@@ -879,10 +879,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             } else {
                 None
             };
-            if let Some((statement, _)) =
+            if let Some((slot, _)) =
                 candidate.and_then(|run| self.single_assignment(run, target))
             {
-                let assignment = self.js.take_value(&mut self.arena, B::stmt_from_node(statement));
+                let statement = self.statements.take(slot);
+                let assignment = self.js.take_value(&mut self.arena, statement);
                 let value = self.js.keep_operand(&mut self.arena, assignment, 1);
                 self.statements.kill(candidate.unwrap());
                 let statement = self.js.declare(&mut self.arena, kind, target, Some(value));
@@ -1102,11 +1103,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 Cont::Effect(_) => self.if_statement(test, yes, no),
                 _ => unreachable!("small switch branches assign their result"),
             };
-            let statement = B::stmt_from_node(statement);
             if matches!(cx.cont, Cont::Effect(Tail::No)) && self.js.is_empty_block(&self.arena, &statement) {
                 self.js.release_stmt(&mut self.arena, statement);
             } else {
-                self.place(plan.head, B::stmt_node(statement));
+                self.place(plan.head, statement);
             }
         }
         self.switch_result(cx, plan)

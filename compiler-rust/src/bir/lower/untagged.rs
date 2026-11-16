@@ -789,12 +789,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         start: out.run.start,
                         len: 0,
                     });
-                    let block = if let Some((_, statement)) = only {
+                    let block = if let Some(slot) = only {
+                        let statement = self.statements.take(slot);
                         self.statements.kill(run);
                         statement
                     } else {
-                        let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, run));
-                        B::stmt_node(self.js.explicit_block(&mut self.arena, B::list_from(list)))
+                        let list = self.statements.take_list(&mut self.js, &mut self.arena, run);
+                        self.js.explicit_block(&mut self.arena, list)
                     };
                     self.place(start.start, block);
                     self.untagged_storage.outputs.push(
@@ -841,7 +842,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         {
             !self.statements.last(out.run).is_some_and(|s| {
                 matches!(
-                    self.js.stmt_kind(&self.arena, &B::stmt_from_node(s)),
+                    self.js.stmt_kind(&self.arena, s),
                     row::Kind::Return | row::Kind::Throw | row::Kind::Continue | row::Kind::Break
                 )
             })

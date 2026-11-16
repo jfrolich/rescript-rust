@@ -164,7 +164,7 @@ impl<B: JsStmt> StatementStack<B> {
     }
     /// The statements of a run moved out of their slots, in order. The run
     /// is left as holes; the caller kills it.
-    fn take_run(&mut self, span: Span) -> impl Iterator<Item = B::S> + '_ {
+    pub(super) fn take_run(&mut self, span: Span) -> impl Iterator<Item = B::S> + '_ {
         let (mut at, end) = (span.start as usize, span.end());
         let (mut inner, mut inner_end) = (0usize, 0usize);
         std::iter::from_fn(move || loop {
@@ -187,24 +187,25 @@ impl<B: JsStmt> StatementStack<B> {
             }
         })
     }
-    /// C:5241 try_fold_effect_only_return_tail folds a run from its end.
-    /// One step per slot of the run.
-    pub(super) fn statements_rev(&mut self, span: Span) -> impl Iterator<Item = NodeId> + '_ {
+    /// C:5241 try_fold_effect_only_return_tail folds a run from its end:
+    /// the statements moved out, last first. The run is left as holes; the
+    /// caller kills it. One step per slot of the run.
+    pub(super) fn take_run_rev(&mut self, span: Span) -> impl Iterator<Item = B::S> + '_ {
         let (start, mut at) = (span.start as usize, span.end());
         let (mut inner_start, mut inner) = (0usize, 0usize);
         std::iter::from_fn(move || loop {
             if inner > inner_start {
                 inner -= 1;
-                return Some(Self::peek(self.held[inner].as_mut().expect("held statement")));
+                return Some(self.held[inner].take().expect("held statement"));
             }
             if at <= start {
                 return None;
             }
             at -= 1;
-            match &mut self.slots[at] {
-                Some(Slot::Statement(s)) => return Some(Self::peek(s)),
+            match self.slots[at].take() {
+                Some(Slot::Statement(s)) => return Some(s),
                 Some(Slot::Held(span)) => (inner_start, inner) = (span.start as usize, span.end()),
-                Some(Slot::Dead(_)) | None => {}
+                other => self.slots[at] = other,
             }
         })
     }
@@ -243,25 +244,67 @@ impl<B: JsStmt> StatementStack<B> {
         }
         None
     }
+    /// The statement of slot `at`, which holds one statement or a hold of
+    /// more than `index`, read in place. O(1).
+    fn slot_ref(&self, at: usize, index: usize) -> &B::S {
+        match &self.slots[at] {
+            Some(Slot::Statement(s)) => s,
+            Some(Slot::Held(span)) => {
+                self.held[span.start as usize + index].as_ref().expect("held statement")
+            }
+            Some(Slot::Dead(_)) | None => unreachable!("an empty slot"),
+        }
+    }
+    /// The statement of a slot that holds one, read in place. O(1).
+    pub(super) fn at(&self, slot: u32) -> &B::S {
+        match &self.slots[slot as usize] {
+            Some(Slot::Statement(s)) => s,
+            _ => panic!("slot {slot} holds no single statement"),
+        }
+    }
+    /// B:1565 unnest_block and C:7612 compiled_from_effect_block replace the
+    /// only statement of an output: the statement of a slot that holds one,
+    /// moved out; the slot is dead. One write.
+    pub(super) fn take(&mut self, slot: u32) -> B::S {
+        match self.slots[slot as usize].replace(Slot::Dead(1)) {
+            Some(Slot::Statement(s)) => s,
+            _ => panic!("slot {slot} holds no single statement"),
+        }
+    }
     /// B:1575 simplify_if reads the head of a branch. Costs the holes and
     /// dead ranges before the first statement; nothing is copied.
-    pub(super) fn first(&mut self, span: Span) -> Option<NodeId> {
+    pub(super) fn first(&mut self, span: Span) -> Option<&B::S> {
         let at = self.live(span.start as usize, span.end())?;
-        Some(self.slot_at(at, 0))
+        Some(self.slot_ref(at, 0))
+    }
+    /// The slot of the first statement of a run, as `first` finds it.
+    pub(super) fn first_slot(&mut self, span: Span) -> Option<u32> {
+        self.live(span.start as usize, span.end()).map(|at| at as u32)
+    }
+    /// The first statement of a slot that holds one, read in place. O(1).
+    pub(super) fn head(&self, slot: u32) -> &B::S {
+        self.slot_ref(slot as usize, 0)
+    }
+    /// The first statement of a slot that holds one, to be changed in place
+    /// (`JsStmt::locate_stmt`). O(1).
+    pub(super) fn head_mut(&mut self, slot: u32) -> &mut B::S {
+        match &mut self.slots[slot as usize] {
+            Some(Slot::Statement(s)) => s,
+            Some(Slot::Held(span)) => self.held[span.start as usize].as_mut().expect("held statement"),
+            Some(Slot::Dead(_)) | None => unreachable!("an empty slot"),
+        }
     }
     /// First slot when it contains one statement. O(leading holes/dead ranges),
     /// using the same bounded scan as first; held multi-statement slots stay put.
-    pub(super) fn first_single_slot(&mut self, span: Span) -> Option<(u32, NodeId)> {
+    pub(super) fn first_single_slot(&mut self, span: Span) -> Option<(u32, &B::S)> {
         let at = self.live(span.start as usize, span.end())?;
         if self.slot_len(at) != 1 {
             return None;
         }
-        Some((at as u32, self.slot_at(at, 0)))
+        Some((at as u32, self.slot_ref(at, 0)))
     }
-    /// B:1575 simplify_if, `[statement]` patterns: the slot and the statement
-    /// when the run holds exactly one. Costs the holes and dead ranges of the
-    /// run, which a trimmed run has only before its first statement.
-    pub(super) fn only(&mut self, span: Span) -> Option<(u32, NodeId)> {
+    /// The slot of `only`, when the run holds exactly one statement.
+    fn only_slot(&mut self, span: Span) -> Option<usize> {
         let at = self.live(span.start as usize, span.end())?;
         if self.slot_len(at) != 1 {
             return None;
@@ -270,22 +313,49 @@ impl<B: JsStmt> StatementStack<B> {
         if self.live(next, span.end()).is_some() {
             return None;
         }
-        Some((at as u32, self.slot_at(at, 0)))
+        Some(at)
     }
-    /// B:1575 simplify_if, `block_last_is_return_throw_or_continue`: the last
-    /// statement. One step on a trimmed run; otherwise one per trailing hole
-    /// or dead slot.
-    pub(super) fn last(&mut self, span: Span) -> Option<NodeId> {
+    /// B:1575 simplify_if, `[statement]` patterns: the slot and the statement
+    /// when the run holds exactly one. Costs the holes and dead ranges of the
+    /// run, which a trimmed run has only before its first statement.
+    pub(super) fn only(&mut self, span: Span) -> Option<(u32, &B::S)> {
+        let at = self.only_slot(span)?;
+        Some((at as u32, self.slot_ref(at, 0)))
+    }
+    /// `only` as a row, for `norm::simplify_if_head`.
+    pub(super) fn only_row(&mut self, span: Span) -> Option<NodeId> {
+        let at = self.only_slot(span)?;
+        Some(self.slot_at(at, 0))
+    }
+    /// The slot of the last statement and its index in the slot. One step
+    /// on a trimmed run; otherwise one per trailing hole or dead slot.
+    fn last_at(&mut self, span: Span) -> Option<(usize, usize)> {
         let mut at = span.end();
         while at > span.start as usize {
             at -= 1;
             let len = self.slot_len(at);
             if len != 0 {
-                return Some(self.slot_at(at, len - 1));
+                return Some((at, len - 1));
             }
             self.scanned += 1;
         }
         None
+    }
+    /// B:1575 simplify_if, `block_last_is_return_throw_or_continue`: the last
+    /// statement. One step on a trimmed run; otherwise one per trailing hole
+    /// or dead slot.
+    pub(super) fn last(&mut self, span: Span) -> Option<&B::S> {
+        let (at, index) = self.last_at(span)?;
+        Some(self.slot_ref(at, index))
+    }
+    /// The slot of the last statement, as `last`.
+    pub(super) fn last_slot(&mut self, span: Span) -> Option<u32> {
+        self.last_at(span).map(|(at, _)| at as u32)
+    }
+    /// `last` as a row, for `norm::simplify_if_head`.
+    pub(super) fn last_row(&mut self, span: Span) -> Option<NodeId> {
+        let (at, index) = self.last_at(span)?;
+        Some(self.slot_at(at, index))
     }
     /// K0: C:119 append. Pop the holes and dead slots at the top, down to
     /// `floor`, so the run above `floor` ends in a statement or is empty.
@@ -319,7 +389,10 @@ impl<B: JsStmt> StatementStack<B> {
     }
     /// B:1225 block: record that `slot` holds an explicit empty block.
     /// A binary search and an insertion among the unit's empty blocks.
-    pub(super) fn note_empty_block(&mut self, slot: u32, statement: NodeId) {
+    /// The block is the statement of slot `holding`, which is `slot` but
+    /// for `cond.rs::block_statement` (its block may land above `slot`).
+    pub(super) fn note_empty_block(&mut self, slot: u32, holding: u32) {
+        let statement = self.slot_at(holding as usize, 0);
         let at = self.empties.partition_point(|&(other, _)| other < slot);
         self.empties.insert(at, (slot, statement));
     }
@@ -339,11 +412,6 @@ impl<B: JsStmt> StatementStack<B> {
                 js.release_stmt(a, held);
             }
         }
-    }
-    /// B:1565 unnest_block and C:7612 compiled_from_effect_block replace the
-    /// only statement of an output. One write.
-    pub(super) fn clear(&mut self, slot: u32) {
-        self.slots[slot as usize] = Some(Slot::Dead(1));
     }
     /// A:191 sequence_arguments: a reserved hold is not an argument statement.
     pub(super) fn has_statements(&self, span: Span) -> bool {

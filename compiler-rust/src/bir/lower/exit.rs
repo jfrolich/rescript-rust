@@ -420,7 +420,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let order = self.js.int_literal(&mut self.arena, plan.first);
             let test = self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, exit, order);
             let statement = self.if_statement(B::node(test), run, super::cond::EMPTY);
-            self.statements.push(B::stmt_from_node(statement));
+            self.statements.push(statement);
             return;
         }
         let keys = crate::bir::KeySpan { start: self.arena.pools.switch_keys.len() as u32, len: plan.len };
