@@ -24139,6 +24139,60 @@ pub(crate) fn mark_type_path_of(
     mark_type_path(ctx, env, &path);
 }
 
+/// `Typetexp.find_constructor` (typetexp.ml:109-110): the constructor `lid`
+/// names, with the marks of `Env.lookup_constructor` (env.ml:1146-1152).
+/// For `M.N.E` every module on the prefix is marked used, and an `open` the
+/// head was found through (`lookup_module_descr`, env.ml:952-972); for `E`
+/// the innermost candidate's `use ()` marks the `open` it came from. Both
+/// mark the type path of the constructor's result. The constructor itself
+/// is not marked: the caller does that with its own usage. Cost: one
+/// constructor lookup, one walk of the prefix's modules and one type
+/// declaration lookup.
+pub(crate) fn find_constructor(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    lid: &Located<LidentIdx>,
+) -> TypeCoreResult<crate::types::decl::ConstructorDescription> {
+    let longident = tctx.resolve_lid(lid.txt).clone();
+    let ctx = tctx.type_ctx;
+    let desc = match &longident {
+        Longident::Lident(name_idx) => {
+            let name = tctx.arena.get_string(*name_idx);
+            env.find_all_constructors_marking(name)
+                .into_iter()
+                .next()
+                .map(|(desc, mark)| {
+                    use_constructor_candidate(ctx, env, name, desc, mark);
+                    desc.clone()
+                })
+        }
+        Longident::Ldot(_, _) => {
+            mark_open_lid_use(
+                ctx,
+                env,
+                tctx.arena,
+                &longident,
+                crate::types::env::OpenLookupKind::Component,
+                Some(lid.loc),
+            );
+            lookup_constructor_in_module(
+                &longident,
+                tctx.arena,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+                None,
+            )
+            .map(|(_, desc)| {
+                mark_type_path_of(ctx, env, desc.cstr_res);
+                desc
+            })
+        }
+        Longident::Lapply(_, _) => None,
+    };
+    desc.ok_or_else(|| unbound_constructor_lookup_error(tctx, env, lid.loc, &longident))
+}
+
 /// The `use ()` callback of a chosen in-scope constructor candidate: the
 /// `wrap_use` of `Env.lookup_all_constructors` (env.ml:1197-1206) around
 /// `TycompTbl.mk_callback` then `Env.check_shadowing` (env.ml:198-204,

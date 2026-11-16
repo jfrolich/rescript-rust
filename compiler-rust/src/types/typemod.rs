@@ -546,40 +546,24 @@ fn force_poly_typed_core_type(
     }
 }
 
-/// Looks up the constructor a `Pext_rebind` names and marks it used as
+/// Looks up the constructor a `Pext_rebind` names with
+/// `Typetexp.find_constructor`, an ordinary constructor lookup that marks
+/// the modules on its path, the `open` it was found through and its result
+/// type used, then marks it used as
 /// `Env.mark_constructor usage env (Longident.last lid.txt) cdescr` does
 /// (compiler/ml/typedecl.ml:1694-1700): `Positive` when the rebound
 /// constructor is private or the new one is public (`priv`, always `Public`
-/// for an exception), `Privatize` otherwise. Cost: one constructor lookup
-/// and one usage-table update.
+/// for an exception), `Privatize` otherwise. Cost: one
+/// [`crate::types::typecore::find_constructor`] and one usage-table update.
 fn lookup_rebind_constructor<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     lid: &Located<LidentIdx>,
     priv_: crate::types::PrivateFlag,
 ) -> TypeModResult<(Path, crate::types::decl::ConstructorDescription)> {
-    let longident = tctx.resolve_lid(lid.txt).clone();
-    let desc = match &longident {
-        Longident::Lident(name_idx) => env
-            .find_constructor(tctx.arena.get_string(*name_idx))
-            .ok()
-            .cloned(),
-        Longident::Ldot(_, _) => crate::types::typecore::lookup_constructor_in_module(
-            &longident,
-            tctx.arena,
-            env,
-            &mut tctx.persistent_env,
-            tctx.type_ctx,
-            None,
-        )
-        .map(|(_, desc)| desc),
-        Longident::Lapply(_, _) => None,
-    };
-    let desc = desc.ok_or_else(|| {
-        TypeModError::CoreError(crate::types::typecore::unbound_constructor_lookup_error(
-            tctx, env, lid.loc, &longident,
-        ))
-    })?;
+    let desc = crate::types::typecore::find_constructor(tctx, env, lid)
+        .map_err(TypeModError::CoreError)?;
+    let name = tctx.arena.get_string(tctx.resolve_lid(lid.txt).last_idx());
     let usage = if matches!(desc.cstr_private, crate::types::PrivateFlag::Private)
         || matches!(priv_, crate::types::PrivateFlag::Public)
     {
@@ -587,22 +571,14 @@ fn lookup_rebind_constructor<'a>(
     } else {
         crate::types::usage::ConstructorUsage::Privatize
     };
-    crate::types::typecore::mark_constructor(
-        tctx.type_ctx,
-        env,
-        usage,
-        tctx.arena.get_string(longident.last_idx()),
-        &desc,
-    );
+    crate::types::typecore::mark_constructor(tctx.type_ctx, env, usage, name, &desc);
     // The path the rebound constructor is read at is the one its description
     // carries (compiler/ml/typedecl.ml:1745-1749): for `M.E` the field `E`
     // of `M`, not a name of its own. A constructor that is no extension is
     // rejected by the caller, which unifies its type with the extended one.
     let path = match &desc.cstr_kind {
         crate::types::ConstructorKind::Extension(path) => *path,
-        crate::types::ConstructorKind::Ordinary(_) => Path::pident(Ident::create_persistent(
-            tctx.arena.get_string(longident.last_idx()),
-        )),
+        crate::types::ConstructorKind::Ordinary(_) => Path::pident(Ident::create_persistent(name)),
     };
     Ok((path, desc))
 }
