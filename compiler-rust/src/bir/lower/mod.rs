@@ -457,7 +457,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     names: names::Storage,
     calls: Vec<Option<call::Plan>>,
     tail_order: Vec<VarId>,
-    rec_members: Vec<rec::Member>,
+    rec_members: Vec<rec::Member<B::S, B::L>>,
     rec_steps: usize,
     switches: Vec<Option<switch::Plan>>,
     variants: Vec<Option<variant::Plan>>,
