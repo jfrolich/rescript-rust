@@ -29,8 +29,11 @@ rescript-tools doc src/EntryPointLibFile.res > doc.json
 ```
 
 `doc <file>` runs `rescript doc <file>`: builds write no `.cmt` files to read
-the module from, so it type-checks the file's project first, without writing
-files, and fails when the project has an error.
+the module from, so it checks the file's project first, without writing
+files, and fails when the project has an error. The check reads the last
+build's record and type-checks only what changed since, so run it after a
+build. Items another module declares (those of an `include`) take another
+check that compiles the modules they come through with source locations.
 
 ### Reanalyze
 

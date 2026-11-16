@@ -50,6 +50,11 @@ location-enabled retry, then dropped with the AST after compilation.
 - Location-valued generated code (`__LINE__`, assertions, match failures, recursive
   module initialization) retries only that module, before publishing its signature or JS.
 - Source maps, editor tooling and requested IR dumps use locations.
+- `rescript doc` type-checks the documented file with locations, and compiles with
+  locations only the modules whose declarations it prints as items of another module
+  and those between them and the documented file (`BuildCommandState::located_modules`):
+  the others' interfaces place declarations by ordinals of the source they were compiled
+  from, which a later edit can shift without changing the interface.
 
 The default standalone parser API still retains complete location side tables for
 formatting and AST marshalling. Location-free compilation does not change

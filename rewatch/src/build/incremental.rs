@@ -872,6 +872,36 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
     loaded
 }
 
+/// Load the stored interfaces of those of `modules` that this build neither
+/// compiled nor loaded, for tooling that type-checks a module against them
+/// after the build. A build loads only the interfaces its compiles read: a
+/// check with nothing stale loads none.
+/// Cost: one pass over `modules`, and [`load_stored`] of those it keeps:
+/// one database read of each one's extras; cores are read on first lookup.
+pub fn load_stored_for_tooling(build_state: &mut BuildCommandState, modules: &AHashSet<String>) {
+    let Some(previous) = build_state.previous_in_process.as_ref() else {
+        return;
+    };
+    let missing: AHashSet<String> = modules
+        .iter()
+        .filter(|module_name| {
+            build_state.get_module(module_name).is_some_and(|module| {
+                !module.is_mlmap()
+                    && !build_state.packages[&module.package_name].prebuilt
+                    && !build_state.compiled_modules.contains(*module_name)
+                    && !build_state.loaded_modules.contains(*module_name)
+                    && previous
+                        .packages
+                        .get(&module.package_name)
+                        .is_some_and(|record| record.state.stored_interfaces.contains_key(*module_name))
+            })
+        })
+        .cloned()
+        .collect();
+    let loaded = load_stored(build_state, &missing);
+    build_state.loaded_modules.extend(loaded);
+}
+
 /// The JS metadata recorded with `module_name`'s stored interface, `None`
 /// when the previous build stored none.
 ///
@@ -1349,9 +1379,11 @@ fn changed_beside_record(build_state: &BuildCommandState, module_name: &str, tim
 /// Whether this build cannot report `module_name`'s recorded warnings as
 /// they are. A build that generated code recorded them, and some may be
 /// warnings only code generation reports. A check generates no code and
-/// reports none of those, so it checks such a module again instead.
+/// reports none of those, so it checks such a module again instead, unless
+/// it prints no warnings (a tooling check).
 fn has_unreplayable_warnings(build_state: &BuildCommandState, module_name: &str) -> bool {
     build_state.check_only
+        && build_state.print_warnings
         && recorded_row(build_state, module_name)
             .is_some_and(|row| row.implementation_warnings.is_some() || row.interface_warnings.is_some())
 }

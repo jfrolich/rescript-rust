@@ -2700,6 +2700,36 @@ pub(crate) fn prepare_registry_for_runtime_precompile(build_state: &BuildCommand
     register_source_fallback_paths(build_state);
 }
 
+/// Register what a compile registers before its first module (namespace
+/// signatures and the runtime's interfaces) for tooling that type-checks a
+/// module against the registry after the build. A build that compiled
+/// nothing registered neither. Where the build did, this finds them
+/// registered: the runtime is not compiled again.
+pub(crate) fn prepare_registry_for_tooling(build_state: &BuildCommandState) -> Result<()> {
+    prepare_registry_for_runtime_precompile(build_state);
+    if build_state.build_state.project_context.current_config.name != "@rescript/runtime" {
+        std::thread::scope(|scope| {
+            spawn_runtime_precompile(scope, || {
+                pre_compile_runtime_modules_with_mode(
+                    &build_state.module_registry,
+                    &build_state.build_state.compiler_info.runtime_path,
+                    RuntimeStore::of_build(build_state).as_ref(),
+                    build_state.check_only,
+                    build_state.dump.is_some(),
+                    build_state.revoked_snapshots[0],
+                )
+            })
+            .and_then(join_runtime_precompile)
+        })?;
+    }
+    build_state
+        .module_registry
+        .lock()
+        .unwrap()
+        .set_source_fallback_paths(AHashMap::new());
+    Ok(())
+}
+
 /// Whether `RESCRIPT_MODULE_TIMINGS` is set; read once per process rather
 /// than on every module compile.
 fn module_timings_enabled() -> bool {

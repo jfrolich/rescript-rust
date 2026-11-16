@@ -70,6 +70,49 @@ elif [ "$(grep -c '"id": "Self-Ns.Me.Other.x"' "$actual")" != 1 ] \
   cat "$actual"
 fi
 
+# Items of an `include` are placed where their declaration is in the
+# current source, also after an edit that moves the declaration and keeps
+# the interface, so that a build recompiles the declaring module (B) but not
+# the module that includes it (C): C's recorded interface then still holds
+# B's declarations as B was before the edit.
+reexport=$(mktemp -d)
+cleanup_reexport() {
+  case "$reexport" in
+    "${TMPDIR:-/tmp}"*|/tmp/*|/var/folders/*) rm -r -- "$reexport" ;;
+  esac
+}
+mkdir "$reexport/src"
+echo '{"name": "reexport", "sources": "src"}' > "$reexport/rescript.json"
+printf 'let f = () => 1\n/** The x. */\nlet x = 1\n' > "$reexport/src/B.res"
+printf 'include B\n' > "$reexport/src/C.res"
+printf 'include C\n' > "$reexport/src/T.res"
+x_line() {
+  grep -A8 '"id": "T.x"' "$actual" | grep -o '"line": [0-9]*' | head -1
+}
+rescript_cli="$PWD/../../cli/rescript.js"
+rescript() {
+  node "$rescript_cli" "$@"
+}
+if ! (cd "$reexport" && rescript build > /dev/null && doc src/T.res > "$actual"); then
+  fail "rescript-tools doc of an included module failed"
+elif [ "$(x_line)" != '"line": 3' ]; then
+  fail "rescript-tools doc placed an included item at $(x_line), not line 3"
+  cat "$actual"
+fi
+printf 'let f = () => {\n  let a = [1, 2]\n  a->Array.length\n}\n\n/** The x. */\nlet x = 1\n' > "$reexport/src/B.res"
+# Without a build since the edit, then after one.
+for step in edited built; do
+  if [ "$step" = built ] && ! (cd "$reexport" && rescript build > /dev/null); then
+    fail "rescript build after the edit failed"
+  elif ! (cd "$reexport" && doc src/T.res > "$actual"); then
+    fail "rescript-tools doc of an included module failed ($step)"
+  elif [ "$(x_line)" != '"line": 7' ]; then
+    fail "rescript-tools doc placed an included item at $(x_line), not line 7 ($step)"
+    cat "$actual"
+  fi
+done
+cleanup_reexport
+
 if [ "$status" = 0 ]; then
   printf "${green}✅ rescript-tools doc matches the doc snapshots.${reset}\n"
 fi
