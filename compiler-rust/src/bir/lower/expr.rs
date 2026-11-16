@@ -280,10 +280,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     unreachable!("return was realized")
                 };
                 assert!(body.value.is_none());
-                let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, body.stmts));
-                let body = self.js.block_of(&mut self.arena, B::list_from(list));
+                let body = self.statements.take_list(&mut self.js, &mut self.arena, body.stmts);
                 let body = match loop_ {
-                    Some(frame) => B::stmt_from_node(self.loop_function_body(frame, header, B::stmt_node(body))),
+                    Some(frame) => self.loop_function_body(frame, header, body),
                     None => body,
                 };
                 let source_loc = Some(self.arena.function(header).loc)
@@ -294,7 +293,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 } else {
                     header
                 };
-                let mut value = self.js.function_of_block(&mut self.arena, header, body);
+                let mut value = self.js.function(&mut self.arena, header, body);
                 super::names::close(&mut self.arena, &self.idents, header);
                 if let Some(loc) = source_loc {
                     self.js.locate(&mut self.arena, &mut value, loc);
@@ -306,11 +305,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// K2: O:339 push_effect_expression into the slot reserved after the head
     /// of a sequence. One step per comma operand of the value.
     fn hold_effect(&mut self, slot: u32, value: NodeId) {
-        let mut held = std::mem::take(&mut self.scratch);
-        self.js.effect(&mut self.arena, B::from_node(value), |s| held.push(B::stmt_node(s)));
-        self.statements.fill_held(slot, held.iter().map(|&n| B::stmt_from_node(n)));
-        held.clear();
-        self.scratch = held;
+        let statements = &mut self.statements;
+        let mark = statements.held_mark();
+        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.hold(s));
+        self.statements.fill_held_since(slot, mark);
     }
     /// K2: O:339 push_effect_expression. Calls may have effects; pure values
     /// are removed and comma values are split before statements are emitted.

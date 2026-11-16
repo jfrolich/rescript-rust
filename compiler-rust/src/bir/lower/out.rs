@@ -462,6 +462,22 @@ impl<B: JsStmt> StatementStack<B> {
         self.pushed += len;
         self.slots[slot as usize] = Some(Slot::Held(span));
     }
+    /// Where the statements given to `hold` start: a mark for
+    /// `fill_held_since`. O(1).
+    pub(super) fn held_mark(&self) -> usize {
+        self.held.len()
+    }
+    /// One statement for the hold `fill_held_since` places. O(1).
+    pub(super) fn hold(&mut self, statement: B::S) {
+        self.held.push(Some(statement));
+    }
+    /// `fill_held` with the statements given to `hold` since `mark`. O(1).
+    pub(super) fn fill_held_since(&mut self, slot: u32, mark: usize) {
+        assert!(self.slots[slot as usize].is_none());
+        let len = self.held.len() - mark;
+        self.pushed += len;
+        self.slots[slot as usize] = Some(Slot::Held(Span { start: mark as u32, len: len as u32 }));
+    }
     /// C:3285 compile_static_raise_jump_output: an argument lowered after a
     /// later one comes before it in the output. Move the top run into the
     /// slot reserved for it. One step per slot of the run; a statement is
