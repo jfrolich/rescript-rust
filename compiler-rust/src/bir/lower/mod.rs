@@ -537,7 +537,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     location_work: Vec<(NodeId,bool)>,
     location_steps: usize,
     sequence_steps: usize,
-    evaluation: args::Evaluation,
+    evaluation: args::Evaluation<B::S>,
     object_scratch: record::Scratch,
     primitive_steps: usize,
     /// Let/Seq nodes read by row R5 step 0 of section 3.6.
