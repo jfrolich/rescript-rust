@@ -518,15 +518,22 @@ pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
         // 3,700 modules).
         let modules: ahash::AHashSet<String> = build_state.modules.keys().cloned().collect();
         super::incremental::load_stored_for_tooling(&mut build_state, &modules);
+        super::phase_mark("doc:stored-interfaces");
         compile::prepare_registry_for_tooling(&build_state).map_err(|err| failed(&err))?;
+        super::phase_mark("doc:registry");
         let docs = on_tooling_thread(|| {
             let project = WatchProject::new(&build_state, cwd, &[path.to_string()]);
             rescript_compiler::analysis::doc(cwd, path, &project)
         });
-        let next = docs
-            .as_ref()
-            .ok()
-            .map(|docs| modules_placing(&build_state, entry.as_deref(), docs, &located));
+        super::phase_mark("doc:documented");
+        let next = docs.as_ref().ok().map(|docs| {
+            // Placing needs the module graph, which a check that found
+            // everything up to date did not compute.
+            if !docs.declared_in.is_empty() {
+                super::incremental::graph_from_record(&mut build_state);
+            }
+            modules_placing(&build_state, entry.as_deref(), docs, &located)
+        });
         // A one-shot command: let the OS reclaim the build graph at exit.
         std::mem::forget(build_state);
         match next {

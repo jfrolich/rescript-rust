@@ -902,6 +902,54 @@ pub fn load_stored_for_tooling(build_state: &mut BuildCommandState, modules: &AH
     build_state.loaded_modules.extend(loaded);
 }
 
+/// Compute the module graph of a build that found everything up to date
+/// (which returns before it computes the graph), from the module references
+/// the record keeps for each source. Returns whether the graph is known:
+/// not when a source changed since its references were recorded.
+/// Cost: one file-system `stat` per source, then the graph's resolution
+/// (`deps::get_deps`), linear in the modules and their references.
+pub fn graph_from_record(build_state: &mut BuildCommandState) -> bool {
+    if build_state.deps_initialized {
+        return true;
+    }
+    if build_state.previous_in_process.is_none() {
+        return false;
+    }
+    collect_source_mtimes(build_state);
+    seed_recorded_deps(build_state);
+    // The modules of a prebuilt package (the Belt snapshot) have no recorded
+    // references; the graph resolves none for them either.
+    let unrecorded = build_state
+        .modules
+        .values()
+        .any(|module| match &module.source_type {
+            _ if build_state.packages[&module.package_name].prebuilt => false,
+            SourceType::SourceFile(source_file) => {
+                source_file.implementation.parse_dirty
+                    || source_file
+                        .interface
+                        .as_ref()
+                        .is_some_and(|interface| interface.parse_dirty)
+            }
+            SourceType::MlMap(_) => false,
+        });
+    for module in build_state.build_state.modules.values_mut() {
+        module.compile_dirty = false;
+        if let SourceType::SourceFile(source_file) = &mut module.source_type {
+            source_file.implementation.parse_dirty = false;
+            if let Some(interface) = source_file.interface.as_mut() {
+                interface.parse_dirty = false;
+            }
+        }
+    }
+    if unrecorded {
+        return false;
+    }
+    let deleted = build_state.deleted_modules.clone();
+    super::deps::get_deps(build_state, &deleted);
+    true
+}
+
 /// The JS metadata recorded with `module_name`'s stored interface, `None`
 /// when the previous build stored none.
 ///
