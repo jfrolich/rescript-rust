@@ -347,6 +347,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         work.clear();
         let mut nested = std::mem::take(&mut self.scratch);
         debug_assert!(nested.is_empty());
+        // PROBE-GAP 1: the rows of the export fold key a statement by its id
+        // (`Row::stmt`, T6x-e); the stack gives the id of a statement it holds
+        // through the transition (`StatementStack::statements`).
         for stmt in self.statements.statements(run) {
             // `nested` holds the statements of the blocks still open, last
             // first; a zero marks where a block ends.
