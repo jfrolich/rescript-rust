@@ -513,7 +513,7 @@ pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
     .map_err(|err| failed(&err))?;
     let docs = on_tooling_thread(|| {
         let project = WatchProject::new(&build_state, cwd, &[path.to_string()]);
-        rescript_compiler::analysis::doc(cwd, path, &project)
+        rescript_compiler::analysis::doc(cwd, path, &project).map(|docs| docs.printed())
     });
     // A one-shot command: let the OS reclaim the build graph at exit.
     std::mem::forget(build_state);

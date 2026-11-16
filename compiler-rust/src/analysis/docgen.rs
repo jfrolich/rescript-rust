@@ -6,10 +6,13 @@
 //! type-checks it from source against the published interfaces.
 //!
 //! An item that another module declares (an item of an `include`, of a
-//! module alias) is documented at the position its declaration has in the
-//! published interface, as OCaml reads it from the `.cmi`. The project must
-//! therefore be built with source locations, which a build leaves out by
-//! default; without them such an item is at line 0.
+//! functor application) is documented at the position its declaration has
+//! in the published interface, as OCaml reads it from the `.cmi`. Builds
+//! publish interfaces without source locations, so such a position is right
+//! only when its module, and every module the declaration reached the
+//! documented file through, was compiled with locations. [`Docs::declared_in`]
+//! names the modules whose declarations the docs print, for the caller to
+//! compile with locations (see `rescript doc` in rewatch).
 
 use super::json::Json;
 use super::session::ProjectSession;
@@ -20,8 +23,10 @@ use super::shared_types::{
 };
 use crate::types::printtyp::{OutArgLabel, OutIdent, OutType, Printtyp, print_out_type_doc};
 use crate::types::{TypeContext, TypeDesc, TypeExprRef};
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 struct FieldDoc {
     field_name: String,
@@ -712,6 +717,44 @@ struct Extraction<'a, 's, 'p> {
     entry: &'a File,
     /// The root of the entry point's package.
     root_path: String,
+    /// The modules of the files that items' declarations are in, other than
+    /// the documented file they are items of (see [`Docs::declared_in`]).
+    declared_in: RefCell<DeclaredIn>,
+}
+
+/// The modules declaring documented items, gathered while documenting.
+#[derive(Default)]
+struct DeclaredIn {
+    /// The module of each file name met, `None` for a file of no module.
+    modules: HashMap<Arc<str>, Option<String>>,
+    /// The modules, other than the file an item is documented in.
+    other: BTreeSet<String>,
+    /// Whether an item is declared in a file of no module of the project.
+    unknown: bool,
+}
+
+/// The documentation of a module, and where its items are declared.
+pub struct Docs {
+    /// The pretty JSON.
+    pub json: String,
+    /// The modules whose declarations the docs print as items of another
+    /// module: the module an `include` includes, a functor whose result is
+    /// included, and so on. Their positions come from the published
+    /// interfaces, which carry source locations only when compiled with them.
+    pub declared_in: BTreeSet<String>,
+    /// Whether an item is declared in a file that is no module of the
+    /// project (one compiled outside the build, such as the runtime), whose
+    /// interface the build cannot compile again with locations.
+    pub declared_outside: bool,
+}
+
+impl Docs {
+    /// What `rescript-tools doc` prints: the JSON and a newline.
+    pub fn printed(&self) -> Vec<u8> {
+        let mut out = super::Output::default();
+        out.print_endline(&self.json);
+        out.into_bytes()
+    }
 }
 
 /// A file being documented: the entry point, or a file a module alias of
@@ -737,6 +780,34 @@ fn concat(a: &[String], b: &[String]) -> Vec<String> {
 }
 
 impl Extraction<'_, '_, '_> {
+    /// Note that an item of `documented` is declared in `declared`.
+    /// Cost: one string comparison for an item of the documented file itself
+    /// (nearly all of them); otherwise one hash lookup, and the first time a
+    /// file is met, one [`super::session::Project::module_for_path`].
+    fn note_declaration(&self, documented: &File, declared: &Arc<str>) {
+        if **declared == *documented.uri || &**declared == super::process_cmt::NONE_FILE {
+            return;
+        }
+        let mut declared_in = self.declared_in.borrow_mut();
+        let DeclaredIn {
+            modules,
+            other,
+            unknown,
+        } = &mut *declared_in;
+        let module = modules.entry(declared.clone()).or_insert_with(|| {
+            self.session
+                .project()
+                .module_for_path(Path::new(&**declared))
+        });
+        match module {
+            Some(module) if *module == documented.module_name => {}
+            Some(module) => {
+                other.insert(module.clone());
+            }
+            None => *unknown = true,
+        }
+    }
+
     /// `extract_docs_for_module`: the module `structure` of the file `at`,
     /// at `module_path` (innermost first).
     fn module(
@@ -760,6 +831,7 @@ impl Extraction<'_, '_, '_> {
             .iter()
             .filter_map(|item| {
                 let name = unwrap_uppercase_exotic(&item.name);
+                self.note_declaration(file, &item.file);
                 let source = get_source(&self.root_path, &item.file, &item.loc);
                 match &item.kind {
                     ModuleItemKind::Value(typ) => Some(DocItem::Value {
@@ -944,7 +1016,7 @@ pub fn extract_docs(
     session: &ProjectSession<'_>,
     cwd: &Path,
     entry_point_file: &str,
-) -> Result<String, String> {
+) -> Result<Docs, String> {
     let path = if Path::new(entry_point_file).is_relative() {
         let joined = cwd.join(entry_point_file);
         joined
@@ -983,6 +1055,7 @@ pub fn extract_docs(
         session,
         entry: &full.file,
         root_path: root_path.to_string_lossy().into_owned(),
+        declared_in: RefCell::default(),
     };
     let docs = extraction.module(
         &Documented {
@@ -992,7 +1065,12 @@ pub fn extract_docs(
         std::slice::from_ref(&full.file.module_name),
         &full.file.structure,
     );
-    Ok(docs_for_module_json(&docs).pretty())
+    let declared_in = extraction.declared_in.into_inner();
+    Ok(Docs {
+        json: docs_for_module_json(&docs).pretty(),
+        declared_in: declared_in.other,
+        declared_outside: declared_in.unknown,
+    })
 }
 
 #[cfg(test)]

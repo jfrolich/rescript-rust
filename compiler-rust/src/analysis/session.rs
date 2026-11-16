@@ -201,6 +201,18 @@ impl<'p> ProjectSession<'p> {
             .find_map(Loaded::raised_error)
     }
 
+    /// The report of the first module the session loaded whose source did
+    /// not type-check. Commands that read a project which built (`doc`)
+    /// treat it as an error; editor commands work with what was typed.
+    pub fn typecheck_failure(&self) -> Option<String> {
+        self.slots
+            .iter()
+            .find_map(|slot| match &slot.get()?.as_ref()?.source.typed.typed {
+                ToolingTyped::Failed(report) => Some(report.clone()),
+                _ => None,
+            })
+    }
+
     /// The module loaded as `id`, when it is.
     pub fn loaded(&self, id: ModuleId) -> &Loaded {
         self.slots[id]
