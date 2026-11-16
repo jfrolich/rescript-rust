@@ -268,8 +268,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O:339 push_effect_expression onto the top-level run (J-M14,
     /// `JsStmt::effect`): each statement is pushed as the rule gives it.
-    /// One visit per comma operand of `value`; no allocation once the stack
-    /// has its capacity.
+    /// Cost: the rule's, one visit per comma operand of `value`; no
+    /// allocation once the stack has its capacity.
     fn push_effect(&mut self, value: NodeId) {
         let statements = &mut self.statements;
         self.js.effect(&mut self.arena, B::from_node(value), |s| statements.push(B::stmt_node(s)));
@@ -440,6 +440,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// The variable, the initialiser and the kind of a declaration row.
+    /// Cost: O(1), a fixed number of reads of the statement.
     fn declared_by(&self, row: u32) -> (VarId, Option<NodeId>, LetKind) {
         let stmt = self.coercion.rows[row as usize].stmt;
         let handle = B::stmt_from_node(stmt);
@@ -460,7 +461,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
     }
 
-    /// S:36 is_literal. One read.
+    /// S:36 is_literal. Cost: O(1), one read.
     fn is_literal(&self, node: NodeId) -> bool {
         matches!(
             self.js.kind_of(&self.arena, node.0),
@@ -468,7 +469,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         )
     }
 
-    /// Classify an expression as an initialiser. One read.
+    /// Classify an expression as an initialiser. Cost: O(1), the kind and
+    /// the variable of a reference.
     fn classify(&self, node: NodeId) -> Init {
         match self.js.kind_of(&self.arena, node.0) {
             row::Kind::Var => {
@@ -633,7 +635,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         resolved
     }
 
-    /// The module member a replacement reads, if it is one. One read.
+    /// The module member a replacement reads, if it is one. Cost: O(1), one
+    /// read.
     fn member_of(&self, replacement: Replacement) -> Option<(crate::bir::ImportId, Option<crate::bir::StrId>)> {
         let (Replacement::Node(node) | Replacement::Member(node)) = replacement else {
             return None;
@@ -740,6 +743,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// `(row + 1) << 1 | function`, or one when the node is in no row (an
     /// export value). Each node above a queried reference is entered once
     /// per unit: the walk stops at the first ancestor another walk reached.
+    /// Cost: the first call of a unit sizes the table by `Js::id_bound` and
+    /// takes one step per row; then one step, one `owner` and one `kind_of`
+    /// per ancestor entered. No allocation once `Tables::path` and the table
+    /// have their capacity.
     fn row_of(&mut self, node: NodeId) -> u32 {
         let t = &mut self.coercion;
         if t.row_of.is_empty() {
@@ -957,7 +964,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// B:1420 define, for the export `export`: `let var = value`, as a row
     /// of kind `place` (`INSERTED` or `TAIL`) that carries the export's
     /// name. When the variable is declared already, the declaration binds a
-    /// copy that prints as the variable. Constant.
+    /// copy that prints as the variable. Cost: O(1); it allocates only when
+    /// a table grows.
     fn define(&mut self, export: u32, place: u32, var: VarId, value: Option<NodeId>, kind: LetKind) -> NodeId {
         let var = if self.arena.vars.binder(var).is_some() {
             let copy = self.arena.new_var_id(self.arena.vars.name(var), self.arena.vars.order(var));
@@ -1289,7 +1297,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// The predicate of O:266: a declaration of a later export whose
-    /// initialiser equals the literal (B:237 ocaml_eq_expression).
+    /// initialiser equals the literal (B:237 ocaml_eq_expression). Cost:
+    /// O(1) to reach the initialiser, then `Js::equal`: one step per pair of
+    /// nodes it inspects, bounded by the smaller tree.
     fn equivalent_later(&self, row: u32, export: u32, value: NodeId) -> bool {
         if !self.coercion.rows[row as usize].has(Row::DECL | Row::VALUE) {
             return false;
