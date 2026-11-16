@@ -7,7 +7,7 @@
 //! `compiler/core` without its prefix: `coercion.ml` and `compile_main.ml`.
 use super::*;
 use crate::bir::{JsPayload, NodeFlags, Op};
-use crate::emit::row;
+use crate::emit::row::{self, flag};
 use crate::lambda::TagInfo;
 use crate::name::Name;
 
@@ -673,15 +673,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if self.coercion.decl[var.index()] != 0 {
             return true;
         }
-        let Some(mut node) = self.arena.vars.binder(var) else {
+        let Some(binder) = self.arena.vars.binder(var) else {
             return false;
         };
-        if !matches!(self.arena.node(node).op(), Op::SDecl | Op::SRest) {
+        let mut node = binder.0;
+        if !matches!(self.js.kind_of(&self.arena, node), row::Kind::Declare | row::Kind::Rest) {
             return false;
         }
-        while let Some(parent) = self.arena.parents[node.index()] {
+        while let Some(parent) = self.js.owner(&self.arena, node) {
             self.coercion.steps += 1;
-            if !matches!(self.arena.node(parent).op(), Op::SIf | Op::SBlock) {
+            if !matches!(self.js.kind_of(&self.arena, parent), row::Kind::If | row::Kind::Block) {
                 return false;
             }
             node = parent;
@@ -690,57 +691,26 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// E:15 js_expr_no_side_effects and S:1053 js_statement_no_side_effects
-    /// as S:641 statement_has_toplevel_effect reads them. A declaration, an
-    /// expression statement and a return are one read; a compound statement
-    /// is read until its first statement with an effect.
+    /// as S:641 statement_has_toplevel_effect reads them. A declaration row
+    /// is one read: a `let` with a value that is not strictly pure, and a
+    /// rest declaration, have an effect. Any other row is one step and
+    /// `JsStmt::effect_free`, whose steps (`Js::steps`) are its own: on rows
+    /// one per node it reads until the first effect, O(1) where the
+    /// implementation keeps the fact with the statement.
     fn has_toplevel_effect(&mut self, row: u32) -> bool {
         let Row { stmt, bits } = self.coercion.rows[row as usize];
+        let handle = B::stmt_from_node(stmt);
         if bits & Row::DECL != 0 {
-            return match self.arena.view(stmt) {
-                View::SDecl { value, .. } => value.is_some_and(|value| {
-                    !self.arena.node(value).flags().contains(NodeFlags::STRICT)
-                }),
+            return match self.js.stmt_kind(&self.arena, &handle) {
+                row::Kind::Declare => self
+                    .js
+                    .value_of(&self.arena, &handle)
+                    .is_some_and(|value| !self.js.has(&self.arena, value, flag::STRICT)),
                 _ => true,
             };
         }
-        let mut work = std::mem::take(&mut self.coercion.path);
-        work.clear();
-        work.push(stmt);
-        let mut pure = true;
-        while let Some(node) = work.pop() {
-            self.coercion.steps += 1;
-            let ok = match self.arena.view(node) {
-                View::SExp { value } | View::SReturn { value } => {
-                    self.arena.node(value).flags().contains(NodeFlags::STRICT)
-                }
-                View::SBlock { .. }
-                | View::SIf { .. }
-                | View::SWhile { .. }
-                | View::SForRange { .. }
-                | View::SForRangeExisting { .. }
-                | View::SSwitch { .. }
-                | View::STry { .. } => {
-                    work.extend(self.arena.view(node).children());
-                    true
-                }
-                View::SThrow { .. }
-                | View::SDebugger
-                | View::SBreak { .. }
-                | View::SContinue { .. }
-                | View::SDecl { .. }
-                | View::SRest { .. }
-                | View::SForOf { .. }
-                | View::SForAwaitOf { .. } => false,
-                _ => self.arena.node(node).flags().contains(NodeFlags::STRICT),
-            };
-            if !ok {
-                pure = false;
-                break;
-            }
-        }
-        work.clear();
-        self.coercion.path = work;
-        !pure
+        self.coercion.steps += 1;
+        !self.js.effect_free(&self.arena, &handle)
     }
 
     /// The last row plus one with a top-level effect, read once per unit
@@ -773,7 +743,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     fn row_of(&mut self, node: NodeId) -> u32 {
         let t = &mut self.coercion;
         if t.row_of.is_empty() {
-            t.row_of.resize(self.arena.nodes.len(), 0);
+            t.row_of.resize(self.js.id_bound(&self.arena) as usize, 0);
             for (index, row) in t.rows.iter().enumerate() {
                 t.steps += 1;
                 if row.bits & (Row::REMOVED | Row::INSERTED | Row::TAIL) == 0 {
@@ -790,13 +760,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             t.steps += 1;
             path.push(at);
-            match self.arena.parents[at.index()] {
-                Some(parent) => at = parent,
+            match self.js.owner(&self.arena, at.0) {
+                Some(parent) => at = NodeId(parent),
                 None => break 1,
             }
         };
         while let Some(at) = path.pop() {
-            if known != 1 && self.arena.nodes[at.index()].op() == Op::JFun {
+            if known != 1 && self.js.kind_of(&self.arena, at.0) == row::Kind::Fun {
                 known |= 1;
             }
             // The reference itself is not remembered: a replacement frees
@@ -837,10 +807,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             if site.node == NodeId(u32::MAX) {
                 continue;
             }
-            let Some(parent) = self.arena.parents[site.node.index()] else {
+            let Some(parent) = self.js.owner(&self.arena, site.node.0) else {
                 continue;
             };
-            let place = self.row_of(parent);
+            let place = self.row_of(NodeId(parent));
             if place == 1 {
                 continue;
             }
@@ -861,14 +831,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if bits & Row::VALUE != 0 && !function {
                     found.0 |= Mentions::LATER_INITIALISER;
                 }
-                let safe = match self.arena.view(parent) {
-                    View::JCall { callee, .. }
-                    | View::JFlatCall { callee, .. }
-                    | View::JNew { callee, .. } => callee == site.node,
-                    View::JTagged { tag, .. } => tag == site.node,
-                    _ => false,
-                };
-                if !safe {
+                if !self.js.is_callee(&self.arena, site.node.0) {
                     found.0 |= Mentions::LATER_UNSAFE;
                 }
             }
@@ -1153,30 +1116,32 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O:308 same_reusable_export_value. One step per static read of the
     /// shorter chain.
-    fn same_reusable_value(&mut self, mut left: NodeId, mut right: NodeId) -> bool {
+    fn same_reusable_value(&mut self, left: NodeId, right: NodeId) -> bool {
+        let (mut left, mut right) = (B::at(left), B::at(right));
         loop {
             self.coercion.steps += 1;
-            match (self.arena.view(left), self.arena.view(right)) {
-                (View::Var { var: l }, View::Var { var: r }) => {
-                    return self.ident(l) == self.ident(r);
+            match (self.js.kind(&self.arena, left), self.js.kind(&self.arena, right)) {
+                (row::Kind::Var, row::Kind::Var) => {
+                    let (l, r) = (self.js.var_of(&self.arena, left), self.js.var_of(&self.arena, right));
+                    return self.ident(l.expect("a reference")) == self.ident(r.expect("a reference"));
                 }
-                (
-                    View::JQualified { module: lm, member: lf },
-                    View::JQualified { module: rm, member: rf },
-                ) => {
+                (row::Kind::Qualified, row::Kind::Qualified) => {
+                    let (lm, lf) = self.js.qualified_of(&self.arena, left).expect("a module reference");
+                    let (rm, rf) = self.js.qualified_of(&self.arena, right).expect("a module reference");
                     return self.arena.pools.j_modules[lm.index()]
                         == self.arena.pools.j_modules[rm.index()]
                         && lf.map(|f| self.arena.text(f)) == rf.map(|f| self.arena.text(f));
                 }
-                (
-                    View::JDot { object: lo, property: lp, position: lpos },
-                    View::JDot { object: ro, property: rp, position: rpos },
-                ) if self.arena.node(left).aux() == 0 && self.arena.node(right).aux() == 0 => {
+                (row::Kind::Dot, row::Kind::Dot)
+                    if self.js.aux(&self.arena, left) == 0 && self.js.aux(&self.arena, right) == 0 =>
+                {
+                    let (lp, lpos) = self.js.member_of(&self.arena, left).expect("a member read");
+                    let (rp, rpos) = self.js.member_of(&self.arena, right).expect("a member read");
                     if self.arena.text(lp) != self.arena.text(rp) || lpos != rpos {
                         return false;
                     }
-                    left = lo;
-                    right = ro;
+                    left = self.js.operand(&self.arena, left, 0);
+                    right = self.js.operand(&self.arena, right, 0);
                 }
                 _ => return false,
             }
@@ -1184,11 +1149,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// C:172 reusable_export_value_candidate. One step per static read.
-    fn reusable_candidate(&self, mut value: NodeId) -> bool {
+    fn reusable_candidate(&self, value: NodeId) -> bool {
+        let mut value = B::at(value);
         loop {
-            match self.arena.view(value) {
-                View::Var { .. } | View::JQualified { .. } => return true,
-                View::JDot { object, .. } if self.arena.node(value).aux() == 0 => value = object,
+            match self.js.kind(&self.arena, value) {
+                row::Kind::Var | row::Kind::Qualified => return true,
+                row::Kind::Dot if self.js.aux(&self.arena, value) == 0 => {
+                    value = self.js.operand(&self.arena, value, 0);
+                }
                 _ => return false,
             }
         }
@@ -1338,7 +1306,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         self.coercion.position[var.index()] > export + 1
             && initialiser != self.coercion.rows[row as usize].stmt
-            && crate::bir::j::equal::equal(&self.arena, initialiser, value, &mut 0)
+            && self.js.equal(&self.arena, B::at(initialiser), B::at(value), &mut 0)
     }
 
     /// C:1099 coerce_toplevel_exports_with_name_reservations on the rows of
