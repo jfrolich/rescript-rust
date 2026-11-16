@@ -8275,6 +8275,127 @@ Every program of R1 above still agrees, its row 21 now included.
 
 - No program here showed M7.
 
+### S1 - an extension constructor declared in a signature gets no unused warning
+
+The place is M7 of "Fourth round: modules, aliases and usage marks" below;
+its witnesses are M7-6 and M7-7:
+
+```rescript
+module M: {} = {module N: {exception E(int)} = {exception E(int)}}
+```
+
+OCaml prints one warning, 60 "unused module N." at `1:24-65`. Rust also
+printed warning 38 "unused exception E" at `1:28-43`, the declaration in
+the signature of N. The same with `type t += E` in the signature prints 38
+"unused extension constructor E". The constructors of a variant declared in
+a hidden signature showed the same difference, with warning 37 "unused
+constructor A.".
+
+Commands as in "Scope, calibration and reproducibility" (OCaml `bsc` from
+`dune build`, Rust from thin-LTO release builds of `3ab5ec3bd3` (before)
+and of the fix (after), the runtime built by `build-reference` with the
+OCaml `bsc`). Each program is `Main.res`, with `Main.resi` where the table
+says so (compiled first, then `Main.res` with `-bs-read-cmi` against the
+interface the OCaml `bsc` wrote). Both compile with `-w +A -bs-jsx 4 -color
+never -I . -I packages/@rescript/runtime/lib/rescript`, and stdout (the
+JavaScript), stderr and the exit status are compared byte for byte.
+
+#### Fixed
+
+- `f64c72ed9`. OCaml translates a signature in `Env.in_signature true
+  env` (`compiler/ml/typemod.ml:916`) and clears the flag for the module
+  expression of `module type of` (`typemod.ml:776`). The delayed unused
+  check of a constructor (`compiler/ml/env.ml:1689`) and of an extension
+  constructor (`env.ml:1729`, `store_extension`) reports only when the
+  environment the declaration was added to is not in a signature.
+- Rust already took this decision: `check_constructor_usages` and
+  `check_extension_usage` (`compiler-rust/src/types/typecore.rs`) take
+  `env.is_in_signature()`, and the report skips the check when it is set.
+  Nothing ever set the flag: `EnvFlags::in_signature` was only read.
+  The declarations of a signature stayed quiet only when an inclusion
+  check marked them. A signature that is itself checked against an
+  outer one (M7-2, M7-3, the unit's interface) gets that mark. A signature
+  hidden by an outer one (M7-6, M7-7, functor parameters and results,
+  recursive modules and module types inside a hidden module) does not, so
+  it kept warnings 37 and 38.
+- The new `Env::in_signature` (`compiler-rust/src/types/env.rs`) is
+  `Env.in_signature`. `transl_signature`
+  (`compiler-rust/src/types/typemod.rs`) starts from
+  `env.in_signature(true)`, and its `Pmty_typeof` arm types the module
+  expression in `env.in_signature(false)`. This is the mechanism the
+  ordinary constructors already read, so both kinds are fixed by one
+  change.
+- Cost: setting the flag copies the environment's bindings once per
+  signature, the copy the signature's first binding makes anyway. An
+  empty signature pays one copy. Lookups do not change.
+- Fixtures: super_errors `signature_extension_unused_submodule`,
+  `_functor`, `_variant` (the ordinary twins) and `_implementation` (an
+  implementation's constructor keeps each of its three warning texts:
+  "unused exception E", "exception E is never used to build values.
+  (However, this constructor appears in patterns.)", and "extension
+  constructor E is never used to build values. It is exported or rebound
+  as a private extension.", `compiler/ext/warnings.ml:340-352`).
+
+Programs through both compilers. OCaml status 0 is accepted and 2
+rejected; the warnings are OCaml's (number and location). DIFFER is a
+difference in the JavaScript, the diagnostics or the status; the "Before"
+column gives the extra Rust warnings.
+
+| # | Program | OCaml | Before (Rust) | After (Rust) |
+| --- | --- | --- | --- | --- |
+| 1 | M7-1, `Main.resi` and `Main.res` both `exception E(int)` | 0 | agree | agree |
+| 2 | M7-2, `module M: {exception E(int)} = {exception E(int)}` | 0 | agree | agree |
+| 3 | M7-3, the same with `type t += E(int)` | 0 | agree | agree |
+| 4 | M7-4, interface and implementation with `type t += E(int)` | 0 | agree | agree |
+| 5 | M7-5, signature `E(int)` against implementation `E(string)` | 2, `1:32-52` "Signature mismatch" | agree | agree |
+| 6 | M7-6, `N: {exception E(int)}` hidden by `M: {}` | 0, 60 `1:24-65` | DIFFER (38 `1:28-43`) | agree |
+| 7 | M7-7, the same without an argument | 0, 60 `1:24-55` | DIFFER (38 `1:28-38`) | agree |
+| 8 | M7-8, the same with `let e = N.E` | 0, 32 `1:62` | agree | agree |
+| 9 | `type t += E` in the hidden signature of N | 0, 60 `3:10-41` | DIFFER (38 `3:24`) | agree |
+| 10 | `module N: {exception E} = {exception E}`, no outer signature | 0 | agree | agree |
+| 11 | the same with `type t += E` | 0 | agree | agree |
+| 12 | hidden N with `N.E` exported through a value | 0 | agree | agree |
+| 13 | functor parameter `(X: {exception E}) => {}` | 0 | agree | agree |
+| 14 | the same hidden by `M: {}` | 0, 60 `1:24-51` | DIFFER (38 `1:33-43`) | agree |
+| 15 | functor parameter `(X: {type t += E})` | 0 | agree | agree |
+| 16 | functor parameter `(X: {type t = A \| B})` (ordinary twin of 13) | 0 | agree | agree |
+| 17 | functor result `(X: {}): {exception E} => {exception E}` | 0 | agree | agree |
+| 18 | the same hidden by `M: {}` | 0, 60 `1:24-66` | DIFFER (38 `1:38-48`) | agree |
+| 19 | `module type S = {exception E}`, nothing uses it | 0 | agree | agree |
+| 20 | the same inside `M: {}` | 0 | DIFFER (38 `1:34-44`) | agree |
+| 21 | `module type S = {type t += E}`, nothing uses it | 0 | agree | agree |
+| 22 | `module type S` used by a hidden `module N: S` | 0, 60 `2:24-43` | agree | agree |
+| 23 | `module type S = {type t = A \| B}` inside `M: {}` (ordinary twin of 20) | 0, 34 `1:34-47` | DIFFER (37 for A and for B) | agree |
+| 24 | first-class module of a type with `exception E`, unpacked | 0, 32 `4:21` | agree | agree |
+| 25 | `module rec A: {exception E} = {exception E}` | 0 | agree | agree |
+| 26 | the same inside `M: {}` | 0, 60 `1:17-59` | DIFFER (38 `1:32-42`) | agree |
+| 27 | `Main.resi` and `Main.res` both `exception E` | 0 | agree | agree |
+| 28 | `Main.res` defines `exception F` that `Main.resi` does not list | 0, 38 `2:1-11` "unused exception F" | agree | agree |
+| 29 | the same with `type u = C` (ordinary twin of 28) | 0, 34 `2:1-10`, 37 `2:1-10` | agree | agree |
+| 30 | `Main.resi` and `Main.res` both `type t = A \| B` | 0 | agree | agree |
+| 31 | signature nested two deep, `N: {module P: {exception E}}`, hidden | 0, 60 `1:35-50`, 60 `1:24-80` | DIFFER (38 `1:39-49`) | agree |
+| 32 | the same with `type t += E` | 0, 60 `2:35-50`, 60 `2:24-80` | DIFFER (38 `2:49`) | agree |
+| 33 | the same with an exception, no outer signature | 0 | agree | agree |
+| 34 | `N: {type t += private E} = {type t += E}`, hidden | 0, 38 `2:62` "... is never used to build values. It is exported or rebound as a private extension.", 60 `2:24-63` | DIFFER (38 `2:46` "unused extension constructor E") | agree |
+| 35 | the same, no outer signature | 0, 38 `2:46` (private text) | agree | agree |
+| 36 | the same matched as `N.E` in an unused value | 0, 38 `2:62` (private text), 32 `2:70` | DIFFER (38 `2:46`) | agree |
+| 37 | implementation exception never used, `M: {} = {exception E}` | 0, 38 `1:17-27` "unused exception E" | agree | agree |
+| 38 | implementation exception used only in a pattern | 0, 38 `1:34-44` "exception E is never used to build values. (However, this constructor appears in patterns.)" | agree | agree |
+| 39 | implementation extension constructor exported as private | 0, 38 `2:46` "extension constructor E is never used to build values. It is exported or rebound as a private extension." | agree | agree |
+| 40 | `N: {type t = A \| B}` hidden (ordinary twin of 6) | 0, 34 `1:28-41`, 60 `1:24-61` | DIFFER (37 for A and for B) | agree |
+| 41 | the same, no outer signature (ordinary twin of 10) | 0 | agree | agree |
+| 42 | the same with `N.A` matched and exported through a value (ordinary twin of 12) | 0 | DIFFER (37 `1:38-51` "constructor B is never used to build values.") | agree |
+| 43 | `module type T = module type of {exception E}` | 0 | agree | agree |
+| 44 | `module type of {exception E}` inside a signature | 0 | agree | agree |
+| 45 | the same with a variant, hidden | 0, 60 `1:24-127` | agree | agree |
+| 46 | hidden `N: module type of X` where X has `exception E` | 0, 60 `2:24-58` | agree | agree |
+
+All programs of R1 and I1 above still agree.
+
+#### Open
+
+Nothing of this place.
+
 ## Fourth round: modules, aliases and usage marks
 
 ### Scope, commands and calibration
@@ -13739,6 +13860,12 @@ stderr:
 Match an implementation extension constructor against an explicit interface or module signature (`extension_constructors`, `includemod.rs:4940`; `includecore.ml:711-740`), including an inner signature hidden by an outer one. Compare delayed unused-constructor warnings after inclusion, not just the inclusion result.
 
 M7-1–5 agree and reach extension inclusion; M7-6–7 produce an extra Rust warning 38 at the inner signature declaration, while M7-8 uses the exported constructor and agrees. Smallest witness found: M7-7. The premise that Rust never marks the constructor is stale: lines 4950–4965 do mark it unless the coercion is implicit. The witness is an observable usage-mark discrepancy in this area, not proof that the implementation declaration lacks the mark; the warning location is the signature declaration.
+
+#### Fixed
+
+Fixed by `f64c72ed9`; see "S1 - an extension constructor declared in a
+signature gets no unused warning" in "Third round: differences found while
+fixing". All eight candidates agree after it.
 
 #### M7-1 — outputs agree
 
