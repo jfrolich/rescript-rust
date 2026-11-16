@@ -745,6 +745,13 @@ and print_statement_expr ~protect_regexp expr kind doc =
   | Braced braces -> print_braces doc expr braces
   | Nothing when protect_regexp && Parens.starts_with_regexp expr ->
     add_statement_parens doc
+  (* A statement [open], [exception] or [external] would start a declaration
+     when the next statement begins with a module name or an identifier. *)
+  | Nothing
+    when match expr.pexp_desc with
+         | Pexp_ident {txt = Lident ("open" | "exception" | "external")} -> true
+         | _ -> false ->
+    add_parens doc
   | Nothing -> doc
 
 and print_structure_item ~state ?(protect_regexp = false)
@@ -1491,11 +1498,18 @@ and print_type_declaration ?inline_record_definitions ~state ~name ~equal_sign
       match td.ptype_manifest with
       | None -> Doc.nil
       | Some typ ->
+        let typ_doc = print_typ_expr ~state typ cmt_tbl in
+        (* [type t = private as 'a] would declare a private type *)
+        let typ_doc =
+          if Parsetree_viewer.typ_starts_with_lident "private" typ then
+            add_parens typ_doc
+          else typ_doc
+        in
         Doc.concat
           [
             Doc.concat [Doc.space; Doc.text equal_sign; Doc.space];
             print_private_flag td.ptype_private;
-            print_typ_expr ~state typ cmt_tbl;
+            typ_doc;
           ])
     | Ptype_open ->
       Doc.concat
@@ -2589,6 +2603,18 @@ and print_value_binding ~state ~rec_flag (vb : Parsetree.value_binding) cmt_tbl
       has_any_trailing_line_comment cmt_tbl vb.pvb_pat.ppat_loc
     in
     let pattern_doc = print_pattern ~state vb.pvb_pat cmt_tbl in
+    (* [let rec as x = 1] would be recursive. [let rec = 1] and
+       [let rec: t = 1] bind a variable named [rec]. *)
+    let pattern_doc =
+      match vb.pvb_pat.ppat_desc with
+      | Ppat_var _ | Ppat_constraint ({ppat_desc = Ppat_var _}, _) ->
+        pattern_doc
+      | _
+        when i = 0 && rec_flag = Doc.nil
+             && Parsetree_viewer.leftmost_pattern_var vb.pvb_pat = Some "rec" ->
+        add_parens pattern_doc
+      | _ -> pattern_doc
+    in
     let equal_doc =
       if pattern_has_trailing_line_comment then
         Doc.indent (Doc.concat [Doc.hard_line; Doc.equal])
@@ -2959,7 +2985,11 @@ and print_pattern ~state (p : Parsetree.pattern) cmt_tbl =
       let needs_parens =
         match p.ppat_desc with
         | Ppat_or (_, _) | Ppat_alias (_, _) -> true
-        | _ -> false
+        | _ -> (
+          (* [exception as] would alias a variable named [exception] *)
+          match Parsetree_viewer.leftmost_pattern_var p with
+          | Some ("as" | "when" | "of") -> true
+          | _ -> false)
       in
       let pat =
         let p = print_pattern ~state p cmt_tbl in
