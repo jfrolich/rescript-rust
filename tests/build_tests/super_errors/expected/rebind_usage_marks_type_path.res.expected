@@ -1,0 +1,23 @@
+
+  [1;33mWarning number 38[0m
+  [36m/.../fixtures/rebind_usage_marks_type_path.res[0m:[2m9:15-21[0m
+
+   7 [2m│[0m   }
+   8 [2m│[0m 
+   [1;33m9[0m [2m│[0m   type N.t += [1;33mA = N.E[0m
+  10 [2m│[0m }
+  11 [2m│[0m 
+
+  unused extension constructor A
+
+
+  [1;33mWarning number 32[0m
+  [36m/.../fixtures/rebind_usage_marks_type_path.res[0m:[2m20:7[0m
+
+  18 [2m│[0m 
+  19 [2m│[0m   exception A = N.E
+  [1;33m20[0m [2m│[0m   let [1;33mf[0m = () => throw(A)
+  21 [2m│[0m }
+  22 [2m│[0m 
+
+  unused value f.

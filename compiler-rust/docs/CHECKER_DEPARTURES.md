@@ -8031,6 +8031,127 @@ difference in the exit status, the diagnostics or the JavaScript:
 
 Nothing of this place.
 
+### R1 - a rebind marks the type path and the modules on its path as used
+
+The place is M6 of "Fourth round: modules, aliases and usage marks" below;
+its witnesses are M6-2, M6-3 and M6-5 to M6-9. The smallest:
+
+```rescript
+module M: {} = {module N = {exception E}; exception A = N.E}
+```
+
+OCaml prints one warning, 38 "unused exception A" at `1:43-59`; Rust also
+printed warning 60 "unused module N." at `1:24-40`. Through an `open`
+(`module M: {exception A} = {module N = {exception E}; open N; exception A =
+E}`) OCaml prints nothing and Rust printed warning 33 "unused open N." at
+`1:54-59`.
+
+Commands as in "Scope, calibration and reproducibility" (OCaml `bsc` from
+`dune build`, Rust from thin-LTO release builds of `8590ce4c03` (before) and
+of the fix (after), the runtime built by `build-reference` with the OCaml
+`bsc`); each program is `Main.res`, with `Main.resi` where the table says so
+(compiled first, then `Main.res` with `-bs-read-cmi` against the interface
+the OCaml `bsc` wrote), compiled by both with `-w +A -bs-jsx 4 -color never
+-I . -I packages/@rescript/runtime/lib/rescript`, and stdout (the
+JavaScript), stderr and the exit status compared byte for byte.
+
+#### Fixed
+
+- `f470283dd`: OCaml's `Pext_rebind` arm finds the constructor with
+  `Typetexp.find_constructor` (`compiler/ml/typedecl.ml:1695`,
+  `compiler/ml/typetexp.ml:109-110`), that is `Env.lookup_constructor`
+  (`compiler/ml/env.ml:1146-1152`): for `N.P.E` it goes through
+  `lookup_module_descr` (`env.ml:968-972`), which marks every module on the
+  prefix as used and reports a deprecated one; for `E` it calls the `use ()`
+  callback of the innermost candidate, which marks the `open` the name came
+  from; both mark the type path of the constructor's result
+  (`mark_type_path`, `env.ml:1135-1139`). The Rust `lookup_rebind_constructor`
+  (`compiler-rust/src/types/typemod.rs:555` before the fix) looked the
+  constructor up with `Env::find_constructor` or
+  `typecore::lookup_constructor_in_module`, neither of which marks anything,
+  and marked only the constructor. It now calls
+  `typecore::find_constructor` (`compiler-rust/src/types/typecore.rs:24151`),
+  the Rust form of `Typetexp.find_constructor`, made of the helpers the
+  constructor lookups of expressions and patterns use: `mark_open_lid_use`
+  for the prefix of a qualified name, `use_constructor_candidate` for the
+  innermost candidate of an unqualified one, and `mark_type_path_of`. The
+  exception item, the local exception (`type_letexception` goes through the
+  same `transl_exception`) and `type t += A = N.E` all reach it. Fixtures:
+  super_errors `rebind_usage_marks_module_path`, `_open`,
+  `_alias_functor`, `_deprecated`, `_type_path`, `_local_exception`, and
+  super_errors_multi `rebind_usage_marks_interface` (M6-5). Each fails on
+  the base and agrees after.
+
+Programs through both compilers. OCaml status 0 is accepted, 2 rejected;
+the warnings are OCaml's (number and location); DIFFER is a difference in
+the JavaScript, the diagnostics or the status. In the "Before" column, the
+extra Rust warnings are given.
+
+| # | Program | OCaml | Before (Rust) | After (Rust) |
+| --- | --- | --- | --- | --- |
+| 1 | M6-1, local `exception A = M.E` used | 0 | agree | agree |
+| 2 | M6-2, `N.E` hidden, `A` unused | 0, 38 `1:48-64` | DIFFER (60 N) | agree |
+| 3 | M6-3, through `open N`, hidden | 0, 38 `1:56-70` | DIFFER (33 open N) | agree |
+| 4 | M6-4, `type N.t += A = N.E` hidden | 0, 38 `1:73-79` | agree | agree |
+| 5 | M6-5, `exception A = M.E` with `Main.resi` `exception A(int)` | 0 | DIFFER (60 M) | agree |
+| 6 | M6-6, two modules `N.P.E`, hidden | 0, 38 `1:61-79` | DIFFER (60 P, 60 N) | agree |
+| 7 | M6-7, argument-free, hidden | 0, 38 `1:43-59` | DIFFER (60 N) | agree |
+| 8 | M6-8, `A` exported | 0 | DIFFER (60 N) | agree |
+| 9 | M6-9, through `open N`, `A` exported | 0 | DIFFER (33 open N) | agree |
+| 10 | exception through two modules `P.Q.E`, exported | 0 | DIFFER (60 Q, 60 P) | agree |
+| 11 | extension constructor through one module, exported | 0 | DIFFER (60 N) | agree |
+| 12 | extension constructor through two modules `P.Q.E` | 0 | DIFFER (60 Q, 60 P) | agree |
+| 13 | extension constructor through `open N` | 0 | DIFFER (33 open N) | agree |
+| 14 | the task's (3): `type t = ..`, `module N = {type t += E}`, `type t += A = N.E`, exported | 0 | DIFFER (60 N) | agree |
+| 15 | exception through `open! N` | 0 | agree | agree |
+| 16 | exception through an alias `module L = N; exception A = L.E` (L and N used) | 0 | DIFFER (60 L) | agree |
+| 17 | extension constructor through an alias `L.E` | 0 | DIFFER (60 L) | agree |
+| 18 | exception through a functor application result `module R = F(X); exception A = R.E` | 0 | DIFFER (60 R) | agree |
+| 19 | extension constructor of a functor application result | 0 | DIFFER (60 R) | agree |
+| 20 | exception through `module I = {include N}; exception A = I.E` | 0 | DIFFER (60 I) | agree |
+| 21 | `include N; exception A = E` (unqualified, after an include) | 0 | DIFFER (2, "The variant constructor E can't be found.") | DIFFER (same); see Open |
+| 22 | source module not hidden, `module N = {exception E}; exception A = N.E` | 0 | agree | agree |
+| 23 | rebound `A` used, `throw(A)` in an unused `f`, hidden | 0, 32 `1:66` | DIFFER (60 N) | agree |
+| 24 | rebound extension constructor used in an exported value | 0 | DIFFER (60 N) | agree |
+| 25 | open shadowed by a later local `exception E` | 0, 38 `1:54-64` | DIFFER (33 open N) | agree |
+| 26 | two opens of modules that both have `E`: the later one is used | 0, 38 `1:40-50`, 33 `1:80-85` (open N) | DIFFER (33 for O as well) | agree |
+| 27 | two modules through `Main.resi` `exception A` | 0 | DIFFER (60 Q, 60 P) | agree |
+| 28 | rebind through a `@deprecated` module | 0, 3 `3:15-17` "deprecated: module N" | DIFFER (no warning 3) | agree |
+| 29 | extensible type exported abstractly, `A` unused | 0, 38 `1:77-83` | DIFFER (60 N) | agree |
+| 30 | rebind of a functor parameter's constructor `X.E` | 0 | agree | agree |
+| 31 | local `exception A = N.E` returned from an exported function | 0 | DIFFER (60 N) | agree |
+| 32 | local `exception A = E` through `open N` | 0 | DIFFER (33 open N) | agree |
+| 33 | local `exception A = P.Q.E` | 0 | DIFFER (60 Q, 60 P) | agree |
+| 34 | local `exception A = N.E`, `A` unused | 0, 38 `1:76-92` | DIFFER (60 N) | agree |
+| 35 | type-path mark: `module M: {} = {module N = {type t = ..; type t += E}; type N.t += A = N.E}` | 0, 38 `1:68-74` (no unused type) | agree | agree |
+| 36 | type-path mark, the type private to an inner signature, M hidden | 0, 38 `1:96-102` | agree | agree |
+| 37 | the same, `type t = N.t = ..` exported | 0 | agree | agree |
+| 38 | `type t += private A = N.E` of a private `N.E`, exported private | 0, 38 `1:107` | DIFFER (60 N) | agree |
+| 39 | rebind of a private extension constructor into a public one, inside a module | 2, `1:117-119` "The constructor N.E is private" | agree | agree |
+| 40 | the same at top level | 2, `3:15-17` "The constructor N.E is private" | agree | agree |
+| 41 | near-miss `N.Ee` for `N.E` | 2, `2:15-18` "The variant constructor N.Ee can't be found." (no hint) | agree | agree |
+| 42 | near-miss `Ex` for `Exx` | 2, `2:15-16` "The variant constructor Ex can't be found." (no hint) | agree | agree |
+| 43 | unbound module `Nn.E` | 2, `2:15-18` | agree | agree |
+| 44 | constructor `Foo` of an ordinary variant as an exception | 2, `2:15-17` "The constructor Foo has type v but was expected to be of type exn" | agree | agree |
+| 45 | constructor `Foo` of an ordinary variant as an extension constructor | 2, `3:15-17` | agree | agree |
+| 46 | `type s += A = E` with `E` of `t<_>` | 2, `4:15` "The constructor E has type t<'a> but was expected to be of type s" | agree | agree |
+| 47 | `type t<_> += E` for `type t<_, _> = ..` | 2, `2:1-14` | agree | agree |
+| 48 | `type u<_, _> += A = E` with `E` of `t<_>` | 2, `4:21` | agree | agree |
+
+#### Open
+
+- Row 21 is a different cause, outside this place: after `include N` an
+  unqualified extension constructor of `N` is not found at all, in an
+  expression too (`module M: {let v: exn} = {module N = {exception E};
+  include N; let v = E}`, and `type t += E` included at top level). OCaml
+  accepts each; Rust rejects with "The variant constructor E can't be
+  found." at the use. The constructor table of the environment after an
+  `include` lacks the included extension constructors, which is the
+  structure's `include` typing, not the rebind lookup; it is left for a task
+  of its own.
+- No program here showed M7 (an extra "unused exception" for a constructor
+  matched by an inner signature).
+
 ## Fourth round: modules, aliases and usage marks
 
 ### Scope, commands and calibration
@@ -12812,6 +12933,12 @@ exports.y = y;
 Rebind an exception or extension constructor through a module path or an open, with the source module hidden by a signature so unused warnings remain observable (`lookup_rebind_constructor`, `typemod.rs:555-610`; `typedecl.ml:1694-1700`). Compare all usage warnings because OCaml constructor lookup marks the type path and modules (`typetexp.ml:109`, `env.ml:952-970,1147-1152`) in addition to the constructor mark.
 
 M6-2, 3, 5–9 are witnesses; M6-1 and M6-4 agree. Smallest witness found: M6-7 (argument-free exceptions, no extra value); M6-8 isolates the extra module warning without the common unused-A warning, and M6-9 isolates the extra unused-open warning. M6-6 also shows the missing use marks at both levels of a module path. These all hit M6.
+
+#### Fixed
+
+Fixed by `f470283dd`; see "R1 - a rebind marks the type path and the modules
+on its path as used" in "Third round: differences found while fixing". All
+nine candidates agree after it.
 
 #### M6-1 — outputs agree
 

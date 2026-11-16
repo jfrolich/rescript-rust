@@ -1,0 +1,1 @@
+- An exception or extension constructor rebound through a module path or an `open` marks those modules, the `open` and the constructor's type as used, as the OCaml compiler does: no more spurious "unused module" and "unused open" warnings, and a deprecated module on the path is reported.

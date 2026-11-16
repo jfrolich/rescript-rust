@@ -1,0 +1,23 @@
+
+  [1;33mWarning number 38[0m
+  [36m/.../fixtures/rebind_usage_marks_open.res[0m:[2m31:5-15[0m
+
+  29 [2m│[0m } = {
+  30 [2m│[0m   module N = {
+  [1;33m31[0m [2m│[0m     [1;33mexception E[0m
+  32 [2m│[0m   }
+  33 [2m│[0m 
+
+  unused exception E
+
+
+  [1;33mWarning number 33[0m
+  [36m/.../fixtures/rebind_usage_marks_open.res[0m:[2m38:3-8[0m
+
+  36 [2m┆[0m }
+  37 [2m┆[0m 
+  [1;33m38[0m [2m┆[0m [1;33mopen N[0m
+  39 [2m┆[0m open O
+  40 [2m┆[0m exception A = E
+
+  unused open N.

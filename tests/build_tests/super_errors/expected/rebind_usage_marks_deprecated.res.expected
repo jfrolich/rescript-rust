@@ -1,0 +1,11 @@
+
+  [1;33mWarning number 3[0m
+  [36m/.../fixtures/rebind_usage_marks_deprecated.res[0m:[2m7:15-17[0m
+
+  5 [2m│[0m }
+  6 [2m│[0m 
+  [1;33m7[0m [2m│[0m exception A = [1;33mN.E[0m
+  8 [2m│[0m 
+
+  deprecated: module N
+use Other
