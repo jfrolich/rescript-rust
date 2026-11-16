@@ -1,1 +1,2 @@
 - An equation of a constructor pattern refines an abstract type reached through a module path (a functor parameter's `X.t`, a sealed module's `N.t`, another unit's `Lib.t`), as in OCaml.
+- A polymorphic variant clash in a constructor pattern with an indexed type is retried as a compatibility test, as in OCaml: a private row index is accepted, and the error no longer prints row details OCaml does not print.

@@ -8434,7 +8434,7 @@ built by `rescript build` and by `rescript build-reference` with the OCaml
 | 7 | recursive module `A.t`, inside and outside | accepted | DIFFER | agree |
 | 8 | two deep, `P.Q.t` | accepted | DIFFER | agree |
 | 9 | `type t = private int` (has a manifest) | rejected | agree | agree |
-| 10 | private row `type t = private [< #a \| #b]` | rejected at the result | DIFFER (rejected at the pattern) | DIFFER: P2 |
+| 10 | private row `type t = private [< #a \| #b]` | rejected at the result | DIFFER (rejected at the pattern) | DIFFER, agrees after P2 |
 | 11 | parameterized `X.t<int>` (arity 1) | rejected | agree | agree |
 | 12 | top-level abstract `type t` of the same unit, a bare identifier | rejected | agree | agree |
 | 13 | locally abstract `(type a)` | accepted | agree | agree |
@@ -8479,12 +8479,100 @@ reaches the variant arm of `unify3`; that is P2 below.
   instantiable sides compares it. `add_gadt_equation` is OCaml's
   (`ctype.ml:2093-2100`); the caller reifies the destination first, as
   `unify3` does (`ctype.ml:2382-2389`), in `unify_gadt_equation`, which
-  replaces the two copies of these arms in `unify_types`.
+  replaces the two copies of these arms in `unify_types`. Commit
+  `4a248ec60`.
 - Fixtures: `tests/tests/src/pattern_equation_module_path.res` (the
   accepted programs), super_errors
   `pattern_equation_module_path_mismatch` (program 3),
   `pattern_equation_same_unit_abstract` (program 12) and
   `pattern_equation_module_path_unused_case` (program 25).
+
+#### Open
+
+Nothing of this place.
+
+### P2 - a row clash in a pattern is retried as OCaml retries it
+
+The place is G3 of "Fifth round: patterns, equations and compatibility"
+(pull request 337); its witnesses are G3-1 to G3-4 and G3-7. Reduced:
+
+```rescript
+type rec t<_> = A: t<[#a]>
+let f = (x: t<[#a | #b]>) => switch x { | A => 0 }
+```
+
+Both reject the pattern with "This pattern matches values of type
+t<[#a]> / but a pattern was expected which matches values of type
+t<[#a | #b]>"; Rust then also printed "The first polymorphic variant is
+closed and doesn't include the constructor: #b." and its "Possible
+solutions:" lines (at `t<[#b]>`: "These polymorphic variants are
+incompatible - they share no common constructors."). Where the rows clash
+but are compatible, OCaml accepts the pattern and Rust rejected it: an
+index that is a functor parameter's private row, as P1's program 10.
+
+Commands as in P1, Rust from the P1 commit (before) and from the fix
+(after).
+
+| # | program | OCaml | before | after |
+| --- | --- | --- | --- | --- |
+| 1 | `A: t<[#a]>` at `t<[#a \| #b]>` | rejected, no row detail | DIFFER (closed-row detail) | agree |
+| 2 | the same at `t<[#b]>` | rejected, no row detail | DIFFER ("share no common constructors") | agree |
+| 3 | at `t<[> #a]>` | accepted | agree | agree |
+| 4 | at `t<[< #a \| #b]>` | accepted | agree | agree |
+| 5 | `A: t<[#a(int)]>` at `t<[#a(string)]>` | rejected | agree | agree |
+| 6 | `A: t<[#a(int)]>` at `t<[#a(b)]>`, `(type b)`, `y: b` used as `int` | accepted | agree | agree |
+| 7 | `A: t<[> #a]>` at `t<[#b]>` | rejected, no row detail | DIFFER | agree |
+| 8 | `A: t<[< #a \| #b]>` at `t<[#a]>` | accepted | agree | agree |
+| 9 | `A \| B` one case at `[#a]`, `[#b]`, `[#a \| #b]`, `[> #a]` in one unit | rejected | DIFFER | agree |
+| 10 | `A \| B` both cases at `[#a]` (G3-4) | rejected | DIFFER | agree |
+| 11 | no index (`generate_equations` off): `type u = U([#a])` in a function parameter, a `let` and a `switch` | accepted | agree | agree |
+| 12 | the same, `U(#c)` against `U([#a \| #b])` | rejected | agree | agree |
+| 13 | the clash inside a tuple index `t<([#a \| #b], int)>` | rejected, no row detail | DIFFER | agree |
+| 14 | the clash inside a record index `t<r<[#b]>>` | rejected, no row detail | DIFFER | agree |
+| 15 | the row variable bound by an earlier equation, `eq<r, [#a \| #b]>` then `t<r>` | rejected, no row detail | DIFFER | agree |
+| 16 | `[#a(X.b)]` with a functor parameter's `X.b` (an equation, P1) | accepted | agree | agree |
+| 17 | `t<r>` with `(type r)` | accepted | agree | agree |
+| 18 | `A \| B` both cases at `[#a \| #b]` and at `[> #a]` | rejected | DIFFER | agree |
+| 19 | `let A = x` at `t<[#a \| #b]>` | rejected, no row detail | DIFFER | agree |
+| 20 | `A: t<[#a(int)]> \| B: t<[#a(string)]>`, one case at `[#a(int)]` | accepted, no warning | agree | agree |
+| 21 | `eq<X.t, [#a]>` with `X.t = private [< #a \| #b]` | accepted | DIFFER (rejected) | agree |
+| 22 | `eq<X.t, [#a \| #b]>` with `X.t = private [> #a]` | accepted | DIFFER (rejected) | agree |
+| 23 | `A \| B` at `t<X.t>`, `X.t = private [< #a \| #b]`, both cases and one | accepted, warning 8 "\| B" for the one case | DIFFER (rejected) | agree |
+| 24 | the same with `X.t = private [> #a]` | rejected | DIFFER | agree |
+| 25 | the same with `X.t = private [< #a]` | rejected | DIFFER | agree |
+| 26 | `A: t<[#a(int)]>` at `X.t = private [< #a(int) \| #b]` | accepted | DIFFER (rejected) | agree |
+| 27 | the same at `X.t = private [< #a(string) \| #b]` | rejected | DIFFER | agree |
+| 28 | `A: t<([#a], [#b])>` at `t<(X.t, X.t)>`, `X.t = private [< #a \| #b]` | accepted | DIFFER (rejected) | agree |
+| 29 | `A \| B`, `[> #a]` with only `A`, `[#a \| #b]` with only `B` | rejected | DIFFER | agree |
+| 30 | `U(A)` with `type u = U(t<[#a \| #b]>)` in a parameter | rejected | DIFFER | agree |
+| 31 | `switch U(x) { \| U(#a) => 0 }` with `x: [#a \| #b]` | rejected | agree | agree |
+| 32 | `A \| B` both cases at `[< #a \| #b]` | rejected | DIFFER | agree |
+| 33 | `A \| B` one case `A` at `[#a]`, `B` at `[#b]`, `A` at `[> #a]`, `A` at `[< #a \| #b]` | accepted, no warning | agree | agree |
+| 34 | `A \| B` one case `A` at `[#a \| #b]`, `B` at `[> #a]` | rejected, no row detail | DIFFER | agree |
+
+The G3 candidates G3-5, G3-6 and G3-8 agreed before and agree after; P1's
+programs all agree after this commit, program 10 included.
+
+#### Fixed
+
+- In Pattern mode OCaml's variant arm of `unify3`
+  (`compiler/ml/ctype.ml:2400-2411`) takes a snapshot, and when
+  `unify_row` raises it backtracks, reifies both sides and, when equations
+  are generated, tests only `mcomp`; the error, if any, carries no row
+  detail, and a compatible pair is accepted. The Rust variant arm of
+  `unify_types` (`compiler-rust/src/types/ctype.rs`) called `unify_rows`
+  and returned its error, row detail included, in both modes.
+- The arm now does what OCaml's does in Pattern mode: the type snapshot
+  the constructor arguments already use (`snapshot_type_state`), taken
+  only in Pattern mode, is restored on a clash and the pair goes to
+  `unify_pattern_constructor_mismatch`, the reify-and-`mcomp` step of the
+  constructor arm (`ctype.ml:2396-2399`). Expression mode is unchanged.
+- Fixtures: `tests/tests/src/pattern_equation_private_row.res` (programs
+  21, 22, 23, 26 and 28), super_errors `pattern_equation_row_closed`
+  (program 1), `pattern_equation_row_disjoint` (2),
+  `pattern_equation_row_nested` (13),
+  `pattern_equation_row_private_unused_case` (23) and
+  `pattern_equation_row_private_payload` (27).
 
 #### Open
 

@@ -1,0 +1,15 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/pattern_equation_row_private_payload.res[0m:[2m3:39[0m
+
+  1 [2m│[0m type rec t<_> = A: t<[#a(int)]>
+  2 [2m│[0m module F = (X: {type t = private [< #a(string) | #b]}) => {
+  [1;31m3[0m [2m│[0m   let f = (x: t<X.t>) => switch x { | [1;31mA[0m => 0 }
+  4 [2m│[0m }
+  5 [2m│[0m 
+
+  This pattern matches values of type [1;31mt<[#a(int)]>[0m
+  but a pattern was expected which matches values of type [1;33mt<X.t>[0m
+  
+  The incompatible parts:
+    [1;31m[#a(int)][0m vs [1;33mX.t[0m

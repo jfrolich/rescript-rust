@@ -1681,9 +1681,10 @@ fn reify_in_unify_state(
     }
 }
 
-/// OCaml `unify3` pattern-mode constructor mismatch
-/// (compiler/ml/ctype.ml:2266-2269): reify both sides and, when generating
-/// equations, accept the pair if `mcomp` finds it compatible.
+/// OCaml `unify3` pattern-mode constructor mismatch and row clash
+/// (compiler/ml/ctype.ml:2396-2399 and 2405-2411): reify both sides and,
+/// when generating equations, accept the pair if `mcomp` finds it
+/// compatible.
 fn unify_pattern_constructor_mismatch(
     ctx: &TypeContext,
     state: &mut UnifyState,
@@ -9014,19 +9015,34 @@ fn unify_types(
             let row1 = ctx.row_desc(row1);
             let row2 = ctx.row_desc(row2);
 
-            // ctype.ml:2197-2201: in Expression mode unify3 runs
-            // `occur !env t1' t2'` before linking and unifying children.
             if state.mode == UnifyMode::Expression {
+                // ctype.ml:2197-2201: in Expression mode unify3 runs
+                // `occur !env t1' t2'` before linking and unifying children.
                 occur_check(ctx, state.env(), state.mode, t1, t2)?;
+                // OCaml links t1' to the original t2 (`link_to`) BEFORE recursing into children
+                link_type(ctx, t1, link_to);
+                let result = unify_rows(ctx, state, &row1, &row2);
+                if matches!(result, Err(TypeError::Unify(_))) {
+                    ctx.set_desc(t1, original_desc1);
+                }
+                return result;
             }
-            // OCaml links t1' to the original t2 (`link_to`) BEFORE recursing into children
+            // ctype.ml:2400-2411: in Pattern mode a row clash is undone and
+            // retried as a constructor mismatch: both sides are reified and,
+            // when generating equations, only their compatibility is tested.
+            // The snapshot also undoes the link of t1.
+            let snap = ctx.snapshot_type_state();
             link_type(ctx, t1, link_to);
-
-            let result = unify_rows(ctx, state, &row1, &row2);
-            if matches!(result, Err(TypeError::Unify(_))) {
-                ctx.set_desc(t1, original_desc1);
+            match unify_rows(ctx, state, &row1, &row2) {
+                Err(TypeError::Unify(_)) => {
+                    ctx.restore_type_state(snap);
+                    unify_pattern_constructor_mismatch(ctx, state, t1, t2)
+                }
+                other => {
+                    drop(snap);
+                    other
+                }
             }
-            result
         }
 
         // Object types
