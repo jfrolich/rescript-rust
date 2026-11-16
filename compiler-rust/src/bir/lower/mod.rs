@@ -446,7 +446,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     tail_frames: Vec<tail::Frame>,
     tail_functions: Vec<Option<LoopRef>>,
     tail_copies: Vec<Option<VarId>>,
-    tail_assignments: Vec<NodeId>,
+    tail_assignments: Vec<B::S>,
     tail_name: String,
     call_reversed: Vec<NodeId>,
     call_arities: Vec<i32>,

@@ -62,9 +62,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 copy
             };
             let assignment = self.js.assign(&mut self.arena, copy, B::from_node(value));
-            assignments.push(B::stmt_node(assignment));
+            assignments.push(assignment);
         }
-        for statement in assignments.drain(..).rev() { self.statements.push(B::stmt_from_node(statement)); }
+        for statement in assignments.drain(..).rev() { self.statements.push(statement); }
         self.tail_assignments = assignments;
         let jump = self.js.continue_(&mut self.arena, None);
         self.statements.push(jump);
