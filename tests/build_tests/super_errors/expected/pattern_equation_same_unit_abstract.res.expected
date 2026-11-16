@@ -1,0 +1,14 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/pattern_equation_same_unit_abstract.res[0m:[2m3:52-55[0m
+
+  1 [2m│[0m type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 [2m│[0m type t
+  [1;31m3[0m [2m│[0m let f = (w: eq<t, int>, v: t): int => switch w { | [1;31mRefl[0m => v }
+  4 [2m│[0m 
+
+  This pattern matches values of type [1;31meq<t, t>[0m
+  but a pattern was expected which matches values of type [1;33meq<t, int>[0m
+  
+  The incompatible parts:
+    [1;31mt[0m vs [1;33mint[0m

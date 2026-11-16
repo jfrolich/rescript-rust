@@ -8396,6 +8396,189 @@ All programs of R1 and I1 above still agree.
 
 Nothing of this place.
 
+### P1 - an equation can refine an abstract type reached through a module path
+
+The place is G6 of "Fifth round: patterns, equations and compatibility"
+(pull request 337); its witness is G6-2. Reduced:
+
+```rescript
+type rec t<_> = I: t<int>
+module F = (X: {type t}) => {
+  let f = (I: t<X.t>, v: X.t): int => v
+}
+```
+
+OCaml accepts it: matching `I` adds the equation `X.t = int`. Rust
+rejected `v` with "This has type: X.t / But it's expected to have type:
+int". With the result annotated `: string` both reject, and OCaml prints
+"X.t (defined as int)" and the conversion hint "You can convert int to
+string with Int.toString."; Rust printed neither, since it had no equation.
+
+Commands as in "Scope, calibration and reproducibility" of the Fifth round
+(OCaml `bsc` from `dune build`, Rust from thin-LTO release builds of
+`5fd5b73eb2` (before) and of the fix (after), the runtime built by
+`build-reference` with the OCaml `bsc`, `-w +A -bs-jsx 4 -color never`,
+stdout, stderr and the exit status compared byte for byte). The program
+with a library unit is a project of `Lib.resi`, `Lib.res` and `Main.res`,
+built by `rescript build` and by `rescript build-reference` with the OCaml
+`bsc`, comparing `Main.js`.
+
+| # | index of the equation | OCaml | before | after |
+| --- | --- | --- | --- | --- |
+| 1 | functor parameter `X.t`, constructor `I: t<int>` in a parameter | accepted | DIFFER (rejected at `v`) | agree |
+| 2 | functor parameter, `eq<X.t, int>` and `eq<X.t, string>` | accepted | DIFFER | agree |
+| 3 | 1 with result `: string` | rejected, "(defined as int)" and conversion hint | DIFFER (no note, no hint) | agree |
+| 4 | result of a generative functor, `R.t` | accepted | DIFFER | agree |
+| 5 | sealed submodule `N: {type t} = {type t = int}`, used outside as `N.t` | accepted | DIFFER | agree |
+| 6 | first-class module unpacked, `module M = unpack(m)`, the function returned | rejected, `M.t` would escape | DIFFER (rejected at `v`) | agree |
+| 7 | recursive module `A.t`, inside and outside | accepted | DIFFER | agree |
+| 8 | two deep, `P.Q.t` | accepted | DIFFER | agree |
+| 9 | `type t = private int` (has a manifest) | rejected | agree | agree |
+| 10 | private row `type t = private [< #a \| #b]` | rejected at the result | DIFFER (rejected at the pattern) | DIFFER, agrees after P2 |
+| 11 | parameterized `X.t<int>` (arity 1) | rejected | agree | agree |
+| 12 | top-level abstract `type t` of the same unit, a bare identifier | rejected | agree | agree |
+| 13 | locally abstract `(type a)` | accepted | agree | agree |
+| 14 | standard library `Date.t` | accepted | DIFFER | agree |
+| 15 | two functor parameters, `eq<X.t, Y.u>` | accepted | DIFFER | agree |
+| 16 | functor parameter against a locally abstract type | accepted | agree | agree |
+| 17 | `switch` over `I: t<int> \| S: t<string>` at `t<X.t>`, one case and both | accepted, warning 8 "\| S" for the one case | agree | agree |
+| 18 | the same at the sealed `N.t` | accepted, warning 8 "\| S" | agree | agree |
+| 19 | the same at the same unit's abstract `u` | rejected | agree | agree |
+| 20 | the same at `type t = private int` | accepted, no warning | agree | agree |
+| 21 | the same at `X.t<int>` | accepted, warning 8 "\| S" | agree | agree |
+| 22 | the same, `y: X.t` used as `int` and as `string` in the two cases | accepted | DIFFER | agree |
+| 23 | 2 with result `: string` | rejected, "(defined as int)" and conversion hint | DIFFER | agree |
+| 24 | `eq<Lib.t, int>` with `Lib.resi` declaring `type t`, and a `switch` at `t<Lib.t>` with the case `S` missing | accepted, `Match_failure` for `S` in `Main.js` | DIFFER (rejected at `v`) | agree (JavaScript; Rust reports warning 8, which `build-reference` does not show) |
+| 25 | the `switch` of 22 with the case `S` missing, `y + 1` in `I` | accepted, warning 8 "\| S" | DIFFER (rejected at `y`) | agree |
+
+The G6 candidates G6-1 and G6-3 to G6-8 agreed before and agree after.
+Program 10 differs because OCaml expands `X.t` to its private row and
+reaches the variant arm of `unify3`; that is P2 below.
+
+#### Fixed
+
+- OCaml's `is_instantiable` (`compiler/ml/ctype.ml:1874-1881`) looks up
+  the declaration of the whole path with `Env.find_type` and asks that it
+  be abstract, public, nullary, without manifest and not `non_aliasable`
+  (`ctype.ml:1870-1872`: a bare identifier without a newtype level). So
+  `X.t` is instantiable without a newtype level. The Rust
+  `is_instantiable` (`compiler-rust/src/types/ctype.rs:579` before the fix)
+  differed in two ways: it looked the declaration up by the last name
+  alone (`path.head_name()`, "t" for `X.t`), and it required a newtype
+  level for every path. A trace (a temporary print in `is_instantiable`)
+  showed that each decides alone for programs 1 and 2: in program 1 the
+  last-name lookup found the indexed type `t<_>` itself, a variant; in
+  program 2 it found no `t`; and the declaration of the whole path `X.t`
+  is abstract, without manifest, and has no newtype level, so the level
+  test also failed.
+- `is_instantiable` (`compiler-rust/src/types/ctype.rs`) now does what
+  OCaml's does, on the declaration `lookup_type_decl_for_path` finds for
+  the whole path. `find_newtype_level` is OCaml's (`ctype.ml:2084-2091`):
+  the declaration's newtype level, else the path's binding time twice;
+  the equation's declaration gets it, and the choice between two
+  instantiable sides compares it. `add_gadt_equation` is OCaml's
+  (`ctype.ml:2093-2100`); the caller reifies the destination first, as
+  `unify3` does (`ctype.ml:2382-2389`), in `unify_gadt_equation`, which
+  replaces the two copies of these arms in `unify_types`. Commit
+  `4a248ec60`.
+- Fixtures: `tests/tests/src/pattern_equation_module_path.res` (the
+  accepted programs), super_errors
+  `pattern_equation_module_path_mismatch` (program 3),
+  `pattern_equation_same_unit_abstract` (program 12) and
+  `pattern_equation_module_path_unused_case` (program 25).
+
+#### Open
+
+Nothing of this place.
+
+### P2 - a row clash in a pattern is retried as OCaml retries it
+
+The place is G3 of "Fifth round: patterns, equations and compatibility"
+(pull request 337); its witnesses are G3-1 to G3-4 and G3-7. Reduced:
+
+```rescript
+type rec t<_> = A: t<[#a]>
+let f = (x: t<[#a | #b]>) => switch x { | A => 0 }
+```
+
+Both reject the pattern with "This pattern matches values of type
+t<[#a]> / but a pattern was expected which matches values of type
+t<[#a | #b]>"; Rust then also printed "The first polymorphic variant is
+closed and doesn't include the constructor: #b." and its "Possible
+solutions:" lines (at `t<[#b]>`: "These polymorphic variants are
+incompatible - they share no common constructors."). Where the rows clash
+but are compatible, OCaml accepts the pattern and Rust rejected it: an
+index that is a functor parameter's private row, as P1's program 10.
+
+Commands as in P1, Rust from the P1 commit (before) and from the fix
+(after).
+
+| # | program | OCaml | before | after |
+| --- | --- | --- | --- | --- |
+| 1 | `A: t<[#a]>` at `t<[#a \| #b]>` | rejected, no row detail | DIFFER (closed-row detail) | agree |
+| 2 | the same at `t<[#b]>` | rejected, no row detail | DIFFER ("share no common constructors") | agree |
+| 3 | at `t<[> #a]>` | accepted | agree | agree |
+| 4 | at `t<[< #a \| #b]>` | accepted | agree | agree |
+| 5 | `A: t<[#a(int)]>` at `t<[#a(string)]>` | rejected | agree | agree |
+| 6 | `A: t<[#a(int)]>` at `t<[#a(b)]>`, `(type b)`, `y: b` used as `int` | accepted | agree | agree |
+| 7 | `A: t<[> #a]>` at `t<[#b]>` | rejected, no row detail | DIFFER | agree |
+| 8 | `A: t<[< #a \| #b]>` at `t<[#a]>` | accepted | agree | agree |
+| 9 | `A \| B` one case at `[#a]`, `[#b]`, `[#a \| #b]`, `[> #a]` in one unit | rejected | DIFFER | agree |
+| 10 | `A \| B` both cases at `[#a]` (G3-4) | rejected | DIFFER | agree |
+| 11 | no index (`generate_equations` off): `type u = U([#a])` in a function parameter, a `let` and a `switch` | accepted | agree | agree |
+| 12 | the same, `U(#c)` against `U([#a \| #b])` | rejected | agree | agree |
+| 13 | the clash inside a tuple index `t<([#a \| #b], int)>` | rejected, no row detail | DIFFER | agree |
+| 14 | the clash inside a record index `t<r<[#b]>>` | rejected, no row detail | DIFFER | agree |
+| 15 | the row variable bound by an earlier equation, `eq<r, [#a \| #b]>` then `t<r>` | rejected, no row detail | DIFFER | agree |
+| 16 | `[#a(X.b)]` with a functor parameter's `X.b` (an equation, P1) | accepted | agree | agree |
+| 17 | `t<r>` with `(type r)` | accepted | agree | agree |
+| 18 | `A \| B` both cases at `[#a \| #b]` and at `[> #a]` | rejected | DIFFER | agree |
+| 19 | `let A = x` at `t<[#a \| #b]>` | rejected, no row detail | DIFFER | agree |
+| 20 | `A: t<[#a(int)]> \| B: t<[#a(string)]>`, one case at `[#a(int)]` | accepted, no warning | agree | agree |
+| 21 | `eq<X.t, [#a]>` with `X.t = private [< #a \| #b]` | accepted | DIFFER (rejected) | agree |
+| 22 | `eq<X.t, [#a \| #b]>` with `X.t = private [> #a]` | accepted | DIFFER (rejected) | agree |
+| 23 | `A \| B` at `t<X.t>`, `X.t = private [< #a \| #b]`, both cases and one | accepted, warning 8 "\| B" for the one case | DIFFER (rejected) | agree |
+| 24 | the same with `X.t = private [> #a]` | rejected | DIFFER | agree |
+| 25 | the same with `X.t = private [< #a]` | rejected | DIFFER | agree |
+| 26 | `A: t<[#a(int)]>` at `X.t = private [< #a(int) \| #b]` | accepted | DIFFER (rejected) | agree |
+| 27 | the same at `X.t = private [< #a(string) \| #b]` | rejected | DIFFER | agree |
+| 28 | `A: t<([#a], [#b])>` at `t<(X.t, X.t)>`, `X.t = private [< #a \| #b]` | accepted | DIFFER (rejected) | agree |
+| 29 | `A \| B`, `[> #a]` with only `A`, `[#a \| #b]` with only `B` | rejected | DIFFER | agree |
+| 30 | `U(A)` with `type u = U(t<[#a \| #b]>)` in a parameter | rejected | DIFFER | agree |
+| 31 | `switch U(x) { \| U(#a) => 0 }` with `x: [#a \| #b]` | rejected | agree | agree |
+| 32 | `A \| B` both cases at `[< #a \| #b]` | rejected | DIFFER | agree |
+| 33 | `A \| B` one case `A` at `[#a]`, `B` at `[#b]`, `A` at `[> #a]`, `A` at `[< #a \| #b]` | accepted, no warning | agree | agree |
+| 34 | `A \| B` one case `A` at `[#a \| #b]`, `B` at `[> #a]` | rejected, no row detail | DIFFER | agree |
+
+The G3 candidates G3-5, G3-6 and G3-8 agreed before and agree after; P1's
+programs all agree after this commit, program 10 included.
+
+#### Fixed
+
+- In Pattern mode OCaml's variant arm of `unify3`
+  (`compiler/ml/ctype.ml:2400-2411`) takes a snapshot, and when
+  `unify_row` raises it backtracks, reifies both sides and, when equations
+  are generated, tests only `mcomp`; the error, if any, carries no row
+  detail, and a compatible pair is accepted. The Rust variant arm of
+  `unify_types` (`compiler-rust/src/types/ctype.rs`) called `unify_rows`
+  and returned its error, row detail included, in both modes.
+- The arm now does what OCaml's does in Pattern mode: the type snapshot
+  the constructor arguments already use (`snapshot_type_state`), taken
+  only in Pattern mode, is restored on a clash and the pair goes to
+  `unify_pattern_constructor_mismatch`, the reify-and-`mcomp` step of the
+  constructor arm (`ctype.ml:2396-2399`). Expression mode is unchanged.
+  Commit `b22d458c9`.
+- Fixtures: `tests/tests/src/pattern_equation_private_row.res` (programs
+  21, 22, 23, 26 and 28), super_errors `pattern_equation_row_closed`
+  (program 1), `pattern_equation_row_disjoint` (2),
+  `pattern_equation_row_nested` (13),
+  `pattern_equation_row_private_unused_case` (23) and
+  `pattern_equation_row_private_payload` (27).
+
+#### Open
+
+Nothing of this place.
+
 ## Fourth round: modules, aliases and usage marks
 
 ### Scope, commands and calibration
@@ -16517,6 +16700,12 @@ stdout (empty):
 
 Match a result-indexed constructor whose polymorphic-variant row clashes with the scrutinee index, reaching Rust `unify_rows` in Pattern mode (ctype.rs:9019–9025) and OCaml’s recovery arm (ctype.ml:2400–2411). Compare the entire trace-derived error after the row clash, not just the accept/reject result.
 
+#### Fixed
+
+Fixed by `b22d458c9`; see "P2 - a row clash in a pattern is retried as
+OCaml retries it" in "Third round: differences found while fixing". All
+eight candidates agree after it.
+
 G3-1–4 and G3-7 differ; G3-5/6/8 agree. All eight hit `rows:gadt`. The two reduced witnesses below distinguish a missing closed-row tag from disjoint rows. Rust preserves extra row-detail advice where the OCaml recovery/reification/compatibility path emits only the outer mismatch; both reject.
 
 #### G3-1 — outputs differ
@@ -17739,6 +17928,12 @@ stdout (empty):
 ### G6 — WITNESS
 
 Match an equality whose index is a functor parameter’s abstract, private or parameterized type (OCaml ctype.ml:1874–1881; Rust ctype.rs:579–595). After the match, demand that an expression of that module type have the concrete index type, so merely accepting the constructor pattern is insufficient.
+
+#### Fixed
+
+Fixed by `4a248ec60`; see "P1 - an equation can refine an abstract type
+reached through a module path" in "Third round: differences found while
+fixing". All eight candidates agree after it.
 
 G6-2 is a witness: OCaml adds the abstract module type equation, but Rust’s newtype-level requirement prevents it, leaving the branch expression at `X.t`. G6-1/3–8 agree. All eight reach `is_instantiable`, but parameterized indices are filtered by the nullary-constructor check before that function; there is no evidence of a parameterized declaration being incorrectly instantiated. The witness demonstrates that the extra Rust newtype-level requirement is too restrictive, rather than that a missing privacy/arity test is too permissive.
 
