@@ -336,6 +336,9 @@ impl Checker {
     /// update is one write when `right` is above `left`. Out of line: a
     /// rare arm of [`Checker::unify_pair`]. O(1) plus
     /// [`Checker::unify_univar`].
+    ///
+    /// Cold: a unit without a universal variable never calls it.
+    #[cold]
     #[inline(never)]
     fn unify_univars(&mut self, [left, right]: [Ty; 2], l: Node, r: Node) -> Result<(), Clash> {
         self.unify_univar(left, right)?;
