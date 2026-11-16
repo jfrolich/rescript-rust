@@ -1,0 +1,1 @@
+- Three trees T6: `Js::copy` on rows counts its traversal and reuses the copy storage, `unblock` and `effect` no longer buffer statements on the operand stack, the interface gains what the export coercion reads (`equal`, `id_bound`, `declared`, `block_ids`, `effect_free`), and `THREE_TREES.md` gains the build prompt of T6q and the cut of T6x.

@@ -1526,6 +1526,12 @@ pub fn jm13_int32_mod(b: &mut Bir, check_zero: bool, left: NodeId, right: NodeId
 /// J-M14, O:339 push_effect_expression. Split sequences left-to-right, drop
 /// strictly pure values, and preserve assignment locations carried by unit pairs.
 pub fn jm14_push_effect_expression(b: &mut Bir, value: NodeId, statements: &mut Vec<NodeId>) {
+    jm14_effect_expression(b, value, &mut |statement| statements.push(statement));
+}
+/// [`jm14_push_effect_expression`] that gives each statement to `sink` as
+/// it is made, in order, instead of collecting them. One step per comma
+/// operand of `value`; the spine is held in the arena's `effect_work`.
+pub fn jm14_effect_expression(b: &mut Bir, value: NodeId, sink: &mut impl FnMut(NodeId)) {
     let mut work = std::mem::take(&mut b.effect_work);
     work.push(value);
     while let Some(value) = work.pop() {
@@ -1555,13 +1561,18 @@ pub fn jm14_push_effect_expression(b: &mut Bir, value: NodeId, statements: &mut 
         } else if super::facts::strictly_pure(b, value) {
             discard_pure_effect(b, value);
         } else {
-            statements.push(js1_exp(b, value));
+            sink(js1_exp(b, value));
         }
     }
     b.effect_work = work;
 }
 /// J-M14, O:368 push_s_exp: only numbers/undefined and trivial comma arms drop.
-pub fn jm14_push_s_exp(b: &mut Bir, mut value: NodeId, statements: &mut Vec<NodeId>) {
+pub fn jm14_push_s_exp(b: &mut Bir, value: NodeId, statements: &mut Vec<NodeId>) {
+    jm14_s_exp(b, value, &mut |statement| statements.push(statement));
+}
+/// [`jm14_push_s_exp`] that gives its one statement, if any, to `sink`.
+/// One step per comma arm dropped.
+pub fn jm14_s_exp(b: &mut Bir, mut value: NodeId, sink: &mut impl FnMut(NodeId)) {
     loop {
         if trivial(b, value) {
             b.release(value);
@@ -1581,16 +1592,21 @@ pub fn jm14_push_s_exp(b: &mut Bir, mut value: NodeId, statements: &mut Vec<Node
                 continue;
             }
         }
-        statements.push(js1_exp(b, value));
+        sink(js1_exp(b, value));
         return;
     }
 }
 /// J-M14, O:359 push_s_if_empty uses permissive PURE, not STRICT.
 pub fn jm14_push_s_if_empty(b: &mut Bir, value: NodeId, statements: &mut Vec<NodeId>) {
+    jm14_s_if_empty(b, value, &mut |statement| statements.push(statement));
+}
+/// [`jm14_push_s_if_empty`] that gives its one statement, if any, to
+/// `sink`. O(1) plus [`jm14_s_exp`].
+pub fn jm14_s_if_empty(b: &mut Bir, value: NodeId, sink: &mut impl FnMut(NodeId)) {
     if p::pure(b, value) {
         b.release(value);
     } else {
-        jm14_push_s_exp(b, value, statements);
+        jm14_s_exp(b, value, sink);
     }
 }
 #[cfg(test)]

@@ -156,6 +156,16 @@ pub trait Js {
     /// call, of a `new` or of a flat call, or the tag of a tagged
     /// template. O(1): one read of the owner, no scan of its operands.
     fn is_callee(&self, a: &Pools, id: u32) -> bool;
+    /// One above the largest id a node of the unit has now: the size of a
+    /// table indexed by id. O(1). (T6q: `export.rs::row_of`.)
+    fn id_bound(&self, a: &Pools) -> u32;
+    /// B:237 `ocaml_eq_expression`: whether two expressions are equal as
+    /// the rules of J compare them. Deliberately partial: a kind it does
+    /// not know is unequal to itself. One step per pair of nodes it
+    /// inspects, the mismatching pair included, added to `steps`; bounded
+    /// by the smaller of the two trees; stops at the first mismatch.
+    /// (T6q: `export.rs::equivalent_later`.)
+    fn equal(&self, a: &Pools, left: Self::Ref<'_>, right: Self::Ref<'_>, steps: &mut usize) -> bool;
 
     // ---- Leaves (plain; O(1) unless said) ----
 
@@ -240,9 +250,12 @@ pub trait Js {
     /// operand.
     fn block(&mut self, a: &mut Pools, mark: Mark, info: JsId, mutability: u8) -> Self::E;
     /// An object literal whose keys are `info`, in the operands' order. One
-    /// step per operand.
+    /// step per operand. Panics when the operands are not as many as the
+    /// keys.
     fn object(&mut self, a: &mut Pools, mark: Mark, info: JsId) -> Self::E;
-    /// A JSX element with the header `info`. One step per operand.
+    /// A JSX element with the header `info`. One step per operand. Panics
+    /// when the operands are not the callee, the tag and what the header
+    /// counts (a spread, the properties, the children, a key).
     fn jsx(&mut self, a: &mut Pools, mark: Mark, info: JsId, has_children: bool) -> Self::E;
 
     // ---- Taking apart, copying, releasing ----
@@ -271,7 +284,9 @@ pub trait Js {
     fn refill(&mut self, a: &mut Pools, e: Self::E, mark: Mark) -> Self::E;
     /// A copy of the node `r` and everything below it
     /// (`Bir::copy_subtree` without a renaming: the binders inside it are
-    /// fresh). One step per node copied.
+    /// fresh and not reported; [`Js::copy_fresh`] reports them). One step
+    /// per node copied; allocates nothing once the implementation's copy
+    /// storage has its capacity and the tree has no binder.
     fn copy(&mut self, a: &mut Pools, r: Self::Ref<'_>) -> Self::E;
     /// [`Js::copy`] that reports the binders it freshened: `(fresh,
     /// source)` is appended to `fresh` for each, in the order the fresh

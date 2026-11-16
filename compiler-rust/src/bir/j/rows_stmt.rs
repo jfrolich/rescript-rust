@@ -33,7 +33,7 @@
 //! | `function` | `block_from_list(body)`, then `bir::j::pure_expression(View::JFun { body, header }, 0)` |
 //! | `exp_rule` | `norm::js1_exp` |
 //! | `if_` | `norm::js3_simplify_if` |
-//! | `effect`, `effect_if_impure` | `norm::jm14_push_effect_expression`, `norm::jm14_push_s_if_empty`, with `Rows::operands` as the vector the rule pushes to: the statements pushed above its length on entry are given to `sink` in order and the vector is cut back |
+//! | `effect`, `effect_if_impure` | `norm::jm14_effect_expression`, `norm::jm14_s_if_empty`: the rule gives each statement to `sink` as it makes it; nothing is collected |
 //!
 //! What the conversion slices T6m to T6q call beside the functions above
 //! (the slice is the first that calls it):
@@ -42,11 +42,14 @@
 //! | --- | --- | --- |
 //! | `locate_stmt` | T6m | `Bir::set_cold` with `loc` and the comment the node has, and `NodeFlags::JS_LOC_PRESENT` set |
 //! | `take_value` | T6n | the `value` of `SExp`, `SReturn` or `SThrow`: `Bir::detach` of it, `Bir::release` of the statement; a panic for any other; one step |
-//! | `unblock` | T6n | the statements of an `SBlock` copied above the length of `Rows::operands`; each `Bir::detach`ed and given to `sink` in order; the vector cut back; `Bir::release` of the block; one step and one per statement |
+//! | `unblock` | T6n | each statement of an `SBlock`, read by its index, `Bir::detach`ed and given to `sink`, in order; then `Bir::release` of the block; nothing is collected; one step and one per statement |
 //! | `stmt_located` | T6o | `NodeFlags::JS_LOC_PRESENT` |
 //! | `is_empty_block` | T6n | an `SBlock` whose `statements` is empty |
 //! | `branch_last_kind` | T6n | of an `SIf`: `rows::kind_of` of the operation of the last entry of the `statements` of `then_`, or of `else_` when `otherwise`; `None` for no entry or no `else_` |
 //! | `copy_stmt` | T6o | `Bir::copy_subtree_with_scratch(s, &[], fresh, ..)` with the copy storage and the label vector of `Rows`, as `copy_fresh` |
+//! | `declared` | T6q | the `var` of `SDecl` or `SRest` |
+//! | `block_ids` | T6q | the ids of the `statements` of an `SBlock`, in order |
+//! | `effect_free` | T6q | the read `export.rs::has_toplevel_effect` made of a statement that is not a declaration row: a work stack (`Rows::work`) of the node's children for a compound statement, the `STRICT` flag of the value of `SExp` and `SReturn` and of every expression below a compound statement, `false` at `SThrow`, `SDebugger`, a jump, `SDecl`, `SRest`, `SForOf`, `SForAwaitOf`; one step per node read |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
 //! | `take_if` | T6n | of an `SIf`: `Bir::detach` of `condition`, `then_` and of `else_` when there is one, `Bir::release` of the statement; one step |
@@ -256,15 +259,18 @@ impl JsStmt for Rows {
         a.release(s.0);
         E(value)
     }
-    fn unblock(&mut self, a: &mut Pools, s: S, sink: impl FnMut(S)) {
+    fn unblock(&mut self, a: &mut Pools, s: S, mut sink: impl FnMut(S)) {
         let View::SBlock { statements } = a.view(s.0) else { panic!("not a block statement") };
-        let start = self.operands.len();
-        self.operands.extend_from_slice(statements);
-        for &statement in &self.operands[start..] {
+        let count = statements.len();
+        self.steps += 1 + count as u64;
+        // Nothing is buffered: each statement is read from the block, taken
+        // out of it and given on, so the width of a block costs no storage.
+        for index in 0..count {
+            let statement = a.view(s.0).child_at(index);
             a.detach(statement);
+            sink(S(statement));
         }
         a.release(s.0);
-        self.give(start, sink);
     }
     #[inline]
     fn is_empty_block(&self, a: &Pools, s: &S) -> bool {
@@ -278,6 +284,58 @@ impl JsStmt for Rows {
     }
     fn copy_stmt(&mut self, a: &mut Pools, s: &S, fresh: &mut Vec<(VarId, VarId)>) -> S {
         S(self.copy_recording(a, s.0, fresh))
+    }
+    #[inline]
+    fn declared(&self, a: &Pools, s: &S) -> Option<VarId> {
+        match a.view(s.0) {
+            View::SDecl { var, .. } | View::SRest { var, .. } => Some(var),
+            _ => None,
+        }
+    }
+    fn block_ids(&self, a: &Pools, s: &S, mut sink: impl FnMut(u32)) {
+        let View::SBlock { statements } = a.view(s.0) else { panic!("not a block statement") };
+        for statement in statements {
+            sink(statement.0);
+        }
+    }
+    fn effect_free(&mut self, a: &Pools, s: &S) -> bool {
+        let mut work = std::mem::take(&mut self.work);
+        debug_assert!(work.is_empty());
+        work.push(s.0);
+        let mut free = true;
+        while let Some(node) = work.pop() {
+            self.steps += 1;
+            let ok = match a.view(node) {
+                View::SExp { value } | View::SReturn { value } => a.node(value).flags().contains(NodeFlags::STRICT),
+                View::SBlock { .. }
+                | View::SIf { .. }
+                | View::SWhile { .. }
+                | View::SForRange { .. }
+                | View::SForRangeExisting { .. }
+                | View::SSwitch { .. }
+                | View::STry { .. } => {
+                    a.view(node).children_into(&mut work);
+                    true
+                }
+                View::SThrow { .. }
+                | View::SDebugger
+                | View::SBreak { .. }
+                | View::SContinue { .. }
+                | View::SDecl { .. }
+                | View::SRest { .. }
+                | View::SForOf { .. }
+                | View::SForAwaitOf { .. } => false,
+                // An expression below a compound statement.
+                _ => a.node(node).flags().contains(NodeFlags::STRICT),
+            };
+            if !ok {
+                free = false;
+                break;
+            }
+        }
+        work.clear();
+        self.work = work;
+        free
     }
     #[inline]
     fn release_stmt(&mut self, a: &mut Pools, s: S) {
@@ -313,15 +371,21 @@ impl JsStmt for Rows {
         self.steps += 1 + self.len(a, yes) as u64 + self.len(a, no) as u64;
         S(norm::js3_simplify_if(a, test.0, yes, no))
     }
-    fn effect(&mut self, a: &mut Pools, value: E, sink: impl FnMut(S)) {
-        let start = self.operands.len();
-        norm::jm14_push_effect_expression(a, value.0, &mut self.operands);
-        self.give(start, sink);
+    fn effect(&mut self, a: &mut Pools, value: E, mut sink: impl FnMut(S)) {
+        let mut given = 0u64;
+        norm::jm14_effect_expression(a, value.0, &mut |statement| {
+            given += 1;
+            sink(S(statement));
+        });
+        self.steps += 1 + given;
     }
-    fn effect_if_impure(&mut self, a: &mut Pools, value: E, sink: impl FnMut(S)) {
-        let start = self.operands.len();
-        norm::jm14_push_s_if_empty(a, value.0, &mut self.operands);
-        self.give(start, sink);
+    fn effect_if_impure(&mut self, a: &mut Pools, value: E, mut sink: impl FnMut(S)) {
+        let mut given = 0u64;
+        norm::jm14_s_if_empty(a, value.0, &mut |statement| {
+            given += 1;
+            sink(S(statement));
+        });
+        self.steps += 1 + given;
     }
 }
 
@@ -339,16 +403,5 @@ impl Rows {
     fn adopt_counted(&mut self, a: &mut Pools, list: ListId) -> NodeId {
         self.steps += self.len(a, list) as u64;
         a.block_from_list(list)
-    }
-    /// The statements a rule pushed onto the operand stack above `start`,
-    /// given to `sink` in order; the stack is cut back to `start`. One step,
-    /// and one per statement given. O(statements); allocates nothing.
-    #[inline]
-    fn give(&mut self, start: usize, mut sink: impl FnMut(S)) {
-        self.steps += 1 + (self.operands.len() - start) as u64;
-        for &statement in &self.operands[start..] {
-            sink(S(statement));
-        }
-        self.operands.truncate(start);
     }
 }

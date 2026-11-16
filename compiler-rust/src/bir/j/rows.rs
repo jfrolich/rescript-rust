@@ -34,11 +34,13 @@
 //! | `str_of` | the `text` of a `JStr`; `None` otherwise |
 //! | `owner` | `Bir::parents` of the node |
 //! | `kind_of` (by id) | `kind_of` of the node's operation |
+//! | `id_bound` | the length of `Bir::nodes` |
+//! | `equal` | `bir::j::equal::equal` |
 //! | `is_callee` | the owner is a `JCall`, `JFlatCall` or `JNew` whose `callee` is the node, or a `JTagged` whose `tag` is |
 //! | `push_list` | `Rows::operands` extended by `Lists::get(list)` |
 //! | `keep_operand` | `child_at`, `Bir::detach` of the operand, `Bir::release` of the node |
 //! | `unpack_rev` | for the operands from the last to the first: `detach`, push; then `release` of the node |
-//! | `copy` | `Bir::copy_subtree(r, &[])` |
+//! | `copy` | as `copy_fresh`, with a vector of its own for the binders, which it drops (the copies of the lowering that use it have none) |
 //! | `copy_fresh` | `Bir::copy_subtree_with_scratch(r, &[], fresh, ..)` with the copy storage and the label vector of `Rows`; the label vector is cleared; one step per node the copy visited (`CopyScratch::copied`) |
 //! | `copy_leaf` | `plain::node` with the view and `aux` of `r`, for `Var`, `JQualified`, `JNumber`, `JStr`, `JJson`, `JRaw`, `JBool`, `JNull`, `JUndefined` and a `JTemplate` without values; a panic for any other |
 //! | `release`, `drop_operands` | `Bir::release` of the node; of each operand since the mark, then the stack is cut back |
@@ -91,6 +93,11 @@ pub struct Rows {
     /// is cleared after each copy and exists so that a copy with labels
     /// allocates nothing in a warm unit.
     labels: Vec<(u32, u32)>,
+    /// The statements and expressions `effect_free` has still to read. A
+    /// work stack of that one walk, empty between calls and kept so that
+    /// the walk allocates only when a statement is wider and deeper than
+    /// any before it in the unit.
+    pub(super) work: Vec<NodeId>,
 }
 
 impl Rows {
@@ -107,6 +114,11 @@ impl Rows {
     #[cfg(test)]
     pub(crate) fn reserve_copy(&mut self, a: &Pools) {
         self.copy.reserve_arena(a);
+    }
+    /// The capacity of the operand stack, for a test that it did not grow.
+    #[cfg(test)]
+    pub(crate) fn operand_capacity(&self) -> usize {
+        self.operands.capacity()
     }
     /// The capacities of the copy storage and of the label vector.
     #[cfg(test)]
@@ -344,6 +356,14 @@ impl Js for Rows {
     }
 
     #[inline]
+    fn id_bound(&self, a: &Pools) -> u32 {
+        a.nodes.len() as u32
+    }
+    fn equal(&self, a: &Pools, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
+        crate::bir::j::equal::equal(a, left, right, steps)
+    }
+
+    #[inline]
     fn var(&mut self, a: &mut Pools, var: VarId) -> E {
         self.leaf(a, View::Var { var }, 0)
     }
@@ -554,6 +574,8 @@ impl Js for Rows {
     }
     fn object(&mut self, a: &mut Pools, mark: Mark, info: JsId) -> E {
         let start = self.since(mark);
+        let JsPayload::Object(keys) = a.javascript(info) else { panic!("an object's keys") };
+        assert_eq!(self.operands.len() - start, keys.len as usize, "one operand per key of the object");
         let id = plain::node(
             a,
             View::JObject {
@@ -566,6 +588,10 @@ impl Js for Rows {
     }
     fn jsx(&mut self, a: &mut Pools, mark: Mark, info: JsId, has_children: bool) -> E {
         let start = self.since(mark);
+        let JsPayload::Jsx(header) = a.javascript(info) else { panic!("a JSX header") };
+        // The callee and the tag, then what the header counts.
+        let expected = 2 + usize::from(header.spread) + header.props.len as usize + header.children as usize + usize::from(header.key);
+        assert_eq!(self.operands.len() - start, expected, "the operands the JSX header counts");
         let id = plain::node(
             a,
             View::JJsx {
@@ -624,10 +650,11 @@ impl Js for Rows {
         self.cut(start, id)
     }
     fn copy(&mut self, a: &mut Pools, r: NodeId) -> E {
-        let before = a.nodes.len();
-        let copy = a.copy_subtree(r, &[]);
-        self.steps += (a.nodes.len() - before).max(1) as u64;
-        E(copy)
+        // The binders a copy freshens are not reported here: a tree with
+        // one is copied with `copy_fresh`. An empty vector allocates
+        // nothing.
+        let mut fresh = Vec::new();
+        E(self.copy_recording(a, r, &mut fresh))
     }
     fn copy_fresh(&mut self, a: &mut Pools, r: NodeId, fresh: &mut Vec<(VarId, VarId)>) -> E {
         E(self.copy_recording(a, r, fresh))
