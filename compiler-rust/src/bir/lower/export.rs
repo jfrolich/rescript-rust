@@ -6,7 +6,7 @@
 //! of the legacy shake module (S). OCaml references name the file under
 //! `compiler/core` without its prefix: `coercion.ml` and `compile_main.ml`.
 use super::*;
-use crate::bir::{JsPayload, NodeFlags, Op};
+use crate::bir::JsPayload;
 use crate::emit::row::{self, flag};
 use crate::lambda::TagInfo;
 use crate::name::Name;
@@ -880,51 +880,46 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// A fresh copy of a replacement. A literal, a module member and a
-    /// variable are one node; a chain of static field reads is one node per
-    /// read.
+    /// variable are one node (`var`, or `copy_leaf`); a chain of static
+    /// field reads is one node per read (`copy_leaf` of its leaf, then one
+    /// `dot` per read, each with the cold data of the original). One step
+    /// per node; no allocation once `Tables::path` has its capacity.
     fn copy_replacement(&mut self, replacement: Replacement) -> NodeId {
         match replacement {
             Replacement::Var(var) => {
-                let copy = self.pure_expression(View::Var { var }, 0);
-                self.built(copy)
+                let copy = self.js.var(&mut self.arena, var);
+                self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
+                B::node(copy)
             }
             Replacement::Member(node) => {
-                let View::JQualified { module, member } = self.arena.view(node) else {
-                    unreachable!("a module member")
-                };
-                let aux = self.arena.node(node).aux();
-                let copy = self.pure_expression(View::JQualified { module, member }, aux);
-                self.built(copy)
+                let mut copy = self.js.copy_leaf(&mut self.arena, B::at(node));
+                self.js.assume_strict(&mut self.arena, &mut copy);
+                self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
+                B::node(copy)
             }
             Replacement::Node(node) => {
                 // The spine of static reads, innermost last.
                 let mut spine = std::mem::take(&mut self.coercion.path);
                 spine.clear();
-                let mut at = node;
-                while let View::JDot { object, .. } = self.arena.view(at) {
-                    spine.push(at);
-                    at = object;
+                let mut at = B::at(node);
+                while self.js.kind(&self.arena, at) == row::Kind::Dot {
+                    spine.push(NodeId(self.js.id(&self.arena, at)));
+                    at = self.js.operand(&self.arena, at, 0);
                 }
-                let mut copy = self.arena.copy_leaf(at);
-                self.built(copy);
+                let leaf = B::at(NodeId(self.js.id(&self.arena, at)));
+                let mut copy = self.js.copy_leaf(&mut self.arena, leaf);
+                self.js.copy_cold(&mut self.arena, leaf, &mut copy);
+                self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
                 while let Some(read) = spine.pop() {
-                    let View::JDot { property, position, .. } = self.arena.view(read) else {
-                        unreachable!("a static read")
-                    };
-                    let aux = self.arena.node(read).aux();
-                    let outer = crate::bir::j::member(&mut self.arena, copy, property, position, aux);
-                    if let Some(cold) = self.arena.cold(read) {
-                        self.arena.set_cold(outer, cold);
-                    }
-                    if self.arena.node(read).flags().contains(NodeFlags::JS_LOC_PRESENT) {
-                        let mut flags = self.arena.node(outer).flags();
-                        flags.0 |= NodeFlags::JS_LOC_PRESENT;
-                        self.arena.nodes[outer.index()].set_flags(flags);
-                    }
-                    copy = self.built(outer);
+                    let read = B::at(read);
+                    let (name, position) = self.js.member_of(&self.arena, read).expect("a static read");
+                    let tag = self.js.aux(&self.arena, read) != 0;
+                    copy = self.js.dot(&mut self.arena, copy, name, position, tag);
+                    self.js.copy_cold(&mut self.arena, read, &mut copy);
+                    self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
                 }
                 self.coercion.path = spine;
-                copy
+                B::node(copy)
             }
         }
     }
@@ -974,17 +969,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         } else {
             var
         };
-        let stmt = self.arena.new_node(
-            View::SDecl { var, value },
-            kind as u16 | ((crate::js_ir::op::UsedStats::default() as u16) << 2),
-        );
+        // Read before the statement takes the value.
+        let function = value.is_some_and(|value| self.js.kind_of(&self.arena, value.0) == row::Kind::Fun);
+        let stmt = B::stmt_node(self.js.declare(&mut self.arena, kind, var, value.map(B::from_node)));
         self.built(stmt);
         // The declaration is a row of the final block: C:801 and O:30 read it.
         let row = self.coercion.rows.len() as u32;
         let mut bits = Row::DECL | place;
-        if let Some(value) = value {
+        if value.is_some() {
             bits |= Row::VALUE;
-            if self.arena.node(value).op() == Op::JFun {
+            if function {
                 bits |= Row::FUNCTION;
             }
         }

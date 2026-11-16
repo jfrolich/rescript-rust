@@ -1349,23 +1349,6 @@ impl Bir {
         }
     }
 
-    /// Copy one childless node with its payload words, flags and source
-    /// metadata, as a detached root. Constant: no map and no vector, unlike
-    /// [`Self::copy_subtree`]. A copied reference gets its own site.
-    pub(crate) fn copy_leaf(&mut self, id: NodeId) -> NodeId {
-        let node = self.node(id);
-        assert!(self.view(id).children().is_empty(), "copy_leaf needs a leaf");
-        let new = self.allocate(node);
-        self.bind(new);
-        if !self.bulk {
-            self.adjust_direct(new, 1);
-        }
-        if let Some(cold) = self.cold(id) {
-            self.set_cold(new, cold);
-        }
-        new
-    }
-
     /// Copy a subtree, freshening every internal binder and static label. Explicit
     /// renaming applies only to free variables; internal binders always win.
     pub fn copy_subtree(&mut self, root: NodeId, renaming: &[(VarId, VarId)]) -> NodeId {

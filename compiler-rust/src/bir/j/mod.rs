@@ -83,6 +83,7 @@ pub(crate) fn write_stats(stats: Stats) -> std::io::Result<()> {
 
 /// A:90/E:15: a member read is strict-pure when its object is, but is not
 /// delay-safe: it can observe a later write. Sequencing uses runs_no_code.
+#[cfg(test)]
 pub(crate) fn member(bir: &mut Bir, object: NodeId, property: super::StrId, position: crate::js_ir::arena::FieldPos, aux: u16) -> NodeId {
     plain::node(bir, View::JDot { object, property, position }, aux)
 }
