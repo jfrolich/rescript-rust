@@ -526,7 +526,27 @@ pub(crate) fn extension_constructor_description(
     ext_type_path: Path,
     ctx: &super::context::TypeContext,
 ) -> ConstructorDescription {
-    let ext_path = Path::pdot_pos(*access_path, id.name(), ext_slot);
+    extension_descr(
+        Path::pdot_pos(*access_path, id.name(), ext_slot),
+        id.name(),
+        ext,
+        ext_type_path,
+        ctx,
+    )
+}
+
+/// `Datarepr.extension_descr path_ext ext` (compiler/ml/datarepr.ml:190-214):
+/// the description of extension constructor `name` read at `ext_path`, whose
+/// extended type is `ext_type_path`. An inline record is the constructor's
+/// one argument, typed by the record type `ext_path` names. Cost: one
+/// description, a clone of the argument list.
+pub(crate) fn extension_descr(
+    ext_path: Path,
+    name: &str,
+    ext: &super::decl::ExtensionConstructor,
+    ext_type_path: Path,
+    ctx: &super::context::TypeContext,
+) -> ConstructorDescription {
     let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
         super::decl::ConstructorArguments::CstrTuple(args) => {
             (args.clone(), args.len() as i32, None)
@@ -563,7 +583,7 @@ pub(crate) fn extension_constructor_description(
     };
     let cstr_res = ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone());
     ConstructorDescription {
-            cstr_name: id.name().to_string(),
+            cstr_name: name.to_string(),
             cstr_res,
             cstr_existentials: declared_constructor_existentials(
                 ctx,

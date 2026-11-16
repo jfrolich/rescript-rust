@@ -8149,8 +8149,131 @@ extra Rust warnings are given.
   `include` lacks the included extension constructors, which is the
   structure's `include` typing, not the rebind lookup; it is left for a task
   of its own.
+  Fixed under I1 below.
 - No program here showed M7 (an extra "unused exception" for a constructor
   matched by an inner signature).
+
+### I1 - an extension constructor brought in by include
+
+Found as row 21 of R1 above. The witnesses:
+
+```rescript
+module N = {exception E}
+include N
+let v = E
+```
+
+with `module N = {type t = ..; type t += E}` in place of the exception, and
+`module M: {let v: exn} = {module N = {exception E}; include N; let v = E}`.
+OCaml accepts all three with no warning; Rust rejected each at the use with
+"The variant constructor E can't be found."
+
+Commands as in "Scope, calibration and reproducibility" (OCaml `bsc` from
+`dune build`, Rust from thin-LTO release builds of `a484dec41d` (before)
+and of the fix (after), the runtime built by `build-reference` with the
+OCaml `bsc`); each single-unit program is `Main.res`, with `Main.resi`
+where the table says so, compiled by both with `-w +A -bs-jsx 4 -color
+never -I . -I packages/@rescript/runtime/lib/rescript`, and stdout (the
+JavaScript), stderr and the exit status compared byte for byte. Programs
+of several units are built as a project (`rescript.json` with
+`"warnings": {"number": "+A"}`) by `rescript build-reference --bsc` (OCaml)
+and `rescript build` (Rust), comparing `lib/rescript/.compiler.log` and
+every generated `.js`.
+
+#### Fixed
+
+- `944264d8f`: OCaml types `include` by adding the included signature with
+  `Env.add_signature` (the `Pstr_include` arm of `compiler/ml/typemod.ml`,
+  and its `Psig_include` arms), whose `add_item` gives a `Sig_typext` item
+  to `add_extension ~check:false` (`compiler/ml/env.ml:1840`, `1791`,
+  `store_extension` at `1715`): the constructor enters the constructor
+  table under its own name with the description
+  `Datarepr.extension_descr (Pident id) ext`. In Rust the `Pstr_include`
+  arm (`compiler-rust/src/types/typemod.rs:19613`) adds the included items
+  itself and its catch-all arm dropped `SigTypext`; the signature
+  `include` goes through `add_signature_items_to_env` (`typemod.rs:7997`),
+  which skipped `SigTypext` too. So after an `include` the constructor
+  could be read by path (`M.E`, through the module's components) but not
+  by its name. Both now call `Env::add_extension`
+  (`compiler-rust/src/types/env.rs:2246`), which adds the description
+  `env_lazy::extension_descr` (`compiler-rust/src/types/env_lazy.rs:543`)
+  builds. That is the builder the `open` road already used, split out of
+  `extension_constructor_description`, which now builds its `Pdot` path and
+  calls it. `add_extension` registers no unused check, as `~check:false`.
+  Cost: one description and one table entry per extension constructor of
+  an included signature; nothing for other items or units.
+  Fixtures: super_errors `include_extension_constructor_expression`,
+  `_pattern`, `_paths`, `_unused`, `_misspelt`, `_arity`, `_wrong_type`,
+  and super_errors_multi `include_extension_constructor_unit` (Lib, Main
+  with `include Lib`, and Third reading `Main.E`).
+- `b37b435e0`: the signature of a recursive module is first approximated,
+  and OCaml's `approx_sig` adds an included signature with
+  `Env.add_signature` too (`compiler/ml/typemod.ml:567-574`). A
+  `module type of` later in that signature types its module expression in
+  this environment, so it can name the constructor (row 38). The Rust
+  approximation's `Psig_include` arm (`compiler-rust/src/types/typemod.rs`,
+  in `approx_signature`) added the items with
+  `includemod::add_sig_item_to_env`, which skips `SigTypext`. It now adds
+  an extension constructor with `Env::add_extension`. The shared
+  `add_sig_item_to_env` is unchanged: it also extends the environment of
+  the inclusion check and of module type extraction, where a description
+  per extension constructor would cost units that have no `include`.
+  Fixture: super_errors `include_extension_constructor_recursive`.
+
+Programs through both compilers. OCaml status 0 is accepted, 2 rejected,
+with OCaml's warnings and errors; DIFFER is a difference in the JavaScript,
+the diagnostics or the status. The JavaScript of accepted programs reads the
+included constructor through the unit's own binding: `let E =
+Primitive_exceptions.create("Main.N.E")` once, `exports.E = E`, and uses
+`RE_EXN_ID: E`. That is the same in both after the fix.
+
+| # | Program | OCaml | Before (Rust) | After (Rust) |
+| --- | --- | --- | --- | --- |
+| 1 | witness (1), `exception E`, `include N`, `let v = E` | 0 | DIFFER (2, "can't be found") | agree |
+| 2 | witness (2), `type t += E` | 0 | DIFFER (2) | agree |
+| 3 | witness (3), inside `M: {let v: exn}` | 0 | DIFFER (2) | agree |
+| 4 | `exception E(int, string)`, `E(1, "a")` | 0 | DIFFER (2) | agree |
+| 5 | `exception E({a: int, b: string})`, built and matched `E({a})` | 0, 9 `5:5-7` | DIFFER (2) | agree |
+| 6 | `type t += E(int)`, `let v: t = E(1)` | 0 | DIFFER (2) | agree |
+| 7 | `type t += E({a: int})`, built and matched | 0 | DIFFER (2) | agree |
+| 8 | `type t<'a> += E('a)`, `E(1): t<int>` and `E("x"): t<string>` | 0 | DIFFER (2) | agree |
+| 9 | pattern, `switch x {\| E => 1 \| _ => 0}` | 0 | DIFFER (2) | agree |
+| 10 | pattern, `try g() catch {\| E(n) => n}` | 0 | DIFFER (2) | agree |
+| 11 | rebind, `exception A = E` after the include | 0 | DIFFER (2) | agree |
+| 12 | `include (N: {exception E})` | 0 | DIFFER (2) | agree |
+| 13 | include of a functor application, `include F({})`, `E(1)` | 0 | DIFFER (2) | agree |
+| 14 | include of a module alias `module L = N; include L` | 0 | DIFFER (2) | agree |
+| 15 | `module M = {include N}`, `M.E` built and matched from outside | 0 | agree | agree |
+| 16 | signature include, `module type T = {include S}`, `X: T`, `X.E` | 0 | agree | agree |
+| 17 | the same with `let v: exn` in `T` and `X.E` read outside | 0 | agree | agree |
+| 18 | `Main.resi` `module type S = {exception E}; include S; let v: exn` | 0 | agree | agree |
+| 19 | two includes bringing `E` into one structure | 2, `4:1-9` "Multiple definition of the extension constructor name E" | agree | agree |
+| 20 | the same with the first one's type used | 2, `4:1-9` (same) | agree | agree |
+| 21 | `include N` at top, `include O` in a submodule using `E("x")`, then `E(1)` outside | 0 | DIFFER (2) | agree |
+| 22 | `include N`, `open O`, `E("x")` (the open wins) | 0 | agree | agree |
+| 23 | `include N`, local `exception E(string)` in a function, `E(1)` outside | 0 | DIFFER (2) | agree |
+| 24 | unused, `module M: {} = {module N = {exception E}; include N}` | 0, 38 `1:29-39` (the declaration in N only) | agree | agree |
+| 25 | unused with a value of N used, `M: {let x: int}` | 0, 38 `1:39-49` | agree | agree |
+| 26 | unused extension constructor, `M: {type t = ..}` | 0, 38 `1:63` | agree | agree |
+| 27 | misspelt `Ex` for `Exc` | 2, `3:9-10` "The variant constructor Ex can't be found." (no hint) | agree | agree |
+| 28 | `E(1, 2)` for `E(int)` | 2, `3:10-15` "This has type: ('a, 'b) But it's expected to have type: int" | DIFFER (2, "can't be found") | agree |
+| 29 | `E("x")` for `E(int)` | 2, `3:11-13` "This has type: string But it's expected to have type: int" | DIFFER (2, "can't be found") | agree |
+| 30 | `let v: int = E` for `type t += E` | 2, `3:14` "This has type: t (defined as N.t) But it's expected to have type: int" | DIFFER (2, "can't be found") | agree |
+| 31 | two units, `Main` does `include Lib` with `exception E(int)` and `type t += C`, uses `E(1)` and `C`; `Third` builds and matches `Main.E` and reads `Main.C` (project) | 0 | DIFFER (2 in Main) | agree |
+| 32 | `M: {let x: int}` including the unit `Lib` with an exception, nothing used (project) | 0 | agree | agree |
+| 33 | `Main.resi` `include Lib.S` (a module type with `exception E(int)`), `Third` reads `Main.E` (project) | 0 | agree | agree |
+| 34 | R1's row 21: `M: {exception A}` with `include N; exception A = E` | 0 | DIFFER (2) | agree |
+| 35 | `M: {let v: exn}`, `include N; let v = E` | 0 | DIFFER (2) | agree |
+| 36 | `include N; exception A = E` at top level | 0 | DIFFER (2) | agree |
+| 37 | `type t += E` in N at top, `include N; type t += A = E` | 0 | DIFFER (2) | agree |
+| 38 | `module rec A: {include S; module B: module type of {let v = E}}`, `S` has `exception E` | 0 | DIFFER (2, `5:13` "can't be found") | agree after `b37b435e0` |
+| 39 | `module rec A: {include S; let f: unit => exn}` | 0 | agree | agree |
+
+Every program of R1 above still agrees, its row 21 now included.
+
+#### Open
+
+- No program here showed M7.
 
 ## Fourth round: modules, aliases and usage marks
 

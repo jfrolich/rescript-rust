@@ -1,0 +1,1 @@
+- An exception or extension constructor brought in by `include` is found by its name, in a structure and in a signature, as the OCaml compiler does; it was reported as "The variant constructor E can't be found."

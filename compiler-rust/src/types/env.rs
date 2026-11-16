@@ -2236,6 +2236,29 @@ impl Env {
         self.data_mut().constrs.add(id, desc);
     }
 
+    /// `Env.add_extension ~check:false id ext` (env.ml:1791, `store_extension`
+    /// env.ml:1715): the extension constructor of a signature item added to
+    /// the environment, as `Env.add_signature` does for an `include`. It
+    /// enters the constructor table under its own name with the description
+    /// `Datarepr.extension_descr (Pident id) ext` gives; `~check:false`
+    /// registers no unused-constructor check. Cost: one description and one
+    /// table entry.
+    pub(crate) fn add_extension(
+        &mut self,
+        ctx: &crate::types::context::TypeContext,
+        id: Ident,
+        ext: &crate::types::decl::ExtensionConstructor,
+    ) {
+        let desc = crate::types::env_lazy::extension_descr(
+            Path::pident(id),
+            id.name(),
+            ext,
+            ext.ext_type_path,
+            ctx,
+        );
+        self.add_constructor(id, desc);
+    }
+
     /// Find a constructor by name.
     pub fn find_constructor(&self, name: impl crate::name::NameKey) -> EnvResult<&ConstructorDescription> {
         #[cfg(debug_assertions)]
