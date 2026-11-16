@@ -1,0 +1,1 @@
+- Three trees T6q: the export coercion of the Rust lowering (`bir/lower/export.rs`) reads and builds JavaScript through the lowering's interface (`Js`, `JsStmt`) instead of naming J opcodes; `Bir::copy_leaf` is deleted and `bir::j::member` is test-only.
