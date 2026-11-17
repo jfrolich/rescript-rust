@@ -55,7 +55,6 @@
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
 //! | `take_if` | T6n | of an `SIf`: `Bir::detach` of `condition`, `then_` and of `else_` when there is one, `Bir::release` of the statement; one step |
-//! | `function_of_block` | T6n | `bir::j::pure_expression(View::JFun { body, header }, 0)`; one step; transition, deleted by T6x |
 //!
 //! Steps (`Js::steps`): one for every function that builds a statement or
 //! a function literal, and one more per statement of each list it
@@ -373,11 +372,6 @@ impl JsStmt for Rows {
         }
         a.release(s.0);
         (E(condition), S(then_), else_.map(S))
-    }
-    #[inline]
-    fn function_of_block(&mut self, a: &mut Pools, header: FuncId, body: S) -> E {
-        self.steps += 1;
-        E(super::pure_expression(a, View::JFun { body: body.0, header }, 0))
     }
 
     fn exp_rule(&mut self, a: &mut Pools, value: E) -> S {
