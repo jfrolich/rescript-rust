@@ -5407,6 +5407,34 @@ share their elements pairwise: linear, by the table.
 unused" in OCaml); a parameter past the 32nd of `injective_bits`;
 `LocalDecls::compare` answering `Members` for two open types.
 
+**Open questions of the sixth turn.**
+
+1. *Ambiguity of GADT instances is not checked* by the Rust compiler
+   (decision 62: a program OCaml refuses is accepted). Recommended: a
+   slice of its own after R3r, designed with R3q in the next turn: the
+   instance levels of `Env` (`gadt_instance_level`,
+   `add_gadt_instance_chain`) as a side table of the kernel, and the
+   three places of unification that read them.
+2. *The old checker links two structures in pattern mode* and no source
+   program shows it (decision 62). Recommended: keep `old_judges`; the
+   hand-built tests judge the success of a structure pair.
+3. *`free_univar` visits a node again for each context* of a
+   polymorphic type WITH bound variables that shares it, as OCaml does
+   (decision 59). Recommended: accept.
+4. *`Checker::lower_scoped` does not drop the name of a row whose path
+   escapes* (ctype.ml:618-623; decision 60). Recommended: a correction
+   with a hand-built test in the turn that designs R3q, which copies
+   named rows.
+5. *`duplicate` is `generalize` and `copy` under a speculation*
+   (decision 67): it holds only if `generalize` writes nothing but
+   levels through the trail. The builder of R3h reports what it
+   writes; if it writes more, the copy gets a flag that copies every
+   node, in `Graph::copy_ref`.
+
+Not designed in this turn: R3q (`instance_poly`, `instance_label`).
+What is known for it: decision 47's fixed-row rule moves to R3h's first
+commit, and question 4 above.
+
 ## 9. R4 as designed
 
 Section 6.5 gave R4 as one slice of seven commits. It is replaced by this
