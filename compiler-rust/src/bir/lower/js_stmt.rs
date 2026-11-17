@@ -312,11 +312,13 @@ pub trait JsStmt: Js {
     ///
     /// Its cost: that of the rule; counted as one step, and what `runs`
     /// counts for the statements it releases and takes (one per node
-    /// released, one per statement moved into the guard's list), plus one
-    /// per negation stripped. The tail is not scanned and not moved: of a
-    /// run that is kept, at most [`Runs::last`] and [`Runs::only`] are
-    /// asked. No allocation in a warm unit. (T6x-a: `cond.rs::if_in_place`,
-    /// the one call of `norm::simplify_if_head` from the lowering.)
+    /// released, one per statement moved into the guard's list); a
+    /// negation stripped is O(1) and counts no step. The tail is not
+    /// scanned and not moved: of a run that is kept, the empty blocks it
+    /// noted are dropped ([`Runs::trim`]) and at most [`Runs::last`] and
+    /// [`Runs::only`] are asked. No allocation in a warm unit. (T6x-a:
+    /// `cond.rs::if_in_place`, the one call of `norm::simplify_if_head`
+    /// from the lowering.)
     fn if_head<R: Runs<Self>>(
         &mut self,
         a: &mut Pools,

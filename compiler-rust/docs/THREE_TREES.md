@@ -4334,7 +4334,7 @@ mode on the application. The builders' pull requests run them.
 | Function | Cost | Probe site that calls it | Test |
 | --- | --- | --- | --- |
 | `JsStmt::stmt_id(&self, a, &S) -> u32`: the id of a statement in hand, read in place. It is what `Js::owner` gives for its value, what `block_ids` gives for it inside a block, and a key for `Js::kind_of` | O(1). Rows: the row. The builder: the `node_id` of the owned node, one load (a statement in flight is 24 bytes, the node and its row; the id is in the node, as it is for an expression) | `out.rs`: `note_empty_block` and `drop_empty_blocks` (the empty-block table names a statement, since a slot is reused); `export.rs::build_rows` (`Row::stmt` of each statement of the top level). The probe turned the handle into a row and back for these (`peek`) | `a_statement_in_hand_gives_the_id_its_readers_know_it_by` |
-| `JsStmt::if_head(a, runs, &mut test, &mut yes, &mut no) -> Option<IfHead<S, R::Run>>` with `R: Runs<Self>`: rules 0 to 6 of J-S3 over two runs the caller holds; `None` when none applies, with the test and the runs as the rules left them | One step, what the runs count for the statements they release and take, and one per negation stripped. A kept run is not scanned: `last` and `only` are asked of it and nothing else | `cond.rs::if_in_place`, the one call of `norm::simplify_if_head` from the lowering. The probe called it through an adapter over the stack that gave rows | `if_head_over_two_runs_is_rules_0_to_6_of_j_s3` (11 tests and every pair of 10 branch shapes, against `js3_simplify_if` on pool lists, compared as trees); `if_head_costs_what_it_consumes_and_does_not_read_the_tail` (1,000, 2,000 and 10,000 statements) |
+| `JsStmt::if_head(a, runs, &mut test, &mut yes, &mut no) -> Option<IfHead<S, R::Run>>` with `R: Runs<Self>`: rules 0 to 6 of J-S3 over two runs the caller holds; `None` when none applies, with the test and the runs as the rules left them | One step, and what the runs count for the statements they release and take; a negation stripped counts no step. A kept run is not scanned: the empty blocks it noted are dropped (`trim`), `last` and `only` are asked of it and nothing else | `cond.rs::if_in_place`, the one call of `norm::simplify_if_head` from the lowering. The probe called it through an adapter over the stack that gave rows | `if_head_over_two_runs_is_rules_0_to_6_of_j_s3` (11 tests and every pair of 10 branch shapes, against `js3_simplify_if` on pool lists, compared as trees); `if_head_costs_what_it_consumes_and_does_not_read_the_tail` (1,000, 2,000 and 10,000 statements) |
 | `Runs<B>`: `trim`, `empty`, `last`, `only`, `release`, `take` over a `Run: Copy`. The statement stack implements it (T6x-a3) with `Run = Span` | each is the stack's function of the same work; the costs are in the trait | `impl Runs<B> for StatementStack<B>` in `out.rs`, in place of `impl norm::IfLists for StatementStack` in `cond.rs` | the two tests of `if_head`, over a test implementation that counts every statement it hands out |
 | `rows_stmt::S::row` (`#[cfg(test)]`, not in the trait) | O(1) | the stack's test-only `statements` on rows, which the 23 tests that release a run row by row call | `a_statement_in_hand_gives_the_id_its_readers_know_it_by` |
 
@@ -6692,7 +6692,10 @@ Commits, in this order, each pushed when made:
    `merge_tail_guard -> B::S` (private). A caller that only pushes,
    fills or places the result loses its wrap.
 
-2. `if_head`. out.rs gets `impl<B: JsStmt> super::js_stmt::Runs<B> for
+   In the same commit, `if_head`: the adapter T6x-a1 left in cond.rs
+   gives rows through `peek`, `last_row` and `only_row`, which this
+   commit deletes, so it cannot outlive them and the two do not
+   compile apart. out.rs gets `impl<B: JsStmt> super::js_stmt::Runs<B> for
    StatementStack<B>` with `type Run = Span`: `trim` is
    `drop_empty_blocks`, `empty` a span of no slot, `last` the stack's
    `last`, `only` the statement of the stack's `only`, `release`
@@ -6721,7 +6724,7 @@ Commits, in this order, each pushed when made:
    Tests: the `Hand` helper of cond.rs passes the row's id to
    `note_empty_block` (`statement.0`).
 
-3. changes/statement-stack-reads.internal.md.
+2. changes/statement-stack-reads.internal.md.
 
 End state, pasted with the output:
 - `rg -n 'fn (peek|clear|statements_rev|terminal|only_row|last_row)\b'
@@ -6783,7 +6786,9 @@ Commits, in this order, each pushed when made:
    `untagged_storage: untagged::Storage<B::S>`. The two size
    assertions of untagged.rs get their type argument and keep 120 and
    16. Where an action is written into the reserved pool list it is
-   turned back with `B::stmt_node` until commit 2.
+   turned back with `B::stmt_node` until commit 2. The design turn did
+   not build this commit on its own: if it cannot compile alone, make
+   commits 1 and 2 one commit and say so in the pull request.
 
 2. The action lists, with the function they are taken with. out.rs:
 
