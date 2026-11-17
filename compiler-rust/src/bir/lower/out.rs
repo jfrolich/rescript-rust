@@ -217,21 +217,25 @@ impl<B: JsStmt> StatementStack<B> {
         }
         None
     }
-    /// The statement of a slot that holds one, read in place. O(1). Panics
-    /// on any other slot.
+    /// The statement of a slot that holds one, read in place: a statement
+    /// slot or a hold of exactly one, the slots `only` and
+    /// `first_single_slot` give. O(1). Panics on any other slot.
     pub(super) fn at(&self, slot: u32) -> &B::S {
-        match &self.slots[slot as usize] {
-            Some(Slot::Statement(s)) => s,
-            _ => panic!("slot {slot} holds no single statement"),
-        }
+        assert!(self.slot_len(slot as usize) == 1, "slot {slot} holds no single statement");
+        self.slot_ref(slot as usize, 0)
     }
     /// B:1565 unnest_block and C:7612 compiled_from_effect_block replace the
     /// only statement of an output: the statement of a slot that holds one,
-    /// moved out; the slot becomes `Dead(1)`. One write. Panics on any
-    /// other slot.
+    /// moved out; the slot becomes `Dead(1)`. A hold of exactly one
+    /// statement is such a slot (`only` and `first_single_slot` give it),
+    /// and its statement is moved out of the hold. O(1): one write, two
+    /// for a hold. Panics on any other slot.
     pub(super) fn take(&mut self, slot: u32) -> B::S {
         match self.slots[slot as usize].replace(Slot::Dead(1)) {
             Some(Slot::Statement(s)) => s,
+            Some(Slot::Held(span)) if span.len == 1 => {
+                self.held[span.start as usize].take().expect("held statement")
+            }
             _ => panic!("slot {slot} holds no single statement"),
         }
     }
@@ -532,7 +536,9 @@ impl StatementStack<crate::bir::j::rows::Rows> {
 impl<B: JsStmt> super::js_stmt::Runs<B> for StatementStack<B> {
     type Run = Span;
     /// `drop_empty_blocks`: two binary searches, one step per noted empty
-    /// block of the run.
+    /// block of the run, and the drain that moves the entries noted after
+    /// the run's: O(E) for the unit's E noted empty blocks in the worst
+    /// case, nothing when the run's are the last.
     fn trim(&mut self, js: &mut B, a: &mut Pools, run: Span) {
         self.drop_empty_blocks(js, a, run);
     }
@@ -559,7 +565,9 @@ impl<B: JsStmt> super::js_stmt::Runs<B> for StatementStack<B> {
         }
         self.kill(run);
     }
-    /// `take_list`: one step per slot and per statement, each moved once.
+    /// `take_list`: one step per slot and per statement, each moved once,
+    /// and the list closed (`close::decide`: one more step per statement)
+    /// when the arena counts JavaScript occurrences.
     fn take(&mut self, js: &mut B, a: &mut Pools, run: Span) -> B::L {
         self.take_list(js, a, run)
     }
@@ -812,6 +820,22 @@ mod tests {
         assert_eq!(stack.pushed, 10_001);
         assert_eq!(stack.copied, 10_001);
         assert_eq!(stack.mark(), Span::default());
+    }
+    /// A hold of one statement is a slot `only` and `first_single_slot`
+    /// give, so `at` reads it and `take` moves it out, as a statement slot.
+    #[test]
+    fn a_hold_of_one_statement_is_read_and_taken_as_a_slot_of_one() {
+        let mut stack = StatementStack::<Rows>::default();
+        let mark = stack.mark();
+        let slot = stack.reserve();
+        stack.fill_held(slot, [Rows::stmt_from_node(NodeId(7))]);
+        let run = stack.since(mark);
+        assert_eq!(stack.only(run).map(|(at, s)| (at, s.row())), Some((slot, NodeId(7))));
+        assert_eq!(stack.first_single_slot(run).map(|(at, s)| (at, s.row())), Some((slot, NodeId(7))));
+        assert_eq!(stack.at(slot).row(), NodeId(7));
+        assert_eq!(stack.take(slot).row(), NodeId(7));
+        assert!(!stack.has_statements(run));
+        assert_eq!(stack.only(run).map(|(at, _)| at), None);
     }
     /// The list of a hold of `n` statements: (i) pushed above a reserved
     /// slot and moved into it with `hold_run`, or (ii) given to `hold` and
