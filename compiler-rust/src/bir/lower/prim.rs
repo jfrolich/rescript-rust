@@ -718,18 +718,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 start: statements.start,
                 len: 0,
             }),
-            B::node(value),
+            value,
         ))
     }
 
     /// C: declare_compiled, assign_compiled, return_compiled: conv after sequencing.
     /// O(s) to inspect the s statement slots, then O(1) conversion.
-    pub(super) fn primitive_result(&mut self, cx: Cx, statements: Span, value: NodeId) -> Probed<B> {
+    pub(super) fn primitive_result(&mut self, cx: Cx, statements: Span, value: B::E) -> Probed<B> {
         if !self.statements.has_statements(statements) {
             self.statements.remove_empty(statements);
-            self.probe_leaf(cx, B::from_node(value))
+            self.probe_leaf(cx, value)
         } else {
-            let out = self.leaf(cx, B::from_node(value));
+            let out = self.leaf(cx, value);
             Probed::Out(Out {
                 stmts: self.statements.since(Span {
                     start: statements.start,

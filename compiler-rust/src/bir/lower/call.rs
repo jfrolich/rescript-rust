@@ -255,7 +255,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let result = (|| {
         if let Some(frame) = call.tail { return self.finish_self_call(frame, statements, &values); }
         if call.inline {
-            return self.primitive_result(cx, statements, values[0]);
+            // `values` holds rows until T6x-c1.
+            return self.primitive_result(cx, statements, B::from_node(values[0]));
         }
         // `call_node` gives a row until T6x-d.
         let mut value = B::from_node(if let Some((module, member, arity)) = call.external {
