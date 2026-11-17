@@ -1,6 +1,6 @@
 //! Recursive binding groups (BACKEND_LOWERING 5.3).
 use super::*;
-use crate::bir::{ListId, Op};
+use crate::bir::Op;
 use crate::emit::row::Kind;
 use crate::lambda::{lam_primitive::Primitive, TagInfo};
 
@@ -16,11 +16,11 @@ pub(super) struct Group {
 enum Mode { Declare, SelfInit, Update }
 
 /// One dense row per binding. Completed statements are list-pool handles.
-pub(super) struct Member {
+pub(super) struct Member<S, L> {
     source: NodeId,
     var: VarId,
-    code: Option<ListId>,
-    placeholder: Option<NodeId>,
+    code: Option<L>,
+    placeholder: Option<S>,
     end: u32,
     finished: Finished,
     mode: Mode,
@@ -103,7 +103,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(a + field-name bytes): turn the self block's already lowered fields
     /// into writes. Moving the primitive pool permits borrowing field names
     /// across J construction without cloning a tag or allocating field strings.
-    fn recursive_block(&mut self, member: usize, value: NodeId) {
+    fn recursive_block(&mut self, member: usize, value: B::E) {
         let row = &self.rec_members[member];
         let (var, mode, source) = (row.var, row.mode, row.source);
         let View::Prim { primitive, .. } = self.source.view(source) else { unreachable!() };
@@ -111,16 +111,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let Primitive::Pmakeblock(tag, _) = &prims[primitive.index()].primitive else { unreachable!() };
         if mode == Mode::Update {
             let target = self.js.var(&mut self.arena, var);
-            let call = self.primitive_runtime("Primitive_object", "updateDummy", &[B::node(target), value]);
+            // `primitive_runtime` takes rows until T6x-d.
+            let call = self.primitive_runtime("Primitive_object", "updateDummy", &[B::node(target), B::node(value)]);
             self.drop_pure_effect(call);
             let dummy = self.recursive_dummy(tag);
             let placeholder = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(B::from_node(dummy)));
-            self.rec_members[member].placeholder = Some(B::stmt_node(placeholder));
+            self.rec_members[member].placeholder = Some(placeholder);
         } else {
             let dummy = self.recursive_dummy(tag);
             let declaration = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(B::from_node(dummy)));
-            self.statements.push(B::stmt_node(declaration));
-            let mut shell = B::from_node(value);
+            self.statements.push(declaration);
+            let mut shell = value;
             assert!(self.js.kind(&self.arena, B::of(&shell)) == Kind::BlockLit, "recursive self block");
             let count = self.js.take_operands(&mut self.arena, &mut shell) as usize;
             for index in 0..count {
@@ -151,21 +152,21 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(s + a) to seal one member's s statements and initialize a self block
     /// of a fields. The last member emits all pooled lists once in group order.
-    pub(super) fn recursive_child(&mut self, cx: Cx, group: Group, index: usize, child: Probed) -> Probed {
+    pub(super) fn recursive_child(&mut self, cx: Cx, group: Group, index: usize, child: Probed<B>) -> Probed<B> {
         let View::LetRec { values, .. } = self.source.view(group.node) else { unreachable!() };
         let count = values.len();
         if index == count { return child; }
         let member = group.base as usize + count - 1 - index;
         let mut out = self.realize(cx, child);
         if self.rec_members[member].mode != Mode::Declare {
-            let value = out.value.take().unwrap_or_else(|| B::node(self.js.undefined(&mut self.arena, false)));
+            let value = out.value.take().unwrap_or_else(|| self.js.undefined(&mut self.arena, false));
             self.recursive_block(member, value);
             // Legacy updateDummy/self initialization always produces a normal
             // block output, even when the block value's prelude was finished.
             out.finished = Finished::False;
         }
         let span = self.statements.since(Span { start: out.stmts.start, len: 0 });
-        let list = self.statements.take_list(&mut self.arena, span);
+        let list = self.statements.take_list(&mut self.js, &mut self.arena, span);
         self.rec_members[member].code = Some(list);
         self.rec_members[member].finished = out.finished;
         if index + 1 == count {
@@ -176,12 +177,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             for i in group.base as usize..group.base as usize + count {
                 self.rec_steps += 1;
-                let list = B::list_from(self.rec_members[i].code.take().unwrap());
+                let list = self.rec_members[i].code.take().unwrap();
                 for k in 0..self.js.len(&self.arena, list) {
                     self.rec_steps += 1;
                     let statement = self.js.take_at(&mut self.arena, list, k);
                     if finished == Finished::True { self.js.release_stmt(&mut self.arena, statement); }
-                    else { self.statements.push(B::stmt_node(statement)); }
+                    else { self.statements.push(statement); }
                 }
                 if self.rec_members[i].finished == Finished::True { finished = Finished::True; }
             }
@@ -193,15 +194,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(deferred realization + discarded body size): append the body using
     /// the ordinary output algebra; no member list is scanned again.
-    pub(super) fn finish_recursive(&mut self, cx: Cx, group: Group, children: impl Iterator<Item = Probed>) -> Probed {
+    pub(super) fn finish_recursive(&mut self, cx: Cx, group: Group, children: impl Iterator<Item = Probed<B>>) -> Probed<B> {
         let body = children.last().expect("recursive body");
         let mut out = self.realize(cx, body);
         if let Some(first) = self.rec_members.get(group.base as usize) {
             let prefix = Out { stmts: Span { start: group.start.start, len: first.end - group.start.start },
                 value: None, finished: first.finished };
             let keep = matches!(cx.cont, Cont::Value(_)).then(|| out.value.take()).flatten();
-            let value = out.value;
-            out = self.append_outputs(prefix, out, value);
+            out = self.append_outputs(prefix, out, true);
             if keep.is_some() { out.value = keep; }
         }
         self.rec_members.truncate(group.base as usize);
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn group_size() {
         assert_eq!(std::mem::size_of::<Group>(), 16);
-        assert_eq!(std::mem::size_of::<Member>(), 32);
+        assert_eq!(std::mem::size_of::<Member<<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::S, crate::bir::ListId>>(), 32);
         assert_eq!(std::mem::size_of::<Mode>(), 1);
     }
 
@@ -319,7 +319,7 @@ mod tests {
             let output = s.probe(Cx::value(), root).unwrap();
             let output = s.realize(Cx::value(), output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
-            if let Some(value) = output.value { s.arena.release(value); }
+            if let Some(value) = output.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(output.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

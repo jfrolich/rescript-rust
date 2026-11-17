@@ -37,7 +37,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// the callee, create copies in parameter order, then emit assignments in
     /// reverse order. Table growth and names are paid once per variable/copy.
     /// Arguments read iteration bindings, not the copies being assigned.
-    pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: &[NodeId]) -> Probed {
+    pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: &[NodeId]) -> Probed<B> {
         let params = self.tail_frames[frame.0 as usize].params;
         self.tail_frames[frame.0 as usize].triggered = true;
         self.tail_copies.resize(self.arena.vars.len(), None);
@@ -62,18 +62,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 copy
             };
             let assignment = self.js.assign(&mut self.arena, copy, B::from_node(value));
-            assignments.push(B::stmt_node(assignment));
+            assignments.push(assignment);
         }
         for statement in assignments.drain(..).rev() { self.statements.push(statement); }
         self.tail_assignments = assignments;
         let jump = self.js.continue_(&mut self.arena, None);
-        self.statements.push(B::stmt_node(jump));
+        self.statements.push(jump);
         Probed::Out(Out { stmts: self.statements.since(Span { start: statements.start, len: 0 }), value: None, finished: Finished::True })
     }
 
     /// O(p log p + s): sort only copied parameters, emit their iteration-local
     /// aliases and wrap the already-lowered body. Each statement moves once.
-    pub(super) fn loop_function_body(&mut self, frame: LoopRef, header: FuncId, body: NodeId) -> NodeId {
+    pub(super) fn loop_function_body(&mut self, frame: LoopRef, header: FuncId, body: B::L) -> B::L {
         let frame = self.tail_frames[frame.0 as usize];
         if !frame.triggered { return body; }
         let start = self.arena.vars.function_params.len() as u32;
@@ -98,19 +98,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let copy = self.tail_copies[param.index()].unwrap();
             let value = self.js.var(&mut self.arena, copy);
             let statement = self.js.declare(&mut self.arena, LetKind::Alias, param, Some(value));
-            self.statements.push(B::stmt_node(statement));
+            self.statements.push(statement);
         }
         self.tail_order = ordered;
-        let (statements, moved) = (&mut self.statements, &mut self.tail_body_statements);
-        self.js.unblock(&mut self.arena, B::stmt_from_node(body), |s| {
-            *moved += 1;
-            statements.push(B::stmt_node(s));
-        });
-        let list = self.statements.take_list(&mut self.arena, self.statements.since(mark));
+        for index in 0..self.js.len(&self.arena, body) {
+            self.tail_body_statements += 1;
+            let statement = self.js.take_at(&mut self.arena, body, index);
+            self.statements.push(statement);
+        }
+        let list = self.statements.take_list(&mut self.js, &mut self.arena, self.statements.since(mark));
         let condition = self.js.boolean(&mut self.arena, true);
-        let loop_ = self.js.while_(&mut self.arena, condition, B::list_from(list), None);
-        let loop_ = self.js.list(&mut self.arena, 1, std::iter::once(loop_));
-        B::stmt_node(self.js.block_of(&mut self.arena, loop_))
+        let loop_ = self.js.while_(&mut self.arena, condition, list, None);
+        self.js.list(&mut self.arena, 1, std::iter::once(loop_))
     }
 }
 
@@ -572,7 +571,7 @@ mod tests {
             let output = s.probe(cx, body).unwrap();
             let output = s.realize(cx, output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
-            if let Some(value) = output.value { s.arena.release(value); }
+            if let Some(value) = output.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(output.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

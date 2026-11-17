@@ -104,8 +104,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// P: compile_primitive_js / compile_debugger source locations on statements.
     /// O(1): one location lookup and one statement push.
-    fn primitive_statement(&mut self, statement: NodeId, loc: crate::lambda::LamLoc) {
-        let mut statement = B::stmt_from_node(statement);
+    fn primitive_statement(&mut self, mut statement: B::S, loc: crate::lambda::LamLoc) {
         if self
             .locations
             .and_then(|locations| locations.get(loc))
@@ -113,7 +112,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         {
             self.js.locate_stmt(&mut self.arena, &mut statement, loc);
         }
-        self.statements.push(B::stmt_node(statement));
+        self.statements.push(statement);
     }
 
     /// P: compile_primitive_js. O(a + emitted metadata bytes), plus sequencing
@@ -124,8 +123,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         prim: Prim,
-        children: impl Iterator<Item = Probed>,
-    ) -> Result<Probed, Unsupported> {
+        children: impl Iterator<Item = Probed<B>>,
+    ) -> Result<Probed<B>, Unsupported> {
         let payloads = std::mem::take(&mut self.arena.pools.prims);
         let payload = &payloads[prim.primitive.index()];
         let result = self.finish_primitive_payload(cx, prim, payload, children);
@@ -140,8 +139,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         cx: Cx,
         prim: Prim,
         payload: &crate::bir::PrimPayload,
-        children: impl Iterator<Item = Probed>,
-    ) -> Result<Probed, Unsupported> {
+        children: impl Iterator<Item = Probed<B>>,
+    ) -> Result<Probed<B>, Unsupported> {
         let mut outputs = std::mem::take(&mut self.argument_outputs);
         outputs.extend(children.map(|child| match child {
             Probed::Out(out) => out,
@@ -157,7 +156,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             _ => {}
         }
         let mut values = std::mem::take(&mut self.argument_values);
-        let statements = self.sequence_arguments(false, &outputs, &mut values);
+        let statements = self.sequence_arguments(false, &mut outputs, &mut values);
         outputs.clear();
         self.argument_outputs = outputs;
         let result = self.finish_primitive_values(cx, prim, payload, statements, &mut values);
@@ -171,7 +170,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     fn finish_primitive_values(
         &mut self, cx: Cx, prim: Prim, payload: &crate::bir::PrimPayload,
         statements: Span, values: &mut Vec<NodeId>,
-    ) -> Result<Probed, Unsupported> {
+    ) -> Result<Probed<B>, Unsupported> {
         self.primitive_steps += values.len() + 1;
         let primitive = &payload.primitive;
         let mut value = match primitive {
@@ -612,17 +611,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     self.js.release(&mut self.arena, B::from_node(value));
                 }
                 let statement = self.js.debugger(&mut self.arena);
-                self.primitive_statement(B::stmt_node(statement), payload.loc);
+                self.primitive_statement(statement, payload.loc);
                 self.js.undefined(&mut self.arena, true)
             }
             // P: compile_primitive_js, Praise; conversion never binds a thrown value.
             Primitive::Praise => {
                 let value = self.first_value(values);
                 let statement = self.js.throw(&mut self.arena, value);
-                self.primitive_statement(B::stmt_node(statement), payload.loc);
+                self.primitive_statement(statement, payload.loc);
                 let value = match cx.cont {
                     Cont::Value(_) | Cont::Effect(Tail::No) => {
-                        Some(B::node(self.js.undefined(&mut self.arena, false)))
+                        Some(self.js.undefined(&mut self.arena, false))
                     }
                     _ => None,
                 };
@@ -719,13 +718,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 start: statements.start,
                 len: 0,
             }),
-            B::node(value),
+            value,
         ))
     }
 
     /// C: declare_compiled, assign_compiled, return_compiled: conv after sequencing.
     /// O(s) to inspect the s statement slots, then O(1) conversion.
-    pub(super) fn primitive_result(&mut self, cx: Cx, statements: Span, value: NodeId) -> Probed {
+    pub(super) fn primitive_result(&mut self, cx: Cx, statements: Span, value: B::E) -> Probed<B> {
         if !self.statements.has_statements(statements) {
             self.statements.remove_empty(statements);
             self.probe_leaf(cx, value)
@@ -1227,7 +1226,7 @@ mod dictionary_allocations {
                 let out = s.probe(Cx::returning(), root).unwrap();
                 let out = s.realize(Cx::returning(), out);
                 for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-                if let Some(value) = out.value { s.arena.release(value); }
+                if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
                 s.statements.kill(out.stmts);
             };
             let lists = state.arena.lists.storage_shape().0;
@@ -1287,7 +1286,7 @@ mod template_allocations {
             let run = |s: &mut State<'_>| {
                 let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
                 for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-                if let Some(value) = out.value { s.arena.release(value); }
+                if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
                 s.statements.kill(out.stmts);
             };
             let lists = state.arena.lists.storage_shape().0;

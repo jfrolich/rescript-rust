@@ -413,7 +413,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         });
     }
     /// O(arity): finish this event with already-computed child costs.
-    pub(super) fn label_leave(&mut self, output: &Probed) {
+    pub(super) fn label_leave(&mut self, output: &Probed<B>) {
         self.labels.complete(matches!(output, Probed::Free(_)));
     }
     /// O(decimal digits), using a bounded stack buffer rather than a String.
@@ -644,7 +644,7 @@ mod tests {
             let output = s.probe(Cx::effect(), root).unwrap();
             let output = s.realize(Cx::effect(), output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
-            if let Some(value) = output.value { s.arena.release(value); }
+            if let Some(value) = output.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(output.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

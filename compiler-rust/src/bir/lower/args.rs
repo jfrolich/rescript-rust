@@ -7,11 +7,15 @@ enum Work {
     Enter(NodeId),
     Rebuild(NodeId, usize),
 }
-#[derive(Default)]
-pub(super) struct Evaluation {
+pub(super) struct Evaluation<S> {
     work: Vec<Work>,
     values: Vec<NodeId>,
-    statements: Vec<NodeId>,
+    statements: Vec<S>,
+}
+impl<S> Default for Evaluation<S> {
+    fn default() -> Self {
+        Self { work: Vec::new(), values: Vec::new(), statements: Vec::new() }
+    }
 }
 
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
@@ -29,19 +33,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Whether `statement` declares a variable whose value, if it has one,
     /// runs no code. One step per member of the value's chain of field
     /// reads with a position (`runs_no_code`); O(1) otherwise.
-    fn declares_pure(&self, statement: NodeId) -> bool {
-        let statement = B::stmt_from_node(statement);
-        self.js.stmt_kind(&self.arena, &statement) == Kind::Declare
+    fn declares_pure(&self, statement: &B::S) -> bool {
+        self.js.stmt_kind(&self.arena, statement) == Kind::Declare
             && self
                 .js
-                .value_of(&self.arena, &statement)
+                .value_of(&self.arena, statement)
                 .is_none_or(|value| self.js.runs_no_code(&self.arena, value))
     }
 
     /// A:96 defines_pure_values: each statement is examined once by sequencing.
     /// Cost: O(statements), each `declares_pure`.
-    fn defines_pure_values(&self, statements: &[NodeId]) -> bool {
-        statements.iter().all(|&statement| self.declares_pure(statement))
+    fn defines_pure_values(&self, statements: &[B::S]) -> bool {
+        statements.iter().all(|statement| self.declares_pure(statement))
     }
 
     /// X:1445 fresh_ident: unit-local naming order, without a global counter.
@@ -86,7 +89,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             self.js.release(&mut self.arena, first);
                         } else {
                             let statement = self.js.exp_rule(&mut self.arena, first);
-                            statements.push(B::stmt_node(statement));
+                            statements.push(statement);
                         }
                         work.push(Work::Enter(B::node(second)));
                         continue;
@@ -122,7 +125,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             var,
                             Some(B::from_node(value)),
                         );
-                        statements.push(B::stmt_node(statement));
+                        statements.push(statement);
                         let mut held = self.js.var(&mut self.arena, var);
                         self.js.assume_strict(&mut self.arena, &mut held);
                         values.push(B::node(held));
@@ -158,7 +161,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn sequence_arguments(
         &mut self,
         method_callee: bool,
-        args: &[Out],
+        args: &mut [Out<B>],
         values: &mut Vec<NodeId>,
     ) -> Span {
         let start = args.first().map_or_else(
@@ -175,9 +178,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mut has_code = false;
         let mut later_defines_pure = true;
         assert!(values.is_empty(), "argument value scratch must be empty");
-        for (i, arg) in args.iter().enumerate().rev() {
+        for (i, arg) in args.iter_mut().enumerate().rev() {
             self.sequence_steps += 1;
-            let value = arg.value.expect("argument value");
+            // `values` holds rows until T6x-c1.
+            let value = B::node(arg.value.take().expect("argument value"));
             let (held, value) =
                 if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(value)) {
                     (Span::default(), value)
@@ -200,11 +204,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             later_defines_pure &= self.defines_pure_values(&self.evaluation.statements[held.start as usize..(held.start + held.len) as usize])
                 && self
                     .statements
-                    .statements(arg.stmts)
+                    .statement_refs(arg.stmts)
                     .all(|statement| self.declares_pure(statement));
             if held.len != 0 {
                 self.statements
-                    .fill_held(arg.stmts.start + arg.stmts.len - 1, &self.evaluation.statements[held.start as usize..(held.start + held.len) as usize]);
+                    .fill_held(arg.stmts.start + arg.stmts.len - 1, self.evaluation.statements.drain(held.start as usize..(held.start + held.len) as usize));
             }
             self.evaluation.statements.truncate(held.start as usize);
             values.push(value);
@@ -236,7 +240,7 @@ mod tests {
         let mut state = State::new(bridge::import_lambda(&a, root).unwrap());
         let value = state.arena.new_node(View::JNull, 0);
         let statement = state.arena.new_node(View::SDebugger, 0);
-        state.evaluation.statements.push(statement);
+        state.evaluation.statements.push(<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::stmt_from_node(statement));
         state.evaluate_now(value);
     }
 
@@ -261,7 +265,7 @@ mod tests {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;
@@ -421,7 +425,7 @@ mod tests {
                 state.statements.reserve();
                 args.push(Out {
                     stmts: state.statements.since(start),
-                    value: Some(value),
+                    value: Some(crate::bir::lower::out::of_row(value)),
                     finished: Finished::False,
                 });
                 expected_args.push((vec![], old_value));
@@ -442,13 +446,13 @@ mod tests {
             );
             let statement = state.arena.new_node(View::SExp { value }, 0);
             let start = state.statements.mark();
-            state.statements.push(statement);
+            state.statements.push(<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::stmt_from_node(statement));
             state.statements.reserve();
             let text = state.arena.intern_text("v");
             let value = state.pure_expression(View::JStr { text }, 0);
             args.push(Out {
                 stmts: state.statements.since(start),
-                value: Some(value),
+                value: Some(crate::bir::lower::out::of_row(value)),
                 finished: Finished::False,
             });
             let callee = exp::var(effect_id, &mut legacy.j);
@@ -457,7 +461,7 @@ mod tests {
             let value = exp::string("v", &mut legacy.j);
             expected_args.push((vec![statement], value));
             let mut values = Vec::new();
-            let span = state.sequence_arguments(method, &args, &mut values);
+            let span = state.sequence_arguments(method, &mut args, &mut values);
             if method || shape != 0 {
                 assert!(state.arena.node(values[0]).flags().contains(NodeFlags::JS_LOC_PRESENT));
             }
@@ -483,7 +487,7 @@ mod tests {
                 Cx::value(),
                 Probed::Out(Out {
                     stmts: span,
-                    value: Some(value),
+                    value: Some(crate::bir::lower::out::of_row(value)),
                     finished: Finished::False,
                 }),
             );

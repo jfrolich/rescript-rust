@@ -500,7 +500,7 @@ mod tests {
                 let out = s.probe(Cx::value(), root).unwrap();
                 let out = s.realize(Cx::value(), out);
                 for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-                if let Some(value) = out.value { s.arena.release(value); }
+                if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
                 s.statements.kill(out.stmts);
             };
             let lists = state.arena.lists.storage_shape().0;

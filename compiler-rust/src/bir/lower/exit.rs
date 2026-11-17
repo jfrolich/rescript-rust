@@ -184,7 +184,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// one declaration built and pushed.
     pub(super) fn declare_empty(&mut self, kind: LetKind, var: VarId) {
         let declaration = self.js.declare(&mut self.arena, kind, var, None);
-        self.statements.push(B::stmt_node(declaration));
+        self.statements.push(declaration);
     }
 
     /// 4.1 `lower_catch` on entering the node (OCaml
@@ -247,7 +247,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let exit = self.fresh_variable("exit");
             let zero = self.js.int_literal(&mut self.arena, 0);
             let declaration = self.js.declare(&mut self.arena, LetKind::Variable, exit, Some(zero));
-            self.statements.push(B::stmt_node(declaration));
+            self.statements.push(declaration);
             (target.map(|(_, var)| var), Some(exit))
         };
         // 4.2 invariant 3: a table starts above every visible entry.
@@ -323,11 +323,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// child is a block (K3: C: compile_effect_block_output). A handler
     /// of a table with several becomes its clause: one step per statement of
     /// the handler, copied to its list once.
-    pub(super) fn catch_child(&mut self, cx: Cx, frame: Catch, index: usize, child: Probed) -> Probed {
+    pub(super) fn catch_child(&mut self, cx: Cx, frame: Catch, index: usize, child: Probed<B>) -> Probed<B> {
         let mut out = self.realize(cx, child);
         if let Some(value) = out.value.take() {
             debug_assert!(matches!(cx.cont, Cont::Effect(Tail::No)));
-            self.drop_pure_effect(value);
+            self.drop_pure_effect(B::node(value));
         }
         let run = self.statements.trim(Span { start: out.stmts.start, len: 0 });
         let finished = out.finished;
@@ -345,11 +345,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             // break only when the handler holds an exit (4.2 invariant 5).
             let should_break = finished != Finished::True
                 && (!matches!(cx.cont, Cont::Effect(Tail::Return(_))) || self.has_exit(handler));
-            let list = self.statements.take_list(&mut self.arena, run);
-            let block = self.js.block_of(&mut self.arena, B::list_from(list));
+            let list = self.statements.take_list(&mut self.js, &mut self.arena, run);
+            let block = self.js.block_of(&mut self.arena, list);
             let plan = self.catches[frame.0 as usize].as_mut().expect("live catch frame");
             let slot = plan.output.start as usize + index - 1;
-            self.switch_output_nodes[slot] = B::stmt_node(block);
+            self.switch_output_nodes[slot] = Some(block);
             self.switch_output_clauses[slot] = ClauseMeta { should_break, comment: None, loc: None };
         }
         Probed::Out(Out { stmts: self.statements.mark(), value: None, finished })
@@ -361,7 +361,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// `if_statement` over its statements; one step per handler of a table
     /// with several. A finished body drops what follows it, releasing each
     /// dropped statement once.
-    pub(super) fn finish_catch(&mut self, cx: Cx, frame: Catch) -> Probed {
+    pub(super) fn finish_catch(&mut self, cx: Cx, frame: Catch) -> Probed<B> {
         let plan = self.catches[frame.0 as usize].take().expect("live catch frame");
         while self.catches.last().is_some_and(Option::is_none) {
             self.catches.pop();
@@ -373,7 +373,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let dropped = self.statements.since(after_body);
             self.release_run(dropped);
             for i in 0..plan.output.len {
-                let block = B::stmt_from_node(self.switch_output_nodes[(plan.output.start + i) as usize]);
+                let block = self.switch_output_nodes[(plan.output.start + i) as usize].take().expect("handler block");
                 self.js.release_stmt(&mut self.arena, block);
             }
             Finished::True
@@ -392,13 +392,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             // C: compile_staticcatch_expr: never finished.
             Cont::Value(_) => Out {
                 stmts,
-                value: Some(B::node(self.js.var(&mut self.arena, plan.target.expect("value catch result")))),
+                value: Some(self.js.var(&mut self.arena, plan.target.expect("value catch result"))),
                 finished: Finished::False,
             },
             // K2: C: compile_effect_output keeps `undefined` as the value.
             Cont::Effect(Tail::No) => Out {
                 stmts,
-                value: Some(B::node(self.js.undefined(&mut self.arena, false))),
+                value: Some(self.js.undefined(&mut self.arena, false)),
                 finished,
             },
             _ => Out { stmts, value: None, finished },
@@ -425,8 +425,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         let keys = crate::bir::KeySpan { start: self.arena.pools.switch_keys.len() as u32, len: plan.len };
         let clauses = crate::bir::ClauseSpan { start: self.arena.pools.switch_clauses.len() as u32, len: plan.len };
-        let actions = self.arena.lists.push_iter(plan.len as usize,
-            std::iter::repeat_n(NodeId(u32::MAX), plan.len as usize));
+        // The actions are pushed on the statement stack and taken as one list.
+        let mark = self.statements.mark();
         let mut slot = 0;
         for group in 0..plan.groups.heads.len as usize {
             let mut case = self.group_indices[plan.groups.heads.start as usize + group];
@@ -434,14 +434,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.arena.pools.switch_keys.push(CaseKey::Lambda(crate::lambda::SwitchKey::Int(plan.first + case as i32)));
                 let next = self.group_indices[plan.groups.next.start as usize + case];
                 let (action, clause) = if next == super::switch::NONE {
-                    (self.switch_output_nodes[plan.output.start as usize + group],
+                    (self.switch_output_nodes[plan.output.start as usize + group].take().expect("handler block"),
                      self.switch_output_clauses[plan.output.start as usize + group])
                 } else {
                     let empty = self.js.list(&mut self.arena, 0, std::iter::empty());
                     let empty = self.js.block_of(&mut self.arena, empty);
-                    (B::stmt_node(empty), ClauseMeta { should_break: false, comment: None, loc: None })
+                    (empty, ClauseMeta { should_break: false, comment: None, loc: None })
                 };
-                self.arena.lists.set(actions, slot, action);
+                self.statements.push(action);
                 self.arena.pools.switch_clauses.push(clause);
                 slot += 1;
                 if next == super::switch::NONE { break; }
@@ -453,9 +453,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             constants: plan.len, keys, clauses, has_default: false, consts_full: false,
             blocks_full: false, dispatch: crate::lambda::SwitchDispatch::Direct,
         });
+        let actions = self.statements.take_list(&mut self.js, &mut self.arena, self.statements.since(mark));
         let scrutinee = self.js.var(&mut self.arena, exit);
-        let statement = self.js.switch(&mut self.arena, scrutinee, B::list_from(actions), header, false);
-        self.statements.push(B::stmt_node(statement));
+        let statement = self.js.switch(&mut self.arena, scrutinee, actions, header, false);
+        self.statements.push(statement);
     }
 
     /// 4.1 `lower_exit` on entering the node (OCaml
@@ -512,7 +513,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// As each argument completes. With several arguments the run moves to
     /// the argument's slot, so that the output is in source order: one step
     /// per statement of the argument.
-    pub(super) fn exit_child(&mut self, cx: Cx, exit: &Exit, index: usize, child: Probed) -> Probed {
+    pub(super) fn exit_child(&mut self, cx: Cx, exit: &Exit, index: usize, child: Probed<B>) -> Probed<B> {
         let out = self.realize(cx, child);
         debug_assert!(out.value.is_none());
         if exit.kept > 1 {
@@ -537,8 +538,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         exit: Exit,
-        children: impl Iterator<Item = Probed>,
-    ) -> Probed {
+        children: impl Iterator<Item = Probed<B>>,
+    ) -> Probed<B> {
         // Children arrive last argument first: the last match is the first
         // finished argument in source order.
         let mut finished_at = None;
@@ -561,7 +562,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if jump.order != CHEAP {
                     let order = self.js.int_literal(&mut self.arena, jump.order);
                     let statement = self.js.assign(&mut self.arena, jump.exit, order);
-                    self.statements.push(B::stmt_node(statement));
+                    self.statements.push(statement);
                 }
                 Finished::False
             }
@@ -574,13 +575,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         let value = match cx.cont {
             Cont::Value(_) | Cont::Effect(Tail::No) => {
-                Some(B::node(self.js.undefined(&mut self.arena, false)))
+                Some(self.js.undefined(&mut self.arena, false))
             }
             Cont::Declare(kind, var) => {
                 if finished != Finished::True {
                     let undefined = self.js.undefined(&mut self.arena, false);
                     let statement = self.js.declare(&mut self.arena, kind, var, Some(undefined));
-                    self.statements.push(B::stmt_node(statement));
+                    self.statements.push(statement);
                 }
                 None
             }
@@ -1308,7 +1309,7 @@ mod tests {
             let output = s.probe(Cx::effect(), root).unwrap();
             let output = s.realize(Cx::effect(), output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
-            if let Some(value) = output.value { s.arena.release(value); }
+            if let Some(value) = output.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(output.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

@@ -236,8 +236,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         call: Call,
-        children: impl Iterator<Item = Probed>,
-    ) -> Probed {
+        children: impl Iterator<Item = Probed<B>>,
+    ) -> Probed<B> {
         let call = self.calls[call.0 as usize].take().expect("live call plan");
         while self.calls.last().is_some_and(Option::is_none) { self.calls.pop(); }
         let mut outputs = std::mem::take(&mut self.argument_outputs);
@@ -249,15 +249,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let method_callee = !call.inline && call.external.is_none()
             && matches!(self.source.view(self.source.lists.get(call.operands)[0]), View::Prim { primitive, .. }
                 if matches!(self.arena.primitive(primitive).primitive, crate::lambda::lam_primitive::Primitive::PjsObjectGet(_)));
-        let statements = self.sequence_arguments(method_callee, &outputs, &mut values);
+        let statements = self.sequence_arguments(method_callee, &mut outputs, &mut values);
         outputs.clear();
         self.argument_outputs = outputs;
         let result = (|| {
         if let Some(frame) = call.tail { return self.finish_self_call(frame, statements, &values); }
         if call.inline {
-            return self.primitive_result(cx, statements, values[0]);
+            // `values` holds rows until T6x-c1.
+            return self.primitive_result(cx, statements, B::from_node(values[0]));
         }
-        let mut value = if let Some((module, member, arity)) = call.external {
+        // `call_node` gives a row until T6x-d.
+        let mut value = B::from_node(if let Some((module, member, arity)) = call.external {
             let mut callee = self.js.qualified(&mut self.arena, module, Some(member));
             self.js.assume_strict(&mut self.arena, &mut callee);
             let callee = B::node(callee);
@@ -281,13 +283,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 &values[1..],
                 Self::call_info_of_apply_status(call.status),
             )
-        };
+        });
         // C:1129 compile_apply_call: attach only a real, non-ghost location.
         if self.locations.and_then(|locations| locations.get(call.loc))
             .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0) {
-            let mut located = B::from_node(value);
-            self.js.locate(&mut self.arena, &mut located, call.loc);
-            value = B::node(located);
+            self.js.locate(&mut self.arena, &mut value, call.loc);
         }
         if !self.statements.has_statements(statements) {
             // Holes carry no effects; pop them before returning a free value.
@@ -497,7 +497,7 @@ mod tests {
                         Cx::value(),
                         Probed::Out(Out {
                             stmts: Span::default(),
-                            value: Some(value),
+                            value: Some(crate::bir::lower::out::of_row(value)),
                             finished: Finished::False,
                         }),
                     );
@@ -557,7 +557,7 @@ mod allocation_tests {
         let run = |s: &mut State<'_>| {
             let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0; let source_lists = state.source.lists.storage_shape().0;
@@ -646,7 +646,7 @@ mod inline_allocation_tests {
             let run = |s: &mut State<'_>, root| {
                 let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
                 for n in s.statements.statements(out.stmts) { s.arena.release(n); }
-                if let Some(n) = out.value { s.arena.release(n); } s.statements.kill(out.stmts);
+                if let Some(n) = out.value { s.arena.release(crate::bir::lower::out::row(n)); } s.statements.kill(out.stmts);
             };
             macro_rules! stores { ($m:ident, $s:ident) => {
                 $m!($s, arena.nodes); $m!($s, arena.parents); $m!($s, arena.free_nodes); $m!($s, arena.release_stack);

@@ -128,8 +128,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         cx: Cx,
         resume: &Resume,
         index: usize,
-        child: Probed,
-    ) -> Probed {
+        child: Probed<B>,
+    ) -> Probed<B> {
         if let Resume::Loop(frame) = resume { return self.loop_child(cx, *frame, index, child); }
         if let Resume::Rec(group) = resume { return self.recursive_child(cx, *group, index, child); }
         if let Resume::Try(frame) = resume { return self.try_child(cx, *frame, index, child); }
@@ -145,8 +145,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let mut out = self.realize(cx, child);
             if let Resume::Prim(prim) = resume {
                 if matches!(self.arena.primitive(prim.primitive).primitive, crate::lambda::lam_primitive::Primitive::Pdebugger) {
-                    if let Some(value) = out.value.take() { self.drop_pure_effect(value); }
-                    out.value = Some(B::node(self.js.undefined(&mut self.arena, true)));
+                    if let Some(value) = out.value.take() { self.drop_pure_effect(B::node(value)); }
+                    out.value = Some(self.js.undefined(&mut self.arena, true));
                 }
             }
             self.statements.reserve();
@@ -187,8 +187,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         resume: Resume,
-        mut children: impl Iterator<Item = Probed>,
-    ) -> Probed {
+        mut children: impl Iterator<Item = Probed<B>>,
+    ) -> Probed<B> {
         match resume {
             Resume::Loop(frame) => self.finish_loop(cx, frame),
             Resume::Rec(group) => self.finish_recursive(cx, group, children),
@@ -213,13 +213,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     // C: compile_expr Let retains the unreachable body's value,
                     // unlike compile_effect_output and append_effect_output.
                     let value = body.value.take();
-                    let mut out = self.append_outputs(first.unwrap(), body, None);
+                    let mut out = self.append_outputs(first.unwrap(), body, false);
                     out.value = value;
                     return Probed::Out(out);
                 }
-                let value = body.value;
                 Probed::Out(match first {
-                    Some(first) => self.append_outputs(first, body, value),
+                    Some(first) => self.append_outputs(first, body, true),
                     None => body,
                 })
             }
@@ -235,41 +234,41 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     if !keeps_value && let Some(value) = first.value.take() {
                         self.hold_effect(slot, value);
                     }
-                    return Probed::Out(self.append_outputs(first, second, None));
+                    return Probed::Out(self.append_outputs(first, second, false));
                 }
                 let head = first.value.take();
-                let tail = match (head, tail) {
+                let tail = match tail {
                     // 1.5: a free tail after a head without statements is free
                     // in the continuations that convert a value (1.4) too.
-                    (Some(head), Probed::Free(tail))
-                        if !keeps_value && !self.statements.has_statements(first.stmts) =>
+                    Probed::Free(tail)
+                        if head.is_some() && !keeps_value && !self.statements.has_statements(first.stmts) =>
                     {
+                        let Some(head) = head else { unreachable!("tested above") };
                         self.statements.remove_empty(first.stmts);
-                        if self.js.has(&self.arena, B::at(head), flag::STRICT) {
-                            self.js.release(&mut self.arena, B::from_node(head));
+                        if self.js.has(&self.arena, B::of(&head), flag::STRICT) {
+                            self.js.release(&mut self.arena, head);
                             return Probed::Free(tail);
                         }
                         return Probed::Free(self.free.push(Free::Seq { first: head, second: tail }));
                     }
-                    (_, tail) => tail,
+                    tail => tail,
                 };
                 let mut second = self.realize(cx, tail);
                 if let Some(value) = head {
                     if keeps_value && !self.statements.has_statements(second.stmts) {
                         let second_value = second.value.expect("value continuation");
-                        let value = if self.js.has(&self.arena, B::at(value), flag::STRICT) {
-                            self.js.release(&mut self.arena, B::from_node(value));
+                        let value = if self.js.has(&self.arena, B::of(&value), flag::STRICT) {
+                            self.js.release(&mut self.arena, value);
                             second_value
                         } else {
-                            B::node(self.js.seq_rule(&mut self.arena, B::from_node(value), B::from_node(second_value)))
+                            self.js.seq_rule(&mut self.arena, value, second_value)
                         };
                         second.value = Some(value);
                     } else {
                         self.hold_effect(slot, value);
                     }
                 }
-                let value = second.value;
-                let out = self.append_outputs(first, second, value);
+                let out = self.append_outputs(first, second, true);
                 if !self.statements.has_statements(out.stmts) && let Some(value) = out.value {
                     self.statements.remove_empty(out.stmts);
                     self.probe_leaf(cx, value)
@@ -280,10 +279,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     unreachable!("return was realized")
                 };
                 assert!(body.value.is_none());
-                let list = self.statements.take_list(&mut self.arena, body.stmts);
-                let body = self.js.block_of(&mut self.arena, B::list_from(list));
+                let body = self.statements.take_list(&mut self.js, &mut self.arena, body.stmts);
                 let body = match loop_ {
-                    Some(frame) => B::stmt_from_node(self.loop_function_body(frame, header, B::stmt_node(body))),
+                    Some(frame) => self.loop_function_body(frame, header, body),
                     None => body,
                 };
                 let source_loc = Some(self.arena.function(header).loc)
@@ -294,23 +292,22 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 } else {
                     header
                 };
-                let mut value = self.js.function_of_block(&mut self.arena, header, body);
+                let mut value = self.js.function(&mut self.arena, header, body);
                 super::names::close(&mut self.arena, &self.idents, header);
                 if let Some(loc) = source_loc {
                     self.js.locate(&mut self.arena, &mut value, loc);
                 }
-                self.probe_leaf(cx, B::node(value))
+                self.probe_leaf(cx, value)
             }
         }
     }
     /// K2: O:339 push_effect_expression into the slot reserved after the head
     /// of a sequence. One step per comma operand of the value.
-    fn hold_effect(&mut self, slot: u32, value: NodeId) {
-        let mut held = std::mem::take(&mut self.scratch);
-        self.js.effect(&mut self.arena, B::from_node(value), |s| held.push(B::stmt_node(s)));
-        self.statements.fill_held(slot, &held);
-        held.clear();
-        self.scratch = held;
+    fn hold_effect(&mut self, slot: u32, value: B::E) {
+        let statements = &mut self.statements;
+        let mark = statements.held_mark();
+        self.js.effect(&mut self.arena, value, |s| statements.hold(s));
+        self.statements.fill_held_since(slot, mark);
     }
     /// K2: O:339 push_effect_expression. Calls may have effects; pure values
     /// are removed and comma values are split before statements are emitted.
@@ -318,7 +315,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// decision reads one cached flag.
     pub(super) fn drop_pure_effect(&mut self, value: NodeId) {
         let statements = &mut self.statements;
-        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.push(B::stmt_node(s)));
+        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.push(s));
     }
 }
 
@@ -356,7 +353,7 @@ mod allocation_tests {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

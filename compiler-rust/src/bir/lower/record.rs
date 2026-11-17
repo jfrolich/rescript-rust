@@ -111,8 +111,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         record: Record,
-        children: impl Iterator<Item = Probed>,
-    ) -> Probed {
+        children: impl Iterator<Item = Probed<B>>,
+    ) -> Probed<B> {
         let mut start = None;
         let mut values = std::mem::take(&mut self.object_scratch.values);
         debug_assert!(values.is_empty());
@@ -122,7 +122,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 unreachable!("record operand realized")
             };
             start.get_or_insert(out.stmts.start);
-            values.push(out.value.expect("record operand value"));
+            values.push(B::node(out.value.expect("record operand value")));
         }
         // The spread, then the overrides in the order of their keys
         // (`record_copy` reversed the keys of the spine).
@@ -149,7 +149,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 start: start.expect("record initializer"),
                 len: 0,
             }),
-            B::node(value),
+            value,
         )
     }
 
@@ -297,7 +297,7 @@ mod tests {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

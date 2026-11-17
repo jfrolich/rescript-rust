@@ -9,12 +9,11 @@ use crate::lambda::lam_primitive::{
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// P:84 compile_js_object_get. O(receiver field spine), holding only
     /// receivers with a prelude that cannot be safely read in place.
-    pub(super) fn hold_external_receiver(&mut self, _cx: Cx, mut arg: Out) -> Out {
+    pub(super) fn hold_external_receiver(&mut self, _cx: Cx, mut arg: Out<B>) -> Out<B> {
         if !self.statements.has_statements(arg.stmts) {
             return arg;
         }
-        let value = arg.value.expect("receiver value");
-        let mut root = B::at(value);
+        let mut root = B::of(arg.value.as_ref().expect("receiver value"));
         let duplicable = loop {
             match self.js.kind(&self.arena, root) {
                 Kind::Dot => root = self.js.operand(&self.arena, root, 0),
@@ -30,14 +29,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if !duplicable {
             let var = self.fresh_variable("tmp");
             let statement =
-                self.js.declare(&mut self.arena, LetKind::Strict, var, Some(B::from_node(value)));
+                self.js.declare(&mut self.arena, LetKind::Strict, var, arg.value.take());
             self.statements.fill_held(
                 arg.stmts.start + arg.stmts.len - 1,
-                &[B::stmt_node(statement)],
+                [statement],
             );
             let mut held = self.js.var(&mut self.arena, var);
             self.js.assume_strict(&mut self.arena, &mut held);
-            arg.value = Some(B::node(held));
+            arg.value = Some(held);
         }
         arg
     }
@@ -178,7 +177,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let obj = self.fresh_variable("tmp");
         let declaration =
             self.js.declare(&mut self.arena, LetKind::Variable, obj, Some(B::from_node(object)));
-        self.statements.push(B::stmt_node(declaration));
+        self.statements.push(declaration);
         for (i, mut arg) in pending.drain(..) {
             self.primitive_steps += 1;
             let spec = &specs[i as usize];
@@ -193,7 +192,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let tmp = self.fresh_variable("tmp");
                 let declaration =
                     self.js.declare(&mut self.arena, LetKind::Strict, tmp, Some(B::from_node(arg)));
-                self.statements.push(B::stmt_node(declaration));
+                self.statements.push(declaration);
                 let mut held = self.js.var(&mut self.arena, tmp);
                 self.js.assume_strict(&mut self.arena, &mut held);
                 arg = B::node(held);
@@ -227,7 +226,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let yes = self.js.list(&mut self.arena, 1, std::iter::once(statement));
             let no = self.js.list(&mut self.arena, 0, std::iter::empty());
             let branch = self.js.if_(&mut self.arena, test, yes, no);
-            self.statements.push(B::stmt_node(branch));
+            self.statements.push(branch);
         }
         self.external_pending = pending;
         let mut object = self.js.var(&mut self.arena, obj);
@@ -544,7 +543,7 @@ mod tests {
                 state.arena.release(statement);
             }
             if let Some(value) = result.value {
-                state.arena.release(value);
+                state.arena.release(crate::bir::lower::out::row(value));
             }
             state.statements.kill(result.stmts);
         };

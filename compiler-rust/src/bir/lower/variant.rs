@@ -184,7 +184,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         if let Some((kind, var)) = binding {
             let statement = self.js.declare(&mut self.arena, kind, var, None);
-            self.statements.push(B::stmt_node(statement));
+            self.statements.push(statement);
         }
         let target = binding.map(|(_, var)| var);
         let body_cx = Cx {
@@ -289,18 +289,19 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// V: named_variant_switch_needs_bound_scrutinee. O(1): the mixed shape
     /// selected at entry needs at most one binding, even for a pure expression.
-    fn bind_named_scrutinee(&mut self, plan: &mut Plan, value: NodeId) {
-        plan.value = Some(
-            if plan.mixed && self.js.kind(&self.arena, B::at(value)) != crate::emit::row::Kind::Var {
+    fn bind_named_scrutinee(&mut self, plan: &mut Plan, value: B::E) {
+        // `Plan::value` holds a row (not a field of T6x-b).
+        plan.value = Some(B::node(
+            if plan.mixed && self.js.kind(&self.arena, B::of(&value)) != crate::emit::row::Kind::Var {
                 let var = self.fresh_variable("tmp");
                 let statement =
-                    self.js.declare(&mut self.arena, LetKind::Strict, var, Some(B::from_node(value)));
-                self.statements.push(B::stmt_node(statement));
-                B::node(self.js.var(&mut self.arena, var))
+                    self.js.declare(&mut self.arena, LetKind::Strict, var, Some(value));
+                self.statements.push(statement);
+                self.js.var(&mut self.arena, var)
             } else {
                 value
             },
-        );
+        ));
     }
 
     /// Read the shared scrutinee without cloning a tree. O(1).
@@ -353,7 +354,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 unreachable!("switch never probes")
             };
             if let Some(value) = out.value {
-                self.js.release(&mut self.arena, B::from_node(value));
+                self.js.release(&mut self.arena, value);
             }
             side.run = out.stmts;
             plan.active += 1;
@@ -394,7 +395,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 unreachable!()
             };
             if let Some(value) = out.value {
-                self.js.release(&mut self.arena, B::from_node(value));
+                self.js.release(&mut self.arena, value);
             }
             plan.sides[plan.active].run = out.stmts;
             plan.active += 1;
@@ -408,8 +409,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         cx: Cx,
         frame: Variant,
         index: usize,
-        child: Probed,
-    ) -> Probed {
+        child: Probed<B>,
+    ) -> Probed<B> {
         let mut plan = self.variants[frame.0 as usize].take().unwrap();
         if index == 0 {
             let out = self.realize(cx, child);
@@ -470,18 +471,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// V: dispatch_named_variant_branches / compile_effect_if. O(statements
     /// consumed by J-S3); the two branch runs enter child lists once.
-    pub(super) fn finish_variant(&mut self, cx: Cx, frame: Variant) -> Probed {
+    pub(super) fn finish_variant(&mut self, cx: Cx, frame: Variant) -> Probed<B> {
         let mut plan = self.variants[frame.0 as usize].take().unwrap();
         while self.variants.last().is_some_and(Option::is_none) {
             self.variants.pop();
         }
         if plan.mixed {
             let test = self.named_literal_test(&mut plan);
-            let statement = B::stmt_from_node(self.if_statement(test, plan.sides[0].run, plan.sides[1].run));
+            let statement = self.if_statement(test, plan.sides[0].run, plan.sides[1].run);
             if matches!(cx.cont, Cont::Effect(Tail::No)) && self.js.is_empty_block(&self.arena, &statement) {
                 self.js.release_stmt(&mut self.arena, statement);
             } else {
-                self.place(plan.head, B::stmt_node(statement));
+                self.place(plan.head, statement);
             }
         }
         if let Some(value) = plan.value {
@@ -491,8 +492,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.unnest(plan.start.start);
         }
         let value = match cx.cont {
-            Cont::Value(_) => Some(B::node(self.js.var(&mut self.arena, plan.target.unwrap()))),
-            Cont::Effect(Tail::No) => Some(B::node(self.js.undefined(&mut self.arena, false))),
+            Cont::Value(_) => Some(self.js.var(&mut self.arena, plan.target.unwrap())),
+            Cont::Effect(Tail::No) => Some(self.js.undefined(&mut self.arena, false)),
             _ => None,
         };
         Probed::Out(Out {
@@ -721,7 +722,7 @@ mod tests {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

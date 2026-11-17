@@ -52,10 +52,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         _cx: Cx,
         label: LabelNoname,
         attr: &Attr,
-        arg: &mut Out,
+        arg: &mut Out<B>,
     ) {
-        let value = arg.value.expect("external argument value");
-        let r = B::at(value);
+        let r = B::of(arg.value.as_ref().expect("external argument value"));
         let wrapped =
             label == LabelNoname::ArgOptional && self.js.kind(&self.arena, r) == Kind::Optional;
         let target = if wrapped { self.js.operand(&self.arena, r, 0) } else { r };
@@ -76,7 +75,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             return;
         }
         let held = if wrapped {
-            let mut shell = B::from_node(value);
+            let mut shell = arg.value.take().expect("external argument value");
             self.js.take_operands(&mut self.arena, &mut shell);
             let target = self.js.pop();
             let replacement = self.hold_in_variable(arg, target);
@@ -86,20 +85,21 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.js.assume_strict(&mut self.arena, &mut wrapper);
             wrapper
         } else {
-            self.hold_in_variable(arg, B::from_node(value))
+            let value = arg.value.take().expect("external argument value");
+            self.hold_in_variable(arg, value)
         };
-        arg.value = Some(B::node(held));
+        arg.value = Some(held);
     }
 
     /// `value` declared in a fresh variable in the argument's reserved
     /// suffix slot; the strictly pure reference to the variable is
     /// returned. O(1).
-    fn hold_in_variable(&mut self, arg: &Out, value: B::E) -> B::E {
+    fn hold_in_variable(&mut self, arg: &Out<B>, value: B::E) -> B::E {
         let var = self.fresh_variable("tmp");
         let statement = self.js.declare(&mut self.arena, LetKind::Strict, var, Some(value));
         self.statements.fill_held(
             arg.stmts.start + arg.stmts.len - 1,
-            &[B::stmt_node(statement)],
+            [statement],
         );
         let mut replacement = self.js.var(&mut self.arena, var);
         self.js.assume_strict(&mut self.arena, &mut replacement);
@@ -108,7 +108,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// X:254 hold_external_args. O(specs + arguments); constants
     /// consume no runtime argument, and unmatched arguments retain their order.
-    pub(super) fn hold_external_args(&mut self, cx: Cx, specs: &[Param], args: &mut [Out]) {
+    pub(super) fn hold_external_args(&mut self, cx: Cx, specs: &[Param], args: &mut [Out<B>]) {
         let mut args = args.iter_mut();
         for spec in specs {
             self.primitive_steps += 1;
@@ -124,7 +124,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// X:278 hold_external_obj_args. O(specs + arguments). One reverse pass records the suffix predicate, then holds are
     /// allocated in source order. No suffix is searched more than once.
-    pub(super) fn hold_external_obj_args(&mut self, cx: Cx, specs: &[ObjParam], args: &mut [Out]) {
+    pub(super) fn hold_external_obj_args(&mut self, cx: Cx, specs: &[ObjParam], args: &mut [Out<B>]) {
         let mut params = std::mem::take(&mut self.ffi_params);
         params.extend(specs.iter().enumerate().filter_map(|(i, p)| {
             (!matches!(
@@ -138,16 +138,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         for (i, arg) in args.iter().enumerate().rev() {
             self.primitive_steps += 1;
             suffix.push(later);
-            let value = arg.value.expect("object argument");
+            let value = arg.value.as_ref().expect("object argument");
             if params.get(i).is_some_and(|&p| {
                 let p = &specs[p];
                 !matches!(p.obj_arg_label, Label::ObjOptional { .. })
                     || matches!(
-                        self.js.kind(&self.arena, B::at(value)),
+                        self.js.kind(&self.arena, B::of(value)),
                         Kind::Undefined | Kind::Optional
                     )
             }) {
-                let r = B::at(value);
+                let r = B::of(value);
                 later.add(
                     self.js.has(&self.arena, r, flag::DELAY_SAFE),
                     self.js.has(&self.arena, r, flag::STRICT),
@@ -167,15 +167,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 Label::ObjOptional { .. } => LabelNoname::ArgOptional,
             };
             self.hold_external_arg(cx, label, &param.obj_arg_type, arg);
-            let value = arg.value.expect("object argument");
-            let r = B::at(value);
+            let r = B::of(arg.value.as_ref().expect("object argument"));
             if label == LabelNoname::ArgOptional
                 && !matches!(self.js.kind(&self.arena, r), Kind::Undefined | Kind::Optional)
                 && !self.js.has(&self.arena, r, flag::DELAY_SAFE)
                 && suffix[count - i - 1].conflicts(self.js.has(&self.arena, r, flag::STRICT))
             {
-                let held = self.hold_in_variable(arg, B::from_node(value));
-                arg.value = Some(B::node(held));
+                let value = arg.value.take().expect("object argument");
+                let held = self.hold_in_variable(arg, value);
+                arg.value = Some(held);
             }
         }
         params.clear();
@@ -289,8 +289,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 .expect("clause pool capacity"),
             len: keys.len,
         };
-        let mut actions = std::mem::take(&mut self.scratch);
-        let start = actions.len();
+        // The actions are pushed on the statement stack and taken as one list.
+        let mark = self.statements.mark();
         for (key, item) in cases {
             self.primitive_steps += 1;
             let text = self.arena.intern_text(key);
@@ -302,7 +302,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let ret = self.js.return_(&mut self.arena, value);
             let body = self.js.list(&mut self.arena, 1, std::iter::once(ret));
             let action = self.js.block_of(&mut self.arena, body);
-            actions.push(B::stmt_node(action));
+            self.statements.push(action);
             self.arena
                 .pools
                 .switch_clauses
@@ -324,13 +324,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             blocks_full: false,
             dispatch: crate::lambda::SwitchDispatch::Direct,
         });
-        let count = u32::try_from(actions.len() - start).expect("switch capacity");
-        let actions_list = self.js.list(
-            &mut self.arena,
-            count,
-            actions.drain(start..).map(B::stmt_from_node),
-        );
-        self.scratch = actions;
+        let actions_list = self.statements.take_list(&mut self.js, &mut self.arena, self.statements.since(mark));
         let switch = self.js.switch(&mut self.arena, B::from_node(arg), actions_list, header, true);
         let body = self.js.list(&mut self.arena, 1, std::iter::once(switch));
         let header = self.arena.function_header(
@@ -687,7 +681,7 @@ mod tests {
             let out = state.probe(Cx::value(), root).unwrap();
             let out = state.realize(Cx::value(), out);
             assert!(!state.statements.has_statements(out.stmts));
-            state.arena.release(out.value.unwrap());
+            state.arena.release(crate::bir::lower::out::row(out.value.unwrap()));
             state.statements.kill(out.stmts);
         };
         let lists_before = state.arena.lists.storage_shape().0;
@@ -762,7 +756,7 @@ mod tests {
             unreachable!()
         };
         let children = children.to_vec();
-        let mut outputs: SmallVec<[Out; 4]> = SmallVec::new();
+        let mut outputs: SmallVec<[Out<crate::bir::j::rows::Rows>; 4]> = SmallVec::new();
         let mut compiler = LambdaCompiler::new();
         let mut expected = crate::lambda::lam_compile_arguments::HeldArgs::new();
         let target = Ident::new("unused", 100, crate::ident::IdentFlags::NONE);
@@ -779,9 +773,9 @@ mod tests {
             expected.push((out.prelude, out.expr));
         }
         state.hold_external_args(Cx::value(), specs, &mut outputs);
-        let held = outputs;
+        let mut held = outputs;
         let mut args = Vec::new();
-        let stmts = state.sequence_arguments(false, &held, &mut args);
+        let stmts = state.sequence_arguments(false, &mut held, &mut args);
         let args = state.arena.lists.push(&args);
         let (args, effect) = state.assemble_external_args_no_splice(Cx::value(), specs, args);
         let args = state.arena.lists.get(args).to_vec();
@@ -791,7 +785,7 @@ mod tests {
             Cx::value(),
             Probed::Out(Out {
                 stmts,
-                value: Some(value),
+                value: Some(crate::bir::lower::out::of_row(value)),
                 finished: Finished::False,
             }),
         );
@@ -949,7 +943,7 @@ mod tests {
             let mut source = LamArena::new();
             let root = source.const_(Constant::JsNull);
             let mut state = State::new(bridge::import_lambda(&source, root).unwrap());
-            let mut args: SmallVec<[Out; 4]> = SmallVec::with_capacity(10_000);
+            let mut args: SmallVec<[Out<crate::bir::j::rows::Rows>; 4]> = SmallVec::with_capacity(10_000);
             let mut specs = Vec::new();
             let mut obj_specs = Vec::new();
             for i in 0..10_000 {
@@ -959,7 +953,7 @@ mod tests {
                 state.statements.reserve();
                 args.push(Out {
                     stmts: state.statements.since(start),
-                    value: Some(value),
+                    value: Some(crate::bir::lower::out::of_row(value)),
                     finished: Finished::False,
                 });
                 specs.push(Param {
@@ -985,7 +979,7 @@ mod tests {
             } else {
                 state.hold_external_args(Cx::value(), &specs, &mut args);
             }
-            let held = args;
+            let mut held = args;
             assert_eq!(held.len(), 10_000);
             assert_eq!(state.primitive_steps, if objects { 20_000 } else { 10_000 });
             assert_eq!(
@@ -993,7 +987,7 @@ mod tests {
                 if objects { 5_000 } else { 10_000 }
             );
             let mut values = Vec::new();
-            state.sequence_arguments(false, &held, &mut values);
+            state.sequence_arguments(false, &mut held, &mut values);
             assert_eq!(values.len(), 10_000);
             assert!(state.sequence_steps <= 30_000);
         }
