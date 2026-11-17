@@ -289,18 +289,19 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// V: named_variant_switch_needs_bound_scrutinee. O(1): the mixed shape
     /// selected at entry needs at most one binding, even for a pure expression.
-    fn bind_named_scrutinee(&mut self, plan: &mut Plan, value: NodeId) {
-        plan.value = Some(
-            if plan.mixed && self.js.kind(&self.arena, B::at(value)) != crate::emit::row::Kind::Var {
+    fn bind_named_scrutinee(&mut self, plan: &mut Plan, value: B::E) {
+        // `Plan::value` holds a row (not a field of T6x-b).
+        plan.value = Some(B::node(
+            if plan.mixed && self.js.kind(&self.arena, B::of(&value)) != crate::emit::row::Kind::Var {
                 let var = self.fresh_variable("tmp");
                 let statement =
-                    self.js.declare(&mut self.arena, LetKind::Strict, var, Some(B::from_node(value)));
+                    self.js.declare(&mut self.arena, LetKind::Strict, var, Some(value));
                 self.statements.push(statement);
-                B::node(self.js.var(&mut self.arena, var))
+                self.js.var(&mut self.arena, var)
             } else {
                 value
             },
-        );
+        ));
     }
 
     /// Read the shared scrutinee without cloning a tree. O(1).
@@ -413,7 +414,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mut plan = self.variants[frame.0 as usize].take().unwrap();
         if index == 0 {
             let out = self.realize(cx, child);
-            self.bind_named_scrutinee(&mut plan, B::node(out.value.unwrap()));
+            self.bind_named_scrutinee(&mut plan, out.value.unwrap());
             if plan.mixed {
                 plan.head = self.statements.reserve();
             }
