@@ -200,10 +200,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let prefix = Out { stmts: Span { start: group.start.start, len: first.end - group.start.start },
                 value: None, finished: first.finished };
             let keep = matches!(cx.cont, Cont::Value(_)).then(|| out.value.take()).flatten();
-            // T6x-b step 1: two holders of one node (see expr.rs).
-            let value = out.value.take().map(B::node);
-            out.value = value.map(B::from_node);
-            out = self.append_outputs(prefix, out, value.map(B::from_node));
+            out = self.append_outputs(prefix, out, true);
             if keep.is_some() { out.value = keep; }
         }
         self.rec_members.truncate(group.base as usize);

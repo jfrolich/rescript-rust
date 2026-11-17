@@ -79,22 +79,16 @@ pub(super) fn lower(
                 let tail = state.probe(Cx::value(), next)?;
                 let mut tail = state.realize(Cx::value(), tail);
                 let value = if matches!(cx.cont, Cont::Declare(_, _)) { tail.value.take() } else { None };
-                out = state.append_outputs(out, tail, None);
+                out = state.append_outputs(out, tail, false);
                 out.value = value;
                 if let Some(first) = accumulated.take() {
-                    let value = out.value.take().map(crate::bir::j::rows::Rows::node);
-                    out.value = value.map(crate::bir::j::rows::Rows::from_node);
-                    out = state.append_outputs(first, out, value.map(crate::bir::j::rows::Rows::from_node));
+                    out = state.append_outputs(first, out, true);
                 }
                 return Ok(state.complete_unit(Probed::Out(out)));
             }
         }
-        let mut out = out;
-        let value = out.value.take().map(crate::bir::j::rows::Rows::node);
-        out.value = value.map(crate::bir::j::rows::Rows::from_node);
-        let value = value.map(crate::bir::j::rows::Rows::from_node);
         let out = match accumulated.take() {
-            Some(first) => state.append_outputs(first, out, value),
+            Some(first) => state.append_outputs(first, out, true),
             None => out,
         };
         if let Some(next) = next {

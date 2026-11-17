@@ -769,11 +769,14 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// K0: append_output drops the tail of finished output. Release its J
     /// ownership as well as truncating its statement run. O(s + released nodes)
     /// for a discarded suffix; O(1) otherwise. No temporary statement vector.
-    fn append_outputs(&mut self, first: Out<B>, mut second: Out<B>, value: Option<B::E>) -> Out<B> {
+    /// The result keeps the value of `second` when `keep`; otherwise it has
+    /// none (THREE_TREES 11.4, T6x-b: the value is not given twice).
+    fn append_outputs(&mut self, first: Out<B>, mut second: Out<B>, keep: bool) -> Out<B> {
         if first.finished == Finished::True {
             for statement in self.statements.take_run(second.stmts) { self.js.release_stmt(&mut self.arena, statement); }
             if let Some(value) = second.value.take() { self.js.release(&mut self.arena, value); }
         }
+        let value = if keep { second.value.take() } else { None };
         self.statements.append(first, second, value)
     }
 

@@ -213,16 +213,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     // C: compile_expr Let retains the unreachable body's value,
                     // unlike compile_effect_output and append_effect_output.
                     let value = body.value.take();
-                    let mut out = self.append_outputs(first.unwrap(), body, None);
+                    let mut out = self.append_outputs(first.unwrap(), body, false);
                     out.value = value;
                     return Probed::Out(out);
                 }
-                // T6x-b step 1: the value is kept by the body and given as
-                // the result's (two holders of one node).
-                let value = body.value.take().map(B::node);
-                body.value = value.map(B::from_node);
                 Probed::Out(match first {
-                    Some(first) => self.append_outputs(first, body, value.map(B::from_node)),
+                    Some(first) => self.append_outputs(first, body, true),
                     None => body,
                 })
             }
@@ -236,9 +232,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if first.finished == Finished::True {
                     let second = self.realize(cx, tail);
                     if !keeps_value && let Some(value) = first.value.take() {
-                        self.hold_effect(slot, B::node(value));
+                        self.hold_effect(slot, value);
                     }
-                    return Probed::Out(self.append_outputs(first, second, None));
+                    return Probed::Out(self.append_outputs(first, second, false));
                 }
                 let head = first.value.take();
                 let tail = match tail {
@@ -269,13 +265,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         };
                         second.value = Some(value);
                     } else {
-                        self.hold_effect(slot, B::node(value));
+                        self.hold_effect(slot, value);
                     }
                 }
-                // T6x-b step 1: two holders of one node, as above.
-                let value = second.value.take().map(B::node);
-                second.value = value.map(B::from_node);
-                let out = self.append_outputs(first, second, value.map(B::from_node));
+                let out = self.append_outputs(first, second, true);
                 if !self.statements.has_statements(out.stmts) && let Some(value) = out.value {
                     self.statements.remove_empty(out.stmts);
                     self.probe_leaf(cx, value)
@@ -310,10 +303,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
     /// K2: O:339 push_effect_expression into the slot reserved after the head
     /// of a sequence. One step per comma operand of the value.
-    fn hold_effect(&mut self, slot: u32, value: NodeId) {
+    fn hold_effect(&mut self, slot: u32, value: B::E) {
         let statements = &mut self.statements;
         let mark = statements.held_mark();
-        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.hold(s));
+        self.js.effect(&mut self.arena, value, |s| statements.hold(s));
         self.statements.fill_held_since(slot, mark);
     }
     /// K2: O:339 push_effect_expression. Calls may have effects; pure values
