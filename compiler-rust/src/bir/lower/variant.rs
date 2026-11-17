@@ -184,7 +184,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         if let Some((kind, var)) = binding {
             let statement = self.js.declare(&mut self.arena, kind, var, None);
-            self.statements.push(B::stmt_node(statement));
+            self.statements.push(statement);
         }
         let target = binding.map(|(_, var)| var);
         let body_cx = Cx {
@@ -295,7 +295,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let var = self.fresh_variable("tmp");
                 let statement =
                     self.js.declare(&mut self.arena, LetKind::Strict, var, Some(B::from_node(value)));
-                self.statements.push(B::stmt_node(statement));
+                self.statements.push(statement);
                 B::node(self.js.var(&mut self.arena, var))
             } else {
                 value

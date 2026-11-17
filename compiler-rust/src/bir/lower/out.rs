@@ -1,4 +1,6 @@
 //! K0 output algebra: C:89–135 BlockOutput, BACKEND_LOWERING §§1.3–1.5.
+use super::js::Pools;
+use super::js_stmt::JsStmt;
 use super::{Cx, ProbeInput, Realizer};
 use crate::bir::{Bir, ListId, NodeId};
 
@@ -38,19 +40,21 @@ pub struct Out {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Slot {
-    Statement(NodeId),
+enum Slot<S> {
+    Statement(S),
     Held(Span),
     /// A run consumed below the top: its first slot holds the run's length
     /// and every other slot 1, so a forward scan crosses the run in one step
     /// and a backward trim pops it slot by slot.
     Dead(u32),
 }
-/// One stack per lowering. A hole is distinct from any valid node handle.
-#[derive(Default)]
-pub struct StatementStack {
-    slots: Vec<Option<Slot>>,
-    held: Vec<NodeId>,
+/// One stack per lowering. A hole is distinct from any statement. The slots
+/// own the statement handles of the runs (THREE_TREES 11.4, "T6x-a: the
+/// statement stack, after the probe").
+pub struct StatementStack<B: JsStmt> {
+    slots: Vec<Option<Slot<B::S>>>,
+    /// Held statements; one that was moved out leaves `None`.
+    held: Vec<Option<B::S>>,
     /// Statements written, excluding holes.
     pub pushed: usize,
     /// Statements copied into final lists.
@@ -61,7 +65,13 @@ pub struct StatementStack {
     /// stale once its slot was consumed; `drop_empty_blocks` checks the slot.
     empties: Vec<(u32, NodeId)>,
 }
-impl StatementStack {
+impl<B: JsStmt> Default for StatementStack<B> {
+    /// An empty stack without capacity. O(1); allocates nothing.
+    fn default() -> Self {
+        Self { slots: Vec::new(), held: Vec::new(), pushed: 0, copied: 0, scanned: 0, empties: Vec::new() }
+    }
+}
+impl<B: JsStmt> StatementStack<B> {
     /// Reserve statement and hole slots from the imported output-node estimate.
     /// Cost: Reserves O(N) statement/hole slots for the imported output estimate N; no
     /// statements are visited or initialized.
@@ -77,14 +87,23 @@ impl StatementStack {
         [self.slots.capacity(), self.held.capacity(), self.empties.capacity()]
     }
 
+    /// The row of a statement the stack holds, the handle staying
+    /// in place. O(1). Transition: deleted by T6x-a3.
+    fn peek(s: &mut B::S) -> NodeId {
+        let id = B::stmt_node(std::mem::replace(s, B::stmt_from_node(NodeId(u32::MAX))));
+        *s = B::stmt_from_node(id);
+        id
+    }
+
     /// K0: C:89 BlockOutput::make, start an empty output at the current top.
+    /// O(1).
     pub fn mark(&self) -> Span {
         Span {
             start: u32::try_from(self.slots.len()).expect("statement stack capacity"),
             len: 0,
         }
     }
-    /// K0: C:89 BlockOutput::make, complete the run since a saved mark.
+    /// K0: C:89 BlockOutput::make, complete the run since a saved mark. O(1).
     pub fn since(&self, mark: Span) -> Span {
         assert!(mark.end() <= self.slots.len());
         Span {
@@ -93,50 +112,133 @@ impl StatementStack {
                 .expect("statement span capacity"),
         }
     }
-    /// A:191 sequence_arguments: skip reserved holes without copying statements.
-    pub(super) fn statements(&self, span: Span) -> impl Iterator<Item = NodeId> + '_ {
+    /// The statements of a run, read in place, in order. Cost: O(slots of
+    /// the run + held statements): one step per slot, a dead range crossed
+    /// in one, and one per held statement.
+    pub(super) fn statement_refs(&self, span: Span) -> impl Iterator<Item = &B::S> + '_ {
         let (mut at, end) = (span.start as usize, span.end());
-        std::iter::from_fn(move || {
-            while at < end {
-                let slot = &self.slots[at];
-                at += match slot {
-                    Some(Slot::Dead(len)) => *len as usize,
-                    _ => 1,
-                };
-                match slot {
-                    Some(Slot::Statement(node)) => return Some(std::slice::from_ref(node)),
-                    Some(Slot::Held(span)) => {
-                        return Some(&self.held[span.start as usize..span.end()]);
-                    }
-                    Some(Slot::Dead(_)) | None => {}
-                }
+        let (mut inner, mut inner_end) = (0usize, 0usize);
+        std::iter::from_fn(move || loop {
+            if inner < inner_end {
+                inner += 1;
+                return Some(self.held[inner - 1].as_ref().expect("held statement"));
             }
-            None
+            if at >= end {
+                return None;
+            }
+            let slot = &self.slots[at];
+            at += match slot {
+                Some(Slot::Dead(len)) => *len as usize,
+                _ => 1,
+            };
+            match slot {
+                Some(Slot::Statement(s)) => return Some(s),
+                Some(Slot::Held(span)) => (inner, inner_end) = (span.start as usize, span.end()),
+                Some(Slot::Dead(_)) | None => {}
+            }
         })
-        .flatten()
-        .copied()
     }
-    /// C:5241 try_fold_effect_only_return_tail folds a run from its end.
-    /// One step per slot of the run.
-    pub(super) fn statements_rev(&self, span: Span) -> impl Iterator<Item = NodeId> + '_ {
-        (span.start as usize..span.end())
-            .rev()
-            .flat_map(|at| self.slot(at).iter().rev())
-            .copied()
+    /// A:191 sequence_arguments: the rows of a run, in order, skipping
+    /// reserved holes without copying statements. Cost: O(slots of the run
+    /// + held statements), each statement read through `peek`.
+    pub(super) fn statements(&mut self, span: Span) -> impl Iterator<Item = NodeId> + '_ {
+        let (mut at, end) = (span.start as usize, span.end());
+        let (mut inner, mut inner_end) = (0usize, 0usize);
+        std::iter::from_fn(move || loop {
+            if inner < inner_end {
+                inner += 1;
+                return Some(Self::peek(self.held[inner - 1].as_mut().expect("held statement")));
+            }
+            if at >= end {
+                return None;
+            }
+            let current = at;
+            at += match self.slots[current] {
+                Some(Slot::Dead(len)) => len as usize,
+                _ => 1,
+            };
+            match &mut self.slots[current] {
+                Some(Slot::Statement(s)) => return Some(Self::peek(s)),
+                Some(Slot::Held(span)) => (inner, inner_end) = (span.start as usize, span.end()),
+                Some(Slot::Dead(_)) | None => {}
+            }
+        })
     }
-    /// The statements of one slot: none for a hole, a dead slot or an empty hold.
-    fn slot(&self, at: usize) -> &[NodeId] {
+    /// C:5241 try_fold_effect_only_return_tail folds a run from its end:
+    /// the rows of a run, last first. Cost: O(slots of the run + held
+    /// statements): one step per slot and per held statement.
+    pub(super) fn statements_rev(&mut self, span: Span) -> impl Iterator<Item = NodeId> + '_ {
+        let (start, mut at) = (span.start as usize, span.end());
+        let (mut inner_start, mut inner) = (0usize, 0usize);
+        std::iter::from_fn(move || loop {
+            if inner > inner_start {
+                inner -= 1;
+                return Some(Self::peek(self.held[inner].as_mut().expect("held statement")));
+            }
+            if at <= start {
+                return None;
+            }
+            at -= 1;
+            match &mut self.slots[at] {
+                Some(Slot::Statement(s)) => return Some(Self::peek(s)),
+                Some(Slot::Held(span)) => (inner_start, inner) = (span.start as usize, span.end()),
+                Some(Slot::Dead(_)) | None => {}
+            }
+        })
+    }
+    /// The statements of a run moved out of their slots, in order; a slot
+    /// or a hold that gave its statements is left a hole, and the caller
+    /// kills the run. Cost: O(slots of the run + held statements), each
+    /// statement moved once.
+    fn take_run(&mut self, span: Span) -> impl Iterator<Item = B::S> + '_ {
+        let (mut at, end) = (span.start as usize, span.end());
+        let (mut inner, mut inner_end) = (0usize, 0usize);
+        std::iter::from_fn(move || loop {
+            if inner < inner_end {
+                inner += 1;
+                return Some(self.held[inner - 1].take().expect("held statement"));
+            }
+            if at >= end {
+                return None;
+            }
+            let current = at;
+            at += match self.slots[current] {
+                Some(Slot::Dead(len)) => len as usize,
+                _ => 1,
+            };
+            match self.slots[current].take() {
+                Some(Slot::Statement(s)) => return Some(s),
+                Some(Slot::Held(span)) => (inner, inner_end) = (span.start as usize, span.end()),
+                other => self.slots[current] = other,
+            }
+        })
+    }
+    /// The number of statements of one slot: none for a hole, a dead slot or
+    /// an empty hold. O(1).
+    fn slot_len(&self, at: usize) -> usize {
         match &self.slots[at] {
-            Some(Slot::Statement(node)) => std::slice::from_ref(node),
-            Some(Slot::Held(span)) => &self.held[span.start as usize..span.end()],
-            Some(Slot::Dead(_)) | None => &[],
+            Some(Slot::Statement(_)) => 1,
+            Some(Slot::Held(span)) => span.len as usize,
+            Some(Slot::Dead(_)) | None => 0,
+        }
+    }
+    /// The row of statement `index` of slot `at`, which holds more than
+    /// `index` statements, read through `peek`. O(1).
+    fn slot_row(&mut self, at: usize, index: usize) -> NodeId {
+        match &mut self.slots[at] {
+            Some(Slot::Statement(s)) => Self::peek(s),
+            Some(Slot::Held(span)) => {
+                let i = span.start as usize + index;
+                Self::peek(self.held[i].as_mut().expect("held statement"))
+            }
+            Some(Slot::Dead(_)) | None => unreachable!("a slot without a statement"),
         }
     }
     /// The first slot of `[at, end)` that holds a statement. One step per
     /// hole, empty hold or dead range before it, counted in `scanned`.
     fn live(&mut self, mut at: usize, end: usize) -> Option<usize> {
         while at < end {
-            if !self.slot(at).is_empty() {
+            if self.slot_len(at) != 0 {
                 return Some(at);
             }
             self.scanned += 1;
@@ -148,30 +250,31 @@ impl StatementStack {
         None
     }
     /// B:1575 simplify_if reads the head of a branch. Costs the holes and
-    /// dead ranges before the first statement; nothing is copied.
+    /// dead ranges before the first statement, one step each; nothing is
+    /// copied.
     pub(super) fn first(&mut self, span: Span) -> Option<NodeId> {
         let at = self.live(span.start as usize, span.end())?;
-        Some(self.slot(at)[0])
+        Some(self.slot_row(at, 0))
     }
     /// First slot when it contains one statement. O(leading holes/dead ranges),
     /// using the same bounded scan as first; held multi-statement slots stay put.
     pub(super) fn first_single_slot(&mut self, span: Span) -> Option<(u32, NodeId)> {
         let at = self.live(span.start as usize, span.end())?;
-        let &[statement] = self.slot(at) else { return None };
-        Some((at as u32, statement))
+        if self.slot_len(at) != 1 {
+            return None;
+        }
+        Some((at as u32, self.slot_row(at, 0)))
     }
     /// B:1575 simplify_if, `[statement]` patterns: the slot and the statement
     /// when the run holds exactly one. Costs the holes and dead ranges of the
-    /// run, which a trimmed run has only before its first statement.
+    /// run, one step each, which a trimmed run has only before its first
+    /// statement.
     pub(super) fn only(&mut self, span: Span) -> Option<(u32, NodeId)> {
         let at = self.live(span.start as usize, span.end())?;
-        let &[statement] = self.slot(at) else {
+        if self.slot_len(at) != 1 || self.live(at + 1, span.end()).is_some() {
             return None;
-        };
-        let next = at + 1;
-        self.live(next, span.end())
-            .is_none()
-            .then_some((at as u32, statement))
+        }
+        Some((at as u32, self.slot_row(at, 0)))
     }
     /// B:1575 simplify_if, `block_last_is_return_throw_or_continue`: the last
     /// statement. One step on a trimmed run; otherwise one per trailing hole
@@ -180,8 +283,9 @@ impl StatementStack {
         let mut at = span.end();
         while at > span.start as usize {
             at -= 1;
-            if let Some(&statement) = self.slot(at).last() {
-                return Some(statement);
+            let len = self.slot_len(at);
+            if len != 0 {
+                return Some(self.slot_row(at, len - 1));
             }
             self.scanned += 1;
         }
@@ -189,10 +293,10 @@ impl StatementStack {
     }
     /// K0: C:119 append. Pop the holes and dead slots at the top, down to
     /// `floor`, so the run above `floor` ends in a statement or is empty.
-    /// Each popped slot is popped once.
+    /// One step per popped slot; each is popped once.
     pub(super) fn trim(&mut self, floor: Span) -> Span {
         while self.slots.len() > floor.start as usize
-            && self.slot(self.slots.len() - 1).is_empty()
+            && self.slot_len(self.slots.len() - 1) == 0
         {
             self.slots.pop();
             self.scanned += 1;
@@ -218,24 +322,27 @@ impl StatementStack {
         }
     }
     /// B:1225 block: record that `slot` holds an explicit empty block.
-    /// A binary search and an insertion among the unit's empty blocks.
+    /// Cost: O(log E) for a binary search among the unit's E empty blocks,
+    /// and an insertion.
     pub(super) fn note_empty_block(&mut self, slot: u32, statement: NodeId) {
         let at = self.empties.partition_point(|&(other, _)| other < slot);
         self.empties.insert(at, (slot, statement));
     }
     /// B:1575 simplify_if drops the empty blocks of both branches first.
-    /// Two binary searches among the unit's empty blocks, then one step per
-    /// empty block of the run. The run itself is not scanned.
-    pub(super) fn drop_empty_blocks(&mut self, bir: &mut Bir, span: Span) {
+    /// Cost: two binary searches among the unit's empty blocks, then one
+    /// step per empty block of the run, each released through
+    /// `JsStmt::release_stmt`. The run itself is not scanned.
+    pub(super) fn drop_empty_blocks(&mut self, js: &mut B, a: &mut Pools, span: Span) {
         let from = self.empties.partition_point(|&(slot, _)| slot < span.start);
         let to = self.empties.partition_point(|&(slot, _)| (slot as usize) < span.end());
         for (slot, statement) in self.empties.drain(from..to) {
             let slot = &mut self.slots[slot as usize];
-            if *slot == Some(Slot::Statement(statement))
-                && matches!(bir.view(statement), crate::bir::View::SBlock { statements } if statements.is_empty())
-            {
-                *slot = Some(Slot::Dead(1));
-                bir.release(statement);
+            let Some(Slot::Statement(held)) = slot else { continue };
+            if Self::peek(held) == statement && js.is_empty_block(a, held) {
+                let Some(Slot::Statement(held)) = slot.replace(Slot::Dead(1)) else {
+                    unreachable!("a statement slot")
+                };
+                js.release_stmt(a, held);
             }
         }
     }
@@ -244,29 +351,33 @@ impl StatementStack {
     pub(super) fn clear(&mut self, slot: u32) {
         self.slots[slot as usize] = Some(Slot::Dead(1));
     }
-    /// A:191 sequence_arguments: a reserved hold is not an argument statement.
+    /// A:191 sequence_arguments: a reserved hold is not an argument
+    /// statement. O(holes and dead ranges before the first statement).
     pub(super) fn has_statements(&self, span: Span) -> bool {
-        self.statements(span).next().is_some()
+        self.statement_refs(span).next().is_some()
     }
     /// C:1144 compile_apply_call_inner: empty reserved holds have no output.
+    /// O(slots of the run).
     pub(super) fn remove_empty(&mut self, span: Span) {
         assert_eq!(span.end(), self.slots.len());
         assert!(!self.has_statements(span));
         self.slots.truncate(span.start as usize);
     }
-    /// K0: C:119 append, push a statement once.
-    pub fn push(&mut self, statement: NodeId) {
+    /// K0: C:119 append, push a statement once. One write.
+    pub fn push(&mut self, statement: B::S) {
         self.slots.push(Some(Slot::Statement(statement)));
         self.pushed += 1;
     }
-    /// K12: C:6441 emit_multi_staticcatch_prelude; reserve before a child run.
+    /// K12: C:6441 emit_multi_staticcatch_prelude; reserve before a child
+    /// run. One write.
     pub fn reserve(&mut self) -> u32 {
         let slot = self.mark().start;
         self.slots.push(None);
         slot
     }
-    /// K12: C:6441 emit_multi_staticcatch_prelude; fill without moving the run.
-    pub fn fill(&mut self, slot: u32, statement: NodeId) {
+    /// K12: C:6441 emit_multi_staticcatch_prelude; fill without moving the
+    /// run. One write.
+    pub fn fill(&mut self, slot: u32, statement: B::S) {
         let hole = &mut self.slots[slot as usize];
         assert!(hole.is_none(), "reserved slot filled twice");
         *hole = Some(Slot::Statement(statement));
@@ -274,30 +385,36 @@ impl StatementStack {
     }
     /// A:191 sequence_arguments: fill an argument's reserved suffix after all
     /// arguments were lowered. Held statements enter the list exactly once.
-    pub(super) fn fill_held(&mut self, slot: u32, statements: &[NodeId]) {
+    /// Cost: one step per statement, each moved once.
+    pub(super) fn fill_held(&mut self, slot: u32, statements: impl IntoIterator<Item = B::S>) {
         assert!(self.slots[slot as usize].is_none());
-        let span = Span { start: self.held.len() as u32, len: statements.len() as u32 };
-        self.pushed += statements.len();
-        self.held.extend_from_slice(statements);
-        self.slots[slot as usize] = Some(Slot::Held(span));
+        let start = self.held.len();
+        self.held.extend(statements.into_iter().map(Some));
+        let len = self.held.len() - start;
+        self.pushed += len;
+        self.slots[slot as usize] = Some(Slot::Held(Span { start: start as u32, len: len as u32 }));
     }
     /// C:3285 compile_static_raise_jump_output: an argument lowered after a
     /// later one comes before it in the output. Move the top run into the
-    /// slot reserved for it. One step per slot of the run; a statement is
-    /// moved once and still enters its list once.
+    /// slot reserved for it. Cost: one step per slot of the run and per
+    /// statement of a hold inside it; a statement is moved once and still
+    /// enters its list once.
     pub(super) fn hold_run(&mut self, slot: u32, run: Span) {
         assert_eq!(run.end(), self.slots.len());
         assert!(slot < run.start && self.slots[slot as usize].is_none());
         let start = self.held.len();
         let mut at = run.start as usize;
         while at < run.end() {
-            at += match self.slots[at] {
-                Some(Slot::Statement(node)) => {
-                    self.held.push(node);
+            at += match self.slots[at].take() {
+                Some(Slot::Statement(statement)) => {
+                    self.held.push(Some(statement));
                     1
                 }
                 Some(Slot::Held(span)) => {
-                    self.held.extend_from_within(span.start as usize..span.end());
+                    for i in span.start as usize..span.end() {
+                        let statement = self.held[i].take();
+                        self.held.push(statement);
+                    }
                     1
                 }
                 Some(Slot::Dead(len)) => len as usize,
@@ -311,7 +428,9 @@ impl StatementStack {
         }));
     }
     /// K0: C:119 append. Both children have already been lowered, even when
-    /// the first finishes. Value combination belongs to K2's expression policy.
+    /// the first finishes. Value combination belongs to K2's expression
+    /// policy. O(1), and one write per slot of the second run when a
+    /// finished first run pops it.
     pub fn append(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {
         assert_eq!(first.stmts.end(), second.stmts.start as usize);
         assert_eq!(second.stmts.end(), self.slots.len());
@@ -334,25 +453,28 @@ impl StatementStack {
             finished: second.finished,
         }
     }
-    /// K2: C:4752 compiled_to_effect_block. Copy each statement of the run
-    /// into the child-list pool once: one step per statement, hole and dead
-    /// range of the run. The top run is popped; a run below the top becomes
-    /// one dead range, so that what follows it is not moved. Never flattens
-    /// SBlock here. The copied run is closed (`close::decide`: one more step
-    /// per statement) when the arena counts JavaScript occurrences.
-    pub fn take_list(&mut self, bir: &mut Bir, span: Span) -> ListId {
+    /// K2: C:4752 compiled_to_effect_block. Move each statement of the run
+    /// into a list in flight once ([`JsStmt::list`]): one step per
+    /// statement, hole and dead range of the run to count them, and one per
+    /// slot and statement to move them. The top run is popped; a run below
+    /// the top becomes one dead range, so that what follows it is not
+    /// moved. Never flattens SBlock here. The list is closed
+    /// (`close::decide`: one more step per statement) when the arena counts
+    /// JavaScript occurrences.
+    pub fn take_list(&mut self, js: &mut B, a: &mut Pools, span: Span) -> B::L {
         if span.len == 0 {
             // An empty run holds no slot. Its start is above the top when
             // the run before it was the top and has been taken.
-            return bir.lists.push_iter(0, std::iter::empty());
+            return js.list(a, 0, std::iter::empty());
         }
         assert!(span.end() <= self.slots.len());
-        let count = self.statements(span).count();
-        let id = bir.lists.push_iter(count, self.statements(span));
+        let count = self.statement_refs(span).count();
+        let list = js.list(a, count as u32, self.take_run(span));
         self.copied += count;
         self.kill(span);
-        self.close(bir, id);
-        id
+        // T6x-b: `close.rs` takes the interface; until then the pool list.
+        self.close(a, B::list_id(list));
+        list
     }
     /// THREE_TREES 11.4, step A: decide the declarations of a copied list.
     /// Cost: that of `close::decide`; nothing on an arena without counts.
@@ -549,6 +671,7 @@ impl FreePool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bir::j::rows::Rows;
     fn output(span: Span, value: Option<NodeId>, finished: Finished) -> Out {
         Out {
             stmts: span,
@@ -587,23 +710,23 @@ mod tests {
         assert_eq!(size_of::<FreeId>(), 4);
         assert_eq!(size_of::<Free>(), 16);
         assert_eq!(size_of::<Probed>(), 20);
-        assert_eq!(size_of::<StatementStack>(), 96);
-        assert_eq!(size_of::<Option<Slot>>(), 12);
+        assert_eq!(size_of::<StatementStack<Rows>>(), 96);
+        assert_eq!(size_of::<Option<Slot<<Rows as JsStmt>::S>>>(), 12);
         assert_eq!(size_of::<FreePool>(), 88);
     }
     #[test]
     fn a_statement_is_copied_once() {
-        let mut stack = StatementStack::default();
+        let mut stack = StatementStack::<Rows>::default();
         let mut bir = Bir::default();
         let mark = stack.mark();
         let hole = stack.reserve();
         stack.reserve();
         for n in 0..10_000 {
-            stack.push(NodeId(n));
+            stack.push(Rows::stmt_from_node(NodeId(n)));
         }
-        stack.fill(hole, NodeId(10_000));
+        stack.fill(hole, Rows::stmt_from_node(NodeId(10_000)));
         let span = stack.since(mark);
-        let list = stack.take_list(&mut bir, span);
+        let list = stack.take_list(&mut Rows::default(), &mut bir, span);
         assert_eq!(bir.lists.get(list).len(), 10_001);
         assert_eq!(bir.lists.get(list)[0], NodeId(10_000));
         assert_eq!(stack.pushed, 10_001);
@@ -618,7 +741,7 @@ mod tests {
     /// slots of the run before it is taken and what reading its last
     /// statement scanned.
     fn switches_with_actions_on_the_stack(switches: u32, clauses: u32, width: u32) -> (u32, usize) {
-        let mut stack = StatementStack::default();
+        let mut stack = StatementStack::<Rows>::default();
         let mut bir = Bir::default();
         let body = stack.mark();
         let mut node = 0;
@@ -633,7 +756,7 @@ mod tests {
                 .map(|_| {
                     let mark = stack.mark();
                     for _ in 0..width {
-                        stack.push(next());
+                        stack.push(Rows::stmt_from_node(next()));
                     }
                     stack.since(mark)
                 })
@@ -644,13 +767,13 @@ mod tests {
             }
             // The clauses in order, then the default, as `untagged.rs`.
             for (at, &run) in runs[1..].iter().chain(&runs[..1]).enumerate() {
-                let list = stack.take_list(&mut bir, run);
+                let list = stack.take_list(&mut Rows::default(), &mut bir, run);
                 assert_eq!(bir.lists.get(list).len(), width as usize);
-                stack.fill(actions.start + at as u32, next());
+                stack.fill(actions.start + at as u32, Rows::stmt_from_node(next()));
             }
-            let list = stack.take_list(&mut bir, stack.since(actions));
+            let list = stack.take_list(&mut Rows::default(), &mut bir, stack.since(actions));
             assert_eq!(bir.lists.get(list).len(), clauses as usize + 1);
-            stack.fill(head, next());
+            stack.fill(head, Rows::stmt_from_node(next()));
             // The switch and the dead ranges of its runs: the holes of the
             // actions are gone, and nothing else stays.
             assert_eq!(stack.mark().start, before + 1 + (clauses + 1) * width);
@@ -659,7 +782,7 @@ mod tests {
         let scanned = stack.scanned;
         assert!(stack.last(run).is_some());
         let scanned = stack.scanned - scanned;
-        let list = stack.take_list(&mut bir, run);
+        let list = stack.take_list(&mut Rows::default(), &mut bir, run);
         assert_eq!(bir.lists.get(list).len(), switches as usize);
         assert_eq!(stack.mark(), Span::default());
         (run.len, scanned)
@@ -680,23 +803,23 @@ mod tests {
     }
     #[test]
     fn append_finished_truncates_and_dummy_preserves() {
-        let mut stack = StatementStack::default();
-        stack.push(NodeId(0));
-        stack.push(NodeId(1));
+        let mut stack = StatementStack::<Rows>::default();
+        stack.push(Rows::stmt_from_node(NodeId(0)));
+        stack.push(Rows::stmt_from_node(NodeId(1)));
         let first = output(Span { start: 0, len: 1 }, None, Finished::True);
         let next = output(Span { start: 1, len: 1 }, Some(NodeId(2)), Finished::False);
         let out = stack.append(first, next, None);
         assert_eq!(out.finished, Finished::True);
-        assert_eq!(stack.slots, vec![Some(Slot::Statement(NodeId(0)))]);
+        assert_eq!(stack.slots, vec![Some(Slot::Statement(Rows::stmt_from_node(NodeId(0))))]);
         let dummy = output(stack.mark(), None, Finished::Dummy);
         let out = stack.append(out, dummy, None);
         assert_eq!(out.stmts.len, 1);
     }
     #[test]
     fn append_adjacent_runs_does_not_copy() {
-        let mut stack = StatementStack::default();
-        stack.push(NodeId(0));
-        stack.push(NodeId(1));
+        let mut stack = StatementStack::<Rows>::default();
+        stack.push(Rows::stmt_from_node(NodeId(0)));
+        stack.push(Rows::stmt_from_node(NodeId(1)));
         let a = output(Span { start: 0, len: 1 }, None, Finished::False);
         let b = output(Span { start: 1, len: 1 }, Some(NodeId(2)), Finished::False);
         let out = stack.append(a, b, Some(NodeId(2)));
