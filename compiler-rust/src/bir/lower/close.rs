@@ -4,9 +4,11 @@
 //! `return`s of the run. Nothing is rewritten: the legacy pass still runs on
 //! the new side of the gate, and check mode compares its decisions with
 //! these (`bir::shadow::compare_decisions`).
+use super::js::{Js, Pools};
+use super::js_stmt::JsStmt;
 use super::scope::{Decision, VarFacts};
-use crate::bir::j::facts::strictly_pure;
-use crate::bir::{Bir, FuncHeader, ListId, NodeId, View};
+use crate::bir::{FuncHeader, NodeId};
+use crate::emit::row::{Kind, flag};
 use crate::js_ir::op::UsedStats;
 use crate::lambda::lam_compat::LetKind;
 
@@ -34,22 +36,39 @@ use crate::lambda::lam_compat::LetKind;
 /// acceptable while nothing is rewritten: a decision is a pure function of
 /// the counts and costs the step the copy already takes. A splice needs a
 /// close that happens once (THREE_TREES 11.4, "T4c design").
-pub(super) fn decide(bir: &mut Bir, list: ListId) {
-    let count = bir.lists.get(list).len();
+pub(super) fn decide<B: JsStmt>(js: &B, bir: &mut Pools, list: B::L) {
+    let count = js.len(bir, list);
     let mut steps = 0;
     for at in (0..count).rev() {
         steps += 1;
-        let statement = bir.lists.get(list)[at];
-        match bir.view(statement) {
-            View::SReturn { value } => super::scope::return_sites(bir, value, at + 1 == count),
-            View::SDecl { var, value } => {
-                let kind = bir.node(statement).aux() & 3;
+        match js.kind_at(bir, list, at) {
+            Kind::Return => {
+                // PROBE-GAP 1: a read by reference of statement `at` of a
+                // list in flight (`JsStmt` has `kind_at` and `take_at`, no
+                // read of the statement in place); the two transition
+                // calls stand for it.
+                let statement = B::stmt_from_node(bir.lists.get(B::list_id(list))[at as usize]);
+                let value = js.value_of(bir, &statement).map(|r| NodeId(js.id(bir, r)));
+                B::stmt_node(statement);
+                // `return_sites` reads rows until T6r.
+                if let Some(value) = value {
+                    super::scope::return_sites(bir, value, at + 1 == count);
+                }
+            }
+            Kind::Declare => {
+                // PROBE-GAP 1, as above.
+                let statement = B::stmt_from_node(bir.lists.get(B::list_id(list))[at as usize]);
+                let var = js.declared(bir, &statement).expect("a declaration declares");
+                let kind = u16::from(js.stmt_aux(bir, &statement)) & 3;
+                let value = js.value_of(bir, &statement);
+                let pure = value.is_some_and(|value| js.has(bir, value, flag::STRICT));
+                let function = value.is_some_and(|value| inlinable_function(js, bir, value));
+                B::stmt_node(statement);
                 let scope = bir.js_scope.as_ref().expect("lowering scope");
                 let built = scope.uses[var.index()].built;
                 let origin = bir.vars.j_origin[var.index()];
                 let exported = scope.facts[origin.index()].state & VarFacts::EXPORTED != 0;
                 let site = scope.facts[var.index()].site != VarFacts::NO_SITE;
-                let pure = value.is_some_and(|value| strictly_pure(bir, value));
                 let status = if exported {
                     UsedStats::Exported
                 } else if built == 0 {
@@ -62,7 +81,7 @@ pub(super) fn decide(bir: &mut Bir, list: ListId) {
                 let inline = status == UsedStats::OncePure
                     && site
                     && (kind == LetKind::Strict as u16 || kind == LetKind::StrictOpt as u16 || kind == LetKind::Alias as u16)
-                    && value.is_some_and(|value| inlinable_function(bir, value));
+                    && function;
                 let scope = bir.js_scope.as_mut().expect("lowering scope");
                 scope.decisions.push(Decision::new(var, status, inline, built));
             }
@@ -74,8 +93,8 @@ pub(super) fn decide(bir: &mut Bir, list: ListId) {
 
 /// `inline_function_decl_from_variable` of the legacy pass: a function
 /// literal that is not a method, not `async` and has no directive. Constant.
-fn inlinable_function(bir: &Bir, value: NodeId) -> bool {
-    let View::JFun { header, .. } = bir.view(value) else { return false };
+fn inlinable_function<B: Js>(js: &B, bir: &Pools, value: B::Ref<'_>) -> bool {
+    let Some(header) = js.function_of(bir, value) else { return false };
     let attributes = bir.function_attributes(header);
     bir.function(header).flags & FuncHeader::METHOD == 0 && !attributes.async_ && attributes.directive.is_none()
 }
@@ -83,7 +102,9 @@ fn inlinable_function(bir: &Bir, value: NodeId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bir::j::rows::Rows;
     use crate::bir::lower::scope::Scope;
+    use crate::bir::{Bir, ListId, View};
     use crate::name::Name;
 
     /// A list of `count` declarations `let v = w` and one `return c ? w : w`.
@@ -108,13 +129,13 @@ mod tests {
         b.js_scope = Some(Scope::new(0));
         let list = run(&mut b, 10_000);
         // Warm: the spine has its capacity, the rows have room.
-        decide(&mut b, list);
+        decide(&Rows::default(), &mut b, list);
         let scope = b.js_scope.as_mut().unwrap();
         assert_eq!(scope.decisions.len(), 10_000);
         // 10,001 statements; the returned conditional and its two branches.
         assert_eq!(scope.close_steps, 10_001 + 3);
         scope.decisions.reserve(10_000);
-        let allocations = allocation_counter::measure(|| decide(&mut b, list));
+        let allocations = allocation_counter::measure(|| decide(&Rows::default(), &mut b, list));
         assert_eq!(allocations.count_total, 0, "{allocations:?}");
         assert_eq!(b.js_scope.as_ref().unwrap().decisions.len(), 20_000);
     }

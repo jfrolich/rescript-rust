@@ -2,7 +2,7 @@
 use super::js::{Js, Pools};
 use super::js_stmt::JsStmt;
 use super::{Cx, ProbeInput, Realizer};
-use crate::bir::{Bir, ListId, NodeId};
+use crate::bir::NodeId;
 
 /// K0: C:73 OutputFinished. Dummy is distinct from ordinary fallthrough.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -559,15 +559,14 @@ impl<B: JsStmt> StatementStack<B> {
         let id = js.list(a, count as u32, self.take_run(span));
         self.copied += count;
         self.kill(span);
-        // T6x-b: `close.rs` takes the interface; until then the pool list.
-        self.close(a, B::list_id(id));
+        self.close(js, a, id);
         id
     }
     /// THREE_TREES 11.4, step A: decide the declarations of a copied list.
     /// Cost: that of `close::decide`; nothing on an arena without counts.
-    pub(super) fn close(&mut self, bir: &mut Bir, list: ListId) {
-        if bir.js_scope.is_some() {
-            super::close::decide(bir, list);
+    pub(super) fn close(&mut self, js: &B, a: &mut Pools, list: B::L) {
+        if a.js_scope.is_some() {
+            super::close::decide(js, a, list);
         }
     }
 }
@@ -775,6 +774,7 @@ impl<B: Js> FreePool<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bir::Bir;
     use crate::bir::j::rows::Rows;
     fn output(span: Span, value: Option<NodeId>, finished: Finished) -> Out<Rows> {
         Out {

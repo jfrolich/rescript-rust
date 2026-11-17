@@ -805,7 +805,8 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
             Some(exports) if !exports.is_empty() => {
                 let coerced = self.coerce_exports(run, exports, out.finished);
                 let list = self.coerced_list(run);
-                self.statements.close(&mut self.arena, list);
+                // `coerced_list` gives a pool list until T6x-e.
+                self.statements.close(&self.js, &mut self.arena, B::list_from(list));
                 (list, coerced)
             }
             _ => (
