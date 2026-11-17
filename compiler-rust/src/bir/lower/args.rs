@@ -161,7 +161,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn sequence_arguments(
         &mut self,
         method_callee: bool,
-        args: &[Out<B>],
+        args: &mut [Out<B>],
         values: &mut Vec<NodeId>,
     ) -> Span {
         let start = args.first().map_or_else(
@@ -178,11 +178,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mut has_code = false;
         let mut later_defines_pure = true;
         assert!(values.is_empty(), "argument value scratch must be empty");
-        for (i, arg) in args.iter().enumerate().rev() {
+        for (i, arg) in args.iter_mut().enumerate().rev() {
             self.sequence_steps += 1;
-            // T6x-b step 1: `args` is borrowed; the value is read by id and
-            // stays in its output (two holders of one node).
-            let value = NodeId(self.js.id(&self.arena, B::of(arg.value.as_ref().expect("argument value"))));
+            // `values` holds rows until T6x-c1.
+            let value = B::node(arg.value.take().expect("argument value"));
             let (held, value) =
                 if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(value)) {
                     (Span::default(), value)
@@ -462,7 +461,7 @@ mod tests {
             let value = exp::string("v", &mut legacy.j);
             expected_args.push((vec![statement], value));
             let mut values = Vec::new();
-            let span = state.sequence_arguments(method, &args, &mut values);
+            let span = state.sequence_arguments(method, &mut args, &mut values);
             if method || shape != 0 {
                 assert!(state.arena.node(values[0]).flags().contains(NodeFlags::JS_LOC_PRESENT));
             }

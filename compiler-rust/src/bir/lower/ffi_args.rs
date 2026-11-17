@@ -773,9 +773,9 @@ mod tests {
             expected.push((out.prelude, out.expr));
         }
         state.hold_external_args(Cx::value(), specs, &mut outputs);
-        let held = outputs;
+        let mut held = outputs;
         let mut args = Vec::new();
-        let stmts = state.sequence_arguments(false, &held, &mut args);
+        let stmts = state.sequence_arguments(false, &mut held, &mut args);
         let args = state.arena.lists.push(&args);
         let (args, effect) = state.assemble_external_args_no_splice(Cx::value(), specs, args);
         let args = state.arena.lists.get(args).to_vec();
@@ -979,7 +979,7 @@ mod tests {
             } else {
                 state.hold_external_args(Cx::value(), &specs, &mut args);
             }
-            let held = args;
+            let mut held = args;
             assert_eq!(held.len(), 10_000);
             assert_eq!(state.primitive_steps, if objects { 20_000 } else { 10_000 });
             assert_eq!(
@@ -987,7 +987,7 @@ mod tests {
                 if objects { 5_000 } else { 10_000 }
             );
             let mut values = Vec::new();
-            state.sequence_arguments(false, &held, &mut values);
+            state.sequence_arguments(false, &mut held, &mut values);
             assert_eq!(values.len(), 10_000);
             assert!(state.sequence_steps <= 30_000);
         }

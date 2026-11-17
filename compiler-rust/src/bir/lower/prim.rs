@@ -156,7 +156,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             _ => {}
         }
         let mut values = std::mem::take(&mut self.argument_values);
-        let statements = self.sequence_arguments(false, &outputs, &mut values);
+        let statements = self.sequence_arguments(false, &mut outputs, &mut values);
         outputs.clear();
         self.argument_outputs = outputs;
         let result = self.finish_primitive_values(cx, prim, payload, statements, &mut values);

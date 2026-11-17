@@ -249,7 +249,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let method_callee = !call.inline && call.external.is_none()
             && matches!(self.source.view(self.source.lists.get(call.operands)[0]), View::Prim { primitive, .. }
                 if matches!(self.arena.primitive(primitive).primitive, crate::lambda::lam_primitive::Primitive::PjsObjectGet(_)));
-        let statements = self.sequence_arguments(method_callee, &outputs, &mut values);
+        let statements = self.sequence_arguments(method_callee, &mut outputs, &mut values);
         outputs.clear();
         self.argument_outputs = outputs;
         let result = (|| {
