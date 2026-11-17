@@ -4611,6 +4611,11 @@ fn the_newer_of_two_locally_abstract_types_is_expanded_once() {
 #[test]
 #[ignore = "R3h build"]
 fn a_recursive_equation_is_not_added() {
+    // Review of pull request 347: this expectation is not what OCaml
+    // does (compiler/ml/ctype.ml:1503-1536, called with `strict = false`:
+    // a tuple at the top is not searched, so this equation IS added).
+    // A design turn corrects the test before the slice is built
+    // (CHECKER_REWRITE 8.9, "Corrections owed after review", item 1).
     let (mut c, _) = pattern_checker(Mode::Success);
     let (inner, int) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
     let destination = tuple(&mut c, &[inner, int]);

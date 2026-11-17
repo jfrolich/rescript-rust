@@ -3027,6 +3027,10 @@ for two equal paths; a change in unify.rs or outside rows.rs and the
 three ignore lines. At most 150 lines.
 ```
 
+Not issued as it stands: the review of this turn found corrections the
+design owes first (8.9, "Corrections owed after review"). The prompt is
+issued when they are in the document and the tests.
+
 ```text
 R3h. Read section 8.9 whole and section 8.6, decisions 47, 60, 61 and
 62; compiler/ml/ctype.ml 253-273, 1478-1535, 1802-1881, 2085-2104,
@@ -3091,6 +3095,10 @@ destination; writing a TypeTable row of an equation anywhere but
 add_gadt_equation and cut_equations; a change in graph.rs, level.rs or
 template.rs, or under src/types. At most 450 lines.
 ```
+
+Not issued as it stands: the review of this turn found corrections the
+design owes first (8.9, "Corrections owed after review"). The prompt is
+issued when they are in the document and the tests.
 
 ```text
 R3r. R3h is merged. Read section 8.9, decisions 63, 64 (the rows
@@ -5431,6 +5439,80 @@ unused" in OCaml); a parameter past the 32nd of `injective_bits`;
    levels through the trail. The builder of R3h reports what it
    writes; if it writes more, the copy gets a flag that copies every
    node, in `Graph::copy_ref`.
+
+**Corrections owed after review** (the review of the sixth turn, pull
+request 347). The prompts of R3h and R3r in 8.4 are not issued until a
+design turn has made these, each with its test; nothing here is the
+builder's to decide.
+
+1. *Decision 67, step 1, and the test
+   `a_recursive_equation_is_not_added` are not what OCaml does.*
+   `local_non_recursive_abbrev` is ctype.ml:1503-1536 (1478-1502 are
+   `occur_full`, `occur` and `occur_in`). It is called with `strict =
+   false`, and then:
+   - a node that is not a constructor is entered only `if strict`
+     (1525-1529): a tuple or an arrow at the top is not searched;
+   - a constructor of `source` answers false (1508);
+   - a constructor of a contractive type (`is_contractive`,
+     1371-1375: a data type, or a predefined type without a manifest)
+     is not entered while not strict (1509);
+   - any other constructor is expanded once (`try_expand_head
+     try_expand_once`, 1515, not the `_opt` form) and the walk goes on
+     in the expansion; one that cannot be expanded has its arguments
+     walked, strictly for an argument whose parameter in the
+     declaration is not a variable (1516-1524).
+   Seen with both compilers on source programs (`Refl: eq<'a, 'a>`
+   matched at `eq<a, T>` for a locally abstract `a`, the branch using a
+   value of type `a` at type `T`): the equations `a := (a, int)`, `a :=
+   array<a>` and `a := box<a>` (a data type) are ADDED, both compilers
+   accept; `a := M.t<a>` for an abstract `M.t` is not, both refuse. The
+   test must expect the tuple's equation added and have a case that is
+   refused.
+2. *The occurrence test of a variable in pattern mode* (decisions 64
+   and 69 say "as in expression mode"). In `Pattern` OCaml's `occur`
+   runs `occur_full` with `allow_recursive` (ctype.ml:1467-1490;
+   `occur_rec`, 1384-1408): a contractive constructor is not entered
+   (1390), a structure that is not a constructor is not entered
+   (1404-1408), objects and variants never are (1403). So a variable is
+   bound to a type that holds it below a tuple in pattern mode, where
+   expression mode clashes. The design says what the binding walk does
+   in pattern mode (the levels are still lowered everywhere), with a
+   hand-built test of the bind that succeeds and one of a clash through
+   a constructor that is not contractive, and what a binding in
+   expression mode pays for it.
+3. *Decision 60 in pattern mode.* `unify_row` keeps row 1's name
+   arguments as children when `last1` is none, which is right because
+   unify3 has linked the left node in expression mode. Pattern mode
+   does not link it (decision 64): say which node is the home of row 1
+   there and whether its name's arguments stop being children, with a
+   test.
+4. `size_of` tests for `Equation` (20 bytes) and `Try` (40 bytes).
+5. `mcomp`'s marker calls `leave_scopes`, which is private to unify.rs
+   and looks for its frame in `frames[base..]`, which `mcomp` has
+   popped by then: say how the scopes are cut there and make what it
+   needs visible.
+6. `mcomp_at_ten_thousand` builds tuples of width 100, so its relation
+   holds with or without the table of pairs it is there for: width n,
+   or a second relation that fails without the table.
+7. Step tests at 1,000 and 10,000 for `non_recursive_abbrev` and
+   `duplicate` (a destination of n nodes) and for `recover`.
+8. Line ranges that are a few lines off, in doc comments, tests and
+   both prompts: the try for an argument that is not injective is
+   2358-2375 (the cited 2359-2371 leaves out the two `reify` calls);
+   the variant arm is 2402-2411 (2411 is the `mcomp` call); the
+   package fallback is 2416-2424 (2422 reifies); two instantiable
+   types 2376-2387; the three one-sided arms 2388-2391, 2392-2395 and
+   2396-2400.
+9. The prompt of R3r gets the rule the prompt of R3h has for its
+   hand-built tests (a test that fails where the code does what the
+   ctype.ml lines say: stop and report, never edit the test); each
+   prompt names the functions that are the other slice's. Decision 71
+   adds what it leaves out (the hash state made in `Checker::new`, the
+   growth of `Checker`, the two compares per pair of rows of decision
+   60), and the cost paragraph of `unify_row` names those two compares.
+
+The five open questions above are answered as recommended in the same
+review; the next design turn writes them into 8.6.
 
 Not designed in this turn: R3q (`instance_poly`, `instance_label`).
 What is known for it: decision 47's fixed-row rule moves to R3h's first
