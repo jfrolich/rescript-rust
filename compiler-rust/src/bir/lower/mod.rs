@@ -1197,7 +1197,7 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
     }
     /// R1–R5: realize a deferred conditional from its value operands.
     fn cond(&mut self, cx: Cx, test: B::E, yes: Out<B>, no: Out<B>) -> Out<B> {
-        self.realize_conditional(cx, B::node(test), yes, no)
+        self.realize_conditional(cx, test, yes, no)
     }
 }
 

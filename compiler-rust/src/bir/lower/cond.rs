@@ -252,7 +252,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         let start = test.stmts.start;
         let end = start + test.stmts.len;
-        let test = B::node(test.value.expect("test value"));
+        let test = test.value.expect("test value");
         if conditional.unit {
             // R5 step 0, C:3691: the test alone, kept only for its effects.
             self.push_s_if_empty(test);
@@ -290,7 +290,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         cx: Cx,
         target: Target,
         parts: Parts,
-        test: NodeId,
+        test: B::E,
         yes: Probed<B>,
         no: Probed<B>,
     ) -> Probed<B> {
@@ -299,7 +299,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 // Nothing follows the reserved slots: drop them.
                 self.statements.trim(Self::from(parts.start));
                 if self.statements.since(Self::from(parts.start)).len == 0 {
-                    return Probed::Free(self.free.push(Free::Cond { test: B::from_node(test), then_, else_ }));
+                    return Probed::Free(self.free.push(Free::Cond { test, then_, else_ }));
                 }
                 if matches!(cx.cont, Cont::Effect(Tail::No)) {
                     // C:7612 compiled_from_effect_block reads the whole block.
@@ -308,12 +308,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     self.free_effect(test, then_, else_);
                     return self.effect_output(parts.start);
                 }
-                let free = self.free.push(Free::Cond { test: B::from_node(test), then_, else_ });
+                let free = self.free.push(Free::Cond { test, then_, else_ });
                 let out = self.realize(cx, Probed::Free(free));
                 return Probed::Out(self.output(parts.start, out.value, out.finished));
             }
             branches => branches,
         };
+        // The rows of 3.6 take a row until T6x-c3.
+        let test = B::node(test);
         match (cx.cont, target) {
             (Cont::Effect(Tail::No), _) => self.effect_conditional(cx, parts, test, yes, no),
             (Cont::Effect(Tail::Return(_)), _) => self.return_conditional(cx, parts, test, yes, no),
@@ -347,14 +349,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// The value of a free branch: one realization, no statement.
-    fn free_value(&mut self, cx: Cx, free: FreeId) -> NodeId {
+    fn free_value(&mut self, cx: Cx, free: FreeId) -> B::E {
         let cx = Cx {
             cont: Cont::Value(Tail::No),
             ..cx
         };
         let out = self.realize(cx, Probed::Free(free));
         debug_assert!(!self.statements.has_statements(out.stmts));
-        B::node(out.value.expect("free value"))
+        out.value.expect("free value")
     }
 
     /// The run of a branch in `cx`: a free branch is converted (1.4), which
@@ -532,9 +534,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O:359 push_s_if_empty: the test as a statement when it has effects.
     /// Cost: J-M14's: one step, O(1) per statement pushed, and the nodes of
     /// a pure test released.
-    fn push_s_if_empty(&mut self, test: NodeId) {
+    fn push_s_if_empty(&mut self, test: B::E) {
         let statements = &mut self.statements;
-        self.js.effect_if_impure(&mut self.arena, B::from_node(test), |s| statements.push(s));
+        self.js.effect_if_impure(&mut self.arena, test, |s| statements.push(s));
     }
 
     /// Rows R1 to R3 on the two runs that assign `target`. Cost:
@@ -684,12 +686,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Probed::Out(out) => Some(out.stmts),
             Probed::Free(free) => {
                 let value = self.free_value(cx, free);
-                if self.js.has(&self.arena, B::at(value), flag::STRICT) {
-                    self.js.release(&mut self.arena, B::from_node(value));
+                if self.js.has(&self.arena, B::of(&value), flag::STRICT) {
+                    self.js.release(&mut self.arena, value);
                     return None;
                 }
                 let mark = self.statements.mark();
-                self.drop_pure_effect(value);
+                self.drop_pure_effect(B::node(value));
                 Some(self.statements.since(mark))
             }
         }
@@ -697,12 +699,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// R4 step 1 on the values of two free branches: pushes the statements.
     /// O(1), plus J-M0 over the comma spine of each value.
-    fn free_effect(&mut self, test: NodeId, yes: NodeId, no: NodeId) {
-        let yes = self.js.without_pure(&mut self.arena, B::from_node(yes));
-        let no = self.js.without_pure(&mut self.arena, B::from_node(no));
-        let test = B::from_node(test);
+    fn free_effect(&mut self, test: B::E, yes: B::E, no: B::E) {
+        let yes = self.js.without_pure(&mut self.arena, yes);
+        let no = self.js.without_pure(&mut self.arena, no);
         let (test, value) = match (yes, no) {
-            (None, None) => return self.push_s_if_empty(B::node(test)),
+            (None, None) => return self.push_s_if_empty(test),
             (Some(yes), Some(no)) => {
                 let value = self.js.cond(&mut self.arena, test, yes, no);
                 return self.drop_pure_effect(B::node(value));
@@ -894,16 +895,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         cx: Cx,
         and: bool,
         parts: Parts,
-        left: NodeId,
+        left: B::E,
         right: Probed<B>,
     ) -> Probed<B> {
         let right = match right {
             Probed::Free(free) => {
-                let right = B::from_node(self.free_value(cx, free));
+                let right = self.free_value(cx, free);
                 let value = if and {
-                    self.js.and(&mut self.arena, B::from_node(left), right)
+                    self.js.and(&mut self.arena, left, right)
                 } else {
-                    self.js.or(&mut self.arena, B::from_node(left), right)
+                    self.js.or(&mut self.arena, left, right)
                 };
                 self.statements.trim(Self::from(parts.start));
                 if self.statements.since(Self::from(parts.start)).len == 0 {
@@ -950,9 +951,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let test = if and {
             left
         } else {
-            B::node(self.js.not(&mut self.arena, B::from_node(left)))
+            self.js.not(&mut self.arena, left)
         };
-        let statement = self.if_statement(test, yes, no);
+        // `if_statement` takes a row until T6x-d.
+        let statement = self.if_statement(B::node(test), yes, no);
         self.place(parts.head, statement);
         let value = match cx.cont {
             Cont::Value(_) | Cont::Effect(_) => {
@@ -966,12 +968,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// `realize(Free::Cond, k)` of section 3.6: on the values of the two
     /// branches, or in **A** on their assignments. O(1), plus
     /// `free_effect` and `effect_output` in an effect continuation.
-    pub(super) fn realize_conditional(&mut self, cx: Cx, test: NodeId, yes: Out<B>, no: Out<B>) -> Out<B> {
+    pub(super) fn realize_conditional(&mut self, cx: Cx, test: B::E, yes: Out<B>, no: Out<B>) -> Out<B> {
         match cx.cont {
             Cont::Effect(Tail::No) => {
                 let start = self.statements.mark().start;
-                let yes = B::node(yes.value.expect("free value"));
-                let no = B::node(no.value.expect("free value"));
+                let yes = yes.value.expect("free value");
+                let no = no.value.expect("free value");
                 self.free_effect(test, yes, no);
                 let Probed::Out(out) = self.effect_output(start) else {
                     unreachable!()
@@ -981,7 +983,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Cont::Assign(target) => {
                 // R3, C:4996: the branches were realized for `A(target)`.
                 let start = yes.stmts.start;
-                let merged = self.merge_assignments(test, target, yes.stmts, no.stmts);
+                // `merge_assignments` takes a row until T6x-d.
+                let merged = self.merge_assignments(B::node(test), target, yes.stmts, no.stmts);
                 let statement = self.assignment_statement(target, merged);
                 self.statements.trim(Self::from(start));
                 self.statements.push(statement);
@@ -990,7 +993,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Cont::Value(_) | Cont::Declare(..) | Cont::Effect(Tail::Return(_)) => {
                 let yes = yes.value.expect("free value");
                 let no = no.value.expect("free value");
-                let value = self.js.cond(&mut self.arena, B::from_node(test), yes, no);
+                let value = self.js.cond(&mut self.arena, test, yes, no);
                 self.leaf(cx, value)
             }
         }
