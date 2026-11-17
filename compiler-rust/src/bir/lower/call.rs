@@ -257,7 +257,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if call.inline {
             return self.primitive_result(cx, statements, values[0]);
         }
-        let mut value = if let Some((module, member, arity)) = call.external {
+        // `call_node` gives a row until T6x-d.
+        let mut value = B::from_node(if let Some((module, member, arity)) = call.external {
             let mut callee = self.js.qualified(&mut self.arena, module, Some(member));
             self.js.assume_strict(&mut self.arena, &mut callee);
             let callee = B::node(callee);
@@ -281,20 +282,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 &values[1..],
                 Self::call_info_of_apply_status(call.status),
             )
-        };
+        });
         // C:1129 compile_apply_call: attach only a real, non-ghost location.
         if self.locations.and_then(|locations| locations.get(call.loc))
             .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0) {
-            let mut located = B::from_node(value);
-            self.js.locate(&mut self.arena, &mut located, call.loc);
-            value = B::node(located);
+            self.js.locate(&mut self.arena, &mut value, call.loc);
         }
         if !self.statements.has_statements(statements) {
             // Holes carry no effects; pop them before returning a free value.
             self.statements.remove_empty(statements);
-            self.probe_leaf(cx, B::from_node(value))
+            self.probe_leaf(cx, value)
         } else {
-            let out = self.leaf(cx, B::from_node(value));
+            let out = self.leaf(cx, value);
             Probed::Out(Out {
                 stmts: self.statements.since(Span {
                     start: statements.start,
