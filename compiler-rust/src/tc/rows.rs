@@ -312,7 +312,7 @@ pub trait PackageDecls {
 
 /// One equation of pattern mode in force (`Env.add_local_constraint`,
 /// compiler/ml/ctype.ml:2093-2100): the type that got a manifest and the
-/// [`TypeInfo`] row it had before, so that cutting the log back puts the
+/// `TypeInfo` row it had before, so that cutting the log back puts the
 /// row back ([`Checker::cut_equations`]). 20 bytes; one per equation
 /// added and not yet cut. (R3h; CHECKER_REWRITE 8.9)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1569,13 +1569,22 @@ impl Checker {
             let extra = self.saved.len() as u32;
             self.saved.push(node);
             self.saved.push(node);
-            self.frames.push(Frame { left: home, right: home, kind: FrameKind::Fields, extra });
+            self.frames.push(Frame {
+                left: home,
+                right: home,
+                kind: FrameKind::Fields,
+                extra,
+            });
         }
         let b = self.g.lists.len() as u32;
-        self.g.lists.extend_from_within(node.b as usize..(node.b + node.arity()) as usize);
+        self.g
+            .lists
+            .extend_from_within(node.b as usize..(node.b + node.arity()) as usize);
         let more = self.g.lists[(b + row.more) as usize];
         let arguments = row.name_arguments;
-        self.g.lists[(b + arguments.start) as usize..(b + arguments.start + arguments.len) as usize].fill(more);
+        self.g.lists
+            [(b + arguments.start) as usize..(b + arguments.start + arguments.len) as usize]
+            .fill(more);
         self.g.write(home, Node { b, ..node });
     }
 
@@ -2206,9 +2215,14 @@ impl Checker {
             let first = frame.extra as usize + 2;
             for at in first..first + (counts.head + counts.level) as usize {
                 let ty = Ty(self.saved[at].head);
-                self.extras.row_scratch.push(FieldRef { name: 0, at: 0, ty });
+                self.extras
+                    .row_scratch
+                    .push(FieldRef { name: 0, at: 0, ty });
             }
-            (end..end + counts.head as usize, end + counts.head as usize..self.extras.row_scratch.len())
+            (
+                end..end + counts.head as usize,
+                end + counts.head as usize..self.extras.row_scratch.len(),
+            )
         } else {
             missing(self, middle..end, base..middle);
             let gained1 = end..self.extras.row_scratch.len();
@@ -3188,7 +3202,12 @@ impl Checker {
                 });
                 for at in kept1.clone().chain(kept2.clone()) {
                     let ty = self.extras.row_scratch[at].ty;
-                    self.saved.push(Node { head: ty.0, level: 0, a: NONE, b: 0 });
+                    self.saved.push(Node {
+                        head: ty.0,
+                        level: 0,
+                        a: NONE,
+                        b: 0,
+                    });
                 }
                 let end = Frame { kind: FrameKind::RowFieldEnd, ..frame };
                 if self.frames.last() != Some(&end) {
@@ -3391,26 +3410,71 @@ impl Checker {
         if compatible { Ok(()) } else { Err(Clash) }
     }
 
-    /// `reify` (compiler/ml/ctype.ml:1813-1870): replace the variables of a
-    /// type by fresh abstract types at the newtype level, in pattern mode.
-    /// O(nodes), marks. (R3h)
-    pub fn reify(&mut self, ty: Ty) {
+    /// `reify` (compiler/ml/ctype.ml:1813-1859): every variable `ty`
+    /// reaches becomes a new locally abstract type of the newtype level,
+    /// and the row variable of every variant that is neither static nor
+    /// fixed a fixed row without tags over one; the steps are in
+    /// CHECKER_REWRITE 8.9 ("`reify`"). Visits each node once (a new mark
+    /// generation, `g.work`), children in `iter_type_expr`'s order. A
+    /// variable below [`Checker::newtype_level`] is linked and then a
+    /// clash (ctype.ml:1837-1839). Needs [`Checker::locals`] when there
+    /// is a variable. O(nodes reached). (R3h)
+    pub fn reify(&mut self, ty: Ty) -> Result<(), Clash> {
         todo!("R3h")
     }
 
-    /// `add_gadt_equation` (compiler/ml/ctype.ml:2093-2100): give the
-    /// locally abstract type `source` the manifest `destination` when the
-    /// equation is well-founded, and clean the memos. O(nodes of
-    /// `destination`). (R3h)
+    /// `add_gadt_equation` (compiler/ml/ctype.ml:2093-2100): when
+    /// [`Checker::non_recursive_abbrev`], the locally abstract type
+    /// `source` gets [`Checker::duplicate`] of `destination` as its
+    /// manifest, the entry goes to [`Checker::equations`] and the memos
+    /// are cleaned; the five steps are in CHECKER_REWRITE 8.9, decision
+    /// 67. Otherwise nothing. O(nodes of `destination`) plus the
+    /// cleanup. (R3h)
     pub fn add_gadt_equation(&mut self, source: u32, destination: Ty) {
         todo!("R3h")
     }
 
-    /// `mcomp` (compiler/ml/ctype.ml:1905-2090): whether two types can have
-    /// a common instance; never links. O(pairs), pair set, explicit stack.
-    /// (R3h)
-    pub fn mcomp(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
+    /// `local_non_recursive_abbrev env p ty` (compiler/ml/ctype.ml:
+    /// 1478-1535): `ty` does not name the type `source`, through its
+    /// children or through the expansions of the constructors it names
+    /// ([`Checker::expand_once`] in `ExpandMode::Opt`). Marks and
+    /// `g.work`; O(nodes reached). (R3h)
+    pub fn non_recursive_abbrev(&mut self, source: u32, ty: Ty) -> bool {
         todo!("R3h")
+    }
+
+    /// `duplicate_type` for an equation: a copy of `ty` in which every
+    /// node is generic, sharing kept; `ty` is as it was afterwards. Made
+    /// of `g.speculate()`, `generalize(ty)` with `g.level` 0,
+    /// `copy(ty)` with `g.level` generic, and `g.restore`: the copy's
+    /// nodes are new and not on the trail (CHECKER_REWRITE 8.9, decision
+    /// 67). Three passes over `ty`. (R3h)
+    pub fn duplicate(&mut self, ty: Ty) -> Ty {
+        todo!("R3h")
+    }
+
+    /// `find_newtype_level env path` (compiler/ml/ctype.ml:2085-2091):
+    /// the `Newtype` row's `(level, expansion_level)` of a type with
+    /// `NEWTYPE`, otherwise `(scope, scope)` (`Path.binding_time`).
+    /// Compared as pairs. A type without a row: `(0, 0)`. O(1). (R3h)
+    pub fn find_newtype_level(&self, type_index: u32) -> (u32, u32) {
+        todo!("R3h")
+    }
+
+    /// `mcomp` (compiler/ml/ctype.ml:1905-2080): whether two types can
+    /// have a common instance; never links, never lowers. The arms are
+    /// in CHECKER_REWRITE 8.9, decision 70. Its table is
+    /// [`Checker::compatible`], emptied when it returns; its stack is
+    /// `g.work`. O(pairs). (R3r)
+    pub fn mcomp(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
+        todo!("R3r")
+    }
+
+    /// One more pair for the `mcomp` in progress: what
+    /// [`LocalDecls::compare`] calls for each pair of member types.
+    /// O(1) amortized: two entries of `g.work`. (R3r)
+    pub fn push_compatible(&mut self, left: Ty, right: Ty) {
+        todo!("R3r")
     }
 }
 

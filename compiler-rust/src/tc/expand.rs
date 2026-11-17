@@ -124,6 +124,11 @@ pub struct TypeTable {
     /// Number of rows with a non-zero `scope`: when 0, lowering never tests a
     /// scope ([`Checker::lower`]).
     pub scoped: u32,
+    /// Per row of `rows`: bit `i` is set when parameter `i` is injective
+    /// (`Variance.(mem Inj)`). Empty, or shorter than `rows`, for types
+    /// without an injective parameter ([`TypeTable::injective`]). Filled
+    /// by the caller that owns the table (R5a). (R3h)
+    pub injective_bits: Vec<u32>,
 }
 
 impl TypeTable {
@@ -310,6 +315,19 @@ impl TypeTable {
         match self.variances.get(type_index as usize) {
             Some(&start) if start != NONE => self.occurs[(start + parameter) as usize] != 0,
             _ => true,
+        }
+    }
+
+    /// `Variance.(mem Inj)` of parameter `parameter` of the type
+    /// (compiler/ml/ctype.ml:2361, 2018): bit `parameter` of
+    /// `injective_bits[type_index]`; a type past the end of that table
+    /// and a parameter past the 32nd are not injective. O(1): one bounds
+    /// test and one load. (R3h; CHECKER_REWRITE 8.9, decision 66)
+    #[inline]
+    pub fn injective(&self, type_index: u32, parameter: u32) -> bool {
+        match self.injective_bits.get(type_index as usize) {
+            Some(&bits) => parameter < 32 && bits >> parameter & 1 != 0,
+            None => false,
         }
     }
 

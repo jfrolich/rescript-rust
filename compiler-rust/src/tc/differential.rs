@@ -718,8 +718,16 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
                     let count = if plan.has(VARIANTS) { 6 } else { 4 };
                     let value = values - 2 - count + rng.below(count);
                     let instance = operands as u16;
-                    let flags = if rng.below(4) == 0 { rng.below(3) as u8 } else { 3 };
-                    let against = if rng.below(3) == 0 { operand(rng) } else { instance + 2 };
+                    let flags = if rng.below(4) == 0 {
+                        rng.below(3) as u8
+                    } else {
+                        3
+                    };
+                    let against = if rng.below(3) == 0 {
+                        operand(rng)
+                    } else {
+                        instance + 2
+                    };
                     follow = vec![
                         Op::Gadt(instance + 1, against, flags),
                         Op::Child(instance, rng.below(4) as u8),
@@ -1235,7 +1243,9 @@ pub(crate) fn old_equations(old: &Old, env: &Env) -> String {
     let mut equations: Vec<(String, TypeExprRef)> = env
         .iter_local_constraints()
         .filter_map(|(path, declaration)| {
-            declaration.type_manifest.map(|body| (path.last().to_string(), body))
+            declaration
+                .type_manifest
+                .map(|body| (path.last().to_string(), body))
         })
         .collect();
     equations.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1473,7 +1483,7 @@ struct FreshNames {
 impl super::rows::LocalDecls for FreshNames {
     fn fresh_abstract(&mut self, name: u32) -> u32 {
         let prefix = match self.strings.get(name as usize) {
-            Some(name) if name != "" => format!("$'{name}"),
+            Some(name) if !name.is_empty() => format!("$'{name}"),
             _ => "$".to_string(),
         };
         let mut names = self.names.borrow_mut();
@@ -1593,13 +1603,18 @@ impl New {
             if PREDEFINED.contains(&self.string(name)) {
                 self.checker.types.set_local(index as u32);
             }
-            let Some(offset) = NEWTYPES.iter().position(|newtype| *newtype == self.string(name))
+            let Some(offset) = NEWTYPES
+                .iter()
+                .position(|newtype| *newtype == self.string(name))
             else {
                 continue;
             };
             let level = 1 + offset as u32;
             let types = &mut self.checker.types;
-            types.newtypes.push(Newtype { level, expansion_level: level });
+            types.newtypes.push(Newtype {
+                level,
+                expansion_level: level,
+            });
             let row = &mut types.rows[index];
             row.flags |= NEWTYPE;
             row.newtype = types.newtypes.len() as u32 - 1;
@@ -1611,7 +1626,9 @@ impl New {
             }
         }
         let pools = &self.segment.signature;
-        let strings = (0..pools.strings.len() as u32).map(|at| self.string(at).to_string()).collect();
+        let strings = (0..pools.strings.len() as u32)
+            .map(|at| self.string(at).to_string())
+            .collect();
         self.checker.locals = Some(Box::new(FreshNames {
             first: pools.paths.len() as u32,
             strings,
@@ -3546,8 +3563,9 @@ mod tests {
     /// R3x.
     #[test]
     fn ignored_tests_name_the_slices_they_reach() {
-        let before: [(&str, &[&str]); 11] = [
+        let before: [(&str, &[&str]); 12] = [
             ("R3q", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
+            ("R3r", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3h"]),
             ("R3p", &["R3m", "R3e"]),
             ("R3k", &[]),
             ("R3m", &[]),
@@ -3645,9 +3663,12 @@ mod tests {
                 let mut reaches: Vec<&str> = Vec::new();
                 let full = body.contains("Tier::Full");
                 let rows = body.contains("OBJECTS") || body.contains("VARIANTS");
-                for (needle, reached) in
-                    [("OBJECTS", "R3e"), ("VARIANTS", "R3f"), ("UNIVAR", "R3g"), ("PATTERN", "R3h")]
-                {
+                for (needle, reached) in [
+                    ("OBJECTS", "R3e"),
+                    ("VARIANTS", "R3f"),
+                    ("UNIVAR", "R3g"),
+                    ("PATTERN", "R3h"),
+                ] {
                     if full && body.contains(needle) {
                         reaches.push(reached);
                     }
@@ -4616,9 +4637,18 @@ mod tests {
             left.form,
             "0 = &0[1]fn(&1[1]n0, &2[1]n1, &3[1]int, &4[1](&5[1]int, &6[1]int)) => &7[1]unit\n1 = @1\n2 = @3\n= n0 := &0[G]int\n"
         );
-        assert_eq!(equations(&old_pattern(&pattern(0, 2, 0, 3)).form), ["= n0 := &0[G]int"]);
-        assert_eq!(equations(&old_pattern(&pattern(0, 0, 1, 3)).form), ["= n1 := &0[G]n0"]);
-        assert_eq!(equations(&old_pattern(&pattern(0, 1, 0, 3)).form), ["= n1 := &0[G]n0"]);
+        assert_eq!(
+            equations(&old_pattern(&pattern(0, 2, 0, 3)).form),
+            ["= n0 := &0[G]int"]
+        );
+        assert_eq!(
+            equations(&old_pattern(&pattern(0, 0, 1, 3)).form),
+            ["= n1 := &0[G]n0"]
+        );
+        assert_eq!(
+            equations(&old_pattern(&pattern(0, 1, 0, 3)).form),
+            ["= n1 := &0[G]n0"]
+        );
         assert_eq!(
             equations(&old_pattern(&pattern(0, 0, 3, 3)).form),
             ["= n0 := &0[G](&1[G]int, &2[G]int)"]
@@ -4650,13 +4680,26 @@ mod tests {
     /// is a link to the other argument in every mode.
     #[test]
     fn old_checker_refines_the_arguments_of_a_constructor_by_its_injectivity() {
-        assert_eq!(equations(&old_pattern(&pattern(1, 0, 1, 3)).form), ["= n0 := &0[G]int"]);
+        assert_eq!(
+            equations(&old_pattern(&pattern(1, 0, 1, 3)).form),
+            ["= n0 := &0[G]int"]
+        );
         for flags in [0, 1] {
             let abstract_type = old_pattern(&pattern(1, 0, 1, flags));
-            assert_eq!((abstract_type.failed, equations(&abstract_type.form).len()), (None, 0));
-            assert!(abstract_type.form.contains("\n1 = @1\n2 = @3\n"), "{}", abstract_type.form);
+            assert_eq!(
+                (abstract_type.failed, equations(&abstract_type.form).len()),
+                (None, 0)
+            );
+            assert!(
+                abstract_type.form.contains("\n1 = @1\n2 = @3\n"),
+                "{}",
+                abstract_type.form
+            );
         }
-        assert_eq!(equations(&old_pattern(&pattern(2, 0, 1, 1)).form), ["= n0 := &0[G]int"]);
+        assert_eq!(
+            equations(&old_pattern(&pattern(2, 0, 1, 1)).form),
+            ["= n0 := &0[G]int"]
+        );
         assert_eq!(equations(&old_pattern(&pattern(2, 0, 1, 0)).form).len(), 0);
         let nested = old_pattern(&pattern(6, 2, 3, 3));
         assert_eq!((nested.failed, equations(&nested.form).len()), (None, 0));
@@ -4689,15 +4732,33 @@ mod tests {
             variable.form.lines().next(),
             Some("0 = &0[1]fn(&1[1]$0, &2[1]', &3[1](@1, &4[1]int)) => &5[1]unit")
         );
-        assert_eq!(equations(&variable.form), ["= n0 := &0[G](&1[G]$0, &2[G]int)"]);
+        assert_eq!(
+            equations(&variable.form),
+            ["= n0 := &0[G](&1[G]$0, &2[G]int)"]
+        );
         let row = old_pattern(&refine(5, 3));
-        assert!(row.form.contains("&10[1][fixed #A(&11[1]int) | &12[1]$0]"), "{}", row.form);
-        assert_eq!(equations(&row.form), ["= n0 := &0[G][fixed #A(&1[G]int) | &2[G]$0]"]);
+        assert!(
+            row.form.contains("&10[1][fixed #A(&11[1]int) | &12[1]$0]"),
+            "{}",
+            row.form
+        );
+        assert_eq!(
+            equations(&row.form),
+            ["= n0 := &0[G][fixed #A(&1[G]int) | &2[G]$0]"]
+        );
         let mut twice = refine(3, 2);
-        twice.extend([Op::Child(2, 1), Op::Instance(3), Op::Child(5, 2), Op::Gadt(4, 6, 3)]);
+        twice.extend([
+            Op::Child(2, 1),
+            Op::Instance(3),
+            Op::Child(5, 2),
+            Op::Gadt(4, 6, 3),
+        ]);
         assert_eq!(
             equations(&old_pattern(&twice).form),
-            ["= n0 := &0[G](&1[G]$0, &2[G]int)", "= n1 := &3[G](&4[G]$1, &5[G]int)"]
+            [
+                "= n0 := &0[G](&1[G]$0, &2[G]int)",
+                "= n1 := &3[G](&4[G]$1, &5[G]int)"
+            ]
         );
     }
 
@@ -4730,20 +4791,21 @@ mod tests {
         let below = old_pattern(&ops);
         assert_eq!(below.failed, Some(5));
         assert_eq!(trace_of(&below.form, 5), ["@7 ~ @3", "@1 ~ &14[0]'"]);
-        assert_eq!(
-            below.form.lines().last(),
-            Some("3 = @7"),
-            "{}",
-            below.form
-        );
+        assert_eq!(below.form.lines().last(), Some("3 = @7"), "{}", below.form);
         assert!(
-            below.form.contains("\n0 = &0[0]fn(&1[0]$0, &2[0]', &3[0](@1, &4[0]int)) => &5[0]unit\n"),
+            below
+                .form
+                .contains("\n0 = &0[0]fn(&1[0]$0, &2[0]', &3[0](@1, &4[0]int)) => &5[0]unit\n"),
             "{}",
             below.form
         );
         let row = old_pattern(&pattern(5, 0, 2, 3));
         assert_eq!(row.failed, Some(4));
-        assert!(row.form.contains("&1[1][fixed #A(&2[1]n0) | &3[1]$0]"), "{}", row.form);
+        assert!(
+            row.form.contains("&1[1][fixed #A(&2[1]n0) | &3[1]$0]"),
+            "{}",
+            row.form
+        );
         let partial = old_pattern(&pattern(6, 0, 1, 3));
         assert_eq!(partial.failed, Some(4));
         assert_eq!(trace_of(&partial.form, 4), ["@1 ~ @4", "@3 ~ @6"]);
@@ -4805,7 +4867,9 @@ mod tests {
         let rows = pattern(4, 0, 1, 3);
         let linked = run_old(&program, plan, &rows);
         assert!(
-            linked.form.starts_with("0 = &0[1]fn(&1[1][closed #A(&2[1]int) #B | &3[1]nil], @1,"),
+            linked
+                .form
+                .starts_with("0 = &0[1]fn(&1[1][closed #A(&2[1]int) #B | &3[1]nil], @1,"),
             "{}",
             linked.form
         );
@@ -4839,7 +4903,8 @@ mod tests {
             Op::Generalize(1),
             Op::Copy(1),
         ];
-        let outcome = compare(0, &program, plan, &ops, Fault::None).unwrap_or_else(|report| panic!("{report}"));
+        let outcome = compare(0, &program, plan, &ops, Fault::None)
+            .unwrap_or_else(|report| panic!("{report}"));
         assert_eq!(outcome.failed, Some(9));
         assert!(outcome.form.contains("k<&"), "{}", outcome.form);
         assert_eq!(equations(&outcome.form).len(), 0);
@@ -4850,8 +4915,10 @@ mod tests {
                 let case_seed = seed * 1_000_003 + sequence;
                 let (program, ops) = case(plan, case_seed);
                 patterns += ops.iter().filter(|op| matches!(op, Op::Gadt(..))).count();
-                let ops: Vec<Op> =
-                    ops.into_iter().filter(|op| !matches!(op, Op::Gadt(..))).collect();
+                let ops: Vec<Op> = ops
+                    .into_iter()
+                    .filter(|op| !matches!(op, Op::Gadt(..)))
+                    .collect();
                 if let Err(report) = compare(case_seed, &program, plan, &ops, Fault::None) {
                     panic!("{report}");
                 }
@@ -4936,13 +5003,85 @@ mod tests {
                 let old = run_old(&program, plan, ops);
                 if compare(case_seed, &program, plan, ops, Fault::ExpressionMode).is_err() {
                     let new = run_new(&program, plan, ops, Fault::ExpressionMode);
-                    equation += usize::from(equations(&old.form).len() > 0);
+                    equation += usize::from(!equations(&old.form).is_empty());
                     refused += usize::from(new.failed.is_some() && old.failed != new.failed);
                 }
             }
         }
         println!("expression mode fault: {cases} {equation} {refused}");
-        assert!(cases >= 75 && equation >= 7 && refused >= 19, "{cases} {equation} {refused}");
+        assert!(
+            cases >= 75 && equation >= 7 && refused >= 19,
+            "{cases} {equation} {refused}"
+        );
+    }
+
+    /// The acceptance test of pattern mode on generated cases (section
+    /// 8.9): 10,000 cases of the pattern plan, each run on the
+    /// operations the old checker is a judge of ([`old_judges`]), agree,
+    /// in the success mode and, 2,000 of them, in the explaining mode;
+    /// and the fixed cases of the observation tests above agree
+    /// (equations and their direction, the arguments of one path by the
+    /// flags, `reify`, what a failure leaves, rows that clash). No seed
+    /// is pinned: the design turn had no build to run them against, so a
+    /// seed that differs is read against the OCaml lines of 8.9 before
+    /// anything is pinned (the build prompt says how).
+    ///
+    /// Reaches: R3m, R3e, R3f, R3n, R3h, R3r.
+    #[test]
+    #[ignore = "R3r build"]
+    fn pattern_plan_agrees_on_generated_cases() {
+        let program = compile(PATTERN_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN);
+        let mut chain = pattern(0, 0, 2, 3);
+        chain.extend([Op::Child(0, 1), Op::Gadt(3, 1, 3)]);
+        let mut twice = refine(3, 2);
+        twice.extend([
+            Op::Child(2, 1),
+            Op::Instance(3),
+            Op::Child(5, 2),
+            Op::Gadt(4, 6, 3),
+        ]);
+        let mut compatible = refine(5, 3);
+        compatible.extend([Op::Child(0, 4), Op::Gadt(1, 4, 3)]);
+        let mut again = pattern(6, 2, 3, 3);
+        again.extend([Op::Child(1, 0), Op::Child(2, 0), Op::Unify(3, 4)]);
+        let below = vec![
+            Op::Instance(3),
+            Op::Child(0, 2),
+            Op::BeginDef,
+            Op::Instance(0),
+            Op::Child(2, 0),
+            Op::Gadt(3, 1, 3),
+        ];
+        let mut cases: Vec<Vec<Op>> = vec![chain, twice, compatible, again, below, refine(5, 3)];
+        for (value, left, right) in [
+            (0, 0, 2),
+            (0, 2, 0),
+            (0, 0, 1),
+            (0, 1, 0),
+            (0, 0, 3),
+            (0, 2, 3),
+            (1, 0, 1),
+            (1, 0, 3),
+            (2, 0, 1),
+            (4, 0, 2),
+            (4, 0, 3),
+            (5, 0, 2),
+            (6, 0, 1),
+            (6, 2, 3),
+        ] {
+            for flags in 0..4 {
+                cases.push(pattern(value, left, right, flags));
+            }
+        }
+        for (index, ops) in cases.iter().enumerate() {
+            compare(index as u64, &program, plan, ops, Fault::None)
+                .unwrap_or_else(|e| panic!("{e}"));
+        }
+        let coverage = run_cases_except(Plan::new(Tier::Full, PATTERN_PLAN), &[]);
+        assert_eq!(coverage.cases, 10_000);
+        assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
+        run_cases(Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN), 1, 20, 100);
     }
 
     /// 10,000 cases of everything on programs with polymorphic fields,
