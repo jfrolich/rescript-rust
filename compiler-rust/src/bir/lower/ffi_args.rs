@@ -52,10 +52,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         _cx: Cx,
         label: LabelNoname,
         attr: &Attr,
-        arg: &mut Out,
+        arg: &mut Out<B>,
     ) {
-        let value = arg.value.expect("external argument value");
-        let r = B::at(value);
+        let r = B::of(arg.value.as_ref().expect("external argument value"));
         let wrapped =
             label == LabelNoname::ArgOptional && self.js.kind(&self.arena, r) == Kind::Optional;
         let target = if wrapped { self.js.operand(&self.arena, r, 0) } else { r };
@@ -76,7 +75,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             return;
         }
         let held = if wrapped {
-            let mut shell = B::from_node(value);
+            let mut shell = arg.value.take().expect("external argument value");
             self.js.take_operands(&mut self.arena, &mut shell);
             let target = self.js.pop();
             let replacement = self.hold_in_variable(arg, target);
@@ -86,15 +85,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.js.assume_strict(&mut self.arena, &mut wrapper);
             wrapper
         } else {
-            self.hold_in_variable(arg, B::from_node(value))
+            let value = arg.value.take().expect("external argument value");
+            self.hold_in_variable(arg, value)
         };
-        arg.value = Some(B::node(held));
+        arg.value = Some(held);
     }
 
     /// `value` declared in a fresh variable in the argument's reserved
     /// suffix slot; the strictly pure reference to the variable is
     /// returned. O(1).
-    fn hold_in_variable(&mut self, arg: &Out, value: B::E) -> B::E {
+    fn hold_in_variable(&mut self, arg: &Out<B>, value: B::E) -> B::E {
         let var = self.fresh_variable("tmp");
         let statement = self.js.declare(&mut self.arena, LetKind::Strict, var, Some(value));
         self.statements.fill_held(
@@ -108,7 +108,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// X:254 hold_external_args. O(specs + arguments); constants
     /// consume no runtime argument, and unmatched arguments retain their order.
-    pub(super) fn hold_external_args(&mut self, cx: Cx, specs: &[Param], args: &mut [Out]) {
+    pub(super) fn hold_external_args(&mut self, cx: Cx, specs: &[Param], args: &mut [Out<B>]) {
         let mut args = args.iter_mut();
         for spec in specs {
             self.primitive_steps += 1;
@@ -124,7 +124,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// X:278 hold_external_obj_args. O(specs + arguments). One reverse pass records the suffix predicate, then holds are
     /// allocated in source order. No suffix is searched more than once.
-    pub(super) fn hold_external_obj_args(&mut self, cx: Cx, specs: &[ObjParam], args: &mut [Out]) {
+    pub(super) fn hold_external_obj_args(&mut self, cx: Cx, specs: &[ObjParam], args: &mut [Out<B>]) {
         let mut params = std::mem::take(&mut self.ffi_params);
         params.extend(specs.iter().enumerate().filter_map(|(i, p)| {
             (!matches!(
@@ -138,16 +138,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         for (i, arg) in args.iter().enumerate().rev() {
             self.primitive_steps += 1;
             suffix.push(later);
-            let value = arg.value.expect("object argument");
+            let value = arg.value.as_ref().expect("object argument");
             if params.get(i).is_some_and(|&p| {
                 let p = &specs[p];
                 !matches!(p.obj_arg_label, Label::ObjOptional { .. })
                     || matches!(
-                        self.js.kind(&self.arena, B::at(value)),
+                        self.js.kind(&self.arena, B::of(value)),
                         Kind::Undefined | Kind::Optional
                     )
             }) {
-                let r = B::at(value);
+                let r = B::of(value);
                 later.add(
                     self.js.has(&self.arena, r, flag::DELAY_SAFE),
                     self.js.has(&self.arena, r, flag::STRICT),
@@ -167,15 +167,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 Label::ObjOptional { .. } => LabelNoname::ArgOptional,
             };
             self.hold_external_arg(cx, label, &param.obj_arg_type, arg);
-            let value = arg.value.expect("object argument");
-            let r = B::at(value);
+            let r = B::of(arg.value.as_ref().expect("object argument"));
             if label == LabelNoname::ArgOptional
                 && !matches!(self.js.kind(&self.arena, r), Kind::Undefined | Kind::Optional)
                 && !self.js.has(&self.arena, r, flag::DELAY_SAFE)
                 && suffix[count - i - 1].conflicts(self.js.has(&self.arena, r, flag::STRICT))
             {
-                let held = self.hold_in_variable(arg, B::from_node(value));
-                arg.value = Some(B::node(held));
+                let value = arg.value.take().expect("object argument");
+                let held = self.hold_in_variable(arg, value);
+                arg.value = Some(held);
             }
         }
         params.clear();
@@ -681,7 +681,7 @@ mod tests {
             let out = state.probe(Cx::value(), root).unwrap();
             let out = state.realize(Cx::value(), out);
             assert!(!state.statements.has_statements(out.stmts));
-            state.arena.release(out.value.unwrap());
+            state.arena.release(crate::bir::lower::out::row(out.value.unwrap()));
             state.statements.kill(out.stmts);
         };
         let lists_before = state.arena.lists.storage_shape().0;
@@ -756,7 +756,7 @@ mod tests {
             unreachable!()
         };
         let children = children.to_vec();
-        let mut outputs: SmallVec<[Out; 4]> = SmallVec::new();
+        let mut outputs: SmallVec<[Out<crate::bir::j::rows::Rows>; 4]> = SmallVec::new();
         let mut compiler = LambdaCompiler::new();
         let mut expected = crate::lambda::lam_compile_arguments::HeldArgs::new();
         let target = Ident::new("unused", 100, crate::ident::IdentFlags::NONE);
@@ -785,7 +785,7 @@ mod tests {
             Cx::value(),
             Probed::Out(Out {
                 stmts,
-                value: Some(value),
+                value: Some(crate::bir::lower::out::of_row(value)),
                 finished: Finished::False,
             }),
         );
@@ -943,7 +943,7 @@ mod tests {
             let mut source = LamArena::new();
             let root = source.const_(Constant::JsNull);
             let mut state = State::new(bridge::import_lambda(&source, root).unwrap());
-            let mut args: SmallVec<[Out; 4]> = SmallVec::with_capacity(10_000);
+            let mut args: SmallVec<[Out<crate::bir::j::rows::Rows>; 4]> = SmallVec::with_capacity(10_000);
             let mut specs = Vec::new();
             let mut obj_specs = Vec::new();
             for i in 0..10_000 {
@@ -953,7 +953,7 @@ mod tests {
                 state.statements.reserve();
                 args.push(Out {
                     stmts: state.statements.since(start),
-                    value: Some(value),
+                    value: Some(crate::bir::lower::out::of_row(value)),
                     finished: Finished::False,
                 });
                 specs.push(Param {

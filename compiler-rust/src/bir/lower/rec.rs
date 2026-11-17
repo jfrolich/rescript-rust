@@ -151,15 +151,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(s + a) to seal one member's s statements and initialize a self block
     /// of a fields. The last member emits all pooled lists once in group order.
-    pub(super) fn recursive_child(&mut self, cx: Cx, group: Group, index: usize, child: Probed) -> Probed {
+    pub(super) fn recursive_child(&mut self, cx: Cx, group: Group, index: usize, child: Probed<B>) -> Probed<B> {
         let View::LetRec { values, .. } = self.source.view(group.node) else { unreachable!() };
         let count = values.len();
         if index == count { return child; }
         let member = group.base as usize + count - 1 - index;
         let mut out = self.realize(cx, child);
         if self.rec_members[member].mode != Mode::Declare {
-            let value = out.value.take().unwrap_or_else(|| B::node(self.js.undefined(&mut self.arena, false)));
-            self.recursive_block(member, value);
+            let value = out.value.take().unwrap_or_else(|| self.js.undefined(&mut self.arena, false));
+            self.recursive_block(member, B::node(value));
             // Legacy updateDummy/self initialization always produces a normal
             // block output, even when the block value's prelude was finished.
             out.finished = Finished::False;
@@ -193,15 +193,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(deferred realization + discarded body size): append the body using
     /// the ordinary output algebra; no member list is scanned again.
-    pub(super) fn finish_recursive(&mut self, cx: Cx, group: Group, children: impl Iterator<Item = Probed>) -> Probed {
+    pub(super) fn finish_recursive(&mut self, cx: Cx, group: Group, children: impl Iterator<Item = Probed<B>>) -> Probed<B> {
         let body = children.last().expect("recursive body");
         let mut out = self.realize(cx, body);
         if let Some(first) = self.rec_members.get(group.base as usize) {
             let prefix = Out { stmts: Span { start: group.start.start, len: first.end - group.start.start },
                 value: None, finished: first.finished };
             let keep = matches!(cx.cont, Cont::Value(_)).then(|| out.value.take()).flatten();
-            let value = out.value;
-            out = self.append_outputs(prefix, out, value);
+            // T6x-b step 1: two holders of one node (see expr.rs).
+            let value = out.value.take().map(B::node);
+            out.value = value.map(B::from_node);
+            out = self.append_outputs(prefix, out, value.map(B::from_node));
             if keep.is_some() { out.value = keep; }
         }
         self.rec_members.truncate(group.base as usize);
@@ -319,7 +321,7 @@ mod tests {
             let output = s.probe(Cx::value(), root).unwrap();
             let output = s.realize(Cx::value(), output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
-            if let Some(value) = output.value { s.arena.release(value); }
+            if let Some(value) = output.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(output.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

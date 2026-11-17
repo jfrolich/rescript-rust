@@ -128,8 +128,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         cx: Cx,
         resume: &Resume,
         index: usize,
-        child: Probed,
-    ) -> Probed {
+        child: Probed<B>,
+    ) -> Probed<B> {
         if let Resume::Loop(frame) = resume { return self.loop_child(cx, *frame, index, child); }
         if let Resume::Rec(group) = resume { return self.recursive_child(cx, *group, index, child); }
         if let Resume::Try(frame) = resume { return self.try_child(cx, *frame, index, child); }
@@ -145,8 +145,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let mut out = self.realize(cx, child);
             if let Resume::Prim(prim) = resume {
                 if matches!(self.arena.primitive(prim.primitive).primitive, crate::lambda::lam_primitive::Primitive::Pdebugger) {
-                    if let Some(value) = out.value.take() { self.drop_pure_effect(value); }
-                    out.value = Some(B::node(self.js.undefined(&mut self.arena, true)));
+                    if let Some(value) = out.value.take() { self.drop_pure_effect(B::node(value)); }
+                    out.value = Some(self.js.undefined(&mut self.arena, true));
                 }
             }
             self.statements.reserve();
@@ -187,8 +187,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         resume: Resume,
-        mut children: impl Iterator<Item = Probed>,
-    ) -> Probed {
+        mut children: impl Iterator<Item = Probed<B>>,
+    ) -> Probed<B> {
         match resume {
             Resume::Loop(frame) => self.finish_loop(cx, frame),
             Resume::Rec(group) => self.finish_recursive(cx, group, children),
@@ -217,9 +217,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     out.value = value;
                     return Probed::Out(out);
                 }
-                let value = body.value;
+                // T6x-b step 1: the value is kept by the body and given as
+                // the result's (two holders of one node).
+                let value = body.value.take().map(B::node);
+                body.value = value.map(B::from_node);
                 Probed::Out(match first {
-                    Some(first) => self.append_outputs(first, body, value),
+                    Some(first) => self.append_outputs(first, body, value.map(B::from_node)),
                     None => body,
                 })
             }
@@ -233,43 +236,46 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if first.finished == Finished::True {
                     let second = self.realize(cx, tail);
                     if !keeps_value && let Some(value) = first.value.take() {
-                        self.hold_effect(slot, value);
+                        self.hold_effect(slot, B::node(value));
                     }
                     return Probed::Out(self.append_outputs(first, second, None));
                 }
                 let head = first.value.take();
-                let tail = match (head, tail) {
+                let tail = match tail {
                     // 1.5: a free tail after a head without statements is free
                     // in the continuations that convert a value (1.4) too.
-                    (Some(head), Probed::Free(tail))
-                        if !keeps_value && !self.statements.has_statements(first.stmts) =>
+                    Probed::Free(tail)
+                        if head.is_some() && !keeps_value && !self.statements.has_statements(first.stmts) =>
                     {
+                        let Some(head) = head else { unreachable!("tested above") };
                         self.statements.remove_empty(first.stmts);
-                        if self.js.has(&self.arena, B::at(head), flag::STRICT) {
-                            self.js.release(&mut self.arena, B::from_node(head));
+                        if self.js.has(&self.arena, B::of(&head), flag::STRICT) {
+                            self.js.release(&mut self.arena, head);
                             return Probed::Free(tail);
                         }
                         return Probed::Free(self.free.push(Free::Seq { first: head, second: tail }));
                     }
-                    (_, tail) => tail,
+                    tail => tail,
                 };
                 let mut second = self.realize(cx, tail);
                 if let Some(value) = head {
                     if keeps_value && !self.statements.has_statements(second.stmts) {
                         let second_value = second.value.expect("value continuation");
-                        let value = if self.js.has(&self.arena, B::at(value), flag::STRICT) {
-                            self.js.release(&mut self.arena, B::from_node(value));
+                        let value = if self.js.has(&self.arena, B::of(&value), flag::STRICT) {
+                            self.js.release(&mut self.arena, value);
                             second_value
                         } else {
-                            B::node(self.js.seq_rule(&mut self.arena, B::from_node(value), B::from_node(second_value)))
+                            self.js.seq_rule(&mut self.arena, value, second_value)
                         };
                         second.value = Some(value);
                     } else {
-                        self.hold_effect(slot, value);
+                        self.hold_effect(slot, B::node(value));
                     }
                 }
-                let value = second.value;
-                let out = self.append_outputs(first, second, value);
+                // T6x-b step 1: two holders of one node, as above.
+                let value = second.value.take().map(B::node);
+                second.value = value.map(B::from_node);
+                let out = self.append_outputs(first, second, value.map(B::from_node));
                 if !self.statements.has_statements(out.stmts) && let Some(value) = out.value {
                     self.statements.remove_empty(out.stmts);
                     self.probe_leaf(cx, value)
@@ -298,7 +304,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if let Some(loc) = source_loc {
                     self.js.locate(&mut self.arena, &mut value, loc);
                 }
-                self.probe_leaf(cx, B::node(value))
+                self.probe_leaf(cx, value)
             }
         }
     }
@@ -354,7 +360,7 @@ mod allocation_tests {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

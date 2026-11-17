@@ -37,7 +37,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// the callee, create copies in parameter order, then emit assignments in
     /// reverse order. Table growth and names are paid once per variable/copy.
     /// Arguments read iteration bindings, not the copies being assigned.
-    pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: &[NodeId]) -> Probed {
+    pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: &[NodeId]) -> Probed<B> {
         let params = self.tail_frames[frame.0 as usize].params;
         self.tail_frames[frame.0 as usize].triggered = true;
         self.tail_copies.resize(self.arena.vars.len(), None);
@@ -571,7 +571,7 @@ mod tests {
             let output = s.probe(cx, body).unwrap();
             let output = s.realize(cx, output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
-            if let Some(value) = output.value { s.arena.release(value); }
+            if let Some(value) = output.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(output.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

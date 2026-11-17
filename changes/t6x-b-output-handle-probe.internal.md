@@ -1,0 +1,1 @@
+- Probe (not for merge): an output of the backend lowering holds an expression handle of its interface.

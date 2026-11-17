@@ -647,12 +647,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         cx: Cx,
         frame: Switch,
         index: usize,
-        child: Probed,
-    ) -> Probed {
+        child: Probed<B>,
+    ) -> Probed<B> {
         let mut out = self.realize(cx, child);
         let plan = self.switches[frame.0 as usize].as_mut().unwrap();
         if index == 0 {
-            plan.value = out.value.take();
+            plan.value = out.value.take().map(B::node);
             if plan.pending_value {
                 let target = self.fresh_variable("tmp");
                 let declaration = self.statements.reserve();
@@ -666,7 +666,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         } else {
             let start = out.stmts.start;
             if let Some(value) = out.value.take() {
-                self.drop_pure_effect(value);
+                self.drop_pure_effect(B::node(value));
             }
             let p = self.switch_plan(frame);
             // O(1): default-first traversal still writes stable pooled case slots.
@@ -737,7 +737,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// C: compile_switch_assignment/effect/return_block_inner. O(case count).
     /// Direct integers retain switch syntax, including zero/one/two cases.
-    pub(super) fn finish_switch(&mut self, cx: Cx, frame: Switch) -> Probed {
+    pub(super) fn finish_switch(&mut self, cx: Cx, frame: Switch) -> Probed<B> {
         let plan = self.switches[frame.0 as usize]
             .take()
             .expect("live switch frame");
@@ -847,7 +847,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// C: prepend_declaration_or_fold_final_assignment; V: compile_string_switch_inner.
     /// O(trailing holes), amortized linear: trim pops each hole once.
-    fn switch_result(&mut self, cx: Cx, plan: &Plan) -> Probed {
+    fn switch_result(&mut self, cx: Cx, plan: &Plan) -> Probed<B> {
         if let Some(slot) = plan.declaration {
             let target = plan.target.unwrap();
             let kind = match cx.cont {
@@ -895,8 +895,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.unnest(plan.start.start);
         }
         let value = match cx.cont {
-            Cont::Value(_) => Some(B::node(self.js.var(&mut self.arena, plan.target.unwrap()))),
-            Cont::Effect(Tail::No) => Some(B::node(self.js.undefined(&mut self.arena, false))),
+            Cont::Value(_) => Some(self.js.var(&mut self.arena, plan.target.unwrap())),
+            Cont::Effect(Tail::No) => Some(self.js.undefined(&mut self.arena, false)),
             _ => None,
         };
         Probed::Out(Out {
@@ -1076,7 +1076,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// V: compile_small_string_switch_assignment/return/effect, one Cx path.
     /// O(statements consumed by J-S3); the direct-body form copies no run.
-    fn finish_small_switch(&mut self, cx: Cx, plan: &Plan) -> Probed {
+    fn finish_small_switch(&mut self, cx: Cx, plan: &Plan) -> Probed<B> {
         let scrutinee = B::from_node(plan.value.unwrap());
         if plan.form == Form::Body {
             self.js.release(&mut self.arena, scrutinee);
@@ -1310,7 +1310,7 @@ mod tests {
                 state.arena.release(node);
             }
             if let Some(value) = out.value {
-                state.arena.release(value);
+                state.arena.release(crate::bir::lower::out::row(value));
             }
             state.statements.kill(out.stmts);
         };

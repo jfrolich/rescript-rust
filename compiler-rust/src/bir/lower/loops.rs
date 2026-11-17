@@ -74,13 +74,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(s) for the child's emitted statements: seal them once into a list.
     /// For loops the end and start are lowered in allocation order, then their
     /// saved lists are attached in execution order without moving statements.
-    pub(super) fn loop_child(&mut self, cx: Cx, frame: Loop, index: usize, child: Probed) -> Probed {
+    pub(super) fn loop_child(&mut self, cx: Cx, frame: Loop, index: usize, child: Probed<B>) -> Probed<B> {
         let mut out = self.realize(cx, child);
         let body_index = if self.loops[frame.0 as usize].nodes[2].is_some() { 2 } else { 1 };
         if index == body_index {
-            if let Some(value) = out.value.take() { self.drop_pure_effect(value); }
+            if let Some(value) = out.value.take() { self.drop_pure_effect(B::node(value)); }
         } else {
-            self.loops[frame.0 as usize].values[index] = out.value;
+            self.loops[frame.0 as usize].values[index] = out.value.map(B::node);
         }
         let span = self.statements.since(Span { start: out.stmts.start, len: 0 });
         let list = self.statements.take_list(&mut self.js, &mut self.arena, span);
@@ -98,7 +98,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(1), apart from formatting a newly requested label's bounded integer.
     /// A jump only consults its innermost frame and the switch depth.
-    pub(super) fn loop_jump(&mut self, cx: Cx, continue_: bool) -> Result<Probed, Unsupported> {
+    pub(super) fn loop_jump(&mut self, cx: Cx, continue_: bool) -> Result<Probed<B>, Unsupported> {
         assert!(cx.loops.0 != 0, "jump outside a loop");
         let index = cx.loops.0 as usize - 1;
         let label = if cx.switch_depth == 0 { None } else {
@@ -113,7 +113,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let statement = if continue_ { self.js.continue_(&mut self.arena, label) } else { self.js.break_(&mut self.arena, label) };
         self.statements.push(statement);
         let value = self.js.undefined(&mut self.arena, false);
-        Ok(Probed::Out(Out { stmts: self.statements.since(start), value: Some(B::node(value)), finished: Finished::True }))
+        Ok(Probed::Out(Out { stmts: self.statements.since(start), value: Some(value), finished: Finished::True }))
     }
 
     /// O(s): attach s saved prelude statements in execution order. Each
@@ -127,7 +127,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(s) for the saved preludes and (only for statement-valued while
     /// conditions) the body's immediate statements; never walks subtrees.
-    pub(super) fn finish_loop(&mut self, cx: Cx, frame: Loop) -> Probed {
+    pub(super) fn finish_loop(&mut self, cx: Cx, frame: Loop) -> Probed<B> {
         let plan = &self.loops[frame.0 as usize];
         let start = plan.start;
         let blocks = plan.blocks;
@@ -187,7 +187,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         self.statements.push(statement);
         let unit = self.js.undefined(&mut self.arena, false);
-        let mut out = self.leaf(cx, B::node(unit));
+        let mut out = self.leaf(cx, unit);
         out.stmts = self.statements.since(start);
         Probed::Out(out)
     }
@@ -336,7 +336,7 @@ mod tests {
             let output = s.probe(Cx::effect(), root).unwrap();
             let output = s.realize(Cx::effect(), output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
-            if let Some(value) = output.value { s.arena.release(value); }
+            if let Some(value) = output.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(output.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

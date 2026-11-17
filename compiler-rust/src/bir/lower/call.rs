@@ -236,8 +236,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         call: Call,
-        children: impl Iterator<Item = Probed>,
-    ) -> Probed {
+        children: impl Iterator<Item = Probed<B>>,
+    ) -> Probed<B> {
         let call = self.calls[call.0 as usize].take().expect("live call plan");
         while self.calls.last().is_some_and(Option::is_none) { self.calls.pop(); }
         let mut outputs = std::mem::take(&mut self.argument_outputs);
@@ -292,9 +292,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if !self.statements.has_statements(statements) {
             // Holes carry no effects; pop them before returning a free value.
             self.statements.remove_empty(statements);
-            self.probe_leaf(cx, value)
+            self.probe_leaf(cx, B::from_node(value))
         } else {
-            let out = self.leaf(cx, value);
+            let out = self.leaf(cx, B::from_node(value));
             Probed::Out(Out {
                 stmts: self.statements.since(Span {
                     start: statements.start,
@@ -497,7 +497,7 @@ mod tests {
                         Cx::value(),
                         Probed::Out(Out {
                             stmts: Span::default(),
-                            value: Some(value),
+                            value: Some(crate::bir::lower::out::of_row(value)),
                             finished: Finished::False,
                         }),
                     );
@@ -557,7 +557,7 @@ mod allocation_tests {
         let run = |s: &mut State<'_>| {
             let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0; let source_lists = state.source.lists.storage_shape().0;
@@ -646,7 +646,7 @@ mod inline_allocation_tests {
             let run = |s: &mut State<'_>, root| {
                 let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
                 for n in s.statements.statements(out.stmts) { s.arena.release(n); }
-                if let Some(n) = out.value { s.arena.release(n); } s.statements.kill(out.stmts);
+                if let Some(n) = out.value { s.arena.release(crate::bir::lower::out::row(n)); } s.statements.kill(out.stmts);
             };
             macro_rules! stores { ($m:ident, $s:ident) => {
                 $m!($s, arena.nodes); $m!($s, arena.parents); $m!($s, arena.free_nodes); $m!($s, arena.release_stack);

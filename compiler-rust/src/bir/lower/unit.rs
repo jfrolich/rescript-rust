@@ -1,5 +1,6 @@
 //! N1/K11: C:663 compile_deps_program_in_arena / C:1513 continues_toplevel_spine.
 use super::*;
+use super::js::Js as _;
 
 /// N1/K11: C:663 compile_deps_program_in_arena / C:1513 continues_toplevel_spine.
 /// Consume top-level groups iteratively. No group in this slice creates loop
@@ -33,7 +34,7 @@ pub(super) fn lower(
     if locations.is_some() {
         state.source_functions = u32::try_from(state.arena.vars.funcs.len()).expect("function header count");
     }
-    let mut accumulated: Option<Out> = None;
+    let mut accumulated: Option<Out<crate::bir::j::rows::Rows>> = None;
     loop {
         let view = state.source.view(node);
         let record_candidate = matches!(view, View::Let { value: Some(value), .. }
@@ -67,7 +68,7 @@ pub(super) fn lower(
         let mut out = state.realize(cx, probed);
         if next.is_some() {
             if let Some(value) = out.value.take() {
-                state.drop_pure_effect(value);
+                state.drop_pure_effect(crate::bir::j::rows::Rows::node(value));
                 out.stmts = state.statements.since(Span { start: out.stmts.start, len: 0 });
             }
         }
@@ -81,13 +82,17 @@ pub(super) fn lower(
                 out = state.append_outputs(out, tail, None);
                 out.value = value;
                 if let Some(first) = accumulated.take() {
-                    let value = out.value;
-                    out = state.append_outputs(first, out, value);
+                    let value = out.value.take().map(crate::bir::j::rows::Rows::node);
+                    out.value = value.map(crate::bir::j::rows::Rows::from_node);
+                    out = state.append_outputs(first, out, value.map(crate::bir::j::rows::Rows::from_node));
                 }
                 return Ok(state.complete_unit(Probed::Out(out)));
             }
         }
-        let value = out.value;
+        let mut out = out;
+        let value = out.value.take().map(crate::bir::j::rows::Rows::node);
+        out.value = value.map(crate::bir::j::rows::Rows::from_node);
+        let value = value.map(crate::bir::j::rows::Rows::from_node);
         let out = match accumulated.take() {
             Some(first) => state.append_outputs(first, out, value),
             None => out,
