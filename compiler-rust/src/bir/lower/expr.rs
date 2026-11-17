@@ -280,10 +280,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     unreachable!("return was realized")
                 };
                 assert!(body.value.is_none());
-                let list = self.statements.take_list(&mut self.js, &mut self.arena, body.stmts);
-                let body = self.js.block_of(&mut self.arena, list);
+                let body = self.statements.take_list(&mut self.js, &mut self.arena, body.stmts);
                 let body = match loop_ {
-                    Some(frame) => B::stmt_from_node(self.loop_function_body(frame, header, B::stmt_node(body))),
+                    Some(frame) => self.loop_function_body(frame, header, body),
                     None => body,
                 };
                 let source_loc = Some(self.arena.function(header).loc)
@@ -294,7 +293,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 } else {
                     header
                 };
-                let mut value = self.js.function_of_block(&mut self.arena, header, body);
+                let mut value = self.js.function(&mut self.arena, header, body);
                 super::names::close(&mut self.arena, &self.idents, header);
                 if let Some(loc) = source_loc {
                     self.js.locate(&mut self.arena, &mut value, loc);
