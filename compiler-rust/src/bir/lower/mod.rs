@@ -788,18 +788,24 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
         // Export coercion takes ownership of the root's identifier vector.
         // Isolate that output-boundary payload so shared source/block shapes
         // remain immutable for any other surviving block occurrence.
-        let value = out.value.map(B::node);
-        if let Some(mut end) = value {
-            while let View::JSeq { second, .. } = self.arena.view(end) { end = second; }
-            if let View::JBlockLit { info, .. } = self.arena.view(end) {
-                if let crate::lambda::TagInfo::ModuleExport(exports) = self.arena.block_tag(info) {
-                    let tag = crate::lambda::TagInfo::ModuleExport(exports.clone());
-                    let owned = self.arena.js_info(crate::bir::JsPayload::Block(tag));
-                    self.arena.nodes[end.index()].set_block_info(owned);
-                }
+        if let Some(value) = &out.value {
+            let mut end = B::of(value);
+            while self.js.kind(&self.arena, end) == crate::emit::row::Kind::Seq { end = self.js.operand(&self.arena, end, 1); }
+            if self.js.kind(&self.arena, end) == crate::emit::row::Kind::BlockLit
+                && let Some(info) = self.js.info_of(&self.arena, end)
+                && let crate::lambda::TagInfo::ModuleExport(exports) = self.arena.block_tag(info)
+            {
+                let tag = crate::lambda::TagInfo::ModuleExport(exports.clone());
+                // PROBE-GAP 2: replace the payload of a node held below the
+                // value in place (the block literal at the end of the comma
+                // spine); the interface has no write through a reference.
+                let end = self.js.id(&self.arena, end) as usize;
+                let owned = self.arena.js_info(crate::bir::JsPayload::Block(tag));
+                self.arena.nodes[end].set_block_info(owned);
             }
         }
-        let exports = self.extract_exports(value, out.finished);
+        // `extract_exports` reads rows until T6x-e.
+        let exports = self.extract_exports(out.value.map(B::node), out.finished);
         let run = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,
@@ -825,12 +831,12 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     #[cfg(test)]
     fn complete(mut self, cx: Cx, probed: Probed<B>) -> Lowered {
         let out = self.realize(cx, probed);
-        let value = out
-            .value
-            .map(B::node)
-            .unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
-        let value = self.arena.new_node(View::SExp { value }, 0);
-        self.statements.push(B::stmt_from_node(value));
+        let value = match out.value {
+            Some(value) => value,
+            None => self.js.undefined(&mut self.arena, false),
+        };
+        let value = self.js.exp(&mut self.arena, value);
+        self.statements.push(value);
         let run = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,
@@ -956,15 +962,10 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
     /// performed twice.
     fn enter(&mut self, cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume, B>, Unsupported> {
         let value = match self.source.view(node) {
-            View::Var { var } => self.pure_expression(View::Var { var }, 0),
-            View::Global { module } => self.pure_expression(
-                View::JQualified {
-                    module,
-                    member: None,
-                },
-                0,
-            ),
-            View::Const { value } => self.constant(value),
+            View::Var { var } => self.js.var(&mut self.arena, var),
+            View::Global { module } => self.js.qualified(&mut self.arena, module, None),
+            // `constant` gives a row until T6x-d.
+            View::Const { value } => B::from_node(self.constant(value)),
             View::Apply { callee, info, .. } => {
                 let args = self.source.node(node).apply_args();
                 let tail = self.self_call(cx, callee);
@@ -1024,8 +1025,8 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
                 use crate::lambda::lam_primitive::Primitive;
                 if matches!(self.arena.primitive(primitive).primitive,
                     Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }) if name.as_str() == "make") {
-                    if let Some(value) = self.flat_make_field(node).map(B::node) {
-                        return Ok(ProbePlan::Ready(self.probe_leaf(cx, B::from_node(value))));
+                    if let Some(value) = self.flat_make_field(node) {
+                        return Ok(ProbePlan::Ready(self.probe_leaf(cx, value)));
                     }
                 }
                 return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
@@ -1115,7 +1116,7 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
             | View::SDebugger
             | View::SRest { .. } => unreachable!("expected level-L source"),
         };
-        Ok(ProbePlan::Ready(self.probe_leaf(cx, B::from_node(value))))
+        Ok(ProbePlan::Ready(self.probe_leaf(cx, value)))
     }
     /// K4/K2/K10: C:2411 compile_let_binding_output / C:4603 compile_effect_output / C:1997 with_function_scope.
     fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>) {
@@ -1157,18 +1158,18 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
                 Some(value)
             }
             Cont::Declare(kind, var) => {
-                let stmt = super::j::declare(&mut self.arena, kind, var, B::node(value));
-                self.statements.push(B::stmt_from_node(stmt));
+                let stmt = self.js.declare(&mut self.arena, kind, var, Some(value));
+                self.statements.push(stmt);
                 None
             }
             Cont::Assign(var) => {
-                let stmt = super::j::assign(&mut self.arena, var, B::node(value));
-                self.statements.push(B::stmt_from_node(stmt));
+                let stmt = self.js.assign(&mut self.arena, var, value);
+                self.statements.push(stmt);
                 None
             }
             Cont::Effect(Tail::Return(_)) => {
-                let stmt = super::j::return_value(&mut self.arena, B::node(value));
-                self.statements.push(B::stmt_from_node(stmt));
+                let stmt = self.js.return_(&mut self.arena, value);
+                self.statements.push(stmt);
                 finished = Finished::True;
                 None
             }
@@ -1182,12 +1183,11 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
     /// K2: C:4715 append_effect_output, where the value is kept: a comma,
     /// or the tail alone when the head has no effect. Constant.
     fn seq(&mut self, _: Cx, first: B::E, mut second: Out<B>) -> Out<B> {
-        let first = B::node(first);
-        if self.arena.node(first).flags().contains(super::NodeFlags::STRICT) {
-            self.arena.release(first);
+        if self.js.has(&self.arena, B::of(&first), crate::emit::row::flag::STRICT) {
+            self.js.release(&mut self.arena, first);
         } else {
-            let value = B::node(second.value.expect("the tail of a kept sequence has a value"));
-            second.value = Some(B::from_node(super::j::norm::jm1_js_seq(&mut self.arena, first, value)));
+            let value = second.value.take().expect("the tail of a kept sequence has a value");
+            second.value = Some(self.js.seq_rule(&mut self.arena, first, value));
         }
         second
     }
@@ -1195,7 +1195,8 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
     /// statements. One step per comma operand of the head.
     fn effect(&mut self, first: B::E) -> Span {
         let mark = self.statements.mark();
-        self.drop_pure_effect(B::node(first));
+        let statements = &mut self.statements;
+        self.js.effect(&mut self.arena, first, |s| statements.push(s));
         self.statements.since(mark)
     }
     /// R1–R5: realize a deferred conditional from its value operands.
