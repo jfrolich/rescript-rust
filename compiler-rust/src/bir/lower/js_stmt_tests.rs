@@ -5,7 +5,7 @@
 //! two arenas that start equal, once through [`JsStmt`] on [`Rows`] and
 //! once with the calls the lowering makes today, and `Bir::dump` of the two
 //! must be equal. No expected row is written down.
-use super::{JsStmt, Range};
+use super::{IfHead, JsStmt, Range, Runs};
 use crate::bir::j::rows::{E, Rows};
 use crate::bir::j::rows_stmt::S;
 use crate::bir::j::{norm, plain};
@@ -86,6 +86,8 @@ enum St {
     Break,
     /// `throw x;`
     Throw,
+    /// `{}`: an explicit block without a statement.
+    Empty,
 }
 
 fn statement(r: &mut Rows, u: &mut Unit, st: St) -> S {
@@ -106,6 +108,10 @@ fn statement(r: &mut Rows, u: &mut Unit, st: St) -> S {
             let x = r.var(a, u.x);
             r.throw(a, x)
         }
+        St::Empty => {
+            let list = r.list(a, 0, std::iter::empty());
+            r.explicit_block(a, list)
+        }
     }
 }
 
@@ -125,6 +131,10 @@ fn statement_today(u: &mut Unit, st: St) -> NodeId {
         St::Throw => {
             let value = var(b, u.x);
             plain::node(b, View::SThrow { value }, 0)
+        }
+        St::Empty => {
+            let list = b.lists.push(&[]);
+            b.explicit_block_from_list(list)
         }
     }
 }
@@ -149,6 +159,7 @@ fn sizes() {
     assert_eq!(std::mem::size_of::<Option<S>>(), 8);
     assert_eq!(std::mem::size_of::<<Rows as JsStmt>::L>(), 4);
     assert_eq!(std::mem::size_of::<Range<E>>(), 16);
+    assert_eq!(std::mem::size_of::<IfHead<S, Span>>(), 16);
 }
 
 /// A statement is consumed by what it is given to; a list is an index.
@@ -247,6 +258,7 @@ fn a_list_is_the_pool_list_of_its_statements() {
                         St::Return => Kind::Return,
                         St::Break => Kind::Break,
                         St::Throw => Kind::Throw,
+                        St::Empty => Kind::Block,
                     };
                     assert_eq!(r.kind_at(&u.b, list, index as u32), kind);
                 }
@@ -947,6 +959,7 @@ fn a_guard_is_taken_apart_and_rebuilt_over_its_blocks() {
                         St::Throw => Kind::Throw,
                         St::Break => Kind::Break,
                         St::Call => Kind::Exp,
+                        St::Empty => Kind::Block,
                     };
                     assert_eq!(r.branch_last_kind(&u.b, &statement, false), Some(last));
                     assert_eq!(r.branch_last_kind(&u.b, &statement, true), None);
@@ -1010,6 +1023,54 @@ fn a_function_over_a_block_is_the_function_over_its_list() {
             },
         );
     }
+}
+
+/// The body of a function through the tail loop of `tail.rs`, as today
+/// (`block`: the body is made a block, taken apart again, and the function
+/// is built over a block) and as T6x-a makes it (the body stays a list, its
+/// statements are taken by position, and the function is built over the
+/// list): the steps of each, and the function.
+fn loop_function(statements: usize, block: bool) -> (u64, String) {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let body = run(&mut r, &mut u, &vec![St::Call; statements]);
+    let before = r.steps();
+    let mut moved = Vec::with_capacity(statements);
+    let a = &mut u.b;
+    if block {
+        let body = r.block_of(a, body);
+        r.unblock(a, body, |s| moved.push(s));
+    } else {
+        for index in 0..r.len(a, body) {
+            moved.push(r.take_at(a, body, index));
+        }
+    }
+    let list = r.list(a, statements as u32, moved.into_iter());
+    let condition = r.boolean(a, true);
+    let loop_ = r.while_(a, condition, list, None);
+    let list = r.list(a, 1, std::iter::once(loop_));
+    let function = if block {
+        let body = r.block_of(a, list);
+        r.function_of_block(a, u.header, body)
+    } else {
+        r.function(a, u.header, list)
+    };
+    let steps = r.steps() - before;
+    let mut tree = String::new();
+    shape(&u.b, Rows::node(function), &mut tree);
+    (steps, tree)
+}
+
+/// T6x-a, `tail.rs::loop_function_body` on lists: the same function, with
+/// one block fewer made and released, and one step fewer per statement of
+/// the body. Deleted with `function_of_block`.
+#[test]
+fn a_loop_function_over_a_list_is_the_one_over_a_block_in_fewer_steps() {
+    assert_eq!(loop_function(3, true).1, loop_function(3, false).1);
+    let saved = |statements: usize| loop_function(statements, true).0 - loop_function(statements, false).0;
+    let (thousand, ten_thousand) = (saved(1_000), saved(10_000));
+    assert_eq!(ten_thousand - thousand, 9_000, "{thousand} {ten_thousand}");
+    assert_eq!(thousand, 1_000 + 3);
 }
 
 #[test]
@@ -1127,6 +1188,287 @@ fn a_declaration_gives_its_variable_and_a_block_the_ids_of_its_statements() {
     assert_eq!(r.steps(), before);
     // The statements are still the block's.
     assert_eq!(r.owner(&u.b, ids[0]), Some(Rows::stmt_node(block).0));
+}
+
+/// `block_ids` gives one id per statement, in order, and counts no step:
+/// at 1,000 and at 10,000 statements the reader leaves `steps` where it
+/// was, and what it gives grows with the block and nothing else.
+#[test]
+fn the_ids_of_ten_thousand_statements_of_a_block_cost_no_step() {
+    let given = |statements: usize| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let list = run(&mut r, &mut u, &vec![St::Call; statements]);
+        let block = r.block_of(&mut u.b, list);
+        let (mut ids, before) = (Vec::with_capacity(statements), r.steps());
+        r.block_ids(&u.b, &block, |id| ids.push(id));
+        assert_eq!(r.steps(), before);
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(ids.iter().all(|&id| r.kind_of(&u.b, id) == Kind::Exp));
+        ids.len()
+    };
+    assert_eq!((given(1_000), given(10_000)), (1_000, 10_000));
+}
+
+/// The id of a statement in hand is the id every reader by id knows it by:
+/// the owner of its value, its kind by id, and what a block gives for it
+/// once it is in one. Reading it takes nothing and counts nothing.
+#[test]
+fn a_statement_in_hand_gives_the_id_its_readers_know_it_by() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let statements = [St::Call, St::Return, St::Break, St::Throw].map(|st| statement(&mut r, &mut u, st));
+    let before = r.steps();
+    let ids: Vec<u32> = statements.iter().map(|s| r.stmt_id(&u.b, s)).collect();
+    assert_eq!(r.steps(), before);
+    for (s, &id) in statements.iter().zip(&ids) {
+        assert_eq!(r.kind_of(&u.b, id), r.stmt_kind(&u.b, s));
+        if let Some(value) = r.value_of(&u.b, s) {
+            assert_eq!(r.owner(&u.b, r.id(&u.b, value)), Some(id));
+        }
+        // Read twice, the same; and no two statements share one.
+        assert_eq!(r.stmt_id(&u.b, s), id);
+        assert_eq!(ids.iter().filter(|&&other| other == id).count(), 1);
+    }
+    let list = r.list(&mut u.b, 4, statements.into_iter());
+    let block = r.block_of(&mut u.b, list);
+    let mut given = Vec::new();
+    r.block_ids(&u.b, &block, |id| given.push(id));
+    assert_eq!(given, ids);
+    // On rows it is the row: what a test reads beside the handle.
+    assert_eq!(block.row().0, r.stmt_id(&u.b, &block));
+}
+
+/// Runs for `if_head` as the lowering's statement stack keeps them: slots
+/// that own the statements where they were pushed, a run a span of slots,
+/// a consumed run left as holes. `touched` counts every statement read in
+/// place or moved, so a test can show what a rule did not look at.
+#[derive(Default)]
+struct Slots {
+    slots: Vec<Option<S>>,
+    /// The slots of the explicit empty blocks, in order, as the stack
+    /// notes them where they are placed.
+    empties: Vec<u32>,
+    touched: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Span {
+    start: u32,
+    len: u32,
+}
+
+impl Slots {
+    fn push_run(&mut self, r: &mut Rows, u: &mut Unit, shape: &[St]) -> Span {
+        let start = self.slots.len() as u32;
+        for &st in shape {
+            let s = statement(r, u, st);
+            if r.is_empty_block(&u.b, &s) {
+                self.empties.push(self.slots.len() as u32);
+            }
+            self.slots.push(Some(s));
+        }
+        Span { start, len: shape.len() as u32 }
+    }
+    fn range(run: Span) -> std::ops::Range<usize> {
+        run.start as usize..(run.start + run.len) as usize
+    }
+    /// The statements still in `run`.
+    fn live(&self, run: Span) -> usize {
+        self.slots[Self::range(run)].iter().flatten().count()
+    }
+    fn drain(&mut self, run: Span) -> impl Iterator<Item = S> + '_ {
+        self.slots[Self::range(run)].iter_mut().filter_map(Option::take)
+    }
+}
+
+impl Runs<Rows> for Slots {
+    type Run = Span;
+    fn trim(&mut self, js: &mut Rows, a: &mut Bir, run: Span) {
+        let inside = |slot: u32| run.start <= slot && slot < run.start + run.len;
+        for at in 0..self.empties.len() {
+            if inside(self.empties[at]) {
+                let s = self.slots[self.empties[at] as usize].take().expect("a noted empty block");
+                self.touched += 1;
+                js.release_stmt(a, s);
+            }
+        }
+        self.empties.retain(|&slot| !inside(slot));
+    }
+    fn empty(&mut self) -> Span {
+        Span { start: 0, len: 0 }
+    }
+    fn last(&mut self, run: Span) -> Option<&S> {
+        let last = self.slots[Self::range(run)].iter().rev().find_map(Option::as_ref)?;
+        self.touched += 1;
+        Some(last)
+    }
+    fn only(&mut self, run: Span) -> Option<&S> {
+        let mut live = self.slots[Self::range(run)].iter().flatten();
+        let first = live.next()?;
+        self.touched += 1;
+        if live.next().is_some() {
+            self.touched += 1;
+            return None;
+        }
+        Some(first)
+    }
+    fn release(&mut self, js: &mut Rows, a: &mut Bir, run: Span) {
+        for at in Self::range(run) {
+            if let Some(s) = self.slots[at].take() {
+                self.touched += 1;
+                js.release_stmt(a, s);
+            }
+        }
+    }
+    fn take(&mut self, js: &mut Rows, a: &mut Bir, run: Span) -> ListId {
+        let count = self.live(run);
+        self.touched += count;
+        js.list(a, count as u32, self.drain(run))
+    }
+}
+
+/// The branches `if_head` is tried on: `SHAPES`, and runs with explicit
+/// empty blocks before, between and after their statements (rule 0 of
+/// J-S3 drops those first).
+const HEAD_SHAPES: [&[St]; 10] = [
+    &[],
+    &[St::Call],
+    &[St::Return],
+    &[St::Break],
+    &[St::Call, St::Return],
+    &[St::Call, St::Call, St::Throw],
+    &[St::Empty],
+    &[St::Empty, St::Return],
+    &[St::Call, St::Empty],
+    &[St::Empty, St::Call, St::Empty, St::Break, St::Empty],
+];
+
+/// The tree below `node` written out: each node's operation and `aux`, a
+/// variable's id and a number's value, then its children in order. Two
+/// trees built at different rows are the same tree when this is equal.
+fn shape(b: &Bir, node: NodeId, out: &mut String) {
+    use std::fmt::Write;
+    write!(out, "({:?}/{}", b.node(node).op(), b.node(node).aux()).unwrap();
+    match b.view(node) {
+        View::Var { var } => write!(out, " v{}", var.index()).unwrap(),
+        View::JNumber { value } => write!(out, " {:?}", b.constant(value)).unwrap(),
+        _ => {}
+    }
+    let mut children = Vec::new();
+    b.view(node).children_into(&mut children);
+    for child in children {
+        shape(b, child, out);
+    }
+    out.push(')');
+}
+
+/// J-S3 on two runs in place is J-S3 on two lists: `if_head`, then the
+/// statement and the kept run as one statement (or `if_` when no rule of
+/// the head applies), is the statement `norm::js3_simplify_if` builds from
+/// the same branches as pool lists. Both are built in one arena and
+/// compared as trees, for every test and every pair of branches: rules 0
+/// to 6 of the row J-S3 of BACKEND_LOWERING 6.
+#[test]
+fn if_head_over_two_runs_is_rules_0_to_6_of_j_s3() {
+    let mut heads = 0;
+    for operand in VALUES {
+        for yes in HEAD_SHAPES {
+            for no in HEAD_SHAPES {
+                let mut u = unit();
+                let mut r = Rows::default();
+                let mut slots = Slots::default();
+                let (mut then_, mut else_) = (slots.push_run(&mut r, &mut u, yes), slots.push_run(&mut r, &mut u, no));
+                let mut test = value(&mut r, &mut u, operand);
+                let in_place = match r.if_head(&mut u.b, &mut slots, &mut test, &mut then_, &mut else_) {
+                    Some(IfHead { statement, tail }) => {
+                        heads += 1;
+                        // What is not the tail was consumed.
+                        assert_eq!(slots.live(Span { start: 0, len: slots.slots.len() as u32 }), slots.live(tail));
+                        let mut statements: Vec<S> = statement.into_iter().collect();
+                        statements.extend(slots.drain(tail));
+                        if statements.len() == 1 {
+                            statements.pop().unwrap()
+                        } else {
+                            let list = r.list(&mut u.b, statements.len() as u32, statements.into_iter());
+                            r.explicit_block(&mut u.b, list)
+                        }
+                    }
+                    None => {
+                        let (yes, no) = (slots.take(&mut r, &mut u.b, then_), slots.take(&mut r, &mut u.b, else_));
+                        r.if_(&mut u.b, test, yes, no)
+                    }
+                };
+                let (then_, else_) = (run_today(&mut u, yes), run_today(&mut u, no));
+                let test = value_today(&mut u, operand);
+                let pooled = norm::js3_simplify_if(&mut u.b, test, then_, else_);
+                let (mut left, mut right) = (String::new(), String::new());
+                shape(&u.b, Rows::stmt_node(in_place), &mut left);
+                shape(&u.b, pooled, &mut right);
+                assert_eq!(left, right, "if ({operand:?}) {yes:?} else {no:?}");
+            }
+        }
+    }
+    // The head applies to most pairs; the rest went through `if_`.
+    assert!(heads > 600 && heads < VALUES.len() * HEAD_SHAPES.len() * HEAD_SHAPES.len(), "{heads}");
+}
+
+/// What one `if_head` costs for a conditional `if (x) yes else no` whose
+/// branches have `yes` and `no` statements before their last: the steps of
+/// the call and the statements the runs were asked for or moved.
+fn head_cost(test: Value, yes: (usize, St), no: (usize, Option<St>)) -> (u64, usize, usize) {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let mut slots = Slots::default();
+    let long = |count: usize, last: Option<St>| {
+        let mut shape = vec![St::Call; count];
+        shape.extend(last);
+        shape
+    };
+    let (yes, no) = (long(yes.0, Some(yes.1)), long(no.0, no.1));
+    let (mut then_, mut else_) = (slots.push_run(&mut r, &mut u, &yes), slots.push_run(&mut r, &mut u, &no));
+    let mut test = value(&mut r, &mut u, test);
+    let before = r.steps();
+    let head = r.if_head(&mut u.b, &mut slots, &mut test, &mut then_, &mut else_).expect("a rule of the head");
+    (r.steps() - before, slots.touched, slots.live(head.tail))
+}
+
+/// The cost of `if_head` follows what it consumes and not what it keeps:
+/// each relation is between a run of 1,000 statements and one of 10,000.
+#[test]
+fn if_head_costs_what_it_consumes_and_does_not_read_the_tail() {
+    const SIZES: [usize; 3] = [1_000, 2_000, 10_000];
+    // Rule 6: a then-run that ends in a `return` becomes the guard, moved
+    // once; the else-run is the tail.
+    let guard = SIZES.map(|n| head_cost(Value::X, (n, St::Return), (7, None)));
+    assert_eq!(guard[2].0 - guard[0].0, 9 * (guard[1].0 - guard[0].0), "{guard:?}");
+    assert_eq!(guard[1].0 - guard[0].0, 1_000, "one step per statement moved: {guard:?}");
+    let tail = SIZES.map(|n| head_cost(Value::X, (7, St::Return), (n, None)));
+    for (cost, size) in tail.iter().zip(SIZES) {
+        // The same steps and the same statements touched whatever the
+        // tail's length, and the tail is where it was, whole.
+        assert_eq!((cost.0, cost.1), (tail[0].0, tail[0].1), "{tail:?}");
+        assert_eq!(cost.2, size);
+    }
+    assert!(tail[0].1 < 16, "the guard's 8 statements and a constant: {tail:?}");
+    // Rule 5: a lone `return` in the else-run becomes `if (!x) return y;`
+    // and the then-run is the tail, whatever its length.
+    let lone = SIZES.map(|n| head_cost(Value::X, (n, St::Call), (0, Some(St::Return))));
+    for (cost, size) in lone.iter().zip(SIZES) {
+        assert_eq!((cost.0, cost.1), (lone[0].0, lone[0].1), "{lone:?}");
+        assert_eq!(cost.2, size + 1);
+    }
+    assert!(lone[0].1 < 8, "{lone:?}");
+    // Rule 0: a test that is `true` keeps the then-run and releases the
+    // else-run, one step per node released.
+    let dropped = SIZES.map(|n| head_cost(Value::True, (7, St::Call), (n, None)));
+    assert_eq!(dropped[2].0 - dropped[0].0, 9 * (dropped[1].0 - dropped[0].0), "{dropped:?}");
+    assert!(dropped[1].0 > dropped[0].0);
+    let kept = SIZES.map(|n| head_cost(Value::True, (n, St::Call), (7, None)));
+    for (cost, size) in kept.iter().zip(SIZES) {
+        assert_eq!((cost.0, cost.1), (kept[0].0, kept[0].1), "{kept:?}");
+        assert_eq!(cost.2, size + 1);
+    }
 }
 
 /// `while (true) { x; while (true) { ... } }`, `depth` loops deep, around
