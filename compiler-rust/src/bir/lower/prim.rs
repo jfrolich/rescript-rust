@@ -104,8 +104,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// P: compile_primitive_js / compile_debugger source locations on statements.
     /// O(1): one location lookup and one statement push.
-    fn primitive_statement(&mut self, statement: NodeId, loc: crate::lambda::LamLoc) {
-        let mut statement = B::stmt_from_node(statement);
+    fn primitive_statement(&mut self, mut statement: B::S, loc: crate::lambda::LamLoc) {
         if self
             .locations
             .and_then(|locations| locations.get(loc))
@@ -113,7 +112,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         {
             self.js.locate_stmt(&mut self.arena, &mut statement, loc);
         }
-        self.statements.push(B::stmt_node(statement));
+        self.statements.push(statement);
     }
 
     /// P: compile_primitive_js. O(a + emitted metadata bytes), plus sequencing
@@ -612,14 +611,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     self.js.release(&mut self.arena, B::from_node(value));
                 }
                 let statement = self.js.debugger(&mut self.arena);
-                self.primitive_statement(B::stmt_node(statement), payload.loc);
+                self.primitive_statement(statement, payload.loc);
                 self.js.undefined(&mut self.arena, true)
             }
             // P: compile_primitive_js, Praise; conversion never binds a thrown value.
             Primitive::Praise => {
                 let value = self.first_value(values);
                 let statement = self.js.throw(&mut self.arena, value);
-                self.primitive_statement(B::stmt_node(statement), payload.loc);
+                self.primitive_statement(statement, payload.loc);
                 let value = match cx.cont {
                     Cont::Value(_) | Cont::Effect(Tail::No) => {
                         Some(B::node(self.js.undefined(&mut self.arena, false)))

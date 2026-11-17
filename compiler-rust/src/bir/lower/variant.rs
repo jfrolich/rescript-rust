@@ -184,7 +184,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         if let Some((kind, var)) = binding {
             let statement = self.js.declare(&mut self.arena, kind, var, None);
-            self.statements.push(B::stmt_node(statement));
+            self.statements.push(statement);
         }
         let target = binding.map(|(_, var)| var);
         let body_cx = Cx {
@@ -295,7 +295,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let var = self.fresh_variable("tmp");
                 let statement =
                     self.js.declare(&mut self.arena, LetKind::Strict, var, Some(B::from_node(value)));
-                self.statements.push(B::stmt_node(statement));
+                self.statements.push(statement);
                 B::node(self.js.var(&mut self.arena, var))
             } else {
                 value
@@ -477,11 +477,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         if plan.mixed {
             let test = self.named_literal_test(&mut plan);
-            let statement = B::stmt_from_node(self.if_statement(test, plan.sides[0].run, plan.sides[1].run));
+            let statement = self.if_statement(test, plan.sides[0].run, plan.sides[1].run);
             if matches!(cx.cont, Cont::Effect(Tail::No)) && self.js.is_empty_block(&self.arena, &statement) {
                 self.js.release_stmt(&mut self.arena, statement);
             } else {
-                self.place(plan.head, B::stmt_node(statement));
+                self.place(plan.head, statement);
             }
         }
         if let Some(value) = plan.value {

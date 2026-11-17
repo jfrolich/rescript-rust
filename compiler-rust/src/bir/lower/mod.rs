@@ -446,7 +446,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     tail_frames: Vec<tail::Frame>,
     tail_functions: Vec<Option<LoopRef>>,
     tail_copies: Vec<Option<VarId>>,
-    tail_assignments: Vec<NodeId>,
+    tail_assignments: Vec<B::S>,
     tail_name: String,
     call_reversed: Vec<NodeId>,
     call_arities: Vec<i32>,
@@ -457,14 +457,14 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     names: names::Storage,
     calls: Vec<Option<call::Plan>>,
     tail_order: Vec<VarId>,
-    rec_members: Vec<rec::Member>,
+    rec_members: Vec<rec::Member<B::S, B::L>>,
     rec_steps: usize,
     switches: Vec<Option<switch::Plan>>,
     variants: Vec<Option<variant::Plan>>,
     named_metadata: variant::Metadata,
     switch_spelling: String,
-    untagged: Vec<Option<untagged::Plan>>,
-    untagged_storage: untagged::Storage,
+    untagged: Vec<Option<untagged::Plan<B::S>>>,
+    untagged_storage: untagged::Storage<B::S>,
     untagged_dispatch: crate::bir::untagged_plan::Plan<u32>,
     switch_facts: Vec<switch::Facts>,
     switch_work: Vec<(NodeId, bool)>,
@@ -474,7 +474,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     group_table: hashbrown::HashTable<usize>,
     group_order: Vec<usize>,
     group_heads: Vec<usize>,
-    switch_output_nodes: Vec<NodeId>,
+    switch_output_nodes: Vec<Option<B::S>>,
     switch_output_clauses: Vec<crate::bir::ClauseMeta>,
     switch_group_steps: usize,
     switch_hash_bytes: Vec<u8>,
@@ -488,7 +488,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     source: Bir,
     arena: Bir,
     idents: Vec<Ident>,
-    statements: StatementStack,
+    statements: StatementStack<B>,
     free: FreePool,
     traversal: SourceProbe<expr::Resume>,
     list_block_info: Option<crate::bir::JsId>,
@@ -537,7 +537,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     location_work: Vec<(NodeId,bool)>,
     location_steps: usize,
     sequence_steps: usize,
-    evaluation: args::Evaluation,
+    evaluation: args::Evaluation<B::S>,
     object_scratch: record::Scratch,
     primitive_steps: usize,
     /// Let/Seq nodes read by row R5 step 0 of section 3.6.
@@ -550,8 +550,8 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     /// The handlers of the catches being lowered, a stack of flattened tables.
     catch_table: Vec<(NodeId, crate::bir::CatchId)>,
     catches: Vec<Option<exit::Plan>>,
-    tries: Vec<try_::Plan>,
-    loops: Vec<loops::Plan>,
+    tries: Vec<try_::Plan<B::L>>,
+    loops: Vec<loops::Plan<B::L>>,
     next_loop_label: u32,
     labels: label::Schedule,
     try_form_reads: usize,
@@ -769,7 +769,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// for a discarded suffix; O(1) otherwise. No temporary statement vector.
     fn append_outputs(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {
         if first.finished == Finished::True {
-            for statement in self.statements.statements(second.stmts) { self.arena.release(statement); }
+            for statement in self.statements.take_run(second.stmts) { self.js.release_stmt(&mut self.arena, statement); }
             if let Some(value) = second.value { self.arena.release(value); }
         }
         self.statements.append(first, second, value)
@@ -806,7 +806,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
                 (list, coerced)
             }
             _ => (
-                self.statements.take_list(&mut self.arena, run),
+                B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, run)),
                 export::Coerced::default(),
             ),
         };
@@ -822,12 +822,12 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
             .value
             .unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
         let value = self.arena.new_node(View::SExp { value }, 0);
-        self.statements.push(value);
+        self.statements.push(B::stmt_from_node(value));
         let run = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,
         });
-        let list = self.statements.take_list(&mut self.arena, run);
+        let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, run));
         self.finish(list, out.finished, export::Coerced::default())
     }
 
@@ -1149,17 +1149,17 @@ impl<B: js_stmt::JsStmt> Realizer for State<'_, B> {
             }
             Cont::Declare(kind, var) => {
                 let stmt = super::j::declare(&mut self.arena, kind, var, value);
-                self.statements.push(stmt);
+                self.statements.push(B::stmt_from_node(stmt));
                 None
             }
             Cont::Assign(var) => {
                 let stmt = super::j::assign(&mut self.arena, var, value);
-                self.statements.push(stmt);
+                self.statements.push(B::stmt_from_node(stmt));
                 None
             }
             Cont::Effect(Tail::Return(_)) => {
                 let stmt = super::j::return_value(&mut self.arena, value);
-                self.statements.push(stmt);
+                self.statements.push(B::stmt_from_node(stmt));
                 finished = Finished::True;
                 None
             }

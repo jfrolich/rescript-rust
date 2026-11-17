@@ -1,6 +1,6 @@
 //! Recursive binding groups (BACKEND_LOWERING 5.3).
 use super::*;
-use crate::bir::{ListId, Op};
+use crate::bir::Op;
 use crate::emit::row::Kind;
 use crate::lambda::{lam_primitive::Primitive, TagInfo};
 
@@ -16,11 +16,11 @@ pub(super) struct Group {
 enum Mode { Declare, SelfInit, Update }
 
 /// One dense row per binding. Completed statements are list-pool handles.
-pub(super) struct Member {
+pub(super) struct Member<S, L> {
     source: NodeId,
     var: VarId,
-    code: Option<ListId>,
-    placeholder: Option<NodeId>,
+    code: Option<L>,
+    placeholder: Option<S>,
     end: u32,
     finished: Finished,
     mode: Mode,
@@ -115,11 +115,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.drop_pure_effect(call);
             let dummy = self.recursive_dummy(tag);
             let placeholder = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(B::from_node(dummy)));
-            self.rec_members[member].placeholder = Some(B::stmt_node(placeholder));
+            self.rec_members[member].placeholder = Some(placeholder);
         } else {
             let dummy = self.recursive_dummy(tag);
             let declaration = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(B::from_node(dummy)));
-            self.statements.push(B::stmt_node(declaration));
+            self.statements.push(declaration);
             let mut shell = B::from_node(value);
             assert!(self.js.kind(&self.arena, B::of(&shell)) == Kind::BlockLit, "recursive self block");
             let count = self.js.take_operands(&mut self.arena, &mut shell) as usize;
@@ -165,7 +165,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             out.finished = Finished::False;
         }
         let span = self.statements.since(Span { start: out.stmts.start, len: 0 });
-        let list = self.statements.take_list(&mut self.arena, span);
+        let list = self.statements.take_list(&mut self.js, &mut self.arena, span);
         self.rec_members[member].code = Some(list);
         self.rec_members[member].finished = out.finished;
         if index + 1 == count {
@@ -176,12 +176,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             for i in group.base as usize..group.base as usize + count {
                 self.rec_steps += 1;
-                let list = B::list_from(self.rec_members[i].code.take().unwrap());
+                let list = self.rec_members[i].code.take().unwrap();
                 for k in 0..self.js.len(&self.arena, list) {
                     self.rec_steps += 1;
                     let statement = self.js.take_at(&mut self.arena, list, k);
                     if finished == Finished::True { self.js.release_stmt(&mut self.arena, statement); }
-                    else { self.statements.push(B::stmt_node(statement)); }
+                    else { self.statements.push(statement); }
                 }
                 if self.rec_members[i].finished == Finished::True { finished = Finished::True; }
             }
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn group_size() {
         assert_eq!(std::mem::size_of::<Group>(), 16);
-        assert_eq!(std::mem::size_of::<Member>(), 32);
+        assert_eq!(std::mem::size_of::<Member<<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::S, crate::bir::ListId>>(), 32);
         assert_eq!(std::mem::size_of::<Mode>(), 1);
     }
 

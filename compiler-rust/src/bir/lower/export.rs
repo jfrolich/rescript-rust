@@ -272,7 +272,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// allocation once the stack has its capacity.
     fn push_effect(&mut self, value: NodeId) {
         let statements = &mut self.statements;
-        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.push(B::stmt_node(s)));
+        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.push(s));
     }
 
     /// The variables of the export block `exports`, as the importer recorded
@@ -347,6 +347,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         work.clear();
         let mut nested = std::mem::take(&mut self.scratch);
         debug_assert!(nested.is_empty());
+        // PROBE-GAP 1: the rows of the export fold key a statement by its id
+        // (`Row::stmt`, T6x-e); the stack gives the id of a statement it holds
+        // through the transition (`StatementStack::statements`).
         for stmt in self.statements.statements(run) {
             // `nested` holds the statements of the blocks still open, last
             // first; a zero marks where a block ends.
