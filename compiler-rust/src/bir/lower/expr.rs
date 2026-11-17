@@ -304,13 +304,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
     }
     /// K2: O:339 push_effect_expression into the slot reserved after the head
-    /// of a sequence. One step per comma operand of the value.
+    /// of a sequence. One step per comma operand of the value; each
+    /// statement is held once, O(1), and the hold placed in O(1).
     fn hold_effect(&mut self, slot: u32, value: NodeId) {
-        let mut held = std::mem::take(&mut self.scratch);
-        self.js.effect(&mut self.arena, B::from_node(value), |s| held.push(B::stmt_node(s)));
-        self.statements.fill_held(slot, held.iter().map(|&row| B::stmt_from_node(row)));
-        held.clear();
-        self.scratch = held;
+        let statements = &mut self.statements;
+        let mark = statements.held_mark();
+        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.hold(s));
+        statements.fill_held_since(slot, mark);
     }
     /// K2: O:339 push_effect_expression. Calls may have effects; pure values
     /// are removed and comma values are split before statements are emitted.
