@@ -4490,6 +4490,144 @@ the reviews above left owed; every test named runs today.
     type has a scope, which no generated program has. Open question 4 of
     this turn.
 
+61. **The harness of pattern mode: the plan bit `PATTERN`.**
+    `differential::PATTERN` (bit 9 of a plan) makes a case a case of
+    pattern mode. What the bit adds:
+    - *the program*: `type n0`, `type n1`, `type k<'a>` and
+      `type d<'a> = D('a)`, and after the generated values four values
+      whose parameters are the pairs R3h is about
+      (`differential::PATTERN_VALUES`): a locally abstract type against a
+      structure and against the other one; constructors of one path with
+      arguments, abstract (`k`) and a data type (`d`), over a locally
+      abstract type, over `int` and over a variable; arrows over them.
+      With `VARIANTS` two more (`PATTERN_ROWS`): rows that clash and are
+      not compatible (a tag the other closed row lacks, a constant tag
+      against one with an argument) and rows that unify under an
+      equation; a row that clashes and is compatible comes from `reify`
+      (a fixed row against an open row with one more tag). There is one
+      data type, so two different data types are never compared and the
+      supplier of declarations answers `Clash` (8.9);
+    - *both sides*: `n0` and `n1` are locally abstract types of two
+      newtype levels, the level the case starts at and one above it. The
+      old side binds them again as local identifiers whose declarations
+      have `type_newtype_level`; the new side sets `NEWTYPE` and a
+      `Newtype` row on their `TypeTable` rows. The old side sees the unit
+      from outside, as `Case`: its types are paths through a module and
+      only the predefined types are bare identifiers
+      (`in_current_module`). The new side says the same with the `LOCAL`
+      flag, set on the predefined types only;
+    - *the operation* `Op::Gadt(left, right, flags)`: one top-level
+      unification in pattern mode with the current level as the newtype
+      level; bit 0 of `flags` is `generate_equations`, bit 1
+      `assume_injective`. `unify_gadt` itself is 3; 1, 0 and 2 are the
+      modes unify3 installs below it (ctype.ml:2352, 2368) and that no
+      top-level call of OCaml asks for: `Checker::unify_pattern` takes
+      the two flags so that a case reaches each. Half of the pattern
+      unifications of a generated case are over two parameters of a new
+      instance of a pattern value, the rest over any two operands;
+    - *the form*: both sides end it with the equations in force, one
+      line a type that has one, sorted by the type's name: `= name :=
+      body`, the bodies numbered together. The old side prints the
+      manifests of the local constraints of the environment the last
+      successful pattern unification left; the new side instantiates the
+      manifest of every entry of `Checker::equations` at the generic
+      level. A type `reify` made prints by its name (`$0`, `$1`), which
+      the new side takes from the supplier of the harness
+      (`differential::FreshNames`, the rule of `get_new_abstract_name`,
+      ctype.ml:908-922).
+    - *the deliberately wrong side* `Fault::ExpressionMode`: a pattern
+      unification runs as `Checker::unify`.
+
+    Running today: `the_two_sides_agree_on_pattern_programs_without_a_
+    pattern_unification` (the self-test: the fixed program and 300
+    generated cases with the pattern unifications taken out agree),
+    `old_side_of_the_pattern_plan_is_not_vacuous` (observed, 1,200
+    cases: 950 pattern unifications that succeed and 493 that fail
+    among the judged operations; 130 cases end with an equation, 3 with
+    two, 183 with a reified type) and
+    `generated_cases_find_a_pattern_unification_in_expression_mode` (the
+    wrong side needs nothing of R3h: of 228 cases with a pattern
+    unification it is reported in 21 that have an equation on the old
+    side and in 58 where only it fails).
+
+62. **What the old checker does in pattern mode, and where it is a
+    judge.** Observed on `differential::tests::PATTERN_PROGRAM`; each
+    item names its test in tc/differential.rs.
+    - *Which pairs get an equation, and its direction* (a judge):
+      `old_checker_gives_the_equation_to_the_newer_locally_abstract_type`.
+      A locally abstract type against a type that is not one gets the
+      equation on either side (ctype.ml:2385-2392) and the two nodes
+      stay two nodes. Of two locally abstract types the one of the
+      higher newtype level gets it (ctype.ml:2373-2384). Without
+      `generate_equations`: none, and a success (`reify`, no `mcomp`).
+      `int` against a tuple with equations: a clash (`mcomp`). After
+      `n0 := int`, `n1` against `n0` gives `n1 := int`: the body is the
+      expanded head.
+    - *The arguments of one path* (a judge):
+      `old_checker_refines_the_arguments_of_a_constructor_by_its_
+      injectivity`. With `assume_injective` the arguments are unified
+      with equations; below that an abstract type that is not of the
+      unit gets none and what does not unify is reified, and a data type
+      gets them. A later expression unification of two `k` nodes that
+      pattern mode assumed equal fails: nothing of the assumption is
+      left after the top-level call.
+    - *What `reify` makes* (a judge, also of the names of variables
+      without one): `old_checker_reifies_a_variable_and_a_row_variable`.
+      A variable at the newtype level is a link to a new abstract type
+      `$0` at the variable's level; a row variable is a link to a fixed
+      row without tags over `$0`; the second is `$1`. A variable with a
+      name (`$'a`) is not reachable from an operation: tested by hand.
+    - *What a failure leaves* (a judge of the graph):
+      `old_checker_keeps_what_reify_linked_when_a_pattern_unification_
+      fails`. `reify` links before it refuses a variable below the
+      newtype level, and the row a clash reified stays fixed when
+      `mcomp` refuses the pair: unify3's handler puts back only the left
+      node's description (ctype.ml:2437-2439). A failure after an
+      equation was added leaves the graph as it was. The caller that
+      goes on restores a snapshot, the levels and the environment it
+      kept (`set_state`, compiler/ml/typecore.ml:1299-1305); the kernel's
+      caller restores a mark and cuts the equations
+      (`Checker::cut_equations`, 8.9). The harness drops the old side's
+      environment of a failed pattern unification, so it does not judge
+      the equations a failed one added.
+    - *Rows* (a judge):
+      `old_checker_accepts_rows_that_clash_and_are_compatible`.
+    - *Two structures unified in pattern mode are ONE node on the old
+      side* (NOT a judge):
+      `old_checker_links_the_structures_a_pattern_unification_unifies`.
+      OCaml records the pair as assumed equal and links neither
+      (`Pattern -> add_type_equality t1' t2'`, ctype.ml:2327-2331). The
+      old checker links them: two tuples of two instances are one node
+      afterwards, and of `[#A(n0) | #B]` against `[#A(int) | #B]` the
+      left row prints `int`: a type equal only under the equations of
+      one case has become the other for good. Three source programs
+      were tried (a constructor whose result names a tuple, the same
+      through a tuple pattern, the same through an abbreviation) and
+      both compilers accept all three: no source program is known that
+      shows it. `differential::old_judges` gives the number of
+      operations of a case before the first pattern unification that
+      succeeds and leaves a structure reachable from an operand a link;
+      `compare` runs both sides on that prefix under `PATTERN` (observed:
+      64 of 1,200 cases are cut). So the generated cases judge failures
+      of structure pairs in pattern mode and never their success; the
+      hand-built tests of 8.9 do, from the OCaml lines.
+    - *Ambiguity is not checked on the old side* (NOT a judge, and not
+      in R3h): OCaml refuses
+      `type rec t<_> = Int: t<int>` /
+      `let f = (type a, x: t<a>, y: a) => switch x { | Int => if true { y } else { 0 } }`
+      with "This instance of int is ambiguous: it would escape the scope
+      of its equation" (`trace_gadt_instances`, `Env.gadt_instance_level`,
+      `add_gadt_instance_chain`, ctype.ml:176-201, 1220-1227, 2289-2298;
+      the report is typecore's). The Rust compiler accepts it (observed
+      with `compile_source_in_process`): the old checker has the tracing
+      flag and no instance levels. The kernel has neither after R3h; it
+      is a slice of its own after R3h (open question 1 of this turn).
+    - Not observed to differ, and not judged: the arm of `unify` for two
+      locally abstract types under local constraints, which expands the
+      newer one once (ctype.ml:2258-2270), is missing on the old side;
+      it expands both heads, and the equations that result were the
+      same on every case tried.
+
 
 ### 8.7 The hot paths of unification (K2)
 

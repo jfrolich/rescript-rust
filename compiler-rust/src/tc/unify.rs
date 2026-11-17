@@ -172,6 +172,18 @@ pub struct Checker {
     /// What [`Checker::unify_package`] asks about module types; `None`
     /// until a caller that has declarations sets it (R5a). (R3p)
     pub packages: Option<Box<dyn super::rows::PackageDecls>>,
+    /// `current_newtype_level` (compiler/ml/ctype.ml:1802-1808): the level
+    /// of the pattern being typed, or 0 outside
+    /// [`Checker::unify_pattern`] (`None`; no node is at level 0). (R3h)
+    pub newtype_level: u32,
+    /// The equations in force, oldest first (the local constraints of
+    /// `Env`, compiler/ml/ctype.ml:2093-2100). Empty for a unit that
+    /// never typed a pattern with an equation; `equations.len()` is what
+    /// a caller keeps to cut back to ([`Checker::cut_equations`]). (R3h)
+    pub equations: Vec<super::rows::Equation>,
+    /// What `reify` and `mcomp` ask about declarations; `None` until a
+    /// caller that has declarations sets it (R5a). (R3h)
+    pub locals: Option<Box<dyn super::rows::LocalDecls>>,
 }
 
 impl Checker {
@@ -196,6 +208,9 @@ impl Checker {
             pairs: PairSet::default(),
             scopes: Vec::new(),
             packages: None,
+            newtype_level: 0,
+            equations: Vec::new(),
+            locals: None,
         }
     }
 
@@ -1224,9 +1239,38 @@ impl Checker {
     }
 
     /// `unify_gadt` (compiler/ml/ctype.ml:2739-2750): one unification in
-    /// pattern mode with equations, at `newtype_level`; clears the pair set
-    /// before and after. (R3h)
+    /// pattern mode with equations and injectivity assumed, at
+    /// `newtype_level`: [`Checker::unify_pattern`]. (R3h)
     pub fn unify_gadt(&mut self, newtype_level: u32, left: Ty, right: Ty) -> Result<(), Clash> {
+        self.unify_pattern(newtype_level, true, true, left, right)
+    }
+
+    /// One top-level unification in pattern mode (`unify_gadt`,
+    /// compiler/ml/ctype.ml:2739-2750, with the two flags of
+    /// `set_mode_pattern`, ctype.ml:256-273, as arguments so that a test
+    /// can ask for each mode `unify3` installs, ctype.ml:2352, 2368):
+    /// 1. `scopes` must be empty (`current_univar_pairs () := []`); the
+    ///    previous `umode`, `generate_equations`, `assume_injective` are
+    ///    kept; `umode = Pattern`, the two flags as given, `newtype_level`
+    ///    as given;
+    /// 2. [`Checker::unify`] of the pair;
+    /// 3. on either result: the three settings go back, `newtype_level`
+    ///    is 0, and the table of assumed equalities is emptied
+    ///    (`Type_pairs.clear (unify_eq_set ())`; `PairSet::clear`,
+    ///    O(pairs assumed)).
+    ///
+    /// The equations it added stay in [`Checker::equations`]: the caller
+    /// cuts them back when the case they belong to ends or when it
+    /// restores a speculation ([`Checker::cut_equations`]). O(1) plus the
+    /// unification. (R3h; CHECKER_REWRITE 8.9)
+    pub fn unify_pattern(
+        &mut self,
+        newtype_level: u32,
+        generate: bool,
+        injective: bool,
+        left: Ty,
+        right: Ty,
+    ) -> Result<(), Clash> {
         todo!("R3h")
     }
 

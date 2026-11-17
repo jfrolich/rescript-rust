@@ -310,6 +310,60 @@ pub trait PackageDecls {
     fn compatible(&mut self, c: &mut Checker, left: Node, right: Node) -> bool;
 }
 
+/// One equation of pattern mode in force (`Env.add_local_constraint`,
+/// compiler/ml/ctype.ml:2093-2100): the type that got a manifest and the
+/// [`TypeInfo`] row it had before, so that cutting the log back puts the
+/// row back ([`Checker::cut_equations`]). 20 bytes; one per equation
+/// added and not yet cut. (R3h; CHECKER_REWRITE 8.9)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct Equation {
+    pub type_index: u32,
+    pub previous: super::expand::TypeInfo,
+}
+
+/// What two declarations answer when `mcomp` compares them
+/// (`mcomp_type_decl`, compiler/ml/ctype.ml:2011-2039).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeclMatch {
+    /// The kinds, the representations, the names, flags and number of the
+    /// members agree; the pairs of member types were pushed
+    /// ([`Checker::push_compatible`]).
+    Members,
+    /// They cannot be one type (`raise (Unify [])`).
+    Clash,
+}
+
+/// What pattern mode asks of the declarations, which the kernel does not
+/// have (CHECKER_REWRITE 8.9). R5a supplies it; the tests of R3h supply
+/// one built by hand. Held in [`Checker::locals`]; without one, `reify`
+/// of a type that has a variable stops the compiler (a caller that types
+/// a pattern installs one first) and two different data types clash.
+pub trait LocalDecls {
+    /// A new locally abstract type for `reify` (`create_fresh_constr`,
+    /// compiler/ml/ctype.ml:1815-1826): the supplier makes the identifier
+    /// (`get_new_abstract_name` of `"$'" ^ name`, or `"$"` when `name` is
+    /// `NONE`; `name` is the variable's name index) and whatever its own
+    /// tables hold for a declaration, and returns the type index. The
+    /// kernel writes the [`TypeTable`](super::expand::TypeTable) row
+    /// (abstract, [`NEWTYPE`](super::expand::NEWTYPE), both newtype levels
+    /// the current one). O(1) amortized.
+    fn fresh_abstract(&mut self, name: u32) -> u32;
+    /// `mcomp_type_decl` for two DIFFERENT types that are both data types
+    /// (a record, a variant or an open type) and not both names of the
+    /// unit being checked (ctype.ml:2026-2037): `Clash` unless both are
+    /// records of one representation, both variants, or both open; for
+    /// records and variants every pair of member types is pushed with
+    /// [`Checker::push_compatible`], in declaration order, the result
+    /// before the arguments, and a difference in names, mutability,
+    /// optionality, argument shape or number of members is a `Clash`
+    /// (`mcomp_variant_description`, `mcomp_record_description`,
+    /// ctype.ml:2047-2078). The member types are nodes of `c`'s graph:
+    /// the declarations' own types, not instances for the two argument
+    /// lists, as in OCaml. O(members).
+    fn compare(&mut self, c: &mut Checker, left: u32, right: u32) -> DeclMatch;
+}
+
 /// O(1): the `a` of a [`RES_EITHER`] node with `c` and `m`.
 #[inline]
 pub fn either_flags(constant: bool, matched: bool) -> u32 {

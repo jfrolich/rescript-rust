@@ -184,6 +184,15 @@ pub(crate) const REFS: u16 = 1 << 7;
 /// two types whose binders pair by position and not by name print
 /// different names at one position and the same back references.
 pub(crate) const UNIVARS: u16 = 1 << 8;
+/// Pattern mode (slice R3h; section 8.6, decision 61). The program
+/// declares two abstract types `n0` and `n1`, which both sides make
+/// locally abstract types of two newtype levels (the level the case
+/// starts at, and one above it), an abstract type with a parameter
+/// `k<'a>` (not injective) and a data type `d<'a>` (injective); its
+/// values have types over them. The operations get [`Op::Gadt`]. Both
+/// sides end their form with the equations in force, one line a type
+/// that has one, sorted by name: `= name := body`.
+pub(crate) const PATTERN: u16 = 1 << 9;
 
 /// A tier and what a case adds to it. 4 bytes, passed by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +279,14 @@ pub(crate) enum Op {
     /// 2424) and the old checker unifies its body (section 8.6, decision
     /// 49), and no generated case is to meet that. [`UNIVARS`].
     Inside(u16, u8),
+    /// Unify two operands in pattern mode at the current level as the
+    /// newtype level (`unify_gadt`, compiler/ml/ctype.ml:2739-2750;
+    /// `Checker::unify_pattern`): bit 0 of the third field is
+    /// `generate_equations`, bit 1 `assume_injective` (`unify_gadt`
+    /// itself is 3; unify3 installs 1 and 0 for the arguments of a
+    /// constructor, ctype.ml:2352, 2368). The equations it adds stay in
+    /// force for the rest of the case. [`PATTERN`].
+    Gadt(u16, u16, u8),
 }
 
 /// A deliberately wrong new side, for the tests that prove the harness sees
@@ -305,6 +322,9 @@ pub(crate) enum Fault {
     /// polymorphic type in the other order: what pairing by name instead
     /// of by position looks like in the form. [`UNIVARS`].
     SwappedBinders,
+    /// [`Op::Gadt`] unifies in expression mode: no equation, no
+    /// reification, a link where pattern mode assumes. [`PATTERN`].
+    ExpressionMode,
 }
 
 /// What one side reports for one case.
@@ -554,16 +574,56 @@ pub(crate) fn program_source(rng: &mut Rng, plan: impl Into<Plan>) -> String {
         nullary.push("rv".to_string());
         unary.push("pv".to_string());
     }
+    if plan.has(PATTERN) {
+        source.push_str(PATTERN_TYPES);
+        for name in NEWTYPES {
+            nullary.push(name.to_string());
+        }
+        unary.push("k".to_string());
+        unary.push("d".to_string());
+    }
     for index in 0..3 + rng.below(4) {
         let mut body = String::new();
         type_text_with(rng, plan.with, 3, &["'a", "'b"], &nullary, &unary, &mut body);
         let _ = writeln!(source, "external v{index}: {body} = \"v{index}\"");
+    }
+    if plan.has(PATTERN) {
+        source.push_str(PATTERN_VALUES);
+        if plan.has(VARIANTS) {
+            source.push_str(PATTERN_ROWS);
+        }
     }
     source.push_str("let dup = x => (x, x)\n");
     let last = nullary.last().unwrap();
     let _ = writeln!(source, "let share = (x: {last}) => (x, x)");
     source
 }
+
+/// The predefined types a generated program names.
+const PREDEFINED: [&str; 6] = ["int", "string", "unit", "float", "bool", "array"];
+
+/// The two types a [`PATTERN`] case makes locally abstract.
+const NEWTYPES: [&str; 2] = ["n0", "n1"];
+
+/// The declarations of a [`PATTERN`] program: the two locally abstract
+/// types, an abstract type with a parameter and a data type with one.
+const PATTERN_TYPES: &str = "type n0\ntype n1\ntype k<'a>\ntype d<'a> = D('a)\n";
+
+/// The values of a [`PATTERN`] program, after the generated ones: a
+/// locally abstract type against a structure and against the other one,
+/// constructors of one path with arguments (abstract: `k`; a data type:
+/// `d`), and a function over both.
+const PATTERN_VALUES: &str = "external q0: (n0, n1, int, (int, t0)) => unit = \"q0\"\n\
+     external q1: (k<n0>, k<int>, k<n1>, k<'a>) => unit = \"q1\"\n\
+     external q2: (d<n0>, d<int>, d<n1>, d<'a>) => unit = \"q2\"\n\
+     external q3: (n0 => n1, int => t0, (n1, n0) => 'a) => unit = \"q3\"\n";
+
+/// With [`VARIANTS`]: rows that clash and are compatible (`#A` over a
+/// locally abstract type against `#A` over `int`, a tag the other closed
+/// row lacks), and rows that clash and are not (a constant tag against
+/// one with an argument).
+const PATTERN_ROWS: &str = "external q4: ([#A(n0) | #B], [#A(int) | #B], [#A(int) | #C], [#A | #B]) => unit = \"q4\"\n\
+     external q5: ([> #A(n0)], [< #A(int) | #B], [#C(n1)]) => unit = \"q5\"\n";
 
 /// O(the program): compile with the old checker. Panics with the source when
 /// the generator wrote a program the old checker rejects.
@@ -646,6 +706,31 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
                 }
                 _ => Op::Inside(operand(rng), rng.below(3) as u8),
             }
+        } else if plan.has(PATTERN) && rng.below(3) == 0 {
+            // [`PATTERN`]: a pattern unification, twice in three as
+            // `unify_gadt` runs it, or a part of an operand to unify.
+            // Half of them are over an instance of one of the pattern
+            // values ([`PATTERN_VALUES`], before `dup` and `share`):
+            // one of its parameters against another, or against any
+            // operand; `follow` is last first.
+            match rng.below(6) {
+                0..=2 => {
+                    let count = if plan.has(VARIANTS) { 6 } else { 4 };
+                    let value = values - 2 - count + rng.below(count);
+                    let instance = operands as u16;
+                    let flags = if rng.below(4) == 0 { rng.below(3) as u8 } else { 3 };
+                    let against = if rng.below(3) == 0 { operand(rng) } else { instance + 2 };
+                    follow = vec![
+                        Op::Gadt(instance + 1, against, flags),
+                        Op::Child(instance, rng.below(4) as u8),
+                        Op::Child(instance, rng.below(4) as u8),
+                    ];
+                    Op::Instance(value as u16)
+                }
+                3 => Op::Gadt(operand(rng), operand(rng), 3),
+                4 => Op::Gadt(operand(rng), operand(rng), rng.below(3) as u8),
+                _ => Op::Child(operand(rng), rng.below(4) as u8),
+            }
         } else if plan.has(BUILD) && rng.below(4) == 0 {
             match rng.below(4) {
                 0 => Op::Var,
@@ -715,7 +800,7 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
 /// The old checker's types of a case: the context, the environment the
 /// unit's declarations are in, the schemes of its values and the level the
 /// case starts at.
-struct Old {
+pub(crate) struct Old {
     ctx: TypeContext,
     env: Env,
     values: Vec<TypeExprRef>,
@@ -745,12 +830,16 @@ fn old_context(program: &Program, plan: Plan) -> Old {
     let mut env: Env = initial_env(&ctx);
     let mut values = Vec::new();
     let mut late = Vec::new();
+    let mut newtypes = Vec::new();
     for item in unit.ps_sig.iter() {
         match item {
             SignatureItem::SigValue(_, value) => values.push(value.val_type),
             SignatureItem::SigType(id, declaration, _) => {
                 if plan.has(SCOPED) && LATE.contains(&id.name()) {
                     late.push((id.name().to_string(), declaration.clone()));
+                }
+                if plan.has(PATTERN) && NEWTYPES.contains(&id.name()) {
+                    newtypes.push((id.name().to_string(), declaration.clone()));
                 }
                 env.add_type(*id, declaration.clone());
             }
@@ -772,15 +861,32 @@ fn old_context(program: &Program, plan: Plan) -> Old {
     // 1`, `+ 2`, `+ 3`. A type of the unit is named through the persistent
     // unit and has binding time 0, so every node that names a late type is
     // renamed to the local identifier, in the schemes and in the manifests.
+    let mut renamed = Vec::new();
     if plan.has(SCOPED) {
         assert_eq!(late.len(), LATE.len(), "{}", program.source);
-        let mut renamed = Vec::new();
         for (offset, (name, declaration)) in late.iter().enumerate() {
             let id = ctx.create_ident(name.as_str());
             assert_eq!(id.stamp(), base + 1 + offset as i32, "late stamp");
             env.add_type(id, declaration.clone());
             renamed.push((name.clone(), id));
         }
+    }
+    // [`PATTERN`]: `n0` and `n1` are locally abstract types, as `(type
+    // a)` declares one (`type_newtype_level = Some (level, level)`,
+    // compiler/ml/typecore.ml, `Pexp_newtype`): local identifiers whose
+    // declarations have the newtype levels `base` and `base + 1`.
+    if plan.has(PATTERN) {
+        assert_eq!(newtypes.len(), NEWTYPES.len(), "{}", program.source);
+        for (offset, (name, declaration)) in newtypes.iter().enumerate() {
+            let id = ctx.create_ident(name.as_str());
+            let level = base + offset as i32;
+            let mut declaration = (**declaration).clone();
+            declaration.type_newtype_level = Some((level, level));
+            env.add_type(id, declaration);
+            renamed.push((name.clone(), id));
+        }
+    }
+    if !renamed.is_empty() {
         let mut seen = crate::fast_hash::AHashSet::default();
         let mut work: Vec<TypeExprRef> = values.clone();
         for item in unit.ps_sig.iter() {
@@ -908,9 +1014,57 @@ fn record_failure(outcome: &mut Outcome, index: usize, before: &str, after: (Str
 
 /// O(operations + printed nodes²): the old checker's side of a case.
 pub(crate) fn run_old(program: &Program, plan: impl Into<Plan>, ops: &[Op]) -> Outcome {
-    let plan = plan.into();
+    run_old_until(program, plan.into(), ops, &mut None)
+}
+
+/// How many of `ops` the old checker is a judge of under [`PATTERN`]
+/// (section 8.6, decision 62): the operations before the first pattern
+/// unification that succeeds and leaves a structure of an operand a link.
+/// In pattern mode OCaml records that the two structures are assumed
+/// equal and links neither (`Pattern -> add_type_equality t1' t2'`,
+/// compiler/ml/ctype.ml:2327-2331); the old checker links them, so its
+/// graph after such an operation is not OCaml's. [`compare`] runs both
+/// sides on this prefix. O(the case × operands).
+pub(crate) fn old_judges(program: &Program, plan: Plan, ops: &[Op]) -> usize {
+    let mut cut = Some(ops.len());
+    run_old_until(program, plan, ops, &mut cut);
+    cut.unwrap()
+}
+
+/// O(nodes): the structures `ty` reaches: every node that is not a
+/// variable, a universal variable or a constructor (those OCaml links in
+/// pattern mode as well, ctype.ml:2247, 2250-2253, 2315-2324).
+fn old_structures(
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+    seen: &mut std::collections::HashSet<TypeExprRef>,
+    out: &mut Vec<TypeExprRef>,
+) {
+    let ty = ctx.repr(ty);
+    if !seen.insert(ty) {
+        return;
+    }
+    if !matches!(
+        *ctx.get_desc(ty),
+        TypeDesc::Tvar { .. } | TypeDesc::Tunivar { .. } | TypeDesc::Tconstr { .. }
+    ) {
+        out.push(ty);
+    }
+    let mut children = Vec::new();
+    crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+    for child in children {
+        old_structures(ctx, child, seen, out);
+    }
+}
+
+/// [`run_old`]; with `cut` set, stops at the first operation the old
+/// checker is not a judge of ([`old_judges`]) and writes its index.
+fn run_old_until(program: &Program, plan: Plan, ops: &[Op], cut: &mut Option<usize>) -> Outcome {
     let old = old_context(program, plan);
-    let (ctx, env, base) = (&old.ctx, &old.env, old.base);
+    let (ctx, base) = (&old.ctx, old.base);
+    // The environment of the case: a pattern unification that succeeds
+    // leaves its equations and its reified types in it.
+    let mut current = old.env.clone();
     let explain = plan.has(EXPLAIN);
     let mut outcome = Outcome {
         failed: None,
@@ -921,10 +1075,14 @@ pub(crate) fn run_old(program: &Program, plan: impl Into<Plan>, ops: &[Op]) -> O
     let mut operands: Vec<TypeExprRef> = Vec::new();
     for (index, op) in ops.iter().enumerate() {
         let before = match op {
-            Op::Unify(..) | Op::Lower(..) if explain => old_forms(&old, plan, &operands, &[]).0,
+            Op::Unify(..) | Op::Lower(..) | Op::Gadt(..) if explain => {
+                old_forms(&old, plan, &operands, &[]).0
+            }
             _ => String::new(),
         };
         let mut failure = None;
+        let env = &current;
+        let mut refined = None;
         match *op {
             Op::Instance(value) => operands.push(ctype::instance(ctx, old.values[value as usize])),
             Op::Copy(operand) => operands.push(ctype::instance(ctx, operands[operand as usize])),
@@ -998,6 +1156,35 @@ pub(crate) fn run_old(program: &Program, plan: impl Into<Plan>, ops: &[Op]) -> O
                 }
                 operands.push(ty);
             }
+            Op::Gadt(left, right, flags) => {
+                let mut structures = Vec::new();
+                if cut.is_some() {
+                    let mut seen = std::collections::HashSet::new();
+                    for &operand in &operands {
+                        old_structures(ctx, operand, &mut seen, &mut structures);
+                    }
+                }
+                let (result, after) = old_gadt(
+                    ctx,
+                    env,
+                    flags,
+                    operands[left as usize],
+                    operands[right as usize],
+                );
+                match result {
+                    Ok(()) => {
+                        if structures.iter().any(|&node| ctx.repr(node) != node) {
+                            *cut = Some(index);
+                            return outcome;
+                        }
+                        refined = Some(after);
+                    }
+                    Err(trace) => failure = Some(trace),
+                }
+            }
+        }
+        if let Some(env) = refined {
+            current = env;
         }
         if let Some(trace) = failure {
             if !explain {
@@ -1008,7 +1195,62 @@ pub(crate) fn run_old(program: &Program, plan: impl Into<Plan>, ops: &[Op]) -> O
         }
     }
     outcome.form.push_str(&old_forms(&old, plan, &operands, &[]).0);
+    if plan.has(PATTERN) {
+        outcome.form.push_str(&old_equations(&old, &current));
+    }
     outcome
+}
+
+/// One pattern unification on the old checker, as `unify_pattern_types_gadt`
+/// runs one (types/typecore.rs): a state in pattern mode with the two
+/// flags of `flags` ([`Op::Gadt`]) and the current level as the newtype
+/// level. Returns the result and the environment the state ends with:
+/// the equations and the reified types of a success.
+pub(crate) fn old_gadt(
+    ctx: &TypeContext,
+    env: &Env,
+    flags: u8,
+    left: TypeExprRef,
+    right: TypeExprRef,
+) -> (Result<(), Vec<(TypeExprRef, TypeExprRef)>>, Env) {
+    let mut state = ctype::UnifyState::new();
+    state.set_env(env);
+    state.mode = crate::types::UnifyMode::Pattern;
+    state.generate_equations = flags & 1 != 0;
+    state.assume_injective = flags & 2 != 0;
+    state.newtype_level = Some(ctx.current_level());
+    let result = match ctype::unify(ctx, &mut state, left, right) {
+        Ok(()) => Ok(()),
+        Err(ctype::TypeError::Unify(trace)) => Err(trace),
+        Err(_) => Err(Vec::new()),
+    };
+    let after = state.env().cloned().unwrap_or_else(|| env.clone());
+    (result, after)
+}
+
+/// O(equations × printed nodes): the equations of `env`, one line a
+/// type that has a local constraint, sorted by the type's name: `= name
+/// := body`, the bodies numbered together (a body is generic: `[G]`).
+pub(crate) fn old_equations(old: &Old, env: &Env) -> String {
+    let mut equations: Vec<(String, TypeExprRef)> = env
+        .iter_local_constraints()
+        .filter_map(|(path, declaration)| {
+            declaration.type_manifest.map(|body| (path.last().to_string(), body))
+        })
+        .collect();
+    equations.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut out = String::new();
+    let mut seen = OldSeen {
+        nodes: Vec::new(),
+        cells: None,
+        refs: None,
+    };
+    for (name, body) in equations {
+        let _ = write!(out, "= {name} := ");
+        old_form(&old.ctx, old.base, true, body, &mut seen, &mut out);
+        out.push('\n');
+    }
+    out
 }
 
 /// O(nodes reachable × nodes seen): print one old node; see the module text.
@@ -1211,6 +1453,48 @@ pub(crate) struct New {
     /// unopened node, the node and the field (bit 63 set): a reference
     /// nothing else holds.
     refs: Vec<u64>,
+    /// [`PATTERN`]: the names of the locally abstract types `reify` made,
+    /// by type index from the segment's last path on ([`FreshNames`]).
+    fresh: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+}
+
+/// The supplier of a [`PATTERN`] case (`rows::LocalDecls`): a fresh
+/// abstract type gets the next type index after the segment's paths and
+/// the name `get_new_abstract_name` gives it (compiler/ml/ctype.ml:
+/// 908-922): `$'a`, then `$'a1`; `$0`, `$1` for a variable without a
+/// name. The program has one data type, so two different data types are
+/// never compared: `Clash`.
+struct FreshNames {
+    first: u32,
+    strings: Vec<String>,
+    names: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+}
+
+impl super::rows::LocalDecls for FreshNames {
+    fn fresh_abstract(&mut self, name: u32) -> u32 {
+        let prefix = match self.strings.get(name as usize) {
+            Some(name) if name != "" => format!("$'{name}"),
+            _ => "$".to_string(),
+        };
+        let mut names = self.names.borrow_mut();
+        let spelled = |index: usize| {
+            if index == 0 && !prefix.ends_with('$') {
+                prefix.clone()
+            } else {
+                format!("{prefix}{index}")
+            }
+        };
+        let mut index = 0;
+        while names.contains(&spelled(index)) {
+            index += 1;
+        }
+        names.push(spelled(index));
+        self.first + names.len() as u32 - 1
+    }
+
+    fn compare(&mut self, _: &mut Checker, _: u32, _: u32) -> super::rows::DeclMatch {
+        super::rows::DeclMatch::Clash
+    }
 }
 
 impl New {
@@ -1272,6 +1556,7 @@ impl New {
             first: vec![None; roots.len()],
             cells: Vec::new(),
             refs: Vec::new(),
+            fresh: Default::default(),
             open,
             segment,
             checker,
@@ -1283,7 +1568,98 @@ impl New {
         if plan.has(SCOPED) {
             new.scope_late_types();
         }
+        if plan.has(PATTERN) {
+            new.declare_newtypes();
+        }
         new
+    }
+
+    /// O(paths): [`PATTERN`]: `n0` and `n1` are locally abstract types of
+    /// the newtype levels 1 and 2 (a graph starts at level 1), on every
+    /// `paths` row that names one, with the scope `get_level` gives a
+    /// newtype (its first level, compiler/ml/ctype.ml:562-569); and the
+    /// supplier of fresh abstract types is installed.
+    fn declare_newtypes(&mut self) {
+        use super::expand::{NEWTYPE, Newtype};
+        for index in 0..self.segment.signature.paths.len() {
+            let name = match self.segment.signature.paths[index] {
+                PathRow::Ident(ident) => self.segment.signature.identifiers[ident as usize].name,
+                PathRow::Dot { name, .. } => name,
+                PathRow::Apply { .. } => continue,
+            };
+            // The old side sees the unit from outside, as `Case`: its
+            // types are paths through a module there and only the
+            // predefined types are bare identifiers (`LOCAL`).
+            if PREDEFINED.contains(&self.string(name)) {
+                self.checker.types.set_local(index as u32);
+            }
+            let Some(offset) = NEWTYPES.iter().position(|newtype| *newtype == self.string(name))
+            else {
+                continue;
+            };
+            let level = 1 + offset as u32;
+            let types = &mut self.checker.types;
+            types.newtypes.push(Newtype { level, expansion_level: level });
+            let row = &mut types.rows[index];
+            row.flags |= NEWTYPE;
+            row.newtype = types.newtypes.len() as u32 - 1;
+            if level > 1 {
+                if row.scope == 0 {
+                    types.scoped += 1;
+                }
+                row.scope = level;
+            }
+        }
+        let pools = &self.segment.signature;
+        let strings = (0..pools.strings.len() as u32).map(|at| self.string(at).to_string()).collect();
+        self.checker.locals = Some(Box::new(FreshNames {
+            first: pools.paths.len() as u32,
+            strings,
+            names: self.fresh.clone(),
+        }));
+    }
+
+    /// O(equations × printed nodes): [`PATTERN`]: the equations in force
+    /// (`Checker::equations`), as [`old_equations`] prints them: one line
+    /// a type, sorted by name, the body an instance of the equation's
+    /// manifest made at the generic level, the bodies numbered together.
+    fn equations(&mut self) -> String {
+        let mut equations: Vec<(String, Ty)> = Vec::new();
+        for at in 0..self.checker.equations.len() {
+            let index = self.checker.equations[at].type_index;
+            let info = self.checker.types.info(index);
+            let manifest = self.checker.types.manifests[info.manifest as usize];
+            let base = self.checker.g.nodes.len() as u32;
+            let level = std::mem::replace(&mut self.checker.g.level, GENERIC);
+            self.checker.g.instance(manifest.template);
+            self.checker.g.level = level;
+            let body = if manifest.body.0 & RELATIVE != 0 {
+                Ty(base + (manifest.body.0 & !RELATIVE))
+            } else {
+                manifest.body
+            };
+            equations.push((self.type_name(index), body));
+        }
+        equations.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut seen = vec![NONE; self.checker.g.nodes.len()];
+        let mut count = 0;
+        let mut out = String::new();
+        for (name, body) in equations {
+            let _ = write!(out, "= {name} := ");
+            self.node_form(body, &mut seen, &mut count, &mut out);
+            out.push('\n');
+        }
+        out
+    }
+
+    /// O(1): the name a type index prints with: the last component of its
+    /// path, or the name of a fresh abstract type.
+    fn type_name(&self, index: u32) -> String {
+        let paths = self.segment.signature.paths.len() as u32;
+        if index >= paths {
+            return self.fresh.borrow()[(index - paths) as usize].clone();
+        }
+        self.path_name(index).to_string()
     }
 
     /// O(paths): give the late types their scopes: a graph starts at level
@@ -1611,6 +1987,17 @@ impl New {
                 }
                 self.operands.push(ty);
             }
+            Op::Gadt(left, right, flags) => {
+                let (left, right) = (self.operands[left as usize], self.operands[right as usize]);
+                if fault == Fault::ExpressionMode {
+                    return self.checker.unify(left, right).map_err(|_| ());
+                }
+                let level = self.checker.g.level;
+                return self
+                    .checker
+                    .unify_pattern(level, flags & 1 != 0, flags & 2 != 0, left, right)
+                    .map_err(|_| ());
+            }
         }
         Ok(())
     }
@@ -1678,16 +2065,7 @@ impl New {
                 }
             }
             CONSTR if node.head & super::segment::EXTENDED == 0 => {
-                let name = match self.segment.signature.paths[node.a as usize] {
-                    PathRow::Ident(ident) => self.segment.signature.identifiers[ident as usize].name,
-                    PathRow::Dot { name, .. } => name,
-                    PathRow::Apply { .. } => NONE,
-                };
-                if name == NONE {
-                    out.push_str("?apply");
-                } else {
-                    out.push_str(self.string(name));
-                }
+                out.push_str(&self.type_name(node.a));
                 if node.arity() != 0 {
                     out.push('<');
                     for index in 0..node.arity() {
@@ -1928,7 +2306,7 @@ pub(crate) fn run_new(program: &Program, plan: impl Into<Plan>, ops: &[Op], faul
             program.source
         );
         let before = match op {
-            Op::Unify(..) | Op::Lower(..) if explain => new.form(),
+            Op::Unify(..) | Op::Lower(..) | Op::Gadt(..) if explain => new.form(),
             _ => String::new(),
         };
         if new.apply(op, fault).is_err() {
@@ -1937,7 +2315,7 @@ pub(crate) fn run_new(program: &Program, plan: impl Into<Plan>, ops: &[Op], faul
             }
             // A failed lowering has no trace on either side (`run_old`).
             let mut trace = match op {
-                Op::Unify(..) => new.checker.trace.clone(),
+                Op::Unify(..) | Op::Gadt(..) => new.checker.trace.clone(),
                 _ => Vec::new(),
             };
             match fault {
@@ -1952,6 +2330,9 @@ pub(crate) fn run_new(program: &Program, plan: impl Into<Plan>, ops: &[Op], faul
         }
     }
     outcome.form.push_str(&new.form());
+    if plan.has(PATTERN) {
+        outcome.form.push_str(&new.equations());
+    }
     outcome
 }
 
@@ -1965,6 +2346,11 @@ pub(crate) fn compare(
     fault: Fault,
 ) -> Result<Outcome, String> {
     let plan = plan.into();
+    // [`PATTERN`]: only the operations the old checker is a judge of.
+    let ops = match plan.has(PATTERN) {
+        true => &ops[..old_judges(program, plan, ops)],
+        false => ops,
+    };
     let old = run_old(program, plan, ops);
     let new = run_new(program, plan, ops, fault);
     if old == new {
@@ -3160,7 +3546,8 @@ mod tests {
     /// R3x.
     #[test]
     fn ignored_tests_name_the_slices_they_reach() {
-        let before: [(&str, &[&str]); 10] = [
+        let before: [(&str, &[&str]); 11] = [
+            ("R3q", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
             ("R3p", &["R3m", "R3e"]),
             ("R3k", &[]),
             ("R3m", &[]),
@@ -3259,7 +3646,7 @@ mod tests {
                 let full = body.contains("Tier::Full");
                 let rows = body.contains("OBJECTS") || body.contains("VARIANTS");
                 for (needle, reached) in
-                    [("OBJECTS", "R3e"), ("VARIANTS", "R3f"), ("UNIVAR", "R3g")]
+                    [("OBJECTS", "R3e"), ("VARIANTS", "R3f"), ("UNIVAR", "R3g"), ("PATTERN", "R3h")]
                 {
                     if full && body.contains(needle) {
                         reaches.push(reached);
@@ -4145,6 +4532,417 @@ mod tests {
              0 = &0[G][#A #B | &1[G]']\n1 = &2[G]'\n2 = &3[0][#A #B | &4[0]']\n3 = &5[0]'\n\
              0 = &0[0][#A #B | &1[0]']\n1 = &2[1]'\n"
         );
+    }
+
+    /// A program for the fixed cases of pattern mode ([`PATTERN`]): the
+    /// two locally abstract types `n0` (the older) and `n1`, an abstract
+    /// type with a parameter `k`, a data type `d`, and values whose
+    /// parameters are the types a case unifies: `p0` nullary types and a
+    /// tuple, `p1` and `p2` constructors of one path, `p3` variables,
+    /// `p4` closed rows, `p5` open rows and a row with an upper bound,
+    /// `p6` tuples and nested constructors.
+    const PATTERN_PROGRAM: &str = "type n0\ntype n1\ntype k<'a>\ntype d<'a> = D('a)\n\
+        external p0: (n0, n1, int, (int, int)) => unit = \"p0\"\n\
+        external p1: (k<n0>, k<int>, k<n1>, k<'a>) => unit = \"p1\"\n\
+        external p2: (d<n0>, d<int>, d<n1>, d<'a>) => unit = \"p2\"\n\
+        external p3: ('a, 'b, ('a, int)) => unit = \"p3\"\n\
+        external p4: ([#A(n0) | #B], [#A(int) | #B], [#A(int) | #C], [#A | #B]) => unit = \"p4\"\n\
+        external p5: ([> #A(n0)], [< #A(int) | #B], [#C(n1)], [> #A(int)], [> #A(int) | #B]) => unit = \"p5\"\n\
+        external p6: ((n0, int), (int, (int, int)), k<k<n0>>, k<k<int>>) => unit = \"p6\"\n";
+
+    /// The plan of the fixed cases of pattern mode.
+    const PATTERN_PLAN: u16 = OBJECTS | VARIANTS | REFS | BUILD | PATTERN;
+
+    /// One definition, an instance of value `value` (operand 0), its
+    /// parameters `left` and `right` (operands 1 and 2), unified in
+    /// pattern mode with `flags` ([`Op::Gadt`]).
+    fn pattern(value: u16, left: u8, right: u8, flags: u8) -> Vec<Op> {
+        vec![
+            Op::BeginDef,
+            Op::Instance(value),
+            Op::Child(0, left),
+            Op::Child(0, right),
+            Op::Gadt(1, 2, flags),
+        ]
+    }
+
+    /// One definition, the parameter `structure` of an instance of value
+    /// `value` (operand 1) and `n0` (operand 3), unified in pattern mode
+    /// as `unify_gadt` does, `n0` on the left.
+    fn refine(value: u16, structure: u8) -> Vec<Op> {
+        vec![
+            Op::BeginDef,
+            Op::Instance(value),
+            Op::Child(0, structure),
+            Op::Instance(0),
+            Op::Child(2, 0),
+            Op::Gadt(3, 1, 3),
+        ]
+    }
+
+    /// O(text): the equations a form ends with.
+    fn equations(form: &str) -> Vec<&str> {
+        form.lines().filter(|line| line.starts_with("= ")).collect()
+    }
+
+    /// The old checker on a fixed pattern case: the outcome, and that it
+    /// is a judge of every operation ([`old_judges`]).
+    fn old_pattern(ops: &[Op]) -> Outcome {
+        let program = compile(PATTERN_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN);
+        assert_eq!(old_judges(&program, plan, ops), ops.len(), "{ops:?}");
+        run_old(&program, plan, ops)
+    }
+
+    /// Which pairs get an equation, and in which direction (observed;
+    /// section 8.6, decision 62; the old checker is a judge of all of
+    /// it). A locally abstract type against a type that is not one gets
+    /// the equation whichever side it is on (`Tconstr (path, [], _), _
+    /// when is_instantiable ...` and its mirror, compiler/ml/ctype.ml:
+    /// 2385-2392), and the two nodes stay two nodes. Two locally abstract
+    /// types: the one of the higher newtype level gets it (`if
+    /// find_newtype_level !env path > find_newtype_level !env path' then
+    /// (path, t2') else (path', t1')`, ctype.ml:2373-2384): `n1`, on
+    /// either side. Without `generate_equations` there is none and the
+    /// unification succeeds (`reify` and no `mcomp`, ctype.ml:2393-2397).
+    /// `int` against a tuple with equations fails: `mcomp`. A second
+    /// equation is for the expansion: `n1` against `n0` after `n0 := int`
+    /// gives `n1 := int` (`unify2` expands both, ctype.ml:2276-2280).
+    #[test]
+    fn old_checker_gives_the_equation_to_the_newer_locally_abstract_type() {
+        let left = old_pattern(&pattern(0, 0, 2, 3));
+        assert_eq!(left.failed, None);
+        assert_eq!(
+            left.form,
+            "0 = &0[1]fn(&1[1]n0, &2[1]n1, &3[1]int, &4[1](&5[1]int, &6[1]int)) => &7[1]unit\n1 = @1\n2 = @3\n= n0 := &0[G]int\n"
+        );
+        assert_eq!(equations(&old_pattern(&pattern(0, 2, 0, 3)).form), ["= n0 := &0[G]int"]);
+        assert_eq!(equations(&old_pattern(&pattern(0, 0, 1, 3)).form), ["= n1 := &0[G]n0"]);
+        assert_eq!(equations(&old_pattern(&pattern(0, 1, 0, 3)).form), ["= n1 := &0[G]n0"]);
+        assert_eq!(
+            equations(&old_pattern(&pattern(0, 0, 3, 3)).form),
+            ["= n0 := &0[G](&1[G]int, &2[G]int)"]
+        );
+        let silent = old_pattern(&pattern(0, 0, 2, 2));
+        assert_eq!((silent.failed, equations(&silent.form).len()), (None, 0));
+        assert_eq!(old_pattern(&pattern(0, 2, 3, 3)).failed, Some(4));
+        let mut chain = pattern(0, 0, 2, 3);
+        chain.extend([Op::Child(0, 1), Op::Gadt(3, 1, 3)]);
+        assert_eq!(
+            equations(&old_pattern(&chain).form),
+            ["= n0 := &0[G]int", "= n1 := &1[G]int"]
+        );
+    }
+
+    /// The arguments of two constructors of one path (observed; decision
+    /// 62; the old checker is a judge). As `unify_gadt` runs it
+    /// (`assume_injective`) the arguments are unified with equations
+    /// (`set_mode_pattern ~generate:true ~injective:false`,
+    /// compiler/ml/ctype.ml:2352-2354): `k<n0>` against `k<int>` gives
+    /// `n0 := int`. Below that, `k`, abstract and not of the unit, is not
+    /// injective: its arguments are unified without equations and what
+    /// does not unify is reified (ctype.ml:2359-2371): no equation, a
+    /// success, the two `k` nodes two nodes, and a later unification of
+    /// the two in expression mode fails, so nothing of the pattern
+    /// unification is left to make them equal. `d`, a data type, is
+    /// injective (`expands_to_datatype`, ctype.ml:2355-2358): `n0 := int`.
+    /// Without `generate_equations` neither has one. A variable argument
+    /// is a link to the other argument in every mode.
+    #[test]
+    fn old_checker_refines_the_arguments_of_a_constructor_by_its_injectivity() {
+        assert_eq!(equations(&old_pattern(&pattern(1, 0, 1, 3)).form), ["= n0 := &0[G]int"]);
+        for flags in [0, 1] {
+            let abstract_type = old_pattern(&pattern(1, 0, 1, flags));
+            assert_eq!((abstract_type.failed, equations(&abstract_type.form).len()), (None, 0));
+            assert!(abstract_type.form.contains("\n1 = @1\n2 = @3\n"), "{}", abstract_type.form);
+        }
+        assert_eq!(equations(&old_pattern(&pattern(2, 0, 1, 1)).form), ["= n0 := &0[G]int"]);
+        assert_eq!(equations(&old_pattern(&pattern(2, 0, 1, 0)).form).len(), 0);
+        let nested = old_pattern(&pattern(6, 2, 3, 3));
+        assert_eq!((nested.failed, equations(&nested.form).len()), (None, 0));
+        let mut again = pattern(6, 2, 3, 3);
+        again.extend([Op::Child(1, 0), Op::Child(2, 0), Op::Unify(3, 4)]);
+        assert_eq!(old_pattern(&again).failed, Some(7));
+        let mut direct = pattern(1, 0, 1, 1);
+        direct.push(Op::Unify(1, 2));
+        assert_eq!(old_pattern(&direct).failed, Some(5));
+        let variable = old_pattern(&pattern(1, 0, 3, 1));
+        assert!(variable.form.contains("&7[1]k<@2>"), "{}", variable.form);
+    }
+
+    /// What `reify` makes of a variable and of a row variable (observed;
+    /// decision 62; the old checker is a judge of both, and of the names
+    /// of variables without a name). The variable of `('a, int)` at the
+    /// newtype level becomes a new abstract type `$0` at the variable's
+    /// level, and the equation's body is a generic copy that names it
+    /// (compiler/ml/ctype.ml:1815-1840, 2085-2087). The row variable of
+    /// `[> #A(int)]` becomes `$0` as well, and the row a fixed row over
+    /// it (`{r with row_fields = []; row_fixed = true; row_more = t}`,
+    /// ctype.ml:1845-1851). A second one is `$1` (`get_new_abstract_name`,
+    /// ctype.ml:908-922). No operation gives the harness a variable with
+    /// a name: `$'a` is tested by hand in tc/r3_tests.rs.
+    #[test]
+    fn old_checker_reifies_a_variable_and_a_row_variable() {
+        let variable = old_pattern(&refine(3, 2));
+        assert_eq!(variable.failed, None);
+        assert_eq!(
+            variable.form.lines().next(),
+            Some("0 = &0[1]fn(&1[1]$0, &2[1]', &3[1](@1, &4[1]int)) => &5[1]unit")
+        );
+        assert_eq!(equations(&variable.form), ["= n0 := &0[G](&1[G]$0, &2[G]int)"]);
+        let row = old_pattern(&refine(5, 3));
+        assert!(row.form.contains("&10[1][fixed #A(&11[1]int) | &12[1]$0]"), "{}", row.form);
+        assert_eq!(equations(&row.form), ["= n0 := &0[G][fixed #A(&1[G]int) | &2[G]$0]"]);
+        let mut twice = refine(3, 2);
+        twice.extend([Op::Child(2, 1), Op::Instance(3), Op::Child(5, 2), Op::Gadt(4, 6, 3)]);
+        assert_eq!(
+            equations(&old_pattern(&twice).form),
+            ["= n0 := &0[G](&1[G]$0, &2[G]int)", "= n1 := &3[G](&4[G]$1, &5[G]int)"]
+        );
+    }
+
+    /// What a pattern unification that fails leaves (observed; decision
+    /// 62; the old checker is a judge of the graph, not of the
+    /// environment, which the harness drops with the state). `reify`
+    /// links before it refuses: a variable below the newtype level is a
+    /// link to its new abstract type when the unification fails with the
+    /// pair of that type and a new variable (`link_type ty t; if ty.level
+    /// < newtype_level then raise (Unify [(t, newvar2 ty.level)])`,
+    /// compiler/ml/ctype.ml:1837-1839), and a row that clashes is a fixed
+    /// row when `mcomp` refuses the pair after it (ctype.ml:2400-2408).
+    /// The handler of unify3 puts back only the description of the left
+    /// node (`t1'.desc <- d1`, ctype.ml:2437-2439). The caller that goes
+    /// on after a failure restores a snapshot, the levels and the
+    /// environment it kept (`set_state`, compiler/ml/typecore.ml:
+    /// 1299-1305); `unify_pat_types_gadt` itself reports the failure
+    /// (typecore.ml:488-495). A failure below a tuple whose first
+    /// elements gave an equation leaves the graph as it was.
+    #[test]
+    fn old_checker_keeps_what_reify_linked_when_a_pattern_unification_fails() {
+        let ops = [
+            Op::Instance(3),
+            Op::Child(0, 2),
+            Op::BeginDef,
+            Op::Instance(0),
+            Op::Child(2, 0),
+            Op::Gadt(3, 1, 3),
+        ];
+        let below = old_pattern(&ops);
+        assert_eq!(below.failed, Some(5));
+        assert_eq!(trace_of(&below.form, 5), ["@7 ~ @3", "@1 ~ &14[0]'"]);
+        assert_eq!(
+            below.form.lines().last(),
+            Some("3 = @7"),
+            "{}",
+            below.form
+        );
+        assert!(
+            below.form.contains("\n0 = &0[0]fn(&1[0]$0, &2[0]', &3[0](@1, &4[0]int)) => &5[0]unit\n"),
+            "{}",
+            below.form
+        );
+        let row = old_pattern(&pattern(5, 0, 2, 3));
+        assert_eq!(row.failed, Some(4));
+        assert!(row.form.contains("&1[1][fixed #A(&2[1]n0) | &3[1]$0]"), "{}", row.form);
+        let partial = old_pattern(&pattern(6, 0, 1, 3));
+        assert_eq!(partial.failed, Some(4));
+        assert_eq!(trace_of(&partial.form, 4), ["@1 ~ @4", "@3 ~ @6"]);
+        assert_eq!((partial.unchanged, partial.changed), (1, 0));
+    }
+
+    /// Rows in pattern mode (observed; decision 62; the old checker is a
+    /// judge of all three). Two closed rows of which one lacks a tag of
+    /// the other, and a constant tag against one with an argument, clash
+    /// and are not compatible: `mcomp` refuses them (`mcomp_row`,
+    /// compiler/ml/ctype.ml:1985-2009). A fixed row against an open row
+    /// with one more tag clashes (`unify_row` does not extend a fixed
+    /// row) and is compatible: the unification succeeds after the
+    /// backtrack, the two rows are two nodes, the open one is reified to
+    /// a fixed row over `$1` and nothing else of the attempt is left
+    /// (ctype.ml:2400-2408).
+    #[test]
+    fn old_checker_accepts_rows_that_clash_and_are_compatible() {
+        assert_eq!(old_pattern(&pattern(4, 0, 2, 3)).failed, Some(4));
+        assert_eq!(old_pattern(&pattern(4, 0, 3, 3)).failed, Some(4));
+        let mut ops = refine(5, 3);
+        ops.extend([Op::Child(0, 4), Op::Gadt(1, 4, 3)]);
+        let compatible = old_pattern(&ops);
+        assert_eq!(compatible.failed, None);
+        assert!(
+            compatible.form.contains(
+                "&10[1][fixed #A(&11[1]int) | &12[1]$0], &13[1][fixed #A(&14[1]int) #B | &15[1]$1]"
+            ),
+            "{}",
+            compatible.form
+        );
+        assert!(compatible.form.contains("\n1 = @10\n") && compatible.form.contains("\n4 = @13\n"));
+    }
+
+    /// Where the old checker is NOT a judge (observed; decision 62): two
+    /// structures that a pattern unification unifies are one node
+    /// afterwards. OCaml records the pair as assumed equal and links
+    /// neither (`Pattern -> add_type_equality t1' t2'`,
+    /// compiler/ml/ctype.ml:2327-2331): a type that is equal only under
+    /// the equations of one case must not become the other for good. Two
+    /// tuples of two instances are one node; of two closed rows that
+    /// differ in `n0` against `int` the left one prints `int` afterwards.
+    /// [`old_judges`] ends a case before such an operation.
+    #[test]
+    fn old_checker_links_the_structures_a_pattern_unification_unifies() {
+        let program = compile(PATTERN_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, PATTERN_PLAN);
+        let tuples = [
+            Op::BeginDef,
+            Op::Instance(0),
+            Op::Child(0, 3),
+            Op::Instance(0),
+            Op::Child(2, 3),
+            Op::Gadt(1, 3, 3),
+        ];
+        let linked = run_old(&program, plan, &tuples);
+        assert!(linked.form.contains("\n3 = @4\n"), "{}", linked.form);
+        assert_eq!(old_judges(&program, plan, &tuples), 5);
+        let rows = pattern(4, 0, 1, 3);
+        let linked = run_old(&program, plan, &rows);
+        assert!(
+            linked.form.starts_with("0 = &0[1]fn(&1[1][closed #A(&2[1]int) #B | &3[1]nil], @1,"),
+            "{}",
+            linked.form
+        );
+        assert_eq!(old_judges(&program, plan, &rows), 4);
+    }
+
+    /// The self-test of [`PATTERN`]: the two sides agree today on a
+    /// pattern program for everything that is not a pattern unification
+    /// (the locally abstract types, the abstract type with a parameter
+    /// and the data type convert, print and unify in expression mode as
+    /// any type), on the fixed program and on 300 generated cases with
+    /// the pattern unifications taken out; and the form of a pattern
+    /// plan ends with no equation there.
+    #[test]
+    fn the_two_sides_agree_on_pattern_programs_without_a_pattern_unification() {
+        let program = compile(PATTERN_PROGRAM.to_string());
+        assert_eq!(program.values.len(), 7);
+        let plan = Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN);
+        let ops = [
+            Op::BeginDef,
+            Op::Instance(0),
+            Op::Instance(1),
+            Op::Child(0, 0),
+            Op::Child(1, 3),
+            Op::Child(3, 0),
+            Op::Unify(2, 4),
+            Op::Instance(5),
+            Op::Child(0, 1),
+            Op::Unify(2, 6),
+            Op::EndDef,
+            Op::Generalize(1),
+            Op::Copy(1),
+        ];
+        let outcome = compare(0, &program, plan, &ops, Fault::None).unwrap_or_else(|report| panic!("{report}"));
+        assert_eq!(outcome.failed, Some(9));
+        assert!(outcome.form.contains("k<&"), "{}", outcome.form);
+        assert_eq!(equations(&outcome.form).len(), 0);
+        let plan = Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN);
+        let mut patterns = 0;
+        for seed in 1..=3u64 {
+            for sequence in 0..100u64 {
+                let case_seed = seed * 1_000_003 + sequence;
+                let (program, ops) = case(plan, case_seed);
+                patterns += ops.iter().filter(|op| matches!(op, Op::Gadt(..))).count();
+                let ops: Vec<Op> =
+                    ops.into_iter().filter(|op| !matches!(op, Op::Gadt(..))).collect();
+                if let Err(report) = compare(case_seed, &program, plan, &ops, Fault::None) {
+                    panic!("{report}");
+                }
+            }
+        }
+        assert!(patterns >= 300, "{patterns}");
+    }
+
+    /// The old side of the pattern plan runs today and is not vacuous
+    /// (observed, 1,200 cases: 1136 judged to the end, 64 not; 950
+    /// pattern unifications that succeed and 493 that fail; 130 cases end
+    /// with an equation, 3 with two, 183 with a reified type; the bounds
+    /// are a third of that): cases the old checker judges to the end and cases it
+    /// leaves at a pattern unification that linked two structures
+    /// ([`old_judges`]); among the judged operations, pattern
+    /// unifications that succeed and that fail; cases that end with an
+    /// equation, with two, and with a reified type.
+    #[test]
+    fn old_side_of_the_pattern_plan_is_not_vacuous() {
+        let plan = Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN);
+        let (mut whole, mut cut, mut ok, mut failed) = (0, 0, 0, 0);
+        let (mut equation, mut two, mut reified) = (0, 0, 0);
+        for seed in 1..=12u64 {
+            for sequence in 0..100u64 {
+                let (program, ops) = case(plan, seed * 1_000_003 + sequence);
+                let judged = old_judges(&program, plan, &ops);
+                if judged == ops.len() {
+                    whole += 1;
+                } else {
+                    cut += 1;
+                }
+                let ops = &ops[..judged];
+                let outcome = run_old(&program, plan, ops);
+                for (index, op) in ops.iter().enumerate() {
+                    if matches!(op, Op::Gadt(..)) {
+                        match outcome.form.contains(&format!("! {index} trace\n")) {
+                            true => failed += 1,
+                            false => ok += 1,
+                        }
+                    }
+                }
+                let count = equations(&outcome.form).len();
+                equation += usize::from(count >= 1);
+                two += usize::from(count >= 2);
+                reified += usize::from(outcome.form.contains('$'));
+            }
+        }
+        println!("pattern plan, old side: {whole} {cut} {ok} {failed} {equation} {two} {reified}");
+        assert!(
+            whole >= 380
+                && cut >= 20
+                && ok >= 300
+                && failed >= 160
+                && equation >= 40
+                && two >= 1
+                && reified >= 60,
+            "{whole} {cut} {ok} {failed} {equation} {two} {reified}"
+        );
+    }
+
+    /// The deliberately wrong new side of [`PATTERN`]
+    /// ([`Fault::ExpressionMode`]: a pattern unification runs as an
+    /// expression unification, which the kernel has today) is reported by
+    /// the generated cases: by a case in which the old checker adds an
+    /// equation, and by one in which a pattern unification the old
+    /// checker accepts fails in expression mode (observed, 300 cases: 228
+    /// with a pattern unification; reported with an equation on the old
+    /// side 21, with a failure only the wrong side has 58).
+    #[test]
+    fn generated_cases_find_a_pattern_unification_in_expression_mode() {
+        let plan = Plan::new(Tier::Full, PATTERN_PLAN);
+        let (mut cases, mut equation, mut refused) = (0, 0, 0);
+        for seed in 1..=3u64 {
+            for sequence in 0..100u64 {
+                let case_seed = seed * 1_000_003 + sequence;
+                let (program, ops) = case(plan, case_seed);
+                let ops = &ops[..old_judges(&program, plan, &ops)];
+                if !ops.iter().any(|op| matches!(op, Op::Gadt(..))) {
+                    continue;
+                }
+                cases += 1;
+                let old = run_old(&program, plan, ops);
+                if compare(case_seed, &program, plan, ops, Fault::ExpressionMode).is_err() {
+                    let new = run_new(&program, plan, ops, Fault::ExpressionMode);
+                    equation += usize::from(equations(&old.form).len() > 0);
+                    refused += usize::from(new.failed.is_some() && old.failed != new.failed);
+                }
+            }
+        }
+        println!("expression mode fault: {cases} {equation} {refused}");
+        assert!(cases >= 75 && equation >= 7 && refused >= 19, "{cases} {equation} {refused}");
     }
 
     /// 10,000 cases of everything on programs with polymorphic fields,
