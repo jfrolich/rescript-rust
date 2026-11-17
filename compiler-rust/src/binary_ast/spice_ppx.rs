@@ -3057,13 +3057,15 @@ fn variants_generate_codecs(
         .map(|d| variants_parse_decl(d, arena))
         .collect::<Result<Vec<_>, _>>()?;
     if let Some(serde_settings) = settings.serde {
-        if unboxed {
-            return Err("@spice.serde can't be combined with @unboxed".to_string());
-        }
         let cases = parsed
             .iter()
             .map(|decl| serde::variant_case(decl, arena))
             .collect::<Result<Vec<_>, _>>()?;
+        let cases = if unboxed {
+            serde::unboxed_cases(serde_settings.tag, cases)?
+        } else {
+            cases
+        };
         let (encoder, decoder) = serde::generate_codecs(
             settings,
             serde_settings,
@@ -3096,6 +3098,9 @@ fn variants_generate_codecs(
     }
     for decl in constr_decls {
         serde::reject_flags(&decl.pcd_attributes, arena)?;
+    }
+    if unboxed && constr_decls.len() > 1 {
+        return Err("An @unboxed variant with several constructors needs @spice.serde".to_string());
     }
     let count_has_attr = parsed.iter().filter(|v| v.has_attr_as).count();
     let has_attr_as = if count_has_attr > 0 {

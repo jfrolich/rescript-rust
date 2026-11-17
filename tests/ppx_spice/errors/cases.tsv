@@ -3,7 +3,9 @@ any.res	Can't generate codecs for `any` type
 function.res	Can't generate codecs for function type
 duplicate.res	Too many occurrences
 partial-as.res	Partial @spice.as usage
-serde-unboxed.res	@spice.serde can't be combined with @unboxed
+serde-unboxed.res	@unboxed can't be combined with @tag
+serde-unboxed-other.res	@spice.other can't be combined with an @unboxed constructor with payload
+unboxed-without-serde.res	An @unboxed variant with several constructors needs @spice.serde
 serde-config.res	@spice.serde takes no payload
 flag-without-serde.res	need @spice.serde
 alias-not-string.res	@spice.alias needs a string

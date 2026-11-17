@@ -41,6 +41,9 @@ impl Construct {
     }
 }
 
+const UNTAGGED_PAYLOAD: &str =
+    "@spice.untagged needs a constructor with one value or an inline record";
+
 /// serde.ml `case`.
 pub(super) struct SerdeCase {
     /// The name in JSON: the constructor, or its `@spice.as` string.
@@ -51,7 +54,9 @@ pub(super) struct SerdeCase {
     pub aliases: Vec<String>,
     /// `@spice.other`: a unit constructor any unknown name decodes to.
     pub other: bool,
-    /// `@spice.untagged`: a one-value constructor written as its value alone.
+    /// `@spice.untagged`, or a payload constructor of an `@unboxed`
+    /// variant: written as its one value or inline record alone, decoded
+    /// from what no named constructor reads.
     pub untagged: bool,
     pub payload: CasePayload,
     /// The constructor pattern, binding `v0`, `v1`, ... or the record fields.
@@ -357,8 +362,10 @@ fn validate_flags(cases: &[SerdeCase]) -> SpiceResult<()> {
         }
     }
     for case in &untagged {
-        if !matches!(&case.payload, CasePayload::Args(args) if args.len() == 1) {
-            return Err("@spice.untagged needs a constructor with one value".to_string());
+        if !matches!(&case.payload, CasePayload::Args(args) if args.len() == 1)
+            && !matches!(case.payload, CasePayload::Record(_))
+        {
+            return Err(UNTAGGED_PAYLOAD.to_string());
         }
         if !case.aliases.is_empty() {
             return Err("An @spice.untagged constructor has no name to alias".to_string());
@@ -440,6 +447,9 @@ fn encoder_case(
     let rhs = match (&case.payload, tag) {
         (CasePayload::Args(args), _) if case.untagged && args.len() == 1 => {
             encode_arg(settings, &args[0], "v0", arena)?
+        }
+        (CasePayload::Record(fields), _) if case.untagged => {
+            records_generate_inline_encoder_expr(settings, fields, vec![], arena)?
         }
         (CasePayload::Unit, None) => {
             let name = str_expr(arena, name);
@@ -659,11 +669,15 @@ fn decode_untagged(
     let Some((case, rest)) = cases.split_first() else {
         return Ok(error);
     };
-    let CasePayload::Args(args) = &case.payload else {
-        return Err("@spice.untagged needs a constructor with one value".to_string());
+    let args = match &case.payload {
+        CasePayload::Record(fields) => {
+            return decode_untagged_record(settings, case, fields, rest, error, arena);
+        }
+        CasePayload::Args(args) => args,
+        CasePayload::Unit => return Err(UNTAGGED_PAYLOAD.to_string()),
     };
     let [arg] = args.as_slice() else {
-        return Err("@spice.untagged needs a constructor with one value".to_string());
+        return Err(UNTAGGED_PAYLOAD.to_string());
     };
     let decoder = decoder_of(settings, arg, arena)?;
     let v = ident(arena, "v");
@@ -677,6 +691,48 @@ fn decode_untagged(
         let value = case.construct.build(Some(v0), arena);
         construct(arena, "Ok", Some(value))
     };
+    let error_pat = {
+        let any = pat_any(arena);
+        pconstruct(arena, "Error", Some(any))
+    };
+    let error_rhs = decode_untagged(settings, rest, error, arena)?;
+    let cases = vec![
+        super::case(ok_pat, ok_rhs, arena),
+        super::case(error_pat, error_rhs, arena),
+    ];
+    Ok(expr_match(decoded, cases, arena))
+}
+
+/// serde.ml `decode_untagged` for an inline record: the object alone.
+fn decode_untagged_record(
+    settings: GeneratorSettings,
+    case: &SerdeCase,
+    fields: &[LabelDeclaration],
+    rest: &[&SerdeCase],
+    error: Expression,
+    arena: &mut ParseArena,
+) -> SpiceResult<Expression> {
+    let object_pat = {
+        let dict = pat_var_dummy(arena, "dict");
+        json_pattern(arena, "Object", Some(dict))
+    };
+    let record = records_generate_inline_decoder_expr(settings, fields, case.constructor, arena)?;
+    let v = ident(arena, "v");
+    let not_object = spice_error(arena, "Not an object", v);
+    let decoded = {
+        let v = ident(arena, "v");
+        let cases = vec![
+            super::case(object_pat, record, arena),
+            super::case(pat_any(arena), not_object, arena),
+        ];
+        expr_match(v, cases, arena)
+    };
+    let ok_pat = {
+        let any = pat_any(arena);
+        let ok = pconstruct(arena, "Ok", Some(any));
+        pat_alias(ok, "ok", arena)
+    };
+    let ok_rhs = ident(arena, "ok");
     let error_pat = {
         let any = pat_any(arena);
         pconstruct(arena, "Error", Some(any))
@@ -1072,6 +1128,33 @@ pub(super) fn variant_case(
         lhs,
         construct: Construct::Variant(decl.name),
     })
+}
+
+/// variants.ml `unboxed_serde_cases`: an `@unboxed` variant is in JSON what
+/// it is in memory. A constructor without payload is its name, one with a
+/// payload is that value alone, as if it were `@spice.untagged`.
+pub(super) fn unboxed_cases(
+    tag: Option<StrIdx>,
+    cases: Vec<SerdeCase>,
+) -> SpiceResult<Vec<SerdeCase>> {
+    if tag.is_some() && !cases.is_empty() {
+        return Err("@unboxed can't be combined with @tag".to_string());
+    }
+    let has_payload = |case: &SerdeCase| !matches!(case.payload, CasePayload::Unit);
+    if cases.iter().any(|case| case.other) && cases.iter().any(has_payload) {
+        return Err(
+            "@spice.other can't be combined with an @unboxed constructor with \
+             payload, which already decodes what no name reads"
+                .to_string(),
+        );
+    }
+    Ok(cases
+        .into_iter()
+        .map(|case| SerdeCase {
+            untagged: case.untagged || has_payload(&case),
+            ..case
+        })
+        .collect())
 }
 
 /// polyvariants.ml `serde_case`.
