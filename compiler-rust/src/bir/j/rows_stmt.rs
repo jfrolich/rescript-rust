@@ -33,6 +33,7 @@
 //! | `function` | `block_from_list(body)`, then `bir::j::pure_expression(View::JFun { body, header }, 0)` |
 //! | `exp_rule` | `norm::js1_exp` |
 //! | `if_` | `norm::js3_simplify_if` |
+//! | `if_head` | `norm::simplify_if_head`, the head `js3_simplify_if` runs over pool lists, over the caller's runs: `RunLists` gives the rule each function of `Runs` under the name `norm::IfLists` has for it |
 //! | `effect`, `effect_if_impure` | `norm::jm14_effect_expression`, `norm::jm14_s_if_empty`: the rule gives each statement to `sink` as it makes it; nothing is collected |
 //!
 //! What the conversion slices T6m to T6q call beside the functions above
@@ -44,6 +45,7 @@
 //! | `take_value` | T6n | the `value` of `SExp`, `SReturn` or `SThrow`: `Bir::detach` of it, `Bir::release` of the statement; a panic for any other; one step |
 //! | `unblock` | T6n | each statement of an `SBlock`, read by its index, `Bir::detach`ed and given to `sink`, in order; then `Bir::release` of the block; nothing is collected; one step and one per statement |
 //! | `stmt_located` | T6o | `NodeFlags::JS_LOC_PRESENT` |
+//! | `stmt_id` | T6x-a | the `NodeId` of the row, as `Js::id` of an expression |
 //! | `is_empty_block` | T6n | an `SBlock` whose `statements` is empty |
 //! | `branch_last_kind` | T6n | of an `SIf`: `rows::kind_of` of the operation of the last entry of the `statements` of `then_`, or of `else_` when `otherwise`; `None` for no entry or no `else_` |
 //! | `copy_stmt` | T6o | `Bir::copy_subtree_with_scratch(s, &[], fresh, ..)` with the copy storage and the label vector of `Rows`, as `copy_fresh` |
@@ -58,12 +60,13 @@
 //! Steps (`Js::steps`): one for every function that builds a statement or
 //! a function literal, and one more per statement of each list it
 //! consumes; `list` one and one per statement; `take_at` one; `effect` and
-//! `effect_if_impure` one and one per statement given. A reader and the
-//! transition functions count nothing.
+//! `effect_if_impure` one and one per statement given; `if_head` one (the
+//! runs count what they release and take). A reader and the transition
+//! functions count nothing.
 use super::rows::{E, Rows, kind_of};
 use super::{norm, plain};
 use crate::bir::lower::js::Pools;
-use crate::bir::lower::js_stmt::{JsStmt, Range};
+use crate::bir::lower::js_stmt::{IfHead, JsStmt, Range, Runs};
 use crate::bir::{FuncId, ListId, NodeFlags, NodeId, StrId, SwitchId, VarId, View};
 use crate::lambda::LamLoc;
 use crate::emit::row::Kind;
@@ -117,6 +120,11 @@ impl JsStmt for Rows {
     #[inline]
     fn stmt_located(&self, a: &Pools, s: &S) -> bool {
         a.node(s.0).flags().contains(NodeFlags::JS_LOC_PRESENT)
+    }
+
+    #[inline]
+    fn stmt_id(&self, _: &Pools, s: &S) -> u32 {
+        s.0.0
     }
 
     fn list(&mut self, a: &mut Pools, len: u32, statements: impl Iterator<Item = S>) -> ListId {
@@ -371,6 +379,19 @@ impl JsStmt for Rows {
         self.steps += 1 + self.len(a, yes) as u64 + self.len(a, no) as u64;
         S(norm::js3_simplify_if(a, test.0, yes, no))
     }
+    fn if_head<R: Runs<Rows>>(
+        &mut self,
+        a: &mut Pools,
+        runs: &mut R,
+        test: &mut E,
+        yes: &mut R::Run,
+        no: &mut R::Run,
+    ) -> Option<IfHead<S, R::Run>> {
+        self.steps += 1;
+        let mut lists = RunLists { rows: self, runs };
+        let head = norm::simplify_if_head(a, &mut lists, &mut test.0, yes, no)?;
+        Some(IfHead { statement: head.statement.map(S), tail: head.tail })
+    }
     fn effect(&mut self, a: &mut Pools, value: E, mut sink: impl FnMut(S)) {
         let mut given = 0u64;
         norm::jm14_effect_expression(a, value.0, &mut |statement| {
@@ -386,6 +407,43 @@ impl JsStmt for Rows {
             sink(S(statement));
         });
         self.steps += 1 + given;
+    }
+}
+
+/// The caller's runs as `norm::simplify_if_head` reads and takes
+/// branches: each function is the function of [`Runs`] with the same name,
+/// and a statement read in place is given to the rule as its row. 16
+/// bytes, made once per [`JsStmt::if_head`].
+struct RunLists<'r, R> {
+    rows: &'r mut Rows,
+    runs: &'r mut R,
+}
+
+impl<R: Runs<Rows>> norm::IfLists for RunLists<'_, R> {
+    type Handle = R::Run;
+    #[inline]
+    fn trim(&mut self, b: &mut Pools, run: R::Run) {
+        self.runs.trim(self.rows, b, run);
+    }
+    #[inline]
+    fn empty(&mut self, _: &mut Pools) -> R::Run {
+        self.runs.empty()
+    }
+    #[inline]
+    fn last(&mut self, _: &Pools, run: R::Run) -> Option<NodeId> {
+        self.runs.last(run).map(|s| s.0)
+    }
+    #[inline]
+    fn only(&mut self, _: &Pools, run: R::Run) -> Option<NodeId> {
+        self.runs.only(run).map(|s| s.0)
+    }
+    #[inline]
+    fn release(&mut self, b: &mut Pools, run: R::Run) {
+        self.runs.release(self.rows, b, run);
+    }
+    #[inline]
+    fn take(&mut self, b: &mut Pools, run: R::Run) -> ListId {
+        self.runs.take(self.rows, b, run)
     }
 }
 

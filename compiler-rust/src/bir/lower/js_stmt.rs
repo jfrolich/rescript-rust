@@ -24,7 +24,8 @@
 //! # Plain functions and rule functions
 //!
 //! As in [`Js`]. The rule functions are J-S1 ([`JsStmt::exp_rule`]), J-S3
-//! ([`JsStmt::if_`]) and J-M14 ([`JsStmt::effect`],
+//! ([`JsStmt::if_`], and [`JsStmt::if_head`] for its rules 0 to 6 over two
+//! runs of the caller's stack) and J-M14 ([`JsStmt::effect`],
 //! [`JsStmt::effect_if_impure`]). No other statement rule of
 //! BACKEND_LOWERING 6 is called by the lowering: J-S2 and J-S5 are done on
 //! its stack, and J-S4 has no call (a switch is built as given).
@@ -50,6 +51,47 @@ pub struct Range<E> {
     pub end: E,
     /// A `ForDirection`.
     pub direction: u16,
+}
+
+/// The runs of statements [`JsStmt::if_head`] works on. The lowering's
+/// statement stack implements it (T6x-a): a run is a span of its slots,
+/// and a branch that is kept stays where it was lowered. The functions
+/// that release or move statements take the implementation and the pools,
+/// because the runs own handles and the implementation owns what is behind
+/// them.
+pub trait Runs<B: JsStmt> {
+    /// A run. `Copy`; at most 8 bytes.
+    type Run: Copy;
+    /// Drop the explicit empty blocks of `run`, each released. On the
+    /// statement stack: two binary searches among the empty blocks it
+    /// noted and one step per empty block of the run; no other statement
+    /// of the run is read.
+    fn trim(&mut self, js: &mut B, a: &mut Pools, run: Self::Run);
+    /// A run without a statement. O(1).
+    fn empty(&mut self) -> Self::Run;
+    /// The last statement of `run`, read in place; `None` for a run
+    /// without one. O(1) on a run that ends in a statement.
+    fn last(&mut self, run: Self::Run) -> Option<&B::S>;
+    /// The statement of a run that holds exactly one, read in place. O(1)
+    /// on a run that starts with a statement: its first two are looked at.
+    fn only(&mut self, run: Self::Run) -> Option<&B::S>;
+    /// Release every statement of `run` ([`JsStmt::release_stmt`]); the run
+    /// is consumed. One step per node released.
+    fn release(&mut self, js: &mut B, a: &mut Pools, run: Self::Run);
+    /// The statements of `run` as a list in flight ([`JsStmt::list`]), each
+    /// moved once; the run is consumed. One step and one per statement.
+    fn take(&mut self, js: &mut B, a: &mut Pools, run: Self::Run) -> B::L;
+}
+
+/// What [`JsStmt::if_head`] leaves of a conditional: the statement that
+/// goes before the kept branch, if there is one, and the kept branch, which
+/// was not moved. 16 bytes with the statement of rows and a run of 8.
+pub struct IfHead<S, R> {
+    /// The guard, the folded `return`, the test as a statement, or an
+    /// empty block where the rule leaves nothing else.
+    pub statement: Option<S>,
+    /// The run that follows `statement`, where it was.
+    pub tail: R,
 }
 
 /// The statement half of the interface.
@@ -87,6 +129,15 @@ pub trait JsStmt: Js {
 
     /// Whether the statement has a source location. O(1). (T6o.)
     fn stmt_located(&self, a: &Pools, s: &Self::S) -> bool;
+    /// The id of the statement, read in place: what [`Js::owner`] gives for
+    /// its value, what [`JsStmt::block_ids`] gives for it once a block
+    /// holds it, and a key for [`Js::kind_of`]. It does not change while
+    /// the statement lives, and no other live statement has it. O(1): on
+    /// rows the row; on the builder the `node_id` of the owned node, one
+    /// load. (T6x-a: the statement stack keys its empty-block table by it,
+    /// since a slot is reused; `export.rs::build_rows` stores it for each
+    /// row of the top level.)
+    fn stmt_id(&self, a: &Pools, s: &Self::S) -> u32;
 
     // ---- Lists ----
 
@@ -247,6 +298,35 @@ pub trait JsStmt: Js {
     /// not an `if`. Its cost: that of the rule (BACKEND_LOWERING 6);
     /// counted as one step and one per statement of both lists.
     fn if_(&mut self, a: &mut Pools, test: Self::E, yes: Self::L, no: Self::L) -> Self::S;
+    /// J-S3 rules 0 to 6 over two runs the caller holds (`runs` is its
+    /// statement stack), for a conditional whose kept branch stays where it
+    /// was lowered: the empty blocks of both runs are dropped, a boolean
+    /// test keeps one run and releases the other, a negation is stripped
+    /// and the runs are swapped, two lone `return`s fold into one, a lone
+    /// `return` in the else-run or a then-run that ends in a jump becomes a
+    /// guard and the other run is the tail. `None` when none of these
+    /// applies: `test`, `yes` and `no` are then what the rules made of
+    /// them (the negations stripped, the runs swapped), for
+    /// [`JsStmt::if_`] over the two runs taken as lists. Otherwise the
+    /// test and the runs that are not the tail are consumed.
+    ///
+    /// Its cost: that of the rule; counted as one step, and what `runs`
+    /// counts for the statements it releases and takes (one per node
+    /// released, one per statement moved into the guard's list), plus one
+    /// per negation stripped. The tail is not scanned and not moved: of a
+    /// run that is kept, at most [`Runs::last`] and [`Runs::only`] are
+    /// asked. No allocation in a warm unit. (T6x-a: `cond.rs::if_in_place`,
+    /// the one call of `norm::simplify_if_head` from the lowering.)
+    fn if_head<R: Runs<Self>>(
+        &mut self,
+        a: &mut Pools,
+        runs: &mut R,
+        test: &mut Self::E,
+        yes: &mut R::Run,
+        no: &mut R::Run,
+    ) -> Option<IfHead<Self::S, R::Run>>
+    where
+        Self: Sized;
     /// J-M14: the statements of a value used for its effect, given to
     /// `sink` in order; a value without effect gives none and is released.
     /// Its cost: that of the rule (one visit per comma operand, and the
