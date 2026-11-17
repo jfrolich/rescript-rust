@@ -2258,14 +2258,15 @@ that R5a answers. R3h was not started in this turn.
 State after the sixth skeleton turn (trunk `61f7f41292`). Merged: every
 slice above R3h in the table, R3g and R3p included (built as designed;
 what their reviews put on record is decisions 53 to 57 of 8.6), and K1 to
-K4. `cargo test --lib tc::` on that trunk: 265 passed, 0 ignored. Without a design
+K4. `cargo test --lib tc::` on that trunk: 265 passed, 0 ignored. At the end
+of the sixth turn: 281 passed, 15 ignored (ten for R3h, five for R3r). Without a design
 before this turn: R3h, the `instance_poly` slice (R3q: a slice name has
 three characters), R3i and R3j. What the sixth turn did is listed in 8.6
 ("Decided in the sixth skeleton turn").
 
 | Slice | Decisions | Tests | Run in this turn |
 |---|---|---|---|
-| R3h | 61 to 67, 69, 71 | nine ignored in `r3_tests.rs`: eight hand-built and the step test `pattern_mode_at_ten_thousand` | none: no prototype was made; they compile against the skeleton and the check of the ignored tests passes. The harness and the old checker's side (decisions 61, 62) are nine tests that run today |
+| R3h | 61 to 67, 69, 71 | ten ignored in `r3_tests.rs`: nine hand-built and the step test `pattern_mode_at_ten_thousand` | none: no prototype was made; they compile against the skeleton and the check of the ignored tests passes. The harness and the old checker's side (decisions 61, 62) are nine tests that run today |
 | R3r | 63, 68, 70 | five ignored: three hand-built and `mcomp_at_ten_thousand` in `r3_tests.rs`, the fixed cases and 12,000 generated cases in `differential.rs` (`pattern_plan_agrees_on_generated_cases`) | none, as above |
 
 After the sixth turn: designed and not built, R3h and R3r (8.9); without
