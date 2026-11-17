@@ -1446,6 +1446,18 @@ impl Checker {
                 return Err(clash);
             }
         };
+        // A row that is not fixed has a variant node as its `more` now
+        // (`link_type rm ty`, ctype.ml:2616), so its name's arguments are
+        // children no longer (`iter_row`, btype.ml:229-241).
+        let homes = [
+            (fixed1 || last1.0 == NONE, row1, last1),
+            (fixed2, row2, if last2.0 == NONE { t2x } else { last2 }),
+        ];
+        for (kept, row, home) in homes {
+            if !kept && row.name != NONE && row.name_arguments.len != 0 {
+                self.drop_name_children(home, row);
+            }
+        }
         // 9. The static row below the common tags, which are popped in the
         //    order of the pairs, then the pair a fixed row asked for.
         if closed {
@@ -1464,6 +1476,53 @@ impl Checker {
         }
         self.extras.row_scratch.truncate(base);
         Ok(())
+    }
+
+    /// The arguments of a row's name stop being children of variant node
+    /// `home` (a representative, whose `VariantRow` is `row`) once the
+    /// row's `more` is a variant node: OCaml's `iter_row` visits them only
+    /// for the row a chain of rows ends in (compiler/ml/btype.ml:229-241):
+    ///
+    /// ```text
+    /// match (repr row.row_more).desc with
+    /// | Tvariant row -> iter_row f row
+    /// | Tvar _ | Tunivar _ | Tsubst _ | Tconstr _ | Tnil ->
+    ///   Misc.may (fun (_, l) -> List.iter f l) row.row_name
+    /// ```
+    ///
+    /// and every walk of a type goes through it (`iter_type_expr`,
+    /// btype.ml:263-265): `update_level`, `generalize`, `deep_occur`,
+    /// `occur_univar`, `univars_escape`; a copy takes the name of the
+    /// innermost row (`row_repr`, btype.ml:126-135). The kernel's walks
+    /// push every slot of a node, so the node is written
+    /// (`Graph::write`, logged in a speculation) with a new list in which
+    /// each slot of the name's arguments holds what the `more` slot
+    /// holds: a child the walk reaches anyway. The shared `VariantRow` is
+    /// not written, and nothing reads the name of a row that is not the
+    /// innermost (`row_repr`). In `Mode::Explain` a
+    /// [`FrameKind::Fields`] frame puts the node's descriptor back when
+    /// the unification fails, as it puts back the two rests, whose links
+    /// are what made the name stale (`rm1.desc <- md1`, ctype.ml:
+    /// 2637-2641). Called by [`Checker::unify_row`] for a row that has a
+    /// name with arguments and is not fixed: O(slots of the node), one
+    /// list of that length; a row without a name with arguments costs the
+    /// two compares of the caller. (CHECKER_REWRITE 8.6, decision 60)
+    #[cold]
+    #[inline(never)]
+    fn drop_name_children(&mut self, home: Ty, row: VariantRow) {
+        let node = self.g.nodes[home.0 as usize];
+        if self.g.mode == Mode::Explain {
+            let extra = self.saved.len() as u32;
+            self.saved.push(node);
+            self.saved.push(node);
+            self.frames.push(Frame { left: home, right: home, kind: FrameKind::Fields, extra });
+        }
+        let b = self.g.lists.len() as u32;
+        self.g.lists.extend_from_within(node.b as usize..(node.b + node.arity()) as usize);
+        let more = self.g.lists[(b + row.more) as usize];
+        let arguments = row.name_arguments;
+        self.g.lists[(b + arguments.start) as usize..(b + arguments.start + arguments.len) as usize].fill(more);
+        self.g.write(home, Node { b, ..node });
     }
 
     /// O(chain): the field `extras.row_scratch[at]` is, read now
@@ -2080,13 +2139,30 @@ impl Checker {
                 }
             }
         };
-        missing(self, middle..end, base..middle);
-        let gained1 = end..self.extras.row_scratch.len();
-        missing(self, base..middle, middle..end);
-        let gained2 = gained1.end..self.extras.row_scratch.len();
+        // The second run, after the types that hold a universal variable
+        // were unified: `tl1'` and `tl2'` are the lists the first run kept
+        // (`let tl1', tlu1 = split_univars tl1'`, computed BEFORE `List.iter
+        // (unify env tu1) (tlu1 @ tlu2)`, ctype.ml:2685-2697), read back
+        // from `saved` after the record ([`Checker::split_univars`]), not
+        // the two lists compared again: a type those unifications made
+        // the same node as one the side already has is still gained
+        // (CHECKER_REWRITE 8.6, decision 58).
+        let (gained1, gained2) = if record.b & ROW_UNIVARS != 0 {
+            let counts = self.saved[frame.extra as usize + 1];
+            let first = frame.extra as usize + 2;
+            for at in first..first + (counts.head + counts.level) as usize {
+                let ty = Ty(self.saved[at].head);
+                self.extras.row_scratch.push(FieldRef { name: 0, at: 0, ty });
+            }
+            (end..end + counts.head as usize, end + counts.head as usize..self.extras.row_scratch.len())
+        } else {
+            missing(self, middle..end, base..middle);
+            let gained1 = end..self.extras.row_scratch.len();
+            missing(self, base..middle, middle..end);
+            (gained1.clone(), gained1.end..self.extras.row_scratch.len())
+        };
         // PR#6744 (ctype.ml:2685-2699), on one load when the graph has no
-        // universal variable; not on the second run, after the types that
-        // hold one were unified.
+        // universal variable; not on the second run.
         let (gained1, gained2) = if self.extras.univars != 0 && record.b & ROW_UNIVARS == 0 {
             match self.split_univars(frame, [gained1, gained2]) {
                 Ok(Some([gained1, gained2])) => (gained1, gained2),
@@ -2808,7 +2884,9 @@ impl Checker {
     ///   root context is never visited again (ctype.ml:1569-1571); one
     ///   visited in a context that has closed is visited again;
     /// - otherwise the node is marked with `current`, one step, and:
-    ///   - a polymorphic type (ctype.ml:1587-1589): a new generation `g`
+    ///   - a polymorphic type without bound variables: its body, in the
+    ///     current context (`bound` is unchanged, ctype.ml:1587-1589);
+    ///   - a polymorphic type with bound variables: a new generation `g`
     ///     and `open_polys.push(true)`; each bound variable's
     ///     representative whose mark is not live is marked `g` (one that
     ///     an enclosing open type binds keeps that mark, so that leaving
@@ -2915,6 +2993,15 @@ impl Checker {
             TUPLE if node.head & EXTENDED != 0 => match self.extras.descriptors[node.a as usize] {
                 // `Tpoly (ty, tyl)`: the body with the bound variables
                 // added to `bound` (compiler/ml/ctype.ml:1587-1589).
+                // `Tpoly (ty, [])` adds nothing to `bound`: no context, the
+                // body is a child like any other. A context for it would
+                // make every node first met below it be visited again
+                // after it is left, which doubles the walk at each such
+                // type that shares its body with the outside
+                // (CHECKER_REWRITE 8.6, decision 59).
+                ExtraDescriptor::Poly if arity == 1 => {
+                    self.g.work.push(self.g.lists[node.b as usize]);
+                }
                 ExtraDescriptor::Poly => {
                     let generation = self.fresh_marks();
                     self.extras.open_polys.push(true);
@@ -3002,9 +3089,12 @@ impl Checker {
     ///   [`Checker::row_field_end`], which popped it) one is pushed; then
     ///   the pairs of the first type of `tlu1` with each other type of
     ///   `tlu1` and each type of `tlu2`, pushed so that they are popped
-    ///   in that order. `Ok(None)`: the join is run again when they are
-    ///   unified, and then every such type is on both sides and gained
-    ///   by neither.
+    ///   in that order; the types each range KEEPS are written to
+    ///   `saved` after the record (an entry with the two counts, then one
+    ///   entry a type). `Ok(None)`: the join is run again when the
+    ///   holders are unified, and gains exactly those kept types, as
+    ///   OCaml's `tl1'` and `tl2'` are computed before `unify env tu1`
+    ///   (ctype.ml:2685-2706; CHECKER_REWRITE 8.6, decision 58).
     /// - One empty (`occur_univar !env tu`): [`Checker::occur_univar`] of
     ///   the first type of the other, which fails and pushes its pair in
     ///   `Mode::Explain`: `Err([NONE, NONE])`.
@@ -3028,6 +3118,24 @@ impl Checker {
             // tlu2)`.
             (false, false) => {
                 self.saved[frame.extra as usize].b |= ROW_UNIVARS;
+                // What the two fields gain is decided now, before the
+                // holders are unified (ctype.ml:2685-2706): the kept types
+                // go after the record, first an entry with the two
+                // counts (`head`, `level`), then one entry a type
+                // (`head`). Only this arm writes them: O(types kept),
+                // 16 bytes each, until the pair's `RowFieldEnd` frame is
+                // popped.
+                debug_assert_eq!(self.saved.len(), frame.extra as usize + 1);
+                self.saved.push(Node {
+                    head: kept1.len() as u32,
+                    level: kept2.len() as u32,
+                    a: NONE,
+                    b: 0,
+                });
+                for at in kept1.clone().chain(kept2.clone()) {
+                    let ty = self.extras.row_scratch[at].ty;
+                    self.saved.push(Node { head: ty.0, level: 0, a: NONE, b: 0 });
+                }
                 let end = Frame { kind: FrameKind::RowFieldEnd, ..frame };
                 if self.frames.last() != Some(&end) {
                     self.frames.push(end);

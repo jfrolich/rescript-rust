@@ -4012,6 +4012,141 @@ mod tests {
         }
     }
 
+    /// The corner of decision 53 on the old checker, built by hand
+    /// (section 8.6, decision 58; observed). Two `Reither` fields inside
+    /// two polymorphic types: `#A` with the types `[(u, x); x]` on the
+    /// left and `[(u', x'); x']` on the right. Each side would gain the
+    /// other's two types; the tuples hold a universal variable and are
+    /// unified instead, which makes `x` and `x'` one node; the lists the
+    /// fields gain were computed BEFORE that unification
+    /// (compiler/ml/ctype.ml:2685-2706):
+    ///
+    /// ```text
+    /// let tl2' = remq tl2 tl1 and tl1' = remq tl1 tl2 in
+    /// let tl1', tlu1 = split_univars tl1' and tl2', tlu2 = split_univars tl2' in
+    /// (match (tlu1, tlu2) with
+    /// | tu1 :: tlu1, _ :: _ ->
+    ///   if not !(passive_variants ()) then List.iter (unify env tu1) (tlu1 @ tlu2)
+    /// ...
+    /// let f1' = Reither (c1 || c2, tl1', m1 || m2, e)
+    /// ```
+    ///
+    /// so each field ends with THREE types, the last two one node (`@4
+    /// @4`): the type it had, and the same node again as the type it
+    /// gained. The OCaml compiler was run on a source program that reaches
+    /// the corner (the pull request of the sixth skeleton turn has it):
+    /// its fields hold three types after the join too.
+    #[test]
+    fn old_checker_gains_a_type_the_holders_made_a_duplicate() {
+        use crate::types::type_expr::{RowDesc, RowField};
+        let program = compile(UNIVAR_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, UNIVAR_PLAN);
+        let old = old_context(&program, plan);
+        let ctx = &old.ctx;
+        let side = || {
+            let u = ctx.new_univar(None);
+            let x = ctx.new_var(None);
+            let holder = ctx.new_tuple(vec![u, x]);
+            let field = RowField::Reither {
+                constant: false,
+                types: vec![holder, x],
+                matched: false,
+                link: ctx.alloc_row_field(None),
+            };
+            let row = ctx.new_type(TypeDesc::Tvariant(ctx.new_row_desc(RowDesc {
+                row_fields: vec![("A".into(), field)].into(),
+                row_more: ctx.new_var(None),
+                row_closed: true,
+                row_fixed: false,
+                row_name: None,
+            })));
+            (ctx.new_poly(row, vec![u]), row, x)
+        };
+        let (left, row1, x1) = side();
+        let (right, row2, x2) = side();
+        let mut state = ctype::UnifyState::new();
+        state.set_env(&old.env);
+        ctype::unify(ctx, &mut state, left, right).unwrap();
+        let form = old_forms(&old, plan, &[left, right, row1, row2, x1, x2], &[]).0;
+        assert_eq!(
+            form,
+            "0 = &0[0]poly(&1[0][closed #A?^0(&2[0](&3[0]!, &4[0]') @4 @4 ) | &5[0]']; @3)\n\
+             1 = @0\n2 = @1\n3 = @1\n4 = @4\n5 = @4\n"
+        );
+    }
+
+    /// What the old checker's walks do with the arguments of a row name
+    /// that is no longer the name of the innermost row (section 8.6,
+    /// decision 60; observed). `[> #B]` is unified with `[> #A] as p<y>`:
+    /// the named row gains `#B` through a new variant node its row
+    /// variable is linked to (`set_more`, compiler/ml/ctype.ml:2596-2616)
+    /// and the merged row has no name (ctype.ml:2574-2586), so `p<y>` is
+    /// the name of a row whose `more` is a variant. `iter_row` visits a
+    /// name's arguments only for the row a chain ends in
+    /// (compiler/ml/btype.ml:229-241), so `y`, which is in no field, is
+    /// reached by no walk: a lowering of the row leaves `y` at its level
+    /// (`[1]`), a generalization leaves it there, `deep_occur` does not
+    /// find it, a copy of the generalized row makes no copy of it that
+    /// the row holds, and a variable bound to the row leaves it.
+    #[test]
+    fn old_checker_does_not_reach_the_arguments_of_a_stale_row_name() {
+        use crate::types::type_expr::{RowDesc, RowField};
+        let program = compile(UNIVAR_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, UNIVAR_PLAN);
+        let old = old_context(&program, plan);
+        let ctx = &old.ctx;
+        let mut out = String::new();
+        for walk in 0..5 {
+            ctx.begin_def();
+            let y = ctx.new_var(None);
+            let path = crate::types::path::Path::pident(ctx.create_ident("p"));
+            let row = |tag: &str, name: Option<(crate::types::path::Path, Vec<TypeExprRef>)>| {
+                ctx.new_type(TypeDesc::Tvariant(ctx.new_row_desc(RowDesc {
+                    row_fields: vec![(tag.into(), RowField::Rpresent(None))].into(),
+                    row_more: ctx.new_var(None),
+                    row_closed: false,
+                    row_fixed: false,
+                    row_name: name,
+                })))
+            };
+            let named = row("A", Some((path, vec![y])));
+            let other = row("B", None);
+            let mut state = ctype::UnifyState::new();
+            state.set_env(&old.env);
+            ctype::unify(ctx, &mut state, other, named).unwrap();
+            ctx.end_def();
+            let mut operands = vec![named, y];
+            match walk {
+                0 => ctype::update_level(ctx, ctx.current_level(), named),
+                1 => ctype::generalize(ctx, named),
+                2 => {
+                    let found = ctype::deep_occur(ctx, y, named);
+                    out.push_str(&format!("deep_occur {found}\n"));
+                }
+                3 => {
+                    ctype::generalize(ctx, named);
+                    ctype::generalize(ctx, y);
+                    operands.push(ctype::instance(ctx, named));
+                    operands.push(ctype::instance(ctx, y));
+                }
+                _ => {
+                    let v = ctx.new_var(None);
+                    ctype::unify(ctx, &mut state, v, named).unwrap();
+                }
+            }
+            out.push_str(&old_forms(&old, plan, &operands, &[]).0);
+        }
+        assert_eq!(
+            out,
+            "0 = &0[0][#A #B | &1[0]']\n1 = &2[1]'\n\
+             0 = &0[G][#A #B | &1[G]']\n1 = &2[1]'\n\
+             deep_occur false\n\
+             0 = &0[1][#A #B | &1[1]']\n1 = &2[1]'\n\
+             0 = &0[G][#A #B | &1[G]']\n1 = &2[G]'\n2 = &3[0][#A #B | &4[0]']\n3 = &5[0]'\n\
+             0 = &0[0][#A #B | &1[0]']\n1 = &2[1]'\n"
+        );
+    }
+
     /// 10,000 cases of everything on programs with polymorphic fields,
     /// universal variables, rows whose row variable is bound and
     /// hand-made polymorphic types, and 10,000 more with made nodes: the

@@ -4351,6 +4351,145 @@ On record from the reviews of the fifth skeleton turn, of R3g and of R3p
     moves**; a build prompt asks for the five operations before and
     after, as a report.
 
+Decided in the sixth skeleton turn (trunk `61f7f41292`), each with what
+was run. Decisions 58 to 60 are corrections and tests of BUILT code that
+the reviews above left owed; every test named runs today.
+
+58. **`split_univars` keeps what OCaml keeps: decision 53 is reopened
+    and closed.** The corner was built by hand on the old checker
+    (`differential::tests::old_checker_gains_a_type_the_holders_made_a_
+    duplicate`): `poly([< #A((u, x)) & x]; u)` against `poly([< #A((u',
+    x')) & x']; u')`. The two tuples hold a universal variable and are
+    unified, which makes `x'` and `x` one node; each field then holds
+    THREE types, the last two one node (`#A?^0((!, ') @4 @4)`). The OCaml
+    compiler was run on a source program that reaches the corner:
+
+    ```rescript
+    let f = (
+      o: {"m": 'u. [< #A(('u, 'a)) & ('a)] => unit},
+      p: {"m": 'u. [< #A(('u, 'b)) & ('b)] => unit},
+    ) => (if true { o } else { p }, o, p)
+    ```
+
+    With a counter added to `unify_row_field` (a local build, not
+    committed) the join runs once with two types a side, the split keeps
+    one and holds one a side, and after `set_row_field` both fields read
+    three types. So OCaml has the duplicate; the kernel, which compared
+    the two lists again after the holders were unified, had two types.
+    Can it show? A printed type lists every type of a `Reither` field
+    (`tree_of_row_field`, printtyp.ml:730-737), and a later join reads
+    the length of the list: the arm of PR#7496 needs `List.length tl1 =
+    List.length tl2` (ctype.ml:2652-2655) and `rigid_variants` reads
+    `List.length tl1 = 1` (ctype.ml:2667-2668), so a field of three
+    types and a field of two can take different arms against the same
+    third field. That is enough to correct it. (The diagnostic of the
+    program above, with `let g: int = f` appended, prints two types for
+    the tag in OCaml although the copies it is made from hold three; what
+    drops the third between the copy and the printed text was not
+    established, and is not needed for the decision.)
+    The correction, in `rows.rs`: the arm of `split_univars` with holders
+    on both sides writes the types each side KEEPS after the pair's
+    record in `saved` (one entry with the two counts, one entry a type;
+    16 bytes each, only in this arm), and the second run of
+    `join_either` reads them back instead of comparing the two lists
+    again. Test: `r3_tests::a_field_gains_what_it_lacked_before_the_
+    holders_were_unified` (both modes; three types, the last two one
+    node; it fails without the edit, observed: two types).
+59. **`free_univar` opens no context for a polymorphic type without
+    bound variables; the step tests of the two walks; the passive
+    split.**
+    - *A fault of built code, found by the step test decision 56 asked
+      for.* Every object field is a `Tpoly (t, [])`. With a context per
+      such type, a node first met below one was visited again after it
+      was left, and the second visit met the types below it in closed
+      contexts again: on `t(i + 1) = (poly(t(i);), t(i))` the walk took
+      `2^(n + 1) - 1` visits (observed without the edit: 2,047, 4,095
+      and 2,097,151 for n = 10, 11, 20). OCaml visits each node once:
+      such a type adds nothing to `bound` (ctype.ml:1587-1589), and a
+      node visited with a `bound` is not visited again with the same one
+      (ctype.ml:1569-1581). A type of that shape is what a value used
+      twice gives (`(x, {"m": x})`), and the walk runs at every binding
+      of a variable to a type with children once the unit has ANY
+      universal variable. Corrected: the `Poly` arm of
+      `push_free_univar_children` pushes the body of a type of arity 1
+      in the current context. The extra visits are now ZERO, stated and
+      asserted: exactly `2n + 1` visits at n = 1,000 and n = 10,000
+      (`r3_tests::the_walks_for_universal_variables_at_ten_thousand`,
+      which also has the linear relations of `free_univar` over a wide
+      type and of `univars_escape` with a known binder).
+    - *Left as it is, and why.* A polymorphic type WITH bound variables
+      still opens a context, and a node shared between the inside of two
+      sibling types with binders, or between the inside and the outside
+      of one, is visited once per context it is met in. OCaml visits
+      such a node again too, once per strictly smaller `bound`
+      (`Type_set.inter bound bound'`, ctype.ml:1574-1576: "that's way
+      too expensive", ctype.ml:1562). On a chain of n nested types WITH
+      binders that share their bodies with the outside the kernel's
+      visits double per type where OCaml's grow with the number of
+      distinct `bound` sets. No program has shown it: a polymorphic
+      method whose type shares a node with a type outside it needs a
+      value that is not generalized inside an annotated method type.
+      Open question 3 of this turn.
+    - *A row walked by `free_univar`*: `r3_tests::a_free_universal_
+      variable_is_found_in_a_row_in_order` (fields, then the name's
+      arguments, then the row variable; an opened `Reither` field through
+      its chain; nothing below a reference resolved to absent).
+    - *The passive split*: `r3_tests::passive_variants_keep_the_levels_
+      of_the_types_that_hold_a_universal_variable` sets
+      `Extras::passive_variants` by hand, with holders on both sides and
+      the holder AFTER the kept type in each list: the holders stay two
+      nodes at their level, the kept types are lowered to the merged row
+      variable's level. With the caller's loop as it was before decision
+      54 the test fails (observed: a holder at level 1).
+60. **The arguments of a row's name are children only of the innermost
+    row, in every walk.** OCaml's `iter_row` visits them only when
+    `row_more` is not itself a variant (btype.ml:229-241), every walk of
+    a type goes through `iter_type_expr` (btype.ml:263-265), and a copy
+    takes the name of the innermost row (`row_repr`, btype.ml:126-135).
+    The kernel's walks push every slot of a node. Before this turn:
+
+    | Walk | Kernel | Visited them for a row whose `more` is a variant | OCaml |
+    |---|---|---|---|
+    | lowering | `Graph::lower`, `Checker::lower_scoped` | yes | no: `update_level`, ctype.ml:625-626 |
+    | generalization | `Graph::generalize`, `generalize_structure` | yes | no: ctype.ml:509-516, 524-540 |
+    | occurrence of a structure pair, of a binding | `Checker::reaches`, `occur_expanding`, the scan of `binding_scan` | not entered: a row stops the walk | not entered: `occur_rec`, ctype.ml:1403 |
+    | deep occurrence | `Checker::reaches` with `deep`, the routed `binding_scan` | yes | no: `deep_occur`, ctype.ml:1735-1782 |
+    | the lowering part of a binding | `binding_scan`, `LEVEL_ONLY` entries below a row | yes | no: `update_level` |
+    | free universal variable | `Checker::free_univar` | yes | no: `occur_univar`, ctype.ml:1601 |
+    | escape of a universal variable | `Checker::univars_escape` | yes | no: ctype.ml:1648 |
+    | closedness of an expansion | `Checker::closed_over` | yes | no: `closed_parameterized_type`, ctype.ml:441-451 |
+    | copy, instance | `Graph::copy`, `Graph::instance` | copied as slots of the copy | not copied: `copy_row` of `row_repr`, ctype.ml:800-868 |
+
+    Observed on the old checker with `[> #B]` unified with `[> #A] as
+    p<y>`, `y` in no field (`differential::tests::old_checker_does_not_
+    reach_the_arguments_of_a_stale_row_name`): a lowering, a
+    generalization, `deep_occur`, a copy and a binding all leave `y`
+    alone. What can show it: the level of a type that is the argument of
+    a phantom parameter of a named open row, after the row gained a tag.
+    Corrected on the write side, so that no walk pays a descriptor load
+    per variant node: when `unify_row` has run both `set_more`, each row
+    that is not fixed has a variant node as its `more` (ctype.ml:2616),
+    and when such a row has a name with arguments its home node is
+    written with a new list in which the slots of those arguments hold
+    what the `more` slot holds (`Checker::drop_name_children`; in the
+    explaining mode a `Fields` frame puts the descriptor back on a
+    failure, as it puts back the rest whose link made the name stale).
+    Nothing reads the name of a row that is not the innermost. Cost: two
+    compares per unified pair of rows; for a named row with arguments
+    that gains a tail, one list of the node's slots. Test:
+    `r3_tests::the_arguments_of_a_stale_row_name_are_not_children`, one
+    block per walk of the table, in both modes (without the edit the
+    lowering already reaches `y`, observed). Two other places link a row
+    variable to a variant node, and each calls `drop_name_children` for
+    the row when it is built: `reify` (ctype.ml:1848-1852, R3h; 8.9) and
+    `rigidify_rec` (ctype.ml:3139-3147, R3i).
+    Found on the way and NOT corrected: `update_level` drops the name of
+    a row whose path would escape (`Some (p, _tl) when level < get_level
+    env p -> ... row_name = None`, ctype.ml:618-623), and
+    `Checker::lower_scoped` has no such arm. It needs a named row whose
+    type has a scope, which no generated program has. Open question 4 of
+    this turn.
+
 
 ### 8.7 The hot paths of unification (K2)
 

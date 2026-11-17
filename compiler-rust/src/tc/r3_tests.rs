@@ -3352,6 +3352,448 @@ fn the_types_that_hold_a_universal_variable_are_unified_not_gained() {
     }
 }
 
+/// A closed row with the one tag `#A`, `Reither (false, types, false, ref
+/// None)` with any number of types (a conjunction), unopened, at level 2.
+fn conjunctive_row(c: &mut Checker, types: &[Ty], more: Ty) -> Ty {
+    let name = name_index(c, "A");
+    let start = c.extras.row_fields.len() as u32;
+    let kind = RowFieldKind::Either { constant: false, matched: false };
+    let published = types.len() as u32 + 1;
+    c.extras.row_fields.push(RowFieldRow {
+        name,
+        types: Range { start: 0, len: types.len() as u32 },
+        link: published,
+        kind,
+    });
+    c.extras.variants.push(VariantRow {
+        fields: Range { start, len: 1 },
+        more: types.len() as u32,
+        name: NONE,
+        name_arguments: Range::default(),
+        closed: true,
+        fixed: false,
+    });
+    let index = c.extras.variants.len() as u32 - 1;
+    let mut slots = types.to_vec();
+    slots.push(more);
+    extended_at(c, 2, ExtraDescriptor::Variant(index), &slots)
+}
+
+/// What two `Reither` fields gain is decided before the types that hold
+/// a universal variable are unified (section 8.6, decisions 53 and 58;
+/// compiler/ml/ctype.ml:2685-2706):
+///
+/// ```text
+/// let tl2' = remq tl2 tl1 and tl1' = remq tl1 tl2 in
+/// let tl1', tlu1 = split_univars tl1' and tl2', tlu2 = split_univars tl2' in
+/// (match (tlu1, tlu2) with
+/// | [], [] -> ()
+/// | tu1 :: tlu1, _ :: _ ->
+///   if not !(passive_variants ()) then List.iter (unify env tu1) (tlu1 @ tlu2)
+/// | tu :: _, [] | [], tu :: _ -> occur_univar !env tu);
+/// List.iter (update_level !env (repr more).level) (tl1' @ tl2');
+/// let e = ref None in
+/// let f1' = Reither (c1 || c2, tl1', m1 || m2, e)
+/// and f2' = Reither (c1 || c2, tl2', m1 || m2, e) in
+/// ```
+///
+/// Witness (the old checker's side is `differential::tests::
+/// old_checker_gains_a_type_the_holders_made_a_duplicate`): `poly([< #A((u,
+/// x)) & x]; u)` against `poly([< #A((u', x')) & x']; u')`. `tl1'` is
+/// `[(u', x'); x']`: the tuple holds a universal variable, `x'` is kept.
+/// The two tuples are unified, which makes `x'` a link to `x`... and the
+/// field of row 1 still gains `x'`: it reads `[(u, x); x; x]`, three
+/// types of which the last two are one node, and so does the field of
+/// row 2. A join that compared the lists again after the unification
+/// would gain nothing (two types): what `split_univars` did before the
+/// sixth skeleton turn. The body is `Checker::join_either`'s second run
+/// and the arm of `Checker::split_univars` with holders on both sides.
+/// Reaches: R3f, R3g.
+#[test]
+fn a_field_gains_what_it_lacked_before_the_holders_were_unified() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let side = |c: &mut Checker| {
+            let u = univar_at(c, 2);
+            let x = var(c);
+            let holder = tuple(c, &[u, x]);
+            let more = var(c);
+            let row = conjunctive_row(c, &[holder, x], more);
+            (poly_of(c, 2, row, &[u]), row, holder, x)
+        };
+        let (left, _, holder1, x1) = side(&mut c);
+        let (right, row2, holder2, x2) = side(&mut c);
+        let rows = rows_now(&c);
+        c.unify(left, right).unwrap();
+        assert_rows_kept(&c, &rows);
+        assert_eq!(c.g.repr(holder1), c.g.repr(holder2));
+        assert_eq!(c.g.repr(x1), c.g.repr(x2));
+        let (tags, _, _) = read_row(&mut c, row2);
+        assert_eq!(tags[0].1.types, 3, "{mode:?}");
+        let mut types = Vec::new();
+        let row2 = c.g.repr(row2);
+        let node = c.g.nodes[row2.0 as usize];
+        let ExtraDescriptor::Variant(index) = c.extras.descriptors[node.a as usize] else {
+            panic!("a variant");
+        };
+        let field = c.extras.row_fields[c.extras.variants[index as usize].fields.start as usize];
+        super::rows::field_types(&c.g, node.b, node.arity(), field, &mut types);
+        let types: Vec<Ty> = types.into_iter().map(|ty| c.g.repr(ty)).collect();
+        let x = c.g.repr(x1);
+        assert_eq!(types, [c.g.repr(holder1), x, x]);
+        assert!(c.scopes.is_empty() && c.frames.is_empty() && c.saved.is_empty());
+    }
+}
+
+/// An open row `[> #tag] as P<argument>` at `level`, unopened: slot 0 its
+/// row variable (new, at `level`), slot 1 the argument of its name.
+fn named_row(c: &mut Checker, level: u32, tag: &str, argument: Option<Ty>) -> Ty {
+    let name = name_index(c, tag);
+    let start = c.extras.row_fields.len() as u32;
+    c.extras.row_fields.push(RowFieldRow {
+        name,
+        types: Range::default(),
+        link: NONE,
+        kind: RowFieldKind::Present,
+    });
+    c.extras.variants.push(VariantRow {
+        fields: Range { start, len: 1 },
+        more: 0,
+        name: if argument.is_some() { PA } else { NONE },
+        name_arguments: Range { start: 1, len: u32::from(argument.is_some()) },
+        closed: false,
+        fixed: false,
+    });
+    let index = c.extras.variants.len() as u32 - 1;
+    let mut slots = vec![var_at(c, level)];
+    slots.extend(argument);
+    extended_at(c, level, ExtraDescriptor::Variant(index), &slots)
+}
+
+/// The arguments of a row's name are children of the row only while the
+/// row is the one its chain ends in (section 8.6, decision 60;
+/// compiler/ml/btype.ml:229-241, `iter_row`):
+///
+/// ```text
+/// match (repr row.row_more).desc with
+/// | Tvariant row -> iter_row f row
+/// | Tvar _ | Tunivar _ | Tsubst _ | Tconstr _ | Tnil ->
+///   Misc.may (fun (_, l) -> List.iter f l) row.row_name
+/// ```
+///
+/// Witness, per walk: `[> #B]` unified with `[> #A] as P<y>` at level 2,
+/// `y` in no field. The named row is the right node, gains `#B` through
+/// a variant node its row variable is linked to, and the merged row has
+/// no name (ctype.ml:2574-2586, 2596-2616). Then, each on a graph of its
+/// own:
+/// - `Checker::lower` of the row to level 1 leaves `y` at 2
+///   (`update_level`, ctype.ml:584-630, through `iter_type_expr`);
+/// - `Checker::generalize` after the definition leaves `y` at 2
+///   (`generalize`, ctype.ml:509-516);
+/// - `Checker::deep_occur` of `y` in the row is false (ctype.ml:1735-1782);
+/// - a variable of level 1 bound to the row (the binding walk, which
+///   lowers below a row) leaves `y` at 2;
+/// - with `y` a universal variable, `Checker::free_univar` of the row
+///   finds none (`occur_univar`, ctype.ml:1563-1607);
+/// - `Checker::univars_escape` of a binder of that universal variable in
+///   a polymorphic type whose body is the row is false
+///   (ctype.ml:1630-1652);
+/// - a `Checker::copy` of the generalized row with `y` generic makes one
+///   variable, the row variable's, and no copy of `y` (`row_repr` gives a
+///   copy the innermost row's name, compiler/ml/btype.ml:126-135,
+///   ctype.ml:800-868).
+///
+/// The old checker's side, observed: `differential::tests::
+/// old_checker_does_not_reach_the_arguments_of_a_stale_row_name`. Before
+/// the sixth skeleton turn every one of these walks reached `y` (each
+/// pushes every slot of a node); the body is
+/// `Checker::drop_name_children`, called by `Checker::unify_row`. While
+/// the row IS the innermost, its name's arguments are children: the
+/// last block.
+/// Reaches: R3f, R3n, R3g.
+#[test]
+fn the_arguments_of_a_stale_row_name_are_not_children() {
+    // The named row after it gained `#B`, and the argument of its name.
+    let stale = |c: &mut Checker, y: Ty| {
+        let other = named_row(c, 2, "B", None);
+        let named = named_row(c, 2, "A", Some(y));
+        let rows = rows_now(c);
+        c.unify(other, named).unwrap();
+        assert_rows_kept(c, &rows);
+        assert_eq!(shape(c, named), "[A B | ']");
+        named
+    };
+    let level = |c: &mut Checker, ty: Ty| {
+        let ty = c.g.repr(ty);
+        c.g.nodes[ty.0 as usize].level
+    };
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let y = var(&mut c);
+        let named = stale(&mut c, y);
+        c.lower(named, 1).unwrap();
+        assert_eq!((level(&mut c, named), level(&mut c, y)), (1, 2), "lower");
+
+        let mut c = checker(mode);
+        let y = var(&mut c);
+        let named = stale(&mut c, y);
+        c.g.end_def();
+        c.generalize(named);
+        assert_eq!((level(&mut c, named), level(&mut c, y)), (GENERIC, 2), "generalize");
+
+        let mut c = checker(mode);
+        let y = var(&mut c);
+        let named = stale(&mut c, y);
+        assert!(!c.deep_occur(y, named), "deep_occur");
+
+        let mut c = checker(mode);
+        let y = var(&mut c);
+        let named = stale(&mut c, y);
+        let v = var_at(&mut c, 1);
+        c.unify(v, named).unwrap();
+        assert_eq!((level(&mut c, named), level(&mut c, y)), (1, 2), "binding");
+
+        let mut c = checker(mode);
+        let u = univar_at(&mut c, 2);
+        let named = stale(&mut c, u);
+        assert_eq!(c.free_univar(named), Ty(NONE), "free_univar");
+        let binder = poly_of(&mut c, 2, u, &[u]);
+        let w = univar_at(&mut c, 2);
+        let other = poly_of(&mut c, 2, named, &[w]);
+        let (binder, other) = (c.g.nodes[binder.0 as usize], c.g.nodes[other.0 as usize]);
+        assert!(!c.univars_escape(binder, other), "univars_escape");
+
+        let mut c = checker(mode);
+        let y = var_at(&mut c, GENERIC);
+        let named = stale(&mut c, y);
+        c.g.end_def();
+        c.generalize(named);
+        let first = c.g.nodes.len();
+        let copy = c.copy(named);
+        assert_eq!(shape(&mut c, copy), "[A B | ']");
+        let variables = c.g.nodes[first..].iter().filter(|node| node.tag() == VAR).count();
+        assert_eq!(variables, 1, "copy");
+    }
+    // The innermost row's name: its argument is a child.
+    let mut c = checker(Mode::Success);
+    let y = var(&mut c);
+    let named = named_row(&mut c, 2, "A", Some(y));
+    assert!(c.deep_occur(y, named));
+    c.lower(named, 1).unwrap();
+    assert_eq!(level(&mut c, y), 1);
+}
+
+/// `free_univar` over a variant row (compiler/ml/btype.ml:229-241,
+/// 263-265; ctype.ml:1563-1607): the fields' types, then the arguments
+/// of the name, then the row variable:
+///
+/// ```text
+/// | Tvariant row ->
+///   iter_row f row;
+///   f (row_more row)
+/// ```
+///
+/// Witnesses, each a row at level 2 with free universal variables in
+/// three places, found in that order:
+/// - `[> #A(u0)] as P<u1>` whose row variable is the universal variable
+///   `u2`: `u0`;
+/// - `[> #A(int)] as P<u1>` over `u2`: `u1`;
+/// - `[> #A(int)]` over `u2`: `u2`;
+/// - inside `poly(...; u2)`, the same row: none (the row variable is
+///   bound);
+/// - an OPENED row `[< #A(u0)]` (`Reither`, its type under the chain
+///   node of its reference): `u0`; and after that reference is resolved
+///   to absent, none: `iter_row` visits what `row_field_repr` gives.
+///
+/// The body is the `Variant` arm of
+/// `Checker::push_free_univar_children`.
+/// Reaches: R3f, R3g.
+#[test]
+fn a_free_universal_variable_is_found_in_a_row_in_order() {
+    let mut c = checker(Mode::Success);
+    // `[> #A(argument)] as P<named>` over `more`.
+    let row = |c: &mut Checker, argument: Ty, named: Option<Ty>, more: Ty| {
+        let name = name_index(c, "A");
+        let start = c.extras.row_fields.len() as u32;
+        c.extras.row_fields.push(RowFieldRow {
+            name,
+            types: Range { start: 0, len: 1 },
+            link: NONE,
+            kind: RowFieldKind::Present,
+        });
+        c.extras.variants.push(VariantRow {
+            fields: Range { start, len: 1 },
+            more: 1,
+            name: if named.is_some() { PA } else { NONE },
+            name_arguments: Range { start: 2, len: u32::from(named.is_some()) },
+            closed: false,
+            fixed: false,
+        });
+        let index = c.extras.variants.len() as u32 - 1;
+        let mut slots = vec![argument, more];
+        slots.extend(named);
+        extended_at(c, 2, ExtraDescriptor::Variant(index), &slots)
+    };
+    let [u0, u1, u2] = [(); 3].map(|()| univar_at(&mut c, 2));
+    let int = constr(&mut c, INT, &[]);
+    let first = row(&mut c, u0, Some(u1), u2);
+    assert_eq!(c.free_univar(first), u0);
+    let second = row(&mut c, int, Some(u1), u2);
+    assert_eq!(c.free_univar(second), u1);
+    let third = row(&mut c, int, None, u2);
+    assert_eq!(c.free_univar(third), u2);
+    let bound = poly_of(&mut c, 2, third, &[u2]);
+    assert_eq!(c.free_univar(bound), Ty(NONE));
+
+    let more = var(&mut c);
+    let either = variant_at(&mut c, 2, &[("A", Tag::Either(false, Some(u0), false))], more, true, NONE);
+    c.open_row(either);
+    assert_eq!(c.free_univar(either), u0);
+    let (tags, _, _) = read_row(&mut c, either);
+    let holders = c.resolve(tags[0].1.end, super::rows::RES_ABSENT, Ty(NONE));
+    c.settle(holders, super::rows::RES_ABSENT);
+    assert_eq!(c.free_univar(either), Ty(NONE));
+}
+
+/// The split of the types that hold a universal variable while the
+/// variants are passive (compiler/ml/ctype.ml:2693-2703):
+///
+/// ```text
+/// | tu1 :: tlu1, _ :: _ ->
+///   (* Attempt to merge all the types containing univars *)
+///   if not !(passive_variants ()) then
+///     List.iter (unify env tu1) (tlu1 @ tlu2)
+/// | tu :: _, [] | [], tu :: _ -> occur_univar !env tu);
+/// (* Is this handling of levels really principal? *)
+/// List.iter (update_level !env (repr more).level) (tl1' @ tl2');
+/// ```
+///
+/// Witness: `poly([< #A(z & (u, x))]; u)` against `poly([< #A(z' & (u',
+/// x'))]; u')`, every type at level 2 and the two row variables at level
+/// 1, with `Extras::passive_variants` set (nothing in `tc` sets it: the
+/// typing of a pattern for an exhaustiveness check does, `with_passive_
+/// variants`, ctype.ml:2189-2202, from typecore.ml:1931; section 8.9).
+/// The two tuples hold a universal variable and are NOT unified and NOT
+/// lowered: they stay two nodes at level 2. `z` and `z'` are gained and
+/// lowered to the level of the merged row variable, 1. Each field then
+/// has its two types and the one it gained. The holder comes after the
+/// kept type in each list, so that the place between the two kept
+/// ranges of the scratch holds a holder: the range `Checker::join_either`
+/// lowered before the review of R3g (section 8.6, decision 54). The
+/// bodies are the passive arm of `Checker::split_univars` and the two
+/// lowering loops of `Checker::join_either`.
+/// Reaches: R3f, R3g.
+#[test]
+fn passive_variants_keep_the_levels_of_the_types_that_hold_a_universal_variable() {
+    let mut c = checker(Mode::Success);
+    c.extras.passive_variants = true;
+    let side = |c: &mut Checker| {
+        let u = univar_at(c, 2);
+        let (x, z) = (var(c), var(c));
+        let holder = tuple(c, &[u, x]);
+        let more = var_at(c, 1);
+        let row = conjunctive_row(c, &[z, holder], more);
+        (poly_of(c, 2, row, &[u]), row, holder, z)
+    };
+    let (left, _, holder1, z1) = side(&mut c);
+    let (right, row2, holder2, z2) = side(&mut c);
+    c.unify(left, right).unwrap();
+    let level = |c: &Checker, ty: Ty| c.g.nodes[ty.0 as usize].level;
+    assert_ne!(c.g.repr(holder1), c.g.repr(holder2));
+    assert_eq!((level(&c, holder1), level(&c, holder2)), (2, 2));
+    assert_eq!((level(&c, z1), level(&c, z2)), (1, 1));
+    let (tags, _, more) = read_row(&mut c, row2);
+    assert_eq!(tags[0].1.types, 3);
+    assert_eq!(level(&c, more), 1);
+    assert!(c.scopes.is_empty() && c.frames.is_empty() && c.saved.is_empty());
+}
+
+/// The cost of the two walks for universal variables, as relations
+/// between n = 1,000 and n = 10,000 (section 8.6, decisions 56 and 59).
+/// - `Checker::free_univar` over a tuple of n variables inside one
+///   binder: one visit a node, linear.
+/// - `Checker::free_univar` over a chain of n polymorphic types WITHOUT
+///   bound variables in which every type is held twice, once under such
+///   a type and once outside it: `t(0)` is the bound variable, `t(i + 1)`
+///   is `(poly(t(i);), t(i))`, the whole inside one binder. A
+///   polymorphic type without bound variables adds nothing to `bound`
+///   (`List.fold_right Type_set.add (List.map repr tyl) bound`,
+///   compiler/ml/ctype.ml:1587-1589), so OCaml visits each node once
+///   (ctype.ml:1569-1581: with the same `bound` a node is not visited
+///   again). So does the walk: exactly `2n + 1` visits (n tuples, n
+///   polymorphic types, the binder), ZERO extra. Before the sixth
+///   skeleton turn such a type opened a context, a node first met inside
+///   it was visited again after it was left, and this chain took `2^n`
+///   visits: the test would not end.
+/// - `Checker::univars_escape` of a known binder over a tuple of n
+///   variables: the family pass and one visit a node, linear.
+///
+/// Reaches: R3g.
+#[test]
+fn the_walks_for_universal_variables_at_ten_thousand() {
+    let wide = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let u = univar_at(&mut c, 2);
+        let mut elements: Vec<Ty> = (0..n).map(|_| var(&mut c)).collect();
+        elements.push(u);
+        let body = tuple(&mut c, &elements);
+        let ty = poly_of(&mut c, 2, body, &[u]);
+        let mut found = u;
+        let count = steps::scope(|| found = c.free_univar(ty));
+        assert_eq!(found, Ty(NONE));
+        count
+    };
+    let (small, large) = (wide(1_000), wide(10_000));
+    assert!(large <= 11 * small, "wide: {small} {large}");
+
+    let shared = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let u = univar_at(&mut c, 2);
+        let mut ty = u;
+        for _ in 0..n {
+            let inner = poly_of(&mut c, 2, ty, &[]);
+            ty = tuple(&mut c, &[inner, ty]);
+        }
+        let ty = poly_of(&mut c, 2, ty, &[u]);
+        let mut found = u;
+        let count = steps::scope(|| found = c.free_univar(ty));
+        assert_eq!(found, Ty(NONE));
+        count
+    };
+    assert_eq!(shared(1_000), 2 * 1_000 + 1);
+    assert_eq!(shared(10_000), 2 * 10_000 + 1);
+
+    let escape = |n: u32| {
+        let mut c = checker(Mode::Success);
+        // An open scope that pairs `u` with `u2`, so that a type that
+        // binds `u` again has a known binder.
+        let (u, u2) = (univar_at(&mut c, 2), univar_at(&mut c, 2));
+        let (outer1, outer2) = (poly_of(&mut c, 2, u, &[u]), poly_of(&mut c, 2, u2, &[u2]));
+        let (n1, n2) = (c.g.nodes[outer1.0 as usize], c.g.nodes[outer2.0 as usize]);
+        let partners = c.g.push(partner_node(Ty(NONE)));
+        c.g.push(partner_node(Ty(NONE)));
+        c.scopes.push(PolyScope { left: n1.b + 1, right: n2.b + 1, left_len: 1, right_len: 1, partners });
+        let binder = poly_of(&mut c, 2, u, &[u]);
+        let w = univar_at(&mut c, 2);
+        let elements: Vec<Ty> = (0..n).map(|_| var(&mut c)).collect();
+        let body = tuple(&mut c, &elements);
+        let other = poly_of(&mut c, 2, body, &[w]);
+        let (binder, other) = (c.g.nodes[binder.0 as usize], c.g.nodes[other.0 as usize]);
+        let mut escapes = true;
+        let count = steps::scope(|| escapes = c.univars_escape(binder, other));
+        assert!(!escapes);
+        // With `u2` in the body it escapes: `u2` is in the family of `u`.
+        let body = tuple(&mut c, &[u2]);
+        let other = poly_of(&mut c, 2, body, &[w]);
+        let other = c.g.nodes[other.0 as usize];
+        assert!(c.univars_escape(binder, other));
+        c.scopes.clear();
+        count
+    };
+    let (small, large) = (escape(1_000), escape(10_000));
+    assert!(large <= 11 * small, "escape: {small} {large}");
+}
+
 /// The cost of universal variables, as relations between n = 1,000 and
 /// n = 10,000.
 /// - n bound variables, the body the last of them: `unify_univar` scans
