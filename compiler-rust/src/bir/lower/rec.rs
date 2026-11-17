@@ -119,7 +119,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         } else {
             let dummy = self.recursive_dummy(tag);
             let declaration = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(B::from_node(dummy)));
-            self.statements.push(B::stmt_node(declaration));
+            self.statements.push(declaration);
             let mut shell = B::from_node(value);
             assert!(self.js.kind(&self.arena, B::of(&shell)) == Kind::BlockLit, "recursive self block");
             let count = self.js.take_operands(&mut self.arena, &mut shell) as usize;
@@ -165,14 +165,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             out.finished = Finished::False;
         }
         let span = self.statements.since(Span { start: out.stmts.start, len: 0 });
-        let list = self.statements.take_list(&mut self.arena, span);
+        let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, span));
         self.rec_members[member].code = Some(list);
         self.rec_members[member].finished = out.finished;
         if index + 1 == count {
             let mut finished = Finished::False;
             for i in group.base as usize..group.base as usize + count {
                 self.rec_steps += 1;
-                if let Some(declaration) = self.rec_members[i].placeholder.take() { self.statements.push(declaration); }
+                if let Some(declaration) = self.rec_members[i].placeholder.take() { self.statements.push(B::stmt_from_node(declaration)); }
             }
             for i in group.base as usize..group.base as usize + count {
                 self.rec_steps += 1;
@@ -181,7 +181,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     self.rec_steps += 1;
                     let statement = self.js.take_at(&mut self.arena, list, k);
                     if finished == Finished::True { self.js.release_stmt(&mut self.arena, statement); }
-                    else { self.statements.push(B::stmt_node(statement)); }
+                    else { self.statements.push(statement); }
                 }
                 if self.rec_members[i].finished == Finished::True { finished = Finished::True; }
             }

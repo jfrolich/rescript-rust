@@ -83,7 +83,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.loops[frame.0 as usize].values[index] = out.value;
         }
         let span = self.statements.since(Span { start: out.stmts.start, len: 0 });
-        let list = self.statements.take_list(&mut self.arena, span);
+        let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, span));
         self.loops[frame.0 as usize].blocks[index] = Some(list);
         if index == 0 {
             let plan = &self.loops[frame.0 as usize];
@@ -111,7 +111,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         let start = self.statements.mark();
         let statement = if continue_ { self.js.continue_(&mut self.arena, label) } else { self.js.break_(&mut self.arena, label) };
-        self.statements.push(B::stmt_node(statement));
+        self.statements.push(statement);
         let value = self.js.undefined(&mut self.arena, false);
         Ok(Probed::Out(Out { stmts: self.statements.since(start), value: Some(B::node(value)), finished: Finished::True }))
     }
@@ -122,7 +122,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let list = B::list_from(list);
         for index in 0..self.js.len(&self.arena, list) {
             let statement = self.js.take_at(&mut self.arena, list, index);
-            self.statements.push(B::stmt_node(statement));
+            self.statements.push(statement);
         }
     }
 
@@ -147,17 +147,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let negated = self.js.not(&mut self.arena, end);
                 let mark = self.statements.mark();
                 let break_ = self.js.break_(&mut self.arena, None);
-                self.statements.push(B::stmt_node(break_));
+                self.statements.push(break_);
                 let yes = self.statements.since(mark);
                 let no = self.statements.mark();
                 let guard = self.if_statement(B::node(negated), yes, no);
                 let mark = self.statements.mark();
                 self.push_loop_list(blocks[0].unwrap());
-                self.statements.push(guard);
+                self.statements.push(B::stmt_from_node(guard));
                 self.push_loop_list(blocks[1].unwrap());
-                let list = self.statements.take_list(&mut self.arena, self.statements.since(mark));
+                let list = self.statements.take_list(&mut self.js, &mut self.arena, self.statements.since(mark));
                 let condition = self.js.boolean(&mut self.arena, true);
-                self.js.while_(&mut self.arena, condition, B::list_from(list), label)
+                self.js.while_(&mut self.arena, condition, list, label)
             } else {
                 self.js.while_(&mut self.arena, end, B::list_from(blocks[1].unwrap()), label)
             }
@@ -177,7 +177,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 && !self.js.has(&self.arena, B::of(&init), flag::DELAY_SAFE);
             let init = if hold {
                 let declaration = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(init));
-                self.statements.push(B::stmt_node(declaration));
+                self.statements.push(declaration);
                 None
             } else {
                 Some(init)
@@ -186,7 +186,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let range = Range { init, end, direction };
             self.js.for_range(&mut self.arena, var, range, B::list_from(blocks[2].unwrap()), label)
         };
-        self.statements.push(B::stmt_node(statement));
+        self.statements.push(statement);
         let unit = self.js.undefined(&mut self.arena, false);
         let mut out = self.leaf(cx, B::node(unit));
         out.stmts = self.statements.since(start);

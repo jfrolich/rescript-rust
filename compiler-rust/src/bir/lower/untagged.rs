@@ -413,7 +413,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         if let Some((kind, var)) = binding {
             let declaration = self.js.declare(&mut self.arena, kind, var, None);
-            self.statements.push(B::stmt_node(declaration));
+            self.statements.push(declaration);
         }
         let frame = Untagged(self.untagged.len() as u32);
         let states = Run::new(
@@ -609,7 +609,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             if !p.payload_only && self.js.kind(&self.arena, B::of(&value)) != row::Kind::Var {
                 let var = self.fresh_variable("tmp");
                 let declaration = self.js.declare(&mut self.arena, LetKind::Strict, var, Some(value));
-                self.statements.push(B::stmt_node(declaration));
+                self.statements.push(declaration);
                 value = self.js.var(&mut self.arena, var);
             }
             p.scrutinee = Some(B::node(value));
@@ -645,11 +645,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 .uses
                 > 1
             {
-                let list = self.statements.take_list(&mut self.arena, out.stmts);
+                let list = self.statements.take_list(&mut self.js, &mut self.arena, out.stmts);
                 self.untagged_storage
                     .states
                     .get_mut(&p.states, action as usize)
-                    .cached = Some(B::stmt_node(self.js.block_of(&mut self.arena, B::list_from(list))));
+                    .cached = Some(B::stmt_node(self.js.block_of(&mut self.arena, list)));
                 self.emit_cached_action(&mut p, action);
             } else {
                 self.untagged_storage
@@ -722,7 +722,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         let start = self.statements.mark();
         let statements = &mut self.statements;
-        self.js.unblock(&mut self.arena, B::stmt_from_node(root), |s| statements.push(B::stmt_node(s)));
+        self.js.unblock(&mut self.arena, B::stmt_from_node(root), |s| statements.push(s));
         self.untagged_storage.outputs.push(
             &mut p.outputs,
             Output {
@@ -793,8 +793,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         self.statements.kill(run);
                         statement
                     } else {
-                        let list = self.statements.take_list(&mut self.arena, run);
-                        B::stmt_node(self.js.explicit_block(&mut self.arena, B::list_from(list)))
+                        let list = self.statements.take_list(&mut self.js, &mut self.arena, run);
+                        B::stmt_node(self.js.explicit_block(&mut self.arena, list))
                     };
                     self.place(start.start, block);
                     self.untagged_storage.outputs.push(
@@ -871,9 +871,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         } else {
             None
         };
-        let list = self.statements.take_list(&mut self.arena, out.run);
+        let list = self.statements.take_list(&mut self.js, &mut self.arena, out.run);
         (
-            B::stmt_node(self.js.block_of(&mut self.arena, B::list_from(list))),
+            B::stmt_node(self.js.block_of(&mut self.arena, list)),
             ClauseMeta {
                 should_break,
                 comment: None,
@@ -952,8 +952,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.arena.pools.switch_clauses.push(meta);
         }
         if has_default {
-            let list = self.statements.take_list(&mut self.arena, default.run);
-            let body = self.js.block_of(&mut self.arena, B::list_from(list));
+            let list = self.statements.take_list(&mut self.js, &mut self.arena, default.run);
+            let body = self.js.block_of(&mut self.arena, list);
             self.arena.lists.set(actions, count, B::stmt_node(body));
             self.arena.pools.switch_clauses.push(ClauseMeta {
                 should_break: false,
@@ -978,7 +978,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             dispatch: SwitchDispatch::Direct,
         });
         let statement = self.js.switch(&mut self.arena, scrutinee, B::list_from(actions), header, true);
-        self.statements.fill(start.start, B::stmt_node(statement));
+        self.statements.fill(start.start, statement);
         self.untagged_storage.outputs.push(
             &mut p.outputs,
             Output {

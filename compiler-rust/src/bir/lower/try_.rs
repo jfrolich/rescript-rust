@@ -92,7 +92,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             start: out.stmts.start,
             len: 0,
         });
-        let list = self.statements.take_list(&mut self.arena, span);
+        let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, span));
         self.tries[frame.0 as usize].blocks[index] = Some(list);
         Probed::Out(Out {
             stmts: self.statements.mark(),
@@ -117,7 +117,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             None => (None, Some(second)),
         };
         let statement = self.js.try_(&mut self.arena, body, handler, finaliser);
-        self.statements.push(B::stmt_node(statement));
+        self.statements.push(statement);
         let value = if matches!(cx.cont, Cont::Value(_)) {
             let var = self
                 .js
