@@ -107,6 +107,39 @@ pub enum FrameKind {
     /// [`Checker::saved`]: the descriptor the left node had. Popped:
     /// [`Checker::package_end`]. (R3p)
     PackageEnd,
+    /// Pattern mode, below the pairs of the arguments of two
+    /// constructors of one type: `extra` holds the two flags as they
+    /// were (bit 0 `generate_equations`, bit 1 `assume_injective`).
+    /// Popped: the flags are put back (`set_mode_pattern`,
+    /// compiler/ml/ctype.ml:256-273). (R3h; CHECKER_REWRITE 8.9,
+    /// decision 64)
+    Flags,
+    /// Pattern mode, below what an arm tries: `left` and `right` are the
+    /// two types to reify when it fails, `extra` indexes
+    /// [`Checker::tries`]. Popped: the attempt succeeded
+    /// ([`Checker::recover`] says what a clash above it does). (R3r;
+    /// CHECKER_REWRITE 8.9, decision 68)
+    Try,
+}
+
+/// One attempt of pattern mode that falls back on a clash (`let snap =
+/// snapshot () in try ... with Unify _ -> backtrack snap; reify ...`,
+/// compiler/ml/ctype.ml:2362-2371, 2400-2408). 40 bytes; one per open
+/// attempt. (R3r; CHECKER_REWRITE 8.9, decision 68)
+#[derive(Debug)]
+pub struct Try {
+    /// What the graph is restored to.
+    pub speculation: super::graph::Speculation,
+    /// Index of the [`FrameKind::Try`] frame in `frames`.
+    pub frame: u32,
+    /// The lengths of `trace`, `saved` and `scopes` when it was opened.
+    pub trace: u32,
+    pub saved: u32,
+    pub scopes: u32,
+    /// Bit 0 `generate_equations`, bit 1 `assume_injective`, as they
+    /// were; bit 2: `mcomp` follows the reification when
+    /// `generate_equations` is on after the flags are put back.
+    pub flags: u8,
 }
 
 /// Bit 31 of a [`FrameKind::Linked`] frame's `extra`: `unify2` ran `unify3`
@@ -172,6 +205,24 @@ pub struct Checker {
     /// What [`Checker::unify_package`] asks about module types; `None`
     /// until a caller that has declarations sets it (R5a). (R3p)
     pub packages: Option<Box<dyn super::rows::PackageDecls>>,
+    /// `current_newtype_level` (compiler/ml/ctype.ml:1802-1808): the level
+    /// of the pattern being typed, or 0 outside
+    /// [`Checker::unify_pattern`] (`None`; no node is at level 0). (R3h)
+    pub newtype_level: u32,
+    /// The equations in force, oldest first (the local constraints of
+    /// `Env`, compiler/ml/ctype.ml:2093-2100). Empty for a unit that
+    /// never typed a pattern with an equation; `equations.len()` is what
+    /// a caller keeps to cut back to ([`Checker::cut_equations`]). (R3h)
+    pub equations: Vec<super::rows::Equation>,
+    /// What `reify` and `mcomp` ask about declarations; `None` until a
+    /// caller that has declarations sets it (R5a). (R3h)
+    pub locals: Option<Box<dyn super::rows::LocalDecls>>,
+    /// The open attempts of pattern mode, innermost last; empty outside
+    /// a pattern unification. (R3r)
+    pub tries: Vec<Try>,
+    /// The pairs `mcomp` assumes compatible, ordered (left, right) in
+    /// one `u64` each; empty outside a call of it. (R3r)
+    pub compatible: PairSet,
 }
 
 impl Checker {
@@ -196,6 +247,11 @@ impl Checker {
             pairs: PairSet::default(),
             scopes: Vec::new(),
             packages: None,
+            newtype_level: 0,
+            equations: Vec::new(),
+            locals: None,
+            tries: Vec::new(),
+            compatible: PairSet::default(),
         }
     }
 
@@ -945,7 +1001,8 @@ impl Checker {
             return self.unify_fields(t1x, t2x);
         }
         if self.umode == UnifyMode::Pattern {
-            // `add_type_equality` in place of the link (ctype.ml:2329).
+            // `add_type_equality` in place of the link (ctype.ml:2329):
+            // CHECKER_REWRITE 8.9, decision 64.
             todo!("R3h")
         }
         // Two variant nodes get the slots of their references while both
@@ -1224,10 +1281,67 @@ impl Checker {
     }
 
     /// `unify_gadt` (compiler/ml/ctype.ml:2739-2750): one unification in
-    /// pattern mode with equations, at `newtype_level`; clears the pair set
-    /// before and after. (R3h)
+    /// pattern mode with equations and injectivity assumed, at
+    /// `newtype_level`: [`Checker::unify_pattern`]. (R3h)
     pub fn unify_gadt(&mut self, newtype_level: u32, left: Ty, right: Ty) -> Result<(), Clash> {
+        self.unify_pattern(newtype_level, true, true, left, right)
+    }
+
+    /// One top-level unification in pattern mode (`unify_gadt`,
+    /// compiler/ml/ctype.ml:2739-2750, with the two flags of
+    /// `set_mode_pattern`, ctype.ml:256-273, as arguments so that a test
+    /// can ask for each mode `unify3` installs, ctype.ml:2352, 2368):
+    /// 1. `scopes` must be empty (`current_univar_pairs () := []`); the
+    ///    previous `umode`, `generate_equations`, `assume_injective` are
+    ///    kept; `umode = Pattern`, the two flags as given, `newtype_level`
+    ///    as given;
+    /// 2. [`Checker::unify`] of the pair;
+    /// 3. on either result: the three settings go back, `newtype_level`
+    ///    is 0, and the table of assumed equalities is emptied
+    ///    (`Type_pairs.clear (unify_eq_set ())`; `PairSet::clear`,
+    ///    O(pairs assumed)).
+    ///
+    /// The equations it added stay in [`Checker::equations`]: the caller
+    /// cuts them back when the case they belong to ends or when it
+    /// restores a speculation ([`Checker::cut_equations`]). O(1) plus the
+    /// unification. (R3h; CHECKER_REWRITE 8.9)
+    pub fn unify_pattern(
+        &mut self,
+        newtype_level: u32,
+        generate: bool,
+        injective: bool,
+        left: Ty,
+        right: Ty,
+    ) -> Result<(), Clash> {
         todo!("R3h")
+    }
+
+    /// Cut the equations back to the first `len` (a length of
+    /// [`Checker::equations`] the caller kept), last first: the
+    /// `TypeTable` row of each popped entry is its `previous` again;
+    /// then [`Checker::cleanup_abbrev`] when one was popped. What a
+    /// caller does where OCaml drops the environment of a case
+    /// (`set_state`, compiler/ml/typecore.ml:1303-1305). O(entries
+    /// popped) plus the cleanup. (R3h; CHECKER_REWRITE 8.9, decision
+    /// 67)
+    pub fn cut_equations(&mut self, len: usize) {
+        todo!("R3h")
+    }
+
+    /// A clash reached `run_frames` whose frames start at `base`: `None`
+    /// when no [`Try`] record has its frame at or above `base` (the
+    /// clash is the caller's). Otherwise the last record is taken:
+    /// `frames` is cut to its frame, [`Checker::restore`] of its
+    /// speculation, `leave_scopes` to its scopes, `trace` and `saved`
+    /// cut to its lengths, the two flags put back; then `reify(left)`,
+    /// `reify(right)` and, with bit 2 of the record and
+    /// `generate_equations` on, `mcomp(left, right)`: `Some` of their
+    /// result. The equations and the fresh types made inside the attempt
+    /// stay (`env` is not part of OCaml's snapshot). O(frames above the
+    /// record + writes restored) plus the three callees. (R3r;
+    /// CHECKER_REWRITE 8.9, decision 68)
+    pub fn recover(&mut self, base: usize) -> Option<Result<(), Clash>> {
+        todo!("R3r")
     }
 
     /// The failure path of the explaining mode: the trace, outermost pair
@@ -1450,6 +1564,13 @@ impl Checker {
                     FrameKind::RowField => self.unify_row_field(frame)?,
                     FrameKind::RowFieldEnd => self.row_field_end(frame)?,
                     FrameKind::RowEnd => self.row_end(frame),
+                    // The two flags go back (8.9, decision 64).
+                    FrameKind::Flags => todo!("R3h"),
+                    // The attempt succeeded: `g.keep` of the record's
+                    // speculation, its flags put back, the record
+                    // popped (8.9, decision 68). The clashes of this
+                    // loop go through `Checker::recover` first.
+                    FrameKind::Try => todo!("R3r"),
                     FrameKind::PackageEnd => {
                         // A clash here is the enclosing pair's (`Unify []`).
                         if self.package_end(frame).is_err() {
