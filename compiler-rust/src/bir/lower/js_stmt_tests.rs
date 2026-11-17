@@ -1025,6 +1025,54 @@ fn a_function_over_a_block_is_the_function_over_its_list() {
     }
 }
 
+/// The body of a function through the tail loop of `tail.rs`, as today
+/// (`block`: the body is made a block, taken apart again, and the function
+/// is built over a block) and as T6x-a makes it (the body stays a list, its
+/// statements are taken by position, and the function is built over the
+/// list): the steps of each, and the function.
+fn loop_function(statements: usize, block: bool) -> (u64, String) {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let body = run(&mut r, &mut u, &vec![St::Call; statements]);
+    let before = r.steps();
+    let mut moved = Vec::with_capacity(statements);
+    let a = &mut u.b;
+    if block {
+        let body = r.block_of(a, body);
+        r.unblock(a, body, |s| moved.push(s));
+    } else {
+        for index in 0..r.len(a, body) {
+            moved.push(r.take_at(a, body, index));
+        }
+    }
+    let list = r.list(a, statements as u32, moved.into_iter());
+    let condition = r.boolean(a, true);
+    let loop_ = r.while_(a, condition, list, None);
+    let list = r.list(a, 1, std::iter::once(loop_));
+    let function = if block {
+        let body = r.block_of(a, list);
+        r.function_of_block(a, u.header, body)
+    } else {
+        r.function(a, u.header, list)
+    };
+    let steps = r.steps() - before;
+    let mut tree = String::new();
+    shape(&u.b, Rows::node(function), &mut tree);
+    (steps, tree)
+}
+
+/// T6x-a, `tail.rs::loop_function_body` on lists: the same function, with
+/// one block fewer made and released, and one step fewer per statement of
+/// the body. Deleted with `function_of_block`.
+#[test]
+fn a_loop_function_over_a_list_is_the_one_over_a_block_in_fewer_steps() {
+    assert_eq!(loop_function(3, true).1, loop_function(3, false).1);
+    let saved = |statements: usize| loop_function(statements, true).0 - loop_function(statements, false).0;
+    let (thousand, ten_thousand) = (saved(1_000), saved(10_000));
+    assert_eq!(ten_thousand - thousand, 9_000, "{thousand} {ten_thousand}");
+    assert_eq!(thousand, 1_000 + 3);
+}
+
 #[test]
 fn releasing_a_statement_costs_one_step_per_node() {
     let steps = |size: usize| {
@@ -1167,9 +1215,8 @@ fn a_statement_in_hand_gives_the_id_its_readers_know_it_by() {
     let mut given = Vec::new();
     r.block_ids(&u.b, &block, |id| given.push(id));
     assert_eq!(given, ids);
-    // On rows it is the row: what the transition gives.
-    let id = r.stmt_id(&u.b, &block);
-    assert_eq!(Rows::stmt_node(block).0, id);
+    // On rows it is the row: what a test reads beside the handle.
+    assert_eq!(block.row().0, r.stmt_id(&u.b, &block));
 }
 
 /// Runs for `if_head` as the lowering's statement stack keeps them: slots

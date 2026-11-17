@@ -610,6 +610,74 @@ mod tests {
         assert_eq!(stack.copied, 10_001);
         assert_eq!(stack.mark(), Span::default());
     }
+    /// The slots `switches` switches leave in one run when the actions of
+    /// each are reserved above the runs of its clauses, filled as each
+    /// clause run is taken and then taken as one list (THREE_TREES 11.4,
+    /// "T6x-a: the statement stack, after the probe" (c)): each switch has
+    /// a default and `clauses` clauses of `width` statements. Returns the
+    /// slots of the run before it is taken and what reading its last
+    /// statement scanned.
+    fn switches_with_actions_on_the_stack(switches: u32, clauses: u32, width: u32) -> (u32, usize) {
+        let mut stack = StatementStack::default();
+        let mut bir = Bir::default();
+        let body = stack.mark();
+        let mut node = 0;
+        let mut next = || {
+            node += 1;
+            NodeId(node)
+        };
+        for _ in 0..switches {
+            let before = stack.mark().start;
+            let head = stack.reserve();
+            let runs: Vec<Span> = (0..=clauses)
+                .map(|_| {
+                    let mark = stack.mark();
+                    for _ in 0..width {
+                        stack.push(next());
+                    }
+                    stack.since(mark)
+                })
+                .collect();
+            let actions = stack.mark();
+            for _ in 0..=clauses {
+                stack.reserve();
+            }
+            // The clauses in order, then the default, as `untagged.rs`.
+            for (at, &run) in runs[1..].iter().chain(&runs[..1]).enumerate() {
+                let list = stack.take_list(&mut bir, run);
+                assert_eq!(bir.lists.get(list).len(), width as usize);
+                stack.fill(actions.start + at as u32, next());
+            }
+            let list = stack.take_list(&mut bir, stack.since(actions));
+            assert_eq!(bir.lists.get(list).len(), clauses as usize + 1);
+            stack.fill(head, next());
+            // The switch and the dead ranges of its runs: the holes of the
+            // actions are gone, and nothing else stays.
+            assert_eq!(stack.mark().start, before + 1 + (clauses + 1) * width);
+        }
+        let run = stack.since(body);
+        let scanned = stack.scanned;
+        assert!(stack.last(run).is_some());
+        let scanned = stack.scanned - scanned;
+        let list = stack.take_list(&mut bir, run);
+        assert_eq!(bir.lists.get(list).len(), switches as usize);
+        assert_eq!(stack.mark(), Span::default());
+        (run.len, scanned)
+    }
+    #[test]
+    fn the_actions_of_ten_thousand_switches_leave_only_the_slots_of_their_runs() {
+        let (clauses, width) = (3, 2);
+        let per_switch = 1 + (clauses + 1) * width;
+        let (thousand, scanned_thousand) = switches_with_actions_on_the_stack(1_000, clauses, width);
+        let (ten_thousand, scanned) = switches_with_actions_on_the_stack(10_000, clauses, width);
+        // A switch leaves its statement and the slots its runs had: linear
+        // in the statements pushed, and all of it gone with the run.
+        assert_eq!((thousand, ten_thousand), (1_000 * per_switch, 10_000 * per_switch));
+        // A read from the end crosses the dead ranges of the last switch,
+        // not those of the switches before it.
+        assert_eq!(scanned, scanned_thousand);
+        assert_eq!(scanned, ((clauses + 1) * width) as usize);
+    }
     #[test]
     fn append_finished_truncates_and_dummy_preserves() {
         let mut stack = StatementStack::default();

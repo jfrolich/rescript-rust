@@ -76,6 +76,15 @@ use crate::lambda::lam_compat::LetKind;
 #[derive(Debug, PartialEq, Eq)]
 pub struct S(NodeId);
 
+#[cfg(test)]
+impl S {
+    /// The row of the statement, for a test that reads the arena beside
+    /// the handle. O(1).
+    pub(crate) fn row(&self) -> NodeId {
+        self.0
+    }
+}
+
 impl JsStmt for Rows {
     type S = S;
     type L = ListId;
