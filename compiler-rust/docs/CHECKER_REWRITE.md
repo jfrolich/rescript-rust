@@ -2179,6 +2179,7 @@ it stops and reports a reproduction.
 | R3g | Universal variables and polymorphic types with variables: the scopes, `unify_univar`, `enter_poly`, the escape test, `occur_univar`, PR#6744 in `unify_row_field` (8.6, decisions 49 to 51; 8.8) | `rows.rs` | R3e, R3f, R3n | R3p | 600 |
 | R3p | Packages: the merge of two name lists, completed through `PackageDecls` (8.6, decision 52; 8.8) | `rows.rs` | R3e | R3g | 150 |
 | R3h | Pattern mode, equations, `reify`, `mcomp` | `rows.rs`, `unify.rs` | R3n, R3g | R3i, R3j | 600 |
+| R3q | `instance_poly` and `instance_label`: the copy that goes through free universal variables without sharing (`copy_sep`), and the fixed-row rule of `copy_row` only it reaches (8.6, decision 47; 8.8, open question 1) | `rows.rs`, `expand.rs` | R3n, R3g | R3h, R3i, R3j | 300 |
 | R3i | `moregeneral`, `equal`, `matches` | `relate.rs` | R3n, R3g | R3h, R3j | 600 |
 | R3j | Subtyping without the declaration-directed coercions | `relate.rs` | R3n, R3g | R3h, R3i | 600 |
 | K2 | The hot paths of unification, no behaviour change (8.7) | `unify.rs` | R3c | every slice above | 150 |
@@ -2252,6 +2253,14 @@ Packages are R3p and not part of R3g: no generated case can judge them
 (the differential program has no module types), their one caller is an
 arm that is already wired, and they ask the declarations three questions
 that R5a answers. R3h was not started in this turn.
+
+State after the sixth skeleton turn (trunk `61f7f41292`). Merged: every
+slice above R3h in the table, R3g and R3p included (built as designed;
+what their reviews put on record is decisions 53 to 57 of 8.6), and K1 to
+K4. `cargo test --lib tc::` on that trunk: 265 passed, 0 ignored. Without a design
+before this turn: R3h, the `instance_poly` slice (R3q: a slice name has
+three characters), R3i and R3j. What the sixth turn did is listed in 8.6
+("Decided in the sixth skeleton turn").
 
 The ignored tests are checked mechanically
 (`differential::tests::ignored_tests_name_the_slices_they_reach`): each
@@ -4285,6 +4294,62 @@ unless it says "ignored".
     - `allow_absent` (subtyping) is R3j's: `Completion::Abstract` and
       `Completion::Missing` are separate answers so that R3j can skip
       them without a second trait.
+
+On record from the reviews of the fifth skeleton turn, of R3g and of R3p
+(trunk `61f7f41292`). They bind the sixth skeleton turn and R5c.
+
+53. **`split_univars` puts the join off and runs it again.** OCaml
+    unifies the gained types that hold a universal variable and then
+    builds the two fields from the lists as they were before those
+    unifications (`List.iter (unify env tu1) (tlu1 @ tlu2)`, then `tl1'`
+    and `tl2'` as already computed, ctype.ml:2693-2706). The kernel
+    returns `Ok(None)`, lets the frame stack unify the holders, and runs
+    `join_either` from its start: the two type lists are read again and
+    compared again. The field holds the same SET of nodes either way. The
+    two differ in one corner: a gained type WITHOUT a universal variable
+    that those unifications make the same node as a type the gaining side
+    already has is not gained by the second run, and is kept, as a
+    duplicate entry of the list, by OCaml. Accepted as built. It is
+    reopened by a case in which a printed type or a later join shows the
+    duplicate; the sixth turn built the corner by hand on the old side
+    (decision 58).
+54. **`join_either` lowers the two gained ranges each on its own.** With
+    `passive_variants` set and holders on both sides, `split_univars`
+    returns two ranges with a gap between them (what its compaction left
+    behind: holders, which OCaml does not lower, ctype.ml:2699-2703). The
+    caller lowered everything from the start of the first range to the end
+    of the second; corrected in the review of R3g. Nothing in `tc` sets
+    `passive_variants`, so no test reached the correction until the sixth
+    turn wrote one by setting the field (decision 59).
+55. **`package_end` reads the right node's descriptor without following
+    a link.** For the right node to be linked away between the two frames
+    it would have to be nested in an argument of one of the two packages,
+    and every such shape ends in an occurrence clash before the
+    `PackageEnd` frame is popped. Whether pattern mode changes that is
+    answered by the design of R3h (decision 63: it does not, and why).
+56. **A mark of `free_univar` is live while its context is open, and a
+    polymorphic type WITHOUT bound variables opens a context.** A node
+    first visited inside such a type is visited again after the type is
+    left, where OCaml's `visited` map, which compares the sets of bound
+    variables, does not visit it again (`bound' ⊆ bound` holds for two
+    equal sets, ctype.ml:1572-1581). The answer is the same; the visits
+    are more. The count is stated and asserted by the sixth turn's step
+    tests (decision 59).
+57. **The bench record of R3g, for R5c.** The five unification operations
+    of `tc_kernel` at the builder's start and at the merged head:
+    `unify_vars` 118 and 122, `unify_ground1` 120 and 120, `unify_ground3`
+    807 and 807, `unify_datatype2` 815 and 815, `unify_abbrev2` 2885.06
+    and 2886.06. Tried and reverted, each measured: `#[inline(never)]` on
+    the five bodies (no figure moved) and `#[cold]` on the seven rare
+    functions (every operation dearer than the merged head). What moved
+    the figures between the two heads was a merge of trunk that changed
+    none of these bodies: code placement under one codegen unit. For
+    R3p, `#[cold] #[inline(never)]` on its two bodies put all five
+    figures back at their base, and is kept. Consequence, binding every
+    later prompt: no slice has a target for a `tc_kernel` figure
+    (decision 46), and **no prompt prescribes a remedy for a figure that
+    moves**; a build prompt asks for the five operations before and
+    after, as a report.
 
 
 ### 8.7 The hot paths of unification (K2)
