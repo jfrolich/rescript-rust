@@ -43,7 +43,7 @@ pub(super) fn decide<B: JsStmt>(js: &B, bir: &mut Pools, list: B::L) {
         steps += 1;
         match js.kind_at(bir, list, at) {
             Kind::Return => {
-                // PROBE-GAP 1: a read by reference of statement `at` of a
+                // PROBE-GAP 3: a read by reference of statement `at` of a
                 // list in flight (`JsStmt` has `kind_at` and `take_at`, no
                 // read of the statement in place); the two transition
                 // calls stand for it.
@@ -56,7 +56,7 @@ pub(super) fn decide<B: JsStmt>(js: &B, bir: &mut Pools, list: B::L) {
                 }
             }
             Kind::Declare => {
-                // PROBE-GAP 1, as above.
+                // PROBE-GAP 3, as above.
                 let statement = B::stmt_from_node(bir.lists.get(B::list_id(list))[at as usize]);
                 let var = js.declared(bir, &statement).expect("a declaration declares");
                 let kind = u16::from(js.stmt_aux(bir, &statement)) & 3;

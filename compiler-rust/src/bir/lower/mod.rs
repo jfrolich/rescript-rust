@@ -796,7 +796,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
                 && let crate::lambda::TagInfo::ModuleExport(exports) = self.arena.block_tag(info)
             {
                 let tag = crate::lambda::TagInfo::ModuleExport(exports.clone());
-                // PROBE-GAP 2: replace the payload of a node held below the
+                // PROBE-GAP 4: replace the payload of a node held below the
                 // value in place (the block literal at the end of the comma
                 // spine); the interface has no write through a reference.
                 let end = self.js.id(&self.arena, end) as usize;
