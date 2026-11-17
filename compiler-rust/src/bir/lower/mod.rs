@@ -488,7 +488,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     source: Bir,
     arena: Bir,
     idents: Vec<Ident>,
-    statements: StatementStack,
+    statements: StatementStack<B>,
     free: FreePool,
     traversal: SourceProbe<expr::Resume>,
     list_block_info: Option<crate::bir::JsId>,
@@ -806,7 +806,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
                 (list, coerced)
             }
             _ => (
-                self.statements.take_list(&mut self.arena, run),
+                B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, run)),
                 export::Coerced::default(),
             ),
         };
@@ -822,12 +822,12 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
             .value
             .unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
         let value = self.arena.new_node(View::SExp { value }, 0);
-        self.statements.push(value);
+        self.statements.push(B::stmt_from_node(value));
         let run = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,
         });
-        let list = self.statements.take_list(&mut self.arena, run);
+        let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, run));
         self.finish(list, out.finished, export::Coerced::default())
     }
 
@@ -1140,6 +1140,7 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
 
 impl<B: js_stmt::JsStmt> Realizer for State<'_, B> {
     /// K4/K5/K6: C:6648 declare_compiled, C:6667 assign_compiled, C:6658 return_compiled.
+    /// O(1): at most one statement built and pushed.
     fn leaf(&mut self, cx: Cx, value: NodeId) -> Out {
         let start = self.statements.mark();
         let mut finished = Finished::False;
@@ -1149,17 +1150,17 @@ impl<B: js_stmt::JsStmt> Realizer for State<'_, B> {
             }
             Cont::Declare(kind, var) => {
                 let stmt = super::j::declare(&mut self.arena, kind, var, value);
-                self.statements.push(stmt);
+                self.statements.push(B::stmt_from_node(stmt));
                 None
             }
             Cont::Assign(var) => {
                 let stmt = super::j::assign(&mut self.arena, var, value);
-                self.statements.push(stmt);
+                self.statements.push(B::stmt_from_node(stmt));
                 None
             }
             Cont::Effect(Tail::Return(_)) => {
                 let stmt = super::j::return_value(&mut self.arena, value);
-                self.statements.push(stmt);
+                self.statements.push(B::stmt_from_node(stmt));
                 finished = Finished::True;
                 None
             }

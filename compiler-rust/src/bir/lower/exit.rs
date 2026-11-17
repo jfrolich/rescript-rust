@@ -184,7 +184,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// one declaration built and pushed.
     pub(super) fn declare_empty(&mut self, kind: LetKind, var: VarId) {
         let declaration = self.js.declare(&mut self.arena, kind, var, None);
-        self.statements.push(B::stmt_node(declaration));
+        self.statements.push(declaration);
     }
 
     /// 4.1 `lower_catch` on entering the node (OCaml
@@ -247,7 +247,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let exit = self.fresh_variable("exit");
             let zero = self.js.int_literal(&mut self.arena, 0);
             let declaration = self.js.declare(&mut self.arena, LetKind::Variable, exit, Some(zero));
-            self.statements.push(B::stmt_node(declaration));
+            self.statements.push(declaration);
             (target.map(|(_, var)| var), Some(exit))
         };
         // 4.2 invariant 3: a table starts above every visible entry.
@@ -345,8 +345,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             // break only when the handler holds an exit (4.2 invariant 5).
             let should_break = finished != Finished::True
                 && (!matches!(cx.cont, Cont::Effect(Tail::Return(_))) || self.has_exit(handler));
-            let list = self.statements.take_list(&mut self.arena, run);
-            let block = self.js.block_of(&mut self.arena, B::list_from(list));
+            let list = self.statements.take_list(&mut self.js, &mut self.arena, run);
+            let block = self.js.block_of(&mut self.arena, list);
             let plan = self.catches[frame.0 as usize].as_mut().expect("live catch frame");
             let slot = plan.output.start as usize + index - 1;
             self.switch_output_nodes[slot] = B::stmt_node(block);
@@ -420,7 +420,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let order = self.js.int_literal(&mut self.arena, plan.first);
             let test = self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, exit, order);
             let statement = self.if_statement(B::node(test), run, super::cond::EMPTY);
-            self.statements.push(statement);
+            self.statements.push(B::stmt_from_node(statement));
             return;
         }
         let keys = crate::bir::KeySpan { start: self.arena.pools.switch_keys.len() as u32, len: plan.len };
@@ -455,7 +455,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         });
         let scrutinee = self.js.var(&mut self.arena, exit);
         let statement = self.js.switch(&mut self.arena, scrutinee, B::list_from(actions), header, false);
-        self.statements.push(B::stmt_node(statement));
+        self.statements.push(statement);
     }
 
     /// 4.1 `lower_exit` on entering the node (OCaml
@@ -561,7 +561,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if jump.order != CHEAP {
                     let order = self.js.int_literal(&mut self.arena, jump.order);
                     let statement = self.js.assign(&mut self.arena, jump.exit, order);
-                    self.statements.push(B::stmt_node(statement));
+                    self.statements.push(statement);
                 }
                 Finished::False
             }
@@ -580,7 +580,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if finished != Finished::True {
                     let undefined = self.js.undefined(&mut self.arena, false);
                     let statement = self.js.declare(&mut self.arena, kind, var, Some(undefined));
-                    self.statements.push(B::stmt_node(statement));
+                    self.statements.push(statement);
                 }
                 None
             }

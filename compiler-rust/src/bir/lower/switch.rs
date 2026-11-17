@@ -157,7 +157,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let declaration = (string && binding.is_some()).then(|| self.statements.reserve());
         if let Some((kind, var)) = binding.filter(|_| !string) {
             let declaration = self.js.declare(&mut self.arena, kind, var, None);
-            self.statements.push(B::stmt_node(declaration));
+            self.statements.push(declaration);
         }
         let frame = Switch(self.switches.len() as u32);
         self.switches.push(Some(Plan {
@@ -711,11 +711,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let explicit = should_break && matches!(cx.cont, Cont::Assign(_));
             if explicit {
                 let statement = self.js.break_(&mut self.arena, None);
-                self.statements.push(B::stmt_node(statement));
+                self.statements.push(statement);
             }
             let run = self.statements.since(Span { start, len: 0 });
-            let list = self.statements.take_list(&mut self.arena, run);
-            let block = self.js.block_of(&mut self.arena, B::list_from(list));
+            let list = self.statements.take_list(&mut self.js, &mut self.arena, run);
+            let block = self.js.block_of(&mut self.arena, list);
             let loc = self.switch_location(source);
             let plan = self.switches[frame.0 as usize].as_mut().unwrap();
             let slot = plan.output.start as usize + index - 1;
@@ -757,7 +757,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.js.release_stmt(&mut self.arena, body);
             }
             let statement = self.js.exp_rule(&mut self.arena, scrutinee);
-            self.statements.push(B::stmt_node(statement));
+            self.statements.push(statement);
         } else {
             let source_keys = self.arena.pools.switches[plan.header.index()].keys;
             let mut keys = crate::bir::KeySpan {
@@ -842,7 +842,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 header,
                 plan.kind != Kind::Integer,
             );
-            self.statements.push(B::stmt_node(statement));
+            self.statements.push(statement);
         }
         self.switch_result(cx, &plan)
     }
@@ -886,10 +886,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let value = self.js.keep_operand(&mut self.arena, assignment, 1);
                 self.statements.kill(candidate.unwrap());
                 let statement = self.js.declare(&mut self.arena, kind, target, Some(value));
-                self.statements.push(B::stmt_node(statement));
+                self.statements.push(statement);
             } else {
                 let declaration = self.js.declare(&mut self.arena, kind, target, None);
-                self.statements.fill(slot, B::stmt_node(declaration));
+                self.statements.fill(slot, declaration);
             }
         }
         if plan.kind != Kind::Named && matches!(cx.cont, Cont::Effect(Tail::Return(_))) {

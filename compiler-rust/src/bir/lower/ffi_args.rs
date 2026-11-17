@@ -99,7 +99,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let statement = self.js.declare(&mut self.arena, LetKind::Strict, var, Some(value));
         self.statements.fill_held(
             arg.stmts.start + arg.stmts.len - 1,
-            &[B::stmt_node(statement)],
+            [statement],
         );
         let mut replacement = self.js.var(&mut self.arena, var);
         self.js.assume_strict(&mut self.arena, &mut replacement);

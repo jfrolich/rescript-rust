@@ -1,0 +1,1 @@
+- The backend lowering's statement stack owns statement handles of its JavaScript interface instead of J rows.

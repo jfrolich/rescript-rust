@@ -29,19 +29,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Whether `statement` declares a variable whose value, if it has one,
     /// runs no code. One step per member of the value's chain of field
     /// reads with a position (`runs_no_code`); O(1) otherwise.
-    fn declares_pure(&self, statement: NodeId) -> bool {
-        let statement = B::stmt_from_node(statement);
-        self.js.stmt_kind(&self.arena, &statement) == Kind::Declare
+    fn declares_pure(&self, statement: &B::S) -> bool {
+        self.js.stmt_kind(&self.arena, statement) == Kind::Declare
             && self
                 .js
-                .value_of(&self.arena, &statement)
+                .value_of(&self.arena, statement)
                 .is_none_or(|value| self.js.runs_no_code(&self.arena, value))
     }
 
     /// A:96 defines_pure_values: each statement is examined once by sequencing.
     /// Cost: O(statements), each `declares_pure`.
     fn defines_pure_values(&self, statements: &[NodeId]) -> bool {
-        statements.iter().all(|&statement| self.declares_pure(statement))
+        statements.iter().all(|&statement| self.declares_pure(&B::stmt_from_node(statement)))
     }
 
     /// X:1445 fresh_ident: unit-local naming order, without a global counter.
@@ -200,11 +199,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             later_defines_pure &= self.defines_pure_values(&self.evaluation.statements[held.start as usize..(held.start + held.len) as usize])
                 && self
                     .statements
-                    .statements(arg.stmts)
+                    .statement_refs(arg.stmts)
                     .all(|statement| self.declares_pure(statement));
             if held.len != 0 {
                 self.statements
-                    .fill_held(arg.stmts.start + arg.stmts.len - 1, &self.evaluation.statements[held.start as usize..(held.start + held.len) as usize]);
+                    .fill_held(arg.stmts.start + arg.stmts.len - 1, self.evaluation.statements[held.start as usize..(held.start + held.len) as usize].iter().map(|&row| B::stmt_from_node(row)));
             }
             self.evaluation.statements.truncate(held.start as usize);
             values.push(value);
@@ -442,7 +441,7 @@ mod tests {
             );
             let statement = state.arena.new_node(View::SExp { value }, 0);
             let start = state.statements.mark();
-            state.statements.push(statement);
+            state.statements.push(<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::stmt_from_node(statement));
             state.statements.reserve();
             let text = state.arena.intern_text("v");
             let value = state.pure_expression(View::JStr { text }, 0);
