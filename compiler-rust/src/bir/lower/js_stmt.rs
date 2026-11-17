@@ -282,12 +282,6 @@ pub trait JsStmt: Js {
     /// O(1): no statement of a block is read. Panics on a statement that
     /// is not an `If`. (T6n: `cond.rs::merge_tail_guard`.)
     fn take_if(&mut self, a: &mut Pools, s: Self::S) -> (Self::E, Self::S, Option<Self::S>);
-    /// Transition (deleted by T6x, when `tail.rs::loop_function_body` takes
-    /// and returns a list): the function literal of `header` whose body is
-    /// the block statement `body`. Strictly pure, as [`JsStmt::function`].
-    /// O(1). (T6n: `expr.rs`, a function whose body went through the tail
-    /// loop of T6w as a block.)
-    fn function_of_block(&mut self, a: &mut Pools, header: FuncId, body: Self::S) -> Self::E;
 
     // ---- Rules of BACKEND_LOWERING 6 ----
 

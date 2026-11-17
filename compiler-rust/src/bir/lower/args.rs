@@ -7,11 +7,18 @@ enum Work {
     Enter(NodeId),
     Rebuild(NodeId, usize),
 }
-#[derive(Default)]
-pub(super) struct Evaluation {
+/// The work, values and statements in flight (`S`) of `evaluate_now`,
+/// reused across calls.
+pub(super) struct Evaluation<S> {
     work: Vec<Work>,
     values: Vec<NodeId>,
-    statements: Vec<NodeId>,
+    statements: Vec<S>,
+}
+impl<S> Default for Evaluation<S> {
+    /// Empty storage. O(1); allocates nothing.
+    fn default() -> Self {
+        Self { work: Vec::new(), values: Vec::new(), statements: Vec::new() }
+    }
 }
 
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
@@ -39,8 +46,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// A:96 defines_pure_values: each statement is examined once by sequencing.
     /// Cost: O(statements), each `declares_pure`.
-    fn defines_pure_values(&self, statements: &[NodeId]) -> bool {
-        statements.iter().all(|&statement| self.declares_pure(&B::stmt_from_node(statement)))
+    fn defines_pure_values(&self, statements: &[B::S]) -> bool {
+        statements.iter().all(|statement| self.declares_pure(statement))
     }
 
     /// X:1445 fresh_ident: unit-local naming order, without a global counter.
@@ -85,7 +92,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             self.js.release(&mut self.arena, first);
                         } else {
                             let statement = self.js.exp_rule(&mut self.arena, first);
-                            statements.push(B::stmt_node(statement));
+                            statements.push(statement);
                         }
                         work.push(Work::Enter(B::node(second)));
                         continue;
@@ -121,7 +128,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             var,
                             Some(B::from_node(value)),
                         );
-                        statements.push(B::stmt_node(statement));
+                        statements.push(statement);
                         let mut held = self.js.var(&mut self.arena, var);
                         self.js.assume_strict(&mut self.arena, &mut held);
                         values.push(B::node(held));
@@ -202,10 +209,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     .statement_refs(arg.stmts)
                     .all(|statement| self.declares_pure(statement));
             if held.len != 0 {
-                self.statements
-                    .fill_held(arg.stmts.start + arg.stmts.len - 1, self.evaluation.statements[held.start as usize..(held.start + held.len) as usize].iter().map(|&row| B::stmt_from_node(row)));
+                let range = held.start as usize..(held.start + held.len) as usize;
+                self.statements.fill_held(arg.stmts.start + arg.stmts.len - 1, self.evaluation.statements.drain(range));
             }
-            self.evaluation.statements.truncate(held.start as usize);
             values.push(value);
         }
         values.reverse();
@@ -235,7 +241,7 @@ mod tests {
         let mut state = State::new(bridge::import_lambda(&a, root).unwrap());
         let value = state.arena.new_node(View::JNull, 0);
         let statement = state.arena.new_node(View::SDebugger, 0);
-        state.evaluation.statements.push(statement);
+        state.evaluation.statements.push(<crate::bir::j::rows::Rows as js_stmt::JsStmt>::stmt_from_node(statement));
         state.evaluate_now(value);
     }
 

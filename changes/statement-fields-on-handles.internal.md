@@ -1,0 +1,1 @@
+- Backend lowering: the fields that hold statements between two calls (argument evaluation, loop and `try` plans, recursive members, tail-call assignments) hold statement handles of the interface, the effect of a sequence head is held through a sink, a function through the tail loop keeps its body a list, and `JsStmt::function_of_block` is deleted.

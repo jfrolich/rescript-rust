@@ -62,9 +62,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 copy
             };
             let assignment = self.js.assign(&mut self.arena, copy, B::from_node(value));
-            assignments.push(B::stmt_node(assignment));
+            assignments.push(assignment);
         }
-        for statement in assignments.drain(..).rev() { self.statements.push(B::stmt_from_node(statement)); }
+        for statement in assignments.drain(..).rev() { self.statements.push(statement); }
         self.tail_assignments = assignments;
         let jump = self.js.continue_(&mut self.arena, None);
         self.statements.push(jump);
@@ -72,8 +72,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// O(p log p + s): sort only copied parameters, emit their iteration-local
-    /// aliases and wrap the already-lowered body. Each statement moves once.
-    pub(super) fn loop_function_body(&mut self, frame: LoopRef, header: FuncId, body: NodeId) -> NodeId {
+    /// aliases and wrap the already-lowered body, a list in flight, in
+    /// `while (true)`. Each of its s statements moves once (`take_at`, one
+    /// step each); the result is the list of the one loop statement, or
+    /// `body` itself when the frame did not trigger (O(1)).
+    pub(super) fn loop_function_body(&mut self, frame: LoopRef, header: FuncId, body: B::L) -> B::L {
         let frame = self.tail_frames[frame.0 as usize];
         if !frame.triggered { return body; }
         let start = self.arena.vars.function_params.len() as u32;
@@ -101,16 +104,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.statements.push(statement);
         }
         self.tail_order = ordered;
-        let (statements, moved) = (&mut self.statements, &mut self.tail_body_statements);
-        self.js.unblock(&mut self.arena, B::stmt_from_node(body), |s| {
-            *moved += 1;
-            statements.push(s);
-        });
+        for index in 0..self.js.len(&self.arena, body) {
+            self.tail_body_statements += 1;
+            let statement = self.js.take_at(&mut self.arena, body, index);
+            self.statements.push(statement);
+        }
         let list = self.statements.take_list(&mut self.js, &mut self.arena, self.statements.since(mark));
         let condition = self.js.boolean(&mut self.arena, true);
         let loop_ = self.js.while_(&mut self.arena, condition, list, None);
-        let loop_ = self.js.list(&mut self.arena, 1, std::iter::once(loop_));
-        B::stmt_node(self.js.block_of(&mut self.arena, loop_))
+        self.js.list(&mut self.arena, 1, std::iter::once(loop_))
     }
 }
 

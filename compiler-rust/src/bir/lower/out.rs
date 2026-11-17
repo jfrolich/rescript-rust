@@ -387,12 +387,26 @@ impl<B: JsStmt> StatementStack<B> {
     /// arguments were lowered. Held statements enter the list exactly once.
     /// Cost: one step per statement, each moved once.
     pub(super) fn fill_held(&mut self, slot: u32, statements: impl IntoIterator<Item = B::S>) {
-        assert!(self.slots[slot as usize].is_none());
-        let start = self.held.len();
+        let mark = self.held_mark();
         self.held.extend(statements.into_iter().map(Some));
-        let len = self.held.len() - start;
+        self.fill_held_since(slot, mark);
+    }
+    /// Where the statements given to `hold` start: a mark for
+    /// `fill_held_since`. O(1).
+    pub(super) fn held_mark(&self) -> usize {
+        self.held.len()
+    }
+    /// One statement for the hold `fill_held_since` places. O(1).
+    pub(super) fn hold(&mut self, statement: B::S) {
+        self.held.push(Some(statement));
+    }
+    /// `fill_held` with the statements given to `hold` since
+    /// `mark`. O(1).
+    pub(super) fn fill_held_since(&mut self, slot: u32, mark: usize) {
+        assert!(self.slots[slot as usize].is_none());
+        let len = self.held.len() - mark;
         self.pushed += len;
-        self.slots[slot as usize] = Some(Slot::Held(Span { start: start as u32, len: len as u32 }));
+        self.slots[slot as usize] = Some(Slot::Held(Span { start: mark as u32, len: len as u32 }));
     }
     /// C:3285 compile_static_raise_jump_output: an argument lowered after a
     /// later one comes before it in the output. Move the top run into the
@@ -732,6 +746,43 @@ mod tests {
         assert_eq!(stack.pushed, 10_001);
         assert_eq!(stack.copied, 10_001);
         assert_eq!(stack.mark(), Span::default());
+    }
+    /// The list of a hold of `n` statements: (i) pushed above a reserved
+    /// slot and moved into it with `hold_run`, or (ii) given to `hold` and
+    /// placed with `fill_held_since`. Each enters its list once.
+    #[test]
+    fn a_hold_of_ten_thousand_statements_enters_its_list_once() {
+        for n in [1_000u32, 10_000] {
+            for sink in [false, true] {
+                let mut stack = StatementStack::<Rows>::default();
+                let mut bir = Bir::default();
+                let before = stack.mark();
+                let slot = stack.reserve();
+                if sink {
+                    let mark = stack.held_mark();
+                    for i in 0..n {
+                        stack.hold(Rows::stmt_from_node(NodeId(i)));
+                    }
+                    stack.fill_held_since(slot, mark);
+                } else {
+                    let mark = stack.mark();
+                    for i in 0..n {
+                        stack.push(Rows::stmt_from_node(NodeId(i)));
+                    }
+                    let run = stack.since(mark);
+                    stack.hold_run(slot, run);
+                }
+                let span = stack.since(before);
+                let list = stack.take_list(&mut Rows::default(), &mut bir, span);
+                let rows = bir.lists.get(list);
+                assert_eq!(rows.len(), n as usize);
+                assert_eq!(rows[0], NodeId(0));
+                assert_eq!(rows[n as usize - 1], NodeId(n - 1));
+                assert_eq!(stack.pushed, n as usize);
+                assert_eq!(stack.copied, n as usize);
+                assert_eq!(stack.mark(), Span::default());
+            }
+        }
     }
     /// The slots `switches` switches leave in one run when the actions of
     /// each are reserved above the runs of its clauses, filled as each

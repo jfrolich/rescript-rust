@@ -1,15 +1,15 @@
 //! Exception regions, BACKEND_LOWERING §5.5.
 use super::*;
-use crate::bir::ListId;
 
 /// Dense exception-frame handle; O(1) access across child visits.
 #[derive(Clone, Copy)]
 pub(super) struct Try(pub u32);
 
-/// Saved operands and completed blocks; no owned collection per source node.
-pub(super) struct Plan {
+/// Saved operands and completed blocks as lists in flight (`L`, the
+/// interface's statement list); no owned collection per source node.
+pub(super) struct Plan<L> {
     nodes: [Option<NodeId>; 3],
-    blocks: [Option<ListId>; 3],
+    blocks: [Option<L>; 3],
     exception: Option<VarId>,
     start: Span,
     target: Option<VarId>,
@@ -92,7 +92,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             start: out.stmts.start,
             len: 0,
         });
-        let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, span));
+        let list = self.statements.take_list(&mut self.js, &mut self.arena, span);
         self.tries[frame.0 as usize].blocks[index] = Some(list);
         Probed::Out(Out {
             stmts: self.statements.mark(),
@@ -110,10 +110,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let start = plan.start;
         let target = plan.target;
         let [body, second, third] = plan.blocks;
-        let body = B::list_from(body.unwrap());
-        let second = B::list_from(second.unwrap());
+        let body = body.unwrap();
+        let second = second.unwrap();
         let (handler, finaliser) = match plan.exception {
-            Some(exception) => (Some((exception, second)), third.map(B::list_from)),
+            Some(exception) => (Some((exception, second)), third),
             None => (None, Some(second)),
         };
         let statement = self.js.try_(&mut self.arena, body, handler, finaliser);
@@ -312,6 +312,6 @@ mod tests {
     #[test]
     fn frame_sizes() {
         assert_eq!(std::mem::size_of::<Try>(), 4);
-        assert_eq!(std::mem::size_of::<Plan>(), 72);
+        assert_eq!(std::mem::size_of::<Plan<crate::bir::ListId>>(), 72);
     }
 }
