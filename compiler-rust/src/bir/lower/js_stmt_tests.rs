@@ -1190,6 +1190,26 @@ fn a_declaration_gives_its_variable_and_a_block_the_ids_of_its_statements() {
     assert_eq!(r.owner(&u.b, ids[0]), Some(Rows::stmt_node(block).0));
 }
 
+/// `block_ids` gives one id per statement, in order, and counts no step:
+/// at 1,000 and at 10,000 statements the reader leaves `steps` where it
+/// was, and what it gives grows with the block and nothing else.
+#[test]
+fn the_ids_of_ten_thousand_statements_of_a_block_cost_no_step() {
+    let given = |statements: usize| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let list = run(&mut r, &mut u, &vec![St::Call; statements]);
+        let block = r.block_of(&mut u.b, list);
+        let (mut ids, before) = (Vec::with_capacity(statements), r.steps());
+        r.block_ids(&u.b, &block, |id| ids.push(id));
+        assert_eq!(r.steps(), before);
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(ids.iter().all(|&id| r.kind_of(&u.b, id) == Kind::Exp));
+        ids.len()
+    };
+    assert_eq!((given(1_000), given(10_000)), (1_000, 10_000));
+}
+
 /// The id of a statement in hand is the id every reader by id knows it by:
 /// the owner of its value, its kind by id, and what a block gives for it
 /// once it is in one. Reading it takes nothing and counts nothing.
