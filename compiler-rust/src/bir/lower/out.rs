@@ -2,7 +2,7 @@
 use super::js::{Js, Pools};
 use super::js_stmt::JsStmt;
 use super::{Cx, ProbeInput, Realizer};
-use crate::bir::{Bir, ListId, NodeId};
+use crate::bir::{Bir, ListId};
 
 /// K0: C:73 OutputFinished. Dummy is distinct from ordinary fallthrough.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,12 +29,11 @@ impl Span {
     }
 }
 /// K0: C:139 Compiled, also representing outputs without a value.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Out {
+pub struct Out<B: Js> {
     /// Statement-stack run.
     pub stmts: Span,
     /// Deferred J expression.
-    pub value: Option<NodeId>,
+    pub value: Option<B::E>,
     /// Control-flow completion.
     pub finished: Finished,
 }
@@ -468,7 +467,7 @@ impl<B: JsStmt> StatementStack<B> {
     /// the first finishes. Value combination belongs to K2's expression
     /// policy. O(1), and one write per slot of the second run when a
     /// finished first run pops it.
-    pub fn append(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {
+    pub fn append(&mut self, first: Out<B>, second: Out<B>, value: Option<B::E>) -> Out<B> {
         assert_eq!(first.stmts.end(), second.stmts.start as usize);
         assert_eq!(second.stmts.end(), self.slots.len());
         if first.finished == Finished::True
@@ -535,9 +534,27 @@ impl<B: JsStmt> StatementStack<B> {
 impl StatementStack<crate::bir::j::rows::Rows> {
     /// The rows of the statements of a run. One step per
     /// slot of the run.
-    pub(super) fn statements(&self, span: Span) -> impl Iterator<Item = NodeId> + '_ {
+    pub(super) fn statements(&self, span: Span) -> impl Iterator<Item = crate::bir::NodeId> + '_ {
         self.statement_refs(span).map(|s| s.row())
     }
+}
+
+/// For the tests: the row of an output's value on rows. O(1).
+#[cfg(test)]
+pub(super) fn row(value: <crate::bir::j::rows::Rows as Js>::E) -> crate::bir::NodeId {
+    crate::bir::j::rows::Rows::node(value)
+}
+/// For the tests: an output's value on rows from its row. O(1).
+#[cfg(test)]
+pub(super) fn of_row(node: crate::bir::NodeId) -> <crate::bir::j::rows::Rows as Js>::E {
+    crate::bir::j::rows::Rows::from_node(node)
+}
+
+/// For the tests: the row of an output's value on rows, read in place. O(1).
+#[cfg(test)]
+pub(super) fn row_of(a: &Pools, value: &<crate::bir::j::rows::Rows as Js>::E) -> crate::bir::NodeId {
+    let rows = crate::bir::j::rows::Rows::default();
+    crate::bir::NodeId(rows.id(a, crate::bir::j::rows::Rows::of(value)))
 }
 
 /// The stack's runs for `JsStmt::if_head`: a run is a span of slots, and a
@@ -607,18 +624,17 @@ pub enum Free<B: Js> {
     },
 }
 /// Result of one probe: deferred expression or completed output.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Probed {
+pub enum Probed<B: Js> {
     /// Statement-free result.
     Free(FreeId),
     /// Already lowered in the requested continuation.
-    Out(Out),
+    Out(Out<B>),
 }
 /// Typed storage for deferred combinations, consumed once.
 pub struct FreePool<B: Js> {
     nodes: Vec<Option<Free<B>>>,
     work: Vec<RealizeWork<B>>,
-    outputs: Vec<Out>,
+    outputs: Vec<Out<B>>,
     /// Combinations probed.
     pub probes: usize,
     /// Deferred nodes consumed.
@@ -673,13 +689,13 @@ impl<B: Js> FreePool<B> {
     /// Cost: O(1) for an output, a sequence, and a conditional whose
     /// branches are both free; otherwise what [`FreePool::realize`] of the
     /// two branches costs, each deferred record consumed once.
-    pub fn probe(&mut self, cx: Cx, input: ProbeInput<B>, emit: &mut impl Realizer<B>) -> Probed {
+    pub fn probe(&mut self, cx: Cx, input: ProbeInput<B>, emit: &mut impl Realizer<B>) -> Probed<B> {
         self.probes += 1;
         match input {
-            ProbeInput::Output(out) => {
+            ProbeInput::Output(mut out) => {
                 if out.stmts.len == 0 && out.finished == Finished::False {
-                    if let Some(value) = out.value {
-                        return Probed::Free(self.push(Free::Leaf(B::from_node(value))));
+                    if let Some(value) = out.value.take() {
+                        return Probed::Free(self.push(Free::Leaf(value)));
                     }
                 }
                 Probed::Out(out)
@@ -705,7 +721,7 @@ impl<B: Js> FreePool<B> {
     /// Cost: O(F + S + J): consumes F deferred occurrences with iterative postorder frames,
     /// transfers S statement slots and pays J normalization/release visits. A consumed Free
     /// is never realized again.
-    pub fn realize(&mut self, cx: Cx, probed: Probed, emit: &mut impl Realizer<B>) -> Out {
+    pub fn realize(&mut self, cx: Cx, probed: Probed<B>, emit: &mut impl Realizer<B>) -> Out<B> {
         let root = match probed {
             Probed::Out(out) => return out,
             Probed::Free(root) => root,
@@ -776,11 +792,12 @@ impl<B: Js> FreePool<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bir::NodeId;
     use crate::bir::j::rows::Rows;
-    fn output(span: Span, value: Option<NodeId>, finished: Finished) -> Out {
+    fn output(span: Span, value: Option<NodeId>, finished: Finished) -> Out<Rows> {
         Out {
             stmts: span,
-            value,
+            value: value.map(Rows::from_node),
             finished,
         }
     }
@@ -789,12 +806,12 @@ mod tests {
         visits: Vec<u32>,
     }
     impl Realizer<Rows> for Oracle {
-        fn leaf(&mut self, _: Cx, value: <Rows as Js>::E) -> Out {
+        fn leaf(&mut self, _: Cx, value: <Rows as Js>::E) -> Out<Rows> {
             let value = Rows::node(value);
             self.visits.push(value.0);
             output(Span::default(), Some(value), Finished::False)
         }
-        fn seq(&mut self, _: Cx, first: <Rows as Js>::E, second: Out) -> Out {
+        fn seq(&mut self, _: Cx, first: <Rows as Js>::E, second: Out<Rows>) -> Out<Rows> {
             self.visits.push(Rows::node(first).0);
             second
         }
@@ -802,7 +819,7 @@ mod tests {
             self.visits.push(Rows::node(first).0);
             Span::default()
         }
-        fn cond(&mut self, _: Cx, test: <Rows as Js>::E, then_: Out, _: Out) -> Out {
+        fn cond(&mut self, _: Cx, test: <Rows as Js>::E, then_: Out<Rows>, _: Out<Rows>) -> Out<Rows> {
             self.visits.push(Rows::node(test).0);
             then_
         }
@@ -812,10 +829,10 @@ mod tests {
         use std::mem::size_of;
         assert_eq!(size_of::<Finished>(), 1);
         assert_eq!(size_of::<Span>(), 8);
-        assert_eq!(size_of::<Out>(), 20);
+        assert_eq!(size_of::<Out<Rows>>(), 20);
         assert_eq!(size_of::<FreeId>(), 4);
         assert_eq!(size_of::<Free<Rows>>(), 16);
-        assert_eq!(size_of::<Probed>(), 20);
+        assert_eq!(size_of::<Probed<Rows>>(), 20);
         assert_eq!(size_of::<StatementStack<Rows>>(), 96);
         assert_eq!(size_of::<Option<Slot<<Rows as JsStmt>::S>>>(), 12);
         assert_eq!(size_of::<FreePool<Rows>>(), 88);
@@ -981,9 +998,9 @@ mod tests {
         stack.push(Rows::stmt_from_node(NodeId(1)));
         let a = output(Span { start: 0, len: 1 }, None, Finished::False);
         let b = output(Span { start: 1, len: 1 }, Some(NodeId(2)), Finished::False);
-        let out = stack.append(a, b, Some(NodeId(2)));
+        let out = stack.append(a, b, Some(Rows::from_node(NodeId(2))));
         assert_eq!(out.stmts, Span { start: 0, len: 2 });
-        assert_eq!(out.value, Some(NodeId(2)));
+        assert_eq!(out.value.map(Rows::node), Some(NodeId(2)));
         assert_eq!(stack.copied, 0);
     }
     #[test]
@@ -1005,7 +1022,7 @@ mod tests {
         }
         assert!(oracle.visits.is_empty());
         let out = pool.realize(cx, probed, &mut oracle);
-        assert_eq!(out.value, Some(NodeId(0)));
+        assert_eq!(out.value.map(Rows::node), Some(NodeId(0)));
         assert_eq!(pool.probes, 10_001);
         assert_eq!(pool.realized, 10_001);
         assert_eq!(oracle.visits, (0..=10_000).collect::<Vec<_>>());

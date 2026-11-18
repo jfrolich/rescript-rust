@@ -2340,7 +2340,7 @@ mod tests {
         let mut state = State::new(input);
         let probed = state.probe(Cx::value(), root).unwrap();
         let out = state.realize(Cx::value(), probed);
-        let exports = state.extract_exports(out.value, out.finished).unwrap();
+        let exports = state.extract_exports(out.value.map(crate::bir::lower::out::row), out.finished).unwrap();
         let run = state.statements.since(Span { start: out.stmts.start, len: 0 });
         let mut vars = Vec::new();
         state.export_variables(&exports, &mut vars);
