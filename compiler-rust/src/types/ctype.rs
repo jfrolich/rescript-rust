@@ -12465,6 +12465,20 @@ fn compute_variance_rec(
     }
 }
 
+/// OCaml `wrap_trace_gadt_instances env f x` (compiler/ml/ctype.ml:188-192):
+/// run `f` with GADT instance tracing turned on when `env` has local
+/// constraints, and turn it off afterwards only if this call turned it on.
+/// While tracing, an expansion of an equation adds the type and its
+/// expansion to the equation's instance set (ctype.ml:1215-1227). Cost: one
+/// local-constraint test and one branch, beside `f`; turning tracing on also
+/// forgets the memorized expansions, as OCaml's `cleanup_abbrev`.
+pub fn wrap_trace_gadt_instances<T>(ctx: &TypeContext, env: &Env, f: impl FnOnce() -> T) -> T {
+    let turned_on = ctx.check_trace_gadt_instances(env.has_local_constraints());
+    let result = f();
+    ctx.reset_trace_gadt_instances(turned_on);
+    result
+}
+
 /// OCaml's lower_args: walk an arrow type, expanding each component with
 /// expand_head. This triggers type alias expansion for function argument/return
 /// types, matching OCaml's behavior during Pexp_apply processing.
@@ -16307,6 +16321,28 @@ mod tests {
         // Outside local constraints the copy adds nothing and tests nothing.
         let steps = crate::tc::steps::scope(|| copy = instance_in(&ctx, &Env::empty(), tuple));
         assert_eq!(steps, 0);
+    }
+
+    /// `wrap_trace_gadt_instances` (ctype.ml:188-192) traces only under
+    /// local constraints and turns tracing off only if it turned it on.
+    #[test]
+    fn wrap_trace_gadt_instances_traces_under_local_constraints_only() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let plain = Env::empty();
+        let mut constrained = Env::empty();
+        let local = Path::pident(crate::ident::Ident::create_persistent("a"));
+        constrained.add_local_constraint(local, reified_type_decl(7));
+        assert!(!wrap_trace_gadt_instances(&ctx, &plain, || ctx.trace_gadt_instances()));
+        assert!(!ctx.trace_gadt_instances());
+        assert!(wrap_trace_gadt_instances(&ctx, &constrained, || ctx.trace_gadt_instances()));
+        assert!(!ctx.trace_gadt_instances());
+        // Already on: the wrapper leaves it on, under constraints or not.
+        let outer = ctx.check_trace_gadt_instances(true);
+        assert!(wrap_trace_gadt_instances(&ctx, &constrained, || ctx.trace_gadt_instances()));
+        assert!(wrap_trace_gadt_instances(&ctx, &plain, || ctx.trace_gadt_instances()));
+        assert!(ctx.trace_gadt_instances());
+        ctx.reset_trace_gadt_instances(outer);
+        assert!(!ctx.trace_gadt_instances());
     }
 
     #[test]

@@ -10339,9 +10339,14 @@ fn type_application_parts(
 
     let lowered_ty = crate::types::ctype::instance_in(ctx, env, typed_funct.exp_type);
     ctx.end_def();
-    // OCaml compiler/ml/typecore.ml:2579-2582 instances the function type and
-    // immediately runs `lower_args` (typecore.ml:2335-2342).
-    crate::types::ctype::lower_args(ctx, env, lowered_ty);
+    // OCaml compiler/ml/typecore.ml:2826-2828 instances the function type and
+    // immediately runs `lower_args` (typecore.ml:2503-2513) with GADT
+    // instances traced: its expansion of an equation's type adds the type to
+    // the equation's instance set, which a later level update refuses to
+    // lower below that set's level.
+    crate::types::ctype::wrap_trace_gadt_instances(ctx, env, || {
+        crate::types::ctype::lower_args(ctx, env, lowered_ty)
+    });
 
     ctx.begin_def();
 

@@ -1,0 +1,1 @@
+- Refuse, as the OCaml compiler does, a function applied inside the case of a GADT equation whose result leaves the case through that equation, for example `switch x { | Int => { let g = (z: a) => z; g(y) } }` without a result annotation ("This instance of int is ambiguous").
