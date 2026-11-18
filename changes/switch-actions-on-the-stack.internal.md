@@ -1,0 +1,1 @@
+- The backend lowering stages the actions of a switch on its statement stack and takes them as one list, so the outputs of a switch and the cached actions of an untagged-variant dispatch hold statement handles.
