@@ -29,8 +29,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// A:90 runs_no_code: inspect each owned member spine without recursion.
     /// Cost: one step per member of the chain of field reads, to its base.
-    fn runs_no_code(&self, value: NodeId) -> bool {
-        self.js.runs_no_code(&self.arena, B::at(value))
+    fn runs_no_code(&self, value: &B::E) -> bool {
+        self.js.runs_no_code(&self.arena, B::of(value))
     }
 
     /// Whether `statement` declares a variable whose value, if it has one,
@@ -164,7 +164,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn sequence_arguments(
         &mut self,
         method_callee: bool,
-        args: &[Out],
+        args: &mut [Out<B>],
         values: &mut Vec<NodeId>,
     ) -> Span {
         let start = args.first().map_or_else(
@@ -181,17 +181,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mut has_code = false;
         let mut later_defines_pure = true;
         assert!(values.is_empty(), "argument value scratch must be empty");
-        for (i, arg) in args.iter().enumerate().rev() {
+        for (i, arg) in args.iter_mut().enumerate().rev() {
             self.sequence_steps += 1;
-            let value = arg.value.expect("argument value");
+            let value = arg.value.take().expect("argument value");
             let (held, value) =
-                if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(value)) {
-                    (Span::default(), value)
+                if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(&value)) {
+                    (Span::default(), B::node(value))
                 } else if method_callee
                     && i == 0
-                    && self.js.kind(&self.arena, B::at(value)) == Kind::Dot
+                    && self.js.kind(&self.arena, B::of(&value)) == Kind::Dot
                 {
-                    let mut shell = B::from_node(value);
+                    let mut shell = value;
                     self.js.take_operands(&mut self.arena, &mut shell);
                     let object = self.js.pop();
                     let (held, object) = self.evaluate_now(B::node(object));
@@ -200,7 +200,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     let value = self.js.refill(&mut self.arena, shell, mark);
                     (held, B::node(value))
                 } else {
-                    self.evaluate_now(value)
+                    self.evaluate_now(B::node(value))
                 };
             has_code |= self.statements.has_statements(arg.stmts) || held.len != 0;
             later_defines_pure &= self.defines_pure_values(&self.evaluation.statements[held.start as usize..(held.start + held.len) as usize])
@@ -266,7 +266,7 @@ mod tests {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;
@@ -426,7 +426,7 @@ mod tests {
                 state.statements.reserve();
                 args.push(Out {
                     stmts: state.statements.since(start),
-                    value: Some(value),
+                    value: Some(crate::bir::lower::out::of_row(value)),
                     finished: Finished::False,
                 });
                 expected_args.push((vec![], old_value));
@@ -453,7 +453,7 @@ mod tests {
             let value = state.pure_expression(View::JStr { text }, 0);
             args.push(Out {
                 stmts: state.statements.since(start),
-                value: Some(value),
+                value: Some(crate::bir::lower::out::of_row(value)),
                 finished: Finished::False,
             });
             let callee = exp::var(effect_id, &mut legacy.j);
@@ -462,7 +462,7 @@ mod tests {
             let value = exp::string("v", &mut legacy.j);
             expected_args.push((vec![statement], value));
             let mut values = Vec::new();
-            let span = state.sequence_arguments(method, &args, &mut values);
+            let span = state.sequence_arguments(method, &mut args, &mut values);
             if method || shape != 0 {
                 assert!(state.arena.node(values[0]).flags().contains(NodeFlags::JS_LOC_PRESENT));
             }
@@ -488,7 +488,7 @@ mod tests {
                 Cx::value(),
                 Probed::Out(Out {
                     stmts: span,
-                    value: Some(value),
+                    value: Some(crate::bir::lower::out::of_row(value)),
                     finished: Finished::False,
                 }),
             );

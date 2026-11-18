@@ -635,12 +635,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         cx: Cx,
         frame: Untagged,
         index: usize,
-        child: Probed,
-    ) -> Probed {
+        child: Probed<B>,
+    ) -> Probed<B> {
         let mut p = self.untagged[frame.0 as usize].take().unwrap();
         let mut out = self.realize(cx, child);
         if index == 0 {
-            let mut value = B::from_node(out.value.unwrap());
+            let mut value = out.value.unwrap();
             if !p.payload_only && self.js.kind(&self.arena, B::of(&value)) != row::Kind::Var {
                 let var = self.fresh_variable("tmp");
                 let declaration = self.js.declare(&mut self.arena, LetKind::Strict, var, Some(value));
@@ -655,7 +655,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             assert_eq!(action as usize, index - 1);
             p.pc += 1;
             if let Some(value) = out.value.take() {
-                self.drop_pure_effect(value);
+                self.drop_pure_effect(B::node(value));
             }
             self.unnest(out.stmts.start);
             out.stmts = self.statements.since(Span {
@@ -1146,7 +1146,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// V: compile_untagged_switch result. O(trailing empty block shells),
     /// amortized by their removal; the scrutinee template is released once.
-    pub(super) fn finish_untagged(&mut self, cx: Cx, frame: Untagged) -> Probed {
+    pub(super) fn finish_untagged(&mut self, cx: Cx, frame: Untagged) -> Probed<B> {
         let p = self.untagged[frame.0 as usize].take().unwrap();
         while self.untagged.last().is_some_and(Option::is_none) {
             self.untagged.pop();
@@ -1158,8 +1158,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.unnest(p.start.start);
         }
         let value = match cx.cont {
-            Cont::Value(_) => Some(B::node(self.js.var(&mut self.arena, p.target.unwrap()))),
-            Cont::Effect(Tail::No) => Some(B::node(self.js.undefined(&mut self.arena, false))),
+            Cont::Value(_) => Some(self.js.var(&mut self.arena, p.target.unwrap())),
+            Cont::Effect(Tail::No) => Some(self.js.undefined(&mut self.arena, false)),
             _ => None,
         };
         Probed::Out(Out {
@@ -1454,7 +1454,7 @@ mod tests {
                 s.arena.release(node);
             }
             if let Some(value) = output.value {
-                s.arena.release(value);
+                s.arena.release(crate::bir::lower::out::row(value));
             }
             s.statements.kill(output.stmts);
         };
@@ -1641,7 +1641,7 @@ mod tests {
                 s.arena.release(node);
             }
             if let Some(value) = out.value {
-                s.arena.release(value);
+                s.arena.release(crate::bir::lower::out::row(value));
             }
             s.statements.kill(out.stmts);
         };

@@ -357,7 +357,7 @@ mod tests {
             let run = |s: &mut State<'_>| {
                 let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
                 for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-                if let Some(value) = out.value { s.arena.release(value); }
+                if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
                 s.statements.kill(out.stmts);
             };
             let lists = state.arena.lists.storage_shape().0; let funcs = state.arena.vars.funcs.len();

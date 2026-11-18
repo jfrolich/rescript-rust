@@ -1,8 +1,7 @@
 //! K0 output algebra: C:89–135 BlockOutput, BACKEND_LOWERING §§1.3–1.5.
-use super::js::Pools;
+use super::js::{Js, Pools};
 use super::js_stmt::JsStmt;
 use super::{Cx, ProbeInput, Realizer};
-use crate::bir::{Bir, ListId, NodeId};
 
 /// K0: C:73 OutputFinished. Dummy is distinct from ordinary fallthrough.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,12 +28,11 @@ impl Span {
     }
 }
 /// K0: C:139 Compiled, also representing outputs without a value.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Out {
+pub struct Out<B: Js> {
     /// Statement-stack run.
     pub stmts: Span,
     /// Deferred J expression.
-    pub value: Option<NodeId>,
+    pub value: Option<B::E>,
     /// Control-flow completion.
     pub finished: Finished,
 }
@@ -468,7 +466,7 @@ impl<B: JsStmt> StatementStack<B> {
     /// the first finishes. Value combination belongs to K2's expression
     /// policy. O(1), and one write per slot of the second run when a
     /// finished first run pops it.
-    pub fn append(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {
+    pub fn append(&mut self, first: Out<B>, second: Out<B>, value: Option<B::E>) -> Out<B> {
         assert_eq!(first.stmts.end(), second.stmts.start as usize);
         assert_eq!(second.stmts.end(), self.slots.len());
         if first.finished == Finished::True
@@ -500,8 +498,7 @@ impl<B: JsStmt> StatementStack<B> {
     /// JavaScript occurrences.
     pub fn take_list(&mut self, js: &mut B, a: &mut Pools, span: Span) -> B::L {
         let list = self.take_actions(js, a, span);
-        // T6x-b: `close.rs` takes the interface; until then the pool list.
-        self.close(a, B::list_id(list));
+        self.close(js, a, list);
         list
     }
     /// The actions of a switch, pushed or filled above the runs
@@ -524,9 +521,9 @@ impl<B: JsStmt> StatementStack<B> {
     }
     /// THREE_TREES 11.4, step A: decide the declarations of a copied list.
     /// Cost: that of `close::decide`; nothing on an arena without counts.
-    pub(super) fn close(&mut self, bir: &mut Bir, list: ListId) {
-        if bir.js_scope.is_some() {
-            super::close::decide(bir, list);
+    pub(super) fn close(&mut self, js: &B, a: &mut Pools, list: B::L) {
+        if a.js_scope.is_some() {
+            super::close::decide(js, a, list);
         }
     }
 }
@@ -535,9 +532,27 @@ impl<B: JsStmt> StatementStack<B> {
 impl StatementStack<crate::bir::j::rows::Rows> {
     /// The rows of the statements of a run. One step per
     /// slot of the run.
-    pub(super) fn statements(&self, span: Span) -> impl Iterator<Item = NodeId> + '_ {
+    pub(super) fn statements(&self, span: Span) -> impl Iterator<Item = crate::bir::NodeId> + '_ {
         self.statement_refs(span).map(|s| s.row())
     }
+}
+
+/// For the tests: the row of an output's value on rows. O(1).
+#[cfg(test)]
+pub(super) fn row(value: <crate::bir::j::rows::Rows as Js>::E) -> crate::bir::NodeId {
+    crate::bir::j::rows::Rows::node(value)
+}
+/// For the tests: an output's value on rows from its row. O(1).
+#[cfg(test)]
+pub(super) fn of_row(node: crate::bir::NodeId) -> <crate::bir::j::rows::Rows as Js>::E {
+    crate::bir::j::rows::Rows::from_node(node)
+}
+
+/// For the tests: the row of an output's value on rows, read in place. O(1).
+#[cfg(test)]
+pub(super) fn row_of(a: &Pools, value: &<crate::bir::j::rows::Rows as Js>::E) -> crate::bir::NodeId {
+    let rows = crate::bir::j::rows::Rows::default();
+    crate::bir::NodeId(rows.id(a, crate::bir::j::rows::Rows::of(value)))
 }
 
 /// The stack's runs for `JsStmt::if_head`: a run is a span of slots, and a
@@ -586,14 +601,13 @@ impl<B: JsStmt> super::js_stmt::Runs<B> for StatementStack<B> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct FreeId(u32);
 /// Deferred combinations of J operands. No boxed trees, no L subtree retained.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Free {
+pub enum Free<B: Js> {
     /// Already-lowered J expression.
-    Leaf(NodeId),
+    Leaf(B::E),
     /// Deferred conditional combination.
     Cond {
         /// J condition.
-        test: NodeId,
+        test: B::E,
         /// True branch ownership token.
         then_: FreeId,
         /// False branch ownership token.
@@ -602,37 +616,41 @@ pub enum Free {
     /// Deferred comma/effect combination.
     Seq {
         /// J effect expression.
-        first: NodeId,
+        first: B::E,
         /// Tail ownership token.
         second: FreeId,
     },
 }
 /// Result of one probe: deferred expression or completed output.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Probed {
+pub enum Probed<B: Js> {
     /// Statement-free result.
     Free(FreeId),
     /// Already lowered in the requested continuation.
-    Out(Out),
+    Out(Out<B>),
 }
 /// Typed storage for deferred combinations, consumed once.
-#[derive(Default)]
-pub struct FreePool {
-    nodes: Vec<Option<Free>>,
-    work: Vec<RealizeWork>,
-    outputs: Vec<Out>,
+pub struct FreePool<B: Js> {
+    nodes: Vec<Option<Free<B>>>,
+    work: Vec<RealizeWork<B>>,
+    outputs: Vec<Out<B>>,
     /// Combinations probed.
     pub probes: usize,
     /// Deferred nodes consumed.
     pub realized: usize,
 }
-enum RealizeWork {
+enum RealizeWork<B: Js> {
     Enter(FreeId, Cx),
-    Seq(NodeId, Cx),
+    Seq(B::E, Cx),
     After(Span),
-    Cond(NodeId, Cx),
+    Cond(B::E, Cx),
 }
-impl FreePool {
+impl<B: Js> Default for FreePool<B> {
+    /// An empty pool without capacity. O(1); allocates nothing.
+    fn default() -> Self {
+        Self { nodes: Vec::new(), work: Vec::new(), outputs: Vec::new(), probes: 0, realized: 0 }
+    }
+}
+impl<B: Js> FreePool<B> {
     /// Deferred expressions and their iterative realization share the source
     /// occurrence bound; no separate allocation is needed for each expression.
     /// Cost: Reserves O(N) deferred-node/work/output slots for N imported occurrences; no
@@ -657,7 +675,7 @@ impl FreePool {
 
     /// K1/K6: C:1529 compile_expr / C:5144 compile_if_return_output; preserve
     /// the first pass's operands rather than recompiling the source subtree.
-    pub(super) fn push(&mut self, free: Free) -> FreeId {
+    pub(super) fn push(&mut self, free: Free<B>) -> FreeId {
         let id = FreeId(u32::try_from(self.nodes.len()).expect("free pool capacity"));
         self.nodes.push(Some(free));
         id
@@ -665,12 +683,12 @@ impl FreePool {
     /// K1/K2/K6: C:1529 compile_expr, C:4715 append_effect_output,
     /// C:5144 compile_if_return_output. Probe one combination of already-lowered
     /// children. A non-free child is realized for cx, not lowered again.
-    pub fn probe(&mut self, cx: Cx, input: ProbeInput, emit: &mut impl Realizer) -> Probed {
+    pub fn probe(&mut self, cx: Cx, input: ProbeInput<B>, emit: &mut impl Realizer<B>) -> Probed<B> {
         self.probes += 1;
         match input {
-            ProbeInput::Output(out) => {
+            ProbeInput::Output(mut out) => {
                 if out.stmts.len == 0 && out.finished == Finished::False {
-                    if let Some(value) = out.value {
+                    if let Some(value) = out.value.take() {
                         return Probed::Free(self.push(Free::Leaf(value)));
                     }
                 }
@@ -697,7 +715,7 @@ impl FreePool {
     /// Cost: O(F + S + J): consumes F deferred occurrences with iterative postorder frames,
     /// transfers S statement slots and pays J normalization/release visits. A consumed Free
     /// is never realized again.
-    pub fn realize(&mut self, cx: Cx, probed: Probed, emit: &mut impl Realizer) -> Out {
+    pub fn realize(&mut self, cx: Cx, probed: Probed<B>, emit: &mut impl Realizer<B>) -> Out<B> {
         let root = match probed {
             Probed::Out(out) => return out,
             Probed::Free(root) => root,
@@ -768,11 +786,12 @@ impl FreePool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bir::{Bir, NodeId};
     use crate::bir::j::rows::Rows;
-    fn output(span: Span, value: Option<NodeId>, finished: Finished) -> Out {
+    fn output(span: Span, value: Option<NodeId>, finished: Finished) -> Out<Rows> {
         Out {
             stmts: span,
-            value,
+            value: value.map(Rows::from_node),
             finished,
         }
     }
@@ -780,21 +799,22 @@ mod tests {
     struct Oracle {
         visits: Vec<u32>,
     }
-    impl Realizer for Oracle {
-        fn leaf(&mut self, _: Cx, value: NodeId) -> Out {
+    impl Realizer<Rows> for Oracle {
+        fn leaf(&mut self, _: Cx, value: <Rows as Js>::E) -> Out<Rows> {
+            let value = Rows::node(value);
             self.visits.push(value.0);
             output(Span::default(), Some(value), Finished::False)
         }
-        fn seq(&mut self, _: Cx, first: NodeId, second: Out) -> Out {
-            self.visits.push(first.0);
+        fn seq(&mut self, _: Cx, first: <Rows as Js>::E, second: Out<Rows>) -> Out<Rows> {
+            self.visits.push(Rows::node(first).0);
             second
         }
-        fn effect(&mut self, first: NodeId) -> Span {
-            self.visits.push(first.0);
+        fn effect(&mut self, first: <Rows as Js>::E) -> Span {
+            self.visits.push(Rows::node(first).0);
             Span::default()
         }
-        fn cond(&mut self, _: Cx, test: NodeId, then_: Out, _: Out) -> Out {
-            self.visits.push(test.0);
+        fn cond(&mut self, _: Cx, test: <Rows as Js>::E, then_: Out<Rows>, _: Out<Rows>) -> Out<Rows> {
+            self.visits.push(Rows::node(test).0);
             then_
         }
     }
@@ -803,13 +823,13 @@ mod tests {
         use std::mem::size_of;
         assert_eq!(size_of::<Finished>(), 1);
         assert_eq!(size_of::<Span>(), 8);
-        assert_eq!(size_of::<Out>(), 20);
+        assert_eq!(size_of::<Out<Rows>>(), 20);
         assert_eq!(size_of::<FreeId>(), 4);
-        assert_eq!(size_of::<Free>(), 16);
-        assert_eq!(size_of::<Probed>(), 20);
+        assert_eq!(size_of::<Free<Rows>>(), 16);
+        assert_eq!(size_of::<Probed<Rows>>(), 20);
         assert_eq!(size_of::<StatementStack<Rows>>(), 96);
         assert_eq!(size_of::<Option<Slot<<Rows as JsStmt>::S>>>(), 12);
-        assert_eq!(size_of::<FreePool>(), 88);
+        assert_eq!(size_of::<FreePool<Rows>>(), 88);
     }
     #[test]
     fn a_statement_is_copied_once() {
@@ -972,9 +992,9 @@ mod tests {
         stack.push(Rows::stmt_from_node(NodeId(1)));
         let a = output(Span { start: 0, len: 1 }, None, Finished::False);
         let b = output(Span { start: 1, len: 1 }, Some(NodeId(2)), Finished::False);
-        let out = stack.append(a, b, Some(NodeId(2)));
+        let out = stack.append(a, b, Some(Rows::from_node(NodeId(2))));
         assert_eq!(out.stmts, Span { start: 0, len: 2 });
-        assert_eq!(out.value, Some(NodeId(2)));
+        assert_eq!(out.value.map(Rows::node), Some(NodeId(2)));
         assert_eq!(stack.copied, 0);
     }
     #[test]
@@ -988,7 +1008,7 @@ mod tests {
             probed = pool.probe(
                 cx,
                 ProbeInput::Seq {
-                    first: NodeId(n),
+                    first: Rows::from_node(NodeId(n)),
                     second: probed,
                 },
                 &mut oracle,
@@ -996,7 +1016,7 @@ mod tests {
         }
         assert!(oracle.visits.is_empty());
         let out = pool.realize(cx, probed, &mut oracle);
-        assert_eq!(out.value, Some(NodeId(0)));
+        assert_eq!(out.value.map(Rows::node), Some(NodeId(0)));
         assert_eq!(pool.probes, 10_001);
         assert_eq!(pool.realized, 10_001);
         assert_eq!(oracle.visits, (0..=10_000).collect::<Vec<_>>());
@@ -1012,7 +1032,7 @@ mod tests {
         let result = pool.probe(
             cx,
             ProbeInput::Cond {
-                test: NodeId(2),
+                test: Rows::from_node(NodeId(2)),
                 then_,
                 else_,
             },

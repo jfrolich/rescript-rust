@@ -83,10 +83,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// C:2770 compile_effect_block_output / C:3129 compile_return_output.
     /// O(s) for s emitted statements, copied once into their list; no L walk.
-    pub(super) fn try_child(&mut self, cx: Cx, frame: Try, index: usize, child: Probed) -> Probed {
+    pub(super) fn try_child(&mut self, cx: Cx, frame: Try, index: usize, child: Probed<B>) -> Probed<B> {
         let mut out = self.realize(cx, child);
         if let Some(value) = out.value.take() {
-            self.drop_pure_effect(value);
+            self.drop_pure_effect(B::node(value));
         }
         let span = self.statements.since(Span {
             start: out.stmts.start,
@@ -105,7 +105,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// each adopted once by its block; no body walk. The lists are stored in
     /// the order the children returned: the body, then the handler when
     /// there is an exception variable, then the finaliser.
-    pub(super) fn finish_try(&mut self, cx: Cx, frame: Try) -> Probed {
+    pub(super) fn finish_try(&mut self, cx: Cx, frame: Try) -> Probed<B> {
         let plan = &self.tries[frame.0 as usize];
         let start = plan.start;
         let target = plan.target;
@@ -122,9 +122,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let var = self
                 .js
                 .var(&mut self.arena, target.expect("value temporary"));
-            Some(B::node(var))
+            Some(var)
         } else if matches!(cx.cont, Cont::Effect(Tail::No)) {
-            Some(B::node(self.js.undefined(&mut self.arena, false)))
+            Some(self.js.undefined(&mut self.arena, false))
         } else {
             None
         };

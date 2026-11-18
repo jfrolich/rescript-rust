@@ -406,7 +406,7 @@ mod allocation_tests {
                 s.arena.release(node);
             }
             if let Some(value) = out.value {
-                s.arena.release(value);
+                s.arena.release(crate::bir::lower::out::row(value));
             }
             s.statements.kill(out.stmts);
         };
@@ -528,7 +528,7 @@ mod allocation_tests {
                     s.arena.release(node);
                 }
                 if let Some(value) = out.value {
-                    s.arena.release(value);
+                    s.arena.release(crate::bir::lower::out::row(value));
                 }
                 s.statements.kill(out.stmts);
             };
