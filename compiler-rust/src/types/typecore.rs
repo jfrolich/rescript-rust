@@ -16186,7 +16186,9 @@ fn type_record(
     // type and the `with` base expression type for persistent constructor
     // families only.
     if let Some(base_expr) = typed_base.as_mut() {
-        let mut output_ty = crate::types::ctype::instance_in(ctx, env, base_expr.exp_type);
+        // No OCaml counterpart: typecore.ml:3165 stores the copy of 3153
+        // (`ty_exp`), so this copy adds to no instance set.
+        let mut output_ty = crate::types::ctype::instance(ctx, base_expr.exp_type);
         if ctx.repr(output_ty) == ctx.repr(record_ty) {
             let repr = ctx.repr(output_ty);
             let desc = ctx.get_desc(repr);
