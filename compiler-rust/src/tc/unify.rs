@@ -114,25 +114,40 @@ pub enum FrameKind {
     /// compiler/ml/ctype.ml:256-273). (R3h; CHECKER_REWRITE 8.9,
     /// decision 64)
     Flags,
-    /// Pattern mode, below what an arm tries: `left` and `right` are the
-    /// two types to reify when it fails, `extra` indexes
-    /// [`Checker::tries`]. Popped: the attempt succeeded
-    /// ([`Checker::recover`] says what a clash above it does). (R3r;
-    /// CHECKER_REWRITE 8.9, decision 68)
+    /// Pattern mode, `Mode::Explain` only, below the children of a
+    /// structure pair that was assumed equal and not linked: `left` and
+    /// `right` are the pair of the enclosing `unify` call, in its order,
+    /// for the trace (compiler/ml/ctype.ml:2274); bit 31 of `extra`
+    /// (`SWAPPED`) as for [`FrameKind::Linked`]. It holds no descriptor:
+    /// nothing of the pair's nodes was written. Popped: nothing. (R3h;
+    /// CHECKER_REWRITE 8.9, decision 64)
+    Assumed,
+    /// Pattern mode, one attempt that falls back: `left` and `right` are
+    /// the two types to reify when it fails. The frame is pushed
+    /// PENDING, with [`TRY_ARGUMENT`] or [`TRY_ROWS`] as its `extra`, and
+    /// is popped twice (`Checker::try_frame`): the first pop STARTS the
+    /// attempt (the snapshot is taken when the attempt is reached, after
+    /// everything pushed above the frame has run) and pushes the frame
+    /// again with the index of its [`Try`] record as `extra`, below what
+    /// is tried; the second pop means the attempt succeeded.
+    /// [`Checker::recover`] says what a clash above a started frame
+    /// does. (R3r; CHECKER_REWRITE 8.9, decision 68)
     Try,
 }
 
-/// One attempt of pattern mode that falls back on a clash (`let snap =
-/// snapshot () in try ... with Unify _ -> backtrack snap; reify ...`,
-/// compiler/ml/ctype.ml:2362-2371, 2400-2408). 40 bytes; one per open
-/// attempt. (R3r; CHECKER_REWRITE 8.9, decision 68)
+/// One STARTED attempt of pattern mode that falls back on a clash (`let
+/// snap = snapshot () in try ... with Unify _ -> backtrack snap; reify
+/// ...`, compiler/ml/ctype.ml:2364-2375 for an argument that is not
+/// injective, 2402-2411 for two variants). 40 bytes; one per attempt
+/// that is started and not yet finished. (R3r; CHECKER_REWRITE 8.9,
+/// decision 68)
 #[derive(Debug)]
 pub struct Try {
     /// What the graph is restored to.
     pub speculation: super::graph::Speculation,
-    /// Index of the [`FrameKind::Try`] frame in `frames`.
+    /// Index of the started [`FrameKind::Try`] frame in `frames`.
     pub frame: u32,
-    /// The lengths of `trace`, `saved` and `scopes` when it was opened.
+    /// The lengths of `trace`, `saved` and `scopes` when it was started.
     pub trace: u32,
     pub saved: u32,
     pub scopes: u32,
@@ -141,6 +156,19 @@ pub struct Try {
     /// `generate_equations` is on after the flags are put back.
     pub flags: u8,
 }
+
+/// `extra` of a pending [`FrameKind::Try`] frame: the attempt of an
+/// argument whose parameter is not injective (compiler/ml/ctype.ml:
+/// 2364-2375). Started, both flags are off (`set_mode_pattern
+/// ~generate:false ~injective:false`) and the pair of the two arguments
+/// is what is tried; the fallback is `reify` of both.
+pub const TRY_ARGUMENT: u32 = 1 << 31;
+/// `extra` of a pending [`FrameKind::Try`] frame: the attempt of two
+/// variants (compiler/ml/ctype.ml:2402-2411). Started, the flags are as
+/// they are, both rows are opened and `unify_row` is what is tried; the
+/// fallback is `reify` of both and, with `generate_equations` on,
+/// `mcomp`. A record index stays below both bits.
+pub const TRY_ROWS: u32 = 1 << 30;
 
 /// Bit 31 of a [`FrameKind::Linked`] frame's `extra`: `unify2` ran `unify3`
 /// on the swapped pair (compiler/ml/ctype.ml:2301-2303), so every trace entry
@@ -164,6 +192,23 @@ pub struct Frame {
 #[derive(Default)]
 pub struct PairSet {
     pub keys: crate::fast_hash::AHashSet<u64>,
+}
+
+impl PairSet {
+    /// O(1): the key of the pair of two nodes whatever their order, the
+    /// smaller index in the high half (`order_type_pair`,
+    /// compiler/ml/ctype.ml:2105: `if t1.id <= t2.id then (t1, t2) else
+    /// (t2, t1)`; the kernel's index is OCaml's `id` for this purpose, a
+    /// total order on nodes).
+    #[inline]
+    pub fn key(left: Ty, right: Ty) -> u64 {
+        let (low, high) = if left.0 <= right.0 {
+            (left.0, right.0)
+        } else {
+            (right.0, left.0)
+        };
+        u64::from(low) << 32 | u64::from(high)
+    }
 }
 
 /// One checker context: the graph and everything unification reads.
@@ -292,7 +337,15 @@ impl Checker {
         let saved_base = self.saved.len();
         let trace_base = self.trace.len();
         self.depth += 1;
-        let result = self.run_frames(base, left, right);
+        let mut result = self.run_frames(base, left, right);
+        // A clash above a started attempt of pattern mode is the
+        // attempt's (8.9, decision 68): one load of `tries.len()`, on
+        // the failure path only.
+        if let Err(pair) = result
+            && !self.tries.is_empty()
+        {
+            result = self.recover_frames(base, pair);
+        }
         self.depth -= 1;
         match result {
             Ok(()) => {
@@ -354,7 +407,10 @@ impl Checker {
             let route = target.tag() == CONSTR;
             return self.bind_routed(var, ty, route.then_some([left, right]));
         }
-        // Two locally abstract types (ctype.ml:2258) need equations: R3h.
+        // Two locally abstract types under equations (ctype.ml:2258-2269)
+        // are `Checker::unify_newtypes`, called after the arm below for a
+        // pair of two constructors without arguments when `equations` is
+        // not empty: R3h (8.9, decision 65).
         //
         // `has_cached_expansion p1 !a1` reads the node's own memo
         // (ctype.ml:2251), which `proper_abbrevs` never writes for a
@@ -695,6 +751,12 @@ impl Checker {
     /// [`Checker::expand_head`] per constructor that holds `node`, on
     /// [`Checker::frames`] above the length it finds.
     fn occur_expanding(&mut self, node: Ty, ty: Ty) -> Result<(), Clash> {
+        // `let allow_recursive = !(umode ()) = Pattern` (ctype.ml:1468):
+        // one load, made only after a walk found `node` in `ty`, which in
+        // expression mode is a clash or the retry of one constructor.
+        if self.umode == UnifyMode::Pattern {
+            return self.occur_pattern(node, ty);
+        }
         let free = self.fresh_marks();
         let holds = self.fresh_marks();
         let busy = self.fresh_marks();
@@ -756,6 +818,43 @@ impl Checker {
             Ok(())
         }
     }
+
+    /// `occur_rec` with `allow_recursive` (compiler/ml/ctype.ml:1384-1408;
+    /// `occur_full` sets it in pattern mode, 1468), run once a walk found
+    /// `node` in `ty`: a clash when `node` occurs where pattern mode
+    /// looks. Per representative:
+    ///
+    /// - `node` itself: it occurs (`if ty == ty0 then raise Occur`, 1387);
+    /// - a constructor whose type is [`TypeTable::contractive`]: free, and
+    ///   not entered (`if allow_recursive && is_contractive env p then
+    ///   ()`, 1390);
+    /// - any other constructor: its arguments, in order; when one holds
+    ///   `node`, or the constructor is met again on the way from `ty`,
+    ///   the constructor is expanded ([`Checker::expand_head`] in
+    ///   [`ExpandMode::Unif`]: `try_expand_head try_expand_once`, 1398)
+    ///   and its expansion is tested in its place; one that does not
+    ///   expand holds `node` (1392-1402);
+    /// - anything else (a tuple, an arrow, an object, a variant, a
+    ///   polymorphic type, a package): free, and not entered (`| _ -> if
+    ///   allow_recursive || Type_set.mem ty visited then ()`, 1403-1405).
+    ///
+    /// So a variable is bound to a type that holds it below a structure
+    /// that is not a constructor or below a contractive constructor, and
+    /// the graph has a cycle through that node afterwards (every walk of
+    /// the kernel marks or cuts by level; `Checker::reaches` gives up at
+    /// its budget and marks). The walk of [`Checker::occur_expanding`]
+    /// with these two rules: marks (free, holding, on the way), one frame
+    /// a constructor entered on [`Checker::frames`] above the length it
+    /// finds. Cost: one step and one `TypeInfo` load a constructor
+    /// reached through constructors that are not contractive, one
+    /// expansion a constructor that holds `node`. (R3h; CHECKER_REWRITE
+    /// 8.9, decision 69)
+    #[cold]
+    #[inline(never)]
+    fn occur_pattern(&mut self, node: Ty, ty: Ty) -> Result<(), Clash> {
+        todo!("R3h")
+    }
+
 
     /// O(1): one node of [`Checker::occur_expanding`]: decided at once
     /// (`node` itself, a node already decided or on the path, a node with no
@@ -844,7 +943,16 @@ impl Checker {
         // of the other side (ctype.ml:2278-2283). When neither side expanded
         // the second pair would read the same graph and return the same
         // nodes, so it is made only after an expansion.
+        // `umode` is loaded once a call and handed to unify3, which read
+        // it before (8.9, decision 64): the loads of a unification in
+        // expression mode are what they were.
+        let pattern = self.umode == UnifyMode::Pattern;
         let left_head = self.g.repr(left);
+        // `if unify_eq t1 t2 then ()` of `unify` (ctype.ml:2233), which
+        // in pattern mode reads the table of assumed pairs.
+        if pattern && self.assumed_equal(left_head, right) {
+            return Ok(());
+        }
         let mut expanded_left = if self.never_expands(left_head) {
             left_head
         } else {
@@ -894,17 +1002,43 @@ impl Checker {
             }
             (self.g.repr(left), self.g.repr(right))
         };
+        // `if unify_eq t1' t2' then ()` (ctype.ml:2286) for a pair that
+        // pattern mode assumed.
+        if pattern && self.assumed_equal(expanded_left, expanded_right) {
+            return Ok(());
+        }
         // `if unify_eq t1 t1' || not (unify_eq t2 t2') then unify3 env t1
         // t1' t2 t2' else unify3 env t2 t2' t1 t1'` (ctype.ml:2299-2303).
+        // These two stay tests of identity in pattern mode: a pair in the
+        // table is two heads, and a node and its own expanded head are
+        // never both that (8.9, decision 64).
         if t1 == expanded_left || t2 != expanded_right {
             self.unify3(
                 [t1, expanded_left, t2, expanded_right],
                 [left, right],
                 false,
+                pattern,
             )
         } else {
-            self.unify3([t2, expanded_right, t1, expanded_left], [left, right], true)
+            self.unify3(
+                [t2, expanded_right, t1, expanded_left],
+                [left, right],
+                true,
+                pattern,
+            )
         }
+    }
+
+    /// `unify_eq` for two nodes that are not one node, in pattern mode
+    /// (compiler/ml/ctype.ml:2205-2214): whether the pair is in the table
+    /// of assumed equalities, in either order. Both are taken as their
+    /// representatives. One hash lookup; never called in expression
+    /// mode. (R3h)
+    #[cold]
+    #[inline(never)]
+    fn assumed_equal(&mut self, left: Ty, right: Ty) -> bool {
+        let (left, right) = (self.g.repr(left), self.g.repr(right));
+        self.pairs.keys.contains(&PairSet::key(left, right))
     }
 
     /// `expand_head_unif` of `ty` (compiler/ml/ctype.ml:1279) as unify2 asks
@@ -935,9 +1069,11 @@ impl Checker {
     /// `unify3 env t1 t1' t2 t2'` (compiler/ml/ctype.ml:2305-2438) on
     /// `[t1, t1', t2, t2']`, all representatives; `pair` is the pair of the
     /// enclosing `unify`, in its order, and `swapped` says unify2 chose the
-    /// right side. A variable head is linked to the *original* other side;
-    /// otherwise `occur t1' t2'`, the link `t1' -> t2` before the children,
-    /// then the children are pushed. When `t2` was expanded and `t1'` occurs
+    /// right side; `pattern` is `umode`, which
+    /// [`Checker::unify_expanded`] loaded. A variable head is linked to
+    /// the *original* other side; otherwise, in expression mode, `occur
+    /// t1' t2'`, the link `t1' -> t2` before the children, then the
+    /// children are pushed; in pattern mode [`Checker::unify3_pattern`]. When `t2` was expanded and `t1'` occurs
     /// in it (`create_recursion`, one [`Checker::deep_occur`]), a
     /// [`FrameKind::Recursion`] frame runs the repair after the children.
     /// O(1) plus one [`Checker::occur`], at most one `deep_occur` and one
@@ -950,6 +1086,7 @@ impl Checker {
         [t1, t1x, t2, t2x]: [Ty; 4],
         pair: [Ty; 2],
         swapped: bool,
+        pattern: bool,
     ) -> Result<(), Clash> {
         let d1 = self.g.nodes[t1x.0 as usize];
         let d2 = self.g.nodes[t2x.0 as usize];
@@ -1000,10 +1137,10 @@ impl Checker {
             }
             return self.unify_fields(t1x, t2x);
         }
-        if self.umode == UnifyMode::Pattern {
-            // `add_type_equality` in place of the link (ctype.ml:2329):
+        if pattern {
+            // `add_type_equality` in place of the link (ctype.ml:2332):
             // CHECKER_REWRITE 8.9, decision 64.
-            todo!("R3h")
+            return self.unify3_pattern([t1, t1x, t2, t2x], pair, swapped, create_recursion);
         }
         // Two variant nodes get the slots of their references while both
         // are nodes (`Checker::open_row`): the left one is a link after
@@ -1298,8 +1435,8 @@ impl Checker {
     /// 2. [`Checker::unify`] of the pair;
     /// 3. on either result: the three settings go back, `newtype_level`
     ///    is 0, and the table of assumed equalities is emptied
-    ///    (`Type_pairs.clear (unify_eq_set ())`; `PairSet::clear`,
-    ///    O(pairs assumed)).
+    ///    (`Type_pairs.clear (unify_eq_set ())`; O(capacity) when it held
+    ///    a pair, one load when it did not).
     ///
     /// The equations it added stay in [`Checker::equations`]: the caller
     /// cuts them back when the case they belong to ends or when it
@@ -1321,26 +1458,167 @@ impl Checker {
     /// `TypeTable` row of each popped entry is its `previous` again;
     /// then [`Checker::cleanup_abbrev`] when one was popped. What a
     /// caller does where OCaml drops the environment of a case
-    /// (`set_state`, compiler/ml/typecore.ml:1303-1305). O(entries
-    /// popped) plus the cleanup. (R3h; CHECKER_REWRITE 8.9, decision
-    /// 67)
+    /// (`set_state`, compiler/ml/typecore.ml:1303-1305). The `Manifest`
+    /// and `Newtype` rows an equation made are not reclaimed. O(entries
+    /// popped), one step each, plus the cleanup. (R3h; CHECKER_REWRITE
+    /// 8.9, decision 67)
     pub fn cut_equations(&mut self, len: usize) {
         todo!("R3h")
     }
 
-    /// A clash reached `run_frames` whose frames start at `base`: `None`
-    /// when no [`Try`] record has its frame at or above `base` (the
-    /// clash is the caller's). Otherwise the last record is taken:
-    /// `frames` is cut to its frame, [`Checker::restore`] of its
-    /// speculation, `leave_scopes` to its scopes, `trace` and `saved`
-    /// cut to its lengths, the two flags put back; then `reify(left)`,
-    /// `reify(right)` and, with bit 2 of the record and
+    /// The arm of `unify` for two locally abstract types under local
+    /// constraints (compiler/ml/ctype.ml:2258-2269): `left` and `right`
+    /// are distinct representatives, constructors WITHOUT arguments of
+    /// two types, with descriptors `l` and `r`; the caller has seen that
+    /// [`Checker::equations`] is not empty (`Env.has_local_constraints`).
+    /// `None` when one of the two types is not a locally abstract type
+    /// (`is_newtype`, ctype.ml:1862-1868: `flags & (NEWTYPE | DATATYPE |
+    /// PRIVATE) == NEWTYPE`) or when the one to expand does not expand
+    /// (`with Cannot_expand -> unify2 env t1 t2`): the caller goes on to
+    /// [`Checker::unify_expanded`]. Otherwise, in pattern mode, `Ok` at
+    /// once for a pair in the table of assumed equalities (`unify_eq`,
+    /// ctype.ml:2233, which comes first); then
+    /// [`Checker::expand_once`] in [`ExpandMode::Unif`] of `right` when
+    /// [`Checker::find_newtype_level`] of the left type is lower (as
+    /// pairs), otherwise of `left`: only the NEWER one is expanded, and
+    /// once ("do not use local constraints more than necessary"). The
+    /// pair of the side that was not expanded and the expansion, in the
+    /// order of the two sides, is pushed as a [`FrameKind::Pair`] frame:
+    /// the nested `unify` of OCaml. In `Mode::Explain` an
+    /// [`FrameKind::Assumed`] frame with `left` and `right` goes below
+    /// it, so that the pair is in the trace of a clash below (`raise
+    /// (Unify ((t1, t2) :: trace))`, ctype.ml:2274). A clash of the
+    /// expansion is the pair's clash. O(1) plus the expansion: two row
+    /// loads, at most two `Newtype` loads. (R3h; CHECKER_REWRITE 8.9,
+    /// decision 65)
+    #[cold]
+    #[inline(never)]
+    fn unify_newtypes(
+        &mut self,
+        [left, right]: [Ty; 2],
+        l: Node,
+        r: Node,
+    ) -> Option<Result<(), Clash>> {
+        todo!("R3h")
+    }
+
+    /// unify3 in pattern mode, after its first arms (a variable on either
+    /// side, two universal variables, two fields: compiler/ml/ctype.ml:
+    /// 2313-2326), for `[t1, t1', t2, t2']` as [`Checker::unify3`] has
+    /// them; `create_recursion` is what it computed (ctype.ml:2309).
+    ///
+    /// 1. the pair `(t1', t2')` goes into the table of assumed equalities
+    ///    (`add_type_equality`, ctype.ml:2332, 2107-2108). No occurrence
+    ///    test, no link;
+    /// 2. in `Mode::Explain` a [`FrameKind::Assumed`] frame with `pair`
+    ///    and `swapped`; with `create_recursion` a
+    ///    [`FrameKind::Recursion`] frame above it, as in expression mode
+    ///    (ctype.ml:2428-2435: the repair is outside the match on
+    ///    `umode`);
+    /// 3. the arm, by the two heads: the table of CHECKER_REWRITE 8.9,
+    ///    decision 64, first row that applies.
+    ///
+    /// An arm that clashes has pushed nothing; then the frames of step 2
+    /// are taken off and, when `swapped`, the trace entries made since
+    /// the call are reversed (ctype.ml:2301-2303). Nothing of `t1'` is
+    /// put back: it was not written (`t1'.desc <- d1`, ctype.ml:2437,
+    /// writes what is there). Out of line: [`Checker::unify3`] keeps the
+    /// size it has. O(1) plus the arm. (R3h; the three arms marked for
+    /// R3r in decision 64 are `todo!("R3r")` until that slice)
+    #[inline(never)]
+    fn unify3_pattern(
+        &mut self,
+        [t1, t1x, t2, t2x]: [Ty; 4],
+        pair: [Ty; 2],
+        swapped: bool,
+        create_recursion: bool,
+    ) -> Result<(), Clash> {
+        todo!("R3h")
+    }
+
+
+    /// O(1): the pop of a [`FrameKind::Flags`] frame: bit 0 of `extra`
+    /// is `generate_equations` and bit 1 `assume_injective`, as they
+    /// were before the arguments of a constructor were entered
+    /// (`set_mode_pattern`, compiler/ml/ctype.ml:256-273). Two stores.
+    /// (R3h)
+    #[inline]
+    fn put_flags(&mut self, extra: u32) {
+        self.generate_equations = extra & 1 != 0;
+        self.assume_injective = extra & 2 != 0;
+    }
+
+    /// The pop of a [`FrameKind::Try`] frame (CHECKER_REWRITE 8.9,
+    /// decision 68).
+    ///
+    /// PENDING (`extra` is [`TRY_ARGUMENT`] or [`TRY_ROWS`]): the attempt
+    /// starts. A [`Try`] record is pushed: `g.speculate()`, the index the
+    /// frame is about to have, the lengths of `trace`, `saved` and
+    /// `scopes`, the two flags as they are, and bit 2 for [`TRY_ROWS`];
+    /// the frame is pushed again with the record's index as `extra`.
+    /// Then, for an argument: both flags off and the pair of `left` and
+    /// `right` pushed above the frame; for two variants:
+    /// [`Checker::open_row`] of both representatives and
+    /// [`Checker::unify_row`] of them, whose clash is this function's
+    /// (with no pair: `Unify []` is the row's own trace), to be recovered
+    /// by the caller.
+    ///
+    /// STARTED (`extra` is a record index, the last record): the attempt
+    /// succeeded: the record is popped, `g.keep` of its speculation, the
+    /// two flags put back.
+    ///
+    /// Cold: only pattern mode pushes the frame. O(1) plus `unify_row`.
+    /// (R3r)
+    #[cold]
+    #[inline(never)]
+    fn try_frame(&mut self, frame: Frame) -> Result<(), [Ty; 2]> {
+        todo!("R3r")
+    }
+
+    /// A clash reached [`Checker::unify_distinct`] whose frames start at
+    /// `base`: `None` when no [`Try`] record has its frame at or above
+    /// `base` (the clash is the caller's). Otherwise the LAST record is
+    /// taken off: `frames` is cut to its frame (the frame itself goes),
+    /// [`Checker::restore`] of its speculation (`backtrack snap`, which
+    /// cleans the memos when something was written), `scopes`, `trace`
+    /// and `saved` cut to its lengths, the two flags put back; then
+    /// `reify(left)`, `reify(right)` and, with bit 2 of the record and
     /// `generate_equations` on, `mcomp(left, right)`: `Some` of their
     /// result. The equations and the fresh types made inside the attempt
-    /// stay (`env` is not part of OCaml's snapshot). O(frames above the
-    /// record + writes restored) plus the three callees. (R3r;
-    /// CHECKER_REWRITE 8.9, decision 68)
+    /// stay (`env` is not part of OCaml's snapshot,
+    /// compiler/ml/btype.ml:753-784). It reads the last record and
+    /// nothing else of `tries` or `frames`: O(writes restored) plus the
+    /// three callees, one step a record taken. (R3r; CHECKER_REWRITE 8.9,
+    /// decision 68)
     pub fn recover(&mut self, base: usize) -> Option<Result<(), Clash>> {
+        todo!("R3r")
+    }
+
+    /// The failure path of [`Checker::unify_distinct`] while an attempt
+    /// of pattern mode is open: `pair` is the clash `run_frames`
+    /// returned. A loop of [`Checker::recover`]: `None`: `Err` of the
+    /// pair in hand; `Some(Ok(()))`: [`Checker::resume_frames`], whose
+    /// `Ok` is this function's and whose clash is the pair in hand for
+    /// the next turn; `Some(Err(_))`: the fallback clashed, the pair in
+    /// hand is none (`Unify []`, or the pair `reify` put on the trace)
+    /// and the next record is asked. Cold. O(records taken) plus the
+    /// callees. (R3r)
+    #[cold]
+    #[inline(never)]
+    fn recover_frames(&mut self, base: usize, pair: [Ty; 2]) -> Result<(), [Ty; 2]> {
+        todo!("R3r")
+    }
+
+    /// Go on with the frames above `base` after an attempt was recovered:
+    /// frames are popped as `run_frames` pops them, arm for arm, until a
+    /// [`FrameKind::Pair`] whose two representatives differ, which goes
+    /// to `run_frames` as its root pair, or until none is left. The hot
+    /// loop of `run_frames` is not changed for it: this is its cold
+    /// second entry, and a `match` on every [`FrameKind`] keeps the two
+    /// in step. O(frames popped). (R3r)
+    #[cold]
+    #[inline(never)]
+    fn resume_frames(&mut self, base: usize) -> Result<(), [Ty; 2]> {
         todo!("R3r")
     }
 
@@ -1348,7 +1626,9 @@ impl Checker {
     /// first (each enclosing `unify` adds its pair, ctype.ml:2272), and the
     /// descriptors of the linked structure nodes enclosing the failure put
     /// back, innermost first (`t1'.desc <- d1`, ctype.ml:2437). The
-    /// enclosing pairs are the `Linked` frames above `base`; the entries a
+    /// enclosing pairs are the `Linked` frames above `base` and, in
+    /// pattern mode, the `Assumed` ones, which have a pair and no
+    /// descriptor; the entries a
     /// nested unification already wrote stay after this one's. O(frames
     /// above `base` + trace entries since `trace_base`).
     /// Below a swapped `unify3` every entry is reversed
@@ -1363,7 +1643,7 @@ impl Checker {
         let mut swapped = false;
         for index in base..self.frames.len() {
             let frame = self.frames[index];
-            if frame.kind == FrameKind::Linked {
+            if frame.kind == FrameKind::Linked || frame.kind == FrameKind::Assumed {
                 let entry = [frame.left, frame.right];
                 self.trace
                     .push(if swapped { [entry[1], entry[0]] } else { entry });
@@ -1565,15 +1845,19 @@ impl Checker {
                     FrameKind::RowFieldEnd => self.row_field_end(frame)?,
                     FrameKind::RowEnd => self.row_end(frame),
                     // The two flags go back (8.9, decision 64).
-                    FrameKind::Flags => todo!("R3h"),
-                    // The attempt succeeded: `g.keep` of the record's
-                    // speculation, its flags put back, the record
-                    // popped (8.9, decision 68). The clashes of this
-                    // loop go through `Checker::recover` first.
-                    FrameKind::Try => todo!("R3r"),
+                    FrameKind::Flags => self.put_flags(frame.extra),
+                    FrameKind::Assumed => {}
+                    // The attempt starts, or it succeeded (8.9, decision
+                    // 68). A clash of this loop is offered to the open
+                    // attempts by the caller (`Checker::recover_frames`).
+                    FrameKind::Try => self.try_frame(frame)?,
                     FrameKind::PackageEnd => {
-                        // A clash here is the enclosing pair's (`Unify []`).
-                        if self.package_end(frame).is_err() {
+                        // A clash here is the enclosing pair's (`Unify []`);
+                        // in pattern mode the two lists are reified instead
+                        // (`Not_found`, ctype.ml:2420-2422; decision 63).
+                        if self.package_end(frame).is_err()
+                            && self.package_fallback(frame.left, frame.right).is_err()
+                        {
                             return Err([Ty(NONE), Ty(NONE)]);
                         }
                     }
@@ -1752,5 +2036,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<UnifyMode>(), 1);
         assert_eq!(std::mem::size_of::<Frame>(), 16);
         assert_eq!(std::mem::size_of::<FrameKind>(), 4);
+        // One per started attempt of pattern mode (CHECKER_REWRITE 8.9,
+        // decision 68).
+        assert_eq!(std::mem::size_of::<Try>(), 40);
     }
 }

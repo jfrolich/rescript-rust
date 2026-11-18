@@ -1124,11 +1124,41 @@ impl Checker {
     /// variable shared, or listed as a rest. (R3f)
     pub fn open_row(&mut self, ty: Ty) -> Node {
         let node = self.g.nodes[ty.0 as usize];
+        match self.opened_row(node) {
+            Some(opened) => {
+                self.g.write(ty, opened);
+                opened
+            }
+            None => node,
+        }
+    }
+
+    /// [`Checker::open_row`] for a node the caller made since the last
+    /// speculation was opened: the node is stored, not logged, so that a
+    /// restore of that speculation leaves it opened. For a copy inside
+    /// [`Checker::duplicate`], whose restore must put back the levels of
+    /// the source and nothing of the copy (`Checker::match_unmatched`).
+    /// The cost of `open_row` without the trail entry.
+    fn open_fresh(&mut self, ty: Ty) -> Node {
+        let node = self.g.nodes[ty.0 as usize];
+        match self.opened_row(node) {
+            Some(opened) => {
+                self.g.nodes[ty.0 as usize] = opened;
+                opened
+            }
+            None => node,
+        }
+    }
+
+    /// The node [`Checker::open_row`] writes for descriptor `node`, with
+    /// its new list, references and holders made, or `None` when there is
+    /// nothing to open. Its cost is `open_row`'s.
+    fn opened_row(&mut self, node: Node) -> Option<Node> {
         if node.head & EXTENDED == 0 {
-            return node;
+            return None;
         }
         let ExtraDescriptor::Variant(row) = self.extras.descriptors[node.a as usize] else {
-            return node;
+            return None;
         };
         let fields = self.extras.variants[row as usize].fields;
         let fields = fields.start as usize..(fields.start + fields.len) as usize;
@@ -1138,11 +1168,9 @@ impl Checker {
         // opened exactly when its arity covers the first.
         let either = |field: &&RowFieldRow| matches!(field.kind, RowFieldKind::Either { .. });
         let row_fields = &self.extras.row_fields[fields.clone()];
-        let Some(published) = row_fields.iter().find(either).map(|field| field.link) else {
-            return node;
-        };
+        let published = row_fields.iter().find(either).map(|field| field.link)?;
         if published < node.arity() {
-            return node;
+            return None;
         }
         let arity = row_fields.iter().rev().find(either).map_or(published, |field| field.link + 1);
         // The new list: the published slots, then one slot per reference.
@@ -1182,13 +1210,11 @@ impl Checker {
             };
             self.g.lists[(b + field.link) as usize] = first;
         }
-        let opened = Node {
+        Some(Node {
             head: (node.head & 0xff) | arity << 8,
             b,
             ..node
-        };
-        self.g.write(ty, opened);
-        opened
+        })
     }
 
     /// `row_repr` (compiler/ml/btype.ml:126-135) of the row of `top`, a
@@ -1381,10 +1407,23 @@ impl Checker {
     /// `Checker::trace`; the frames and `saved` records this call pushed
     /// are taken off; `Err(Clash)`.
     ///
+    /// After step 8 a row that is not fixed has a variant node as its
+    /// `more`, and the arguments of its name stop being children of its
+    /// home (`Checker::drop_name_children`; CHECKER_REWRITE 8.6, decision
+    /// 60): the home of row 2 is its last node, or `t2x`; the home of row
+    /// 1 is its last node, or `t1x` when `t1x` is still a variant node,
+    /// which it is in pattern mode only (`unify3` links it in expression
+    /// mode, and a link has no children).
+    ///
     /// Cost: the two flattenings and the merge; one step per field of a
     /// rest; per changed row what [`Checker::set_more`] allocates; 16
-    /// bytes of frame and 16 of record per pair. (R3f)
-    pub fn unify_row(&mut self, [_, t2x]: [Ty; 2], left: Node, right: Node) -> Result<(), Clash> {
+    /// bytes of frame and 16 of record per pair; and for the names two
+    /// compares per row that is not fixed (`name` against none, the
+    /// number of its arguments against zero), on the `VariantRow` the
+    /// call has loaded: no read. A row with a name that has arguments
+    /// pays one node load more (its home's head) and, when the home is
+    /// not a link, one list of the home's slots. (R3f)
+    pub fn unify_row(&mut self, [t1x, t2x]: [Ty; 2], left: Node, right: Node) -> Result<(), Clash> {
         // 1. `row_repr` of both.
         let base = self.extras.row_scratch.len();
         let (last1, rm1) = self.flatten_row(left);
@@ -1503,12 +1542,21 @@ impl Checker {
         // A row that is not fixed has a variant node as its `more` now
         // (`link_type rm ty`, ctype.ml:2616), so its name's arguments are
         // children no longer (`iter_row`, btype.ml:229-241).
+        // The home of row 1 is the left node itself when `last1` is none.
+        // In expression mode `unify3` has linked that node away and it
+        // has no children left; in pattern mode it is still a variant
+        // node (CHECKER_REWRITE 8.6, decision 60). The node is read only
+        // for a row that has a name with arguments.
         let homes = [
-            (fixed1 || last1.0 == NONE, row1, last1),
+            (fixed1, row1, if last1.0 == NONE { t1x } else { last1 }),
             (fixed2, row2, if last2.0 == NONE { t2x } else { last2 }),
         ];
         for (kept, row, home) in homes {
-            if !kept && row.name != NONE && row.name_arguments.len != 0 {
+            if !kept
+                && row.name != NONE
+                && row.name_arguments.len != 0
+                && self.g.nodes[home.0 as usize].head != LINK
+            {
                 self.drop_name_children(home, row);
             }
         }
@@ -1564,8 +1612,8 @@ impl Checker {
     #[cold]
     #[inline(never)]
     fn drop_name_children(&mut self, home: Ty, row: VariantRow) {
-        let node = self.g.nodes[home.0 as usize];
         if self.g.mode == Mode::Explain {
+            let node = self.g.nodes[home.0 as usize];
             let extra = self.saved.len() as u32;
             self.saved.push(node);
             self.saved.push(node);
@@ -1576,6 +1624,20 @@ impl Checker {
                 extra,
             });
         }
+        self.forget_name_children(home, row);
+    }
+
+    /// The write of [`Checker::drop_name_children`] without its frame:
+    /// variant node `home`, whose `VariantRow` is `row`, gets a new list
+    /// in which each slot of the name's arguments holds what the `more`
+    /// slot holds (`Graph::write`, logged in a speculation). For a caller
+    /// whose link of the row variable stays when the unification fails:
+    /// `reify` (compiler/ml/ctype.ml:1848-1853: the link is written
+    /// before the clash and `unify3`'s handler puts back the left
+    /// descriptor only, ctype.ml:2436-2438). O(slots of the node), one
+    /// list of that length.
+    fn forget_name_children(&mut self, home: Ty, row: VariantRow) {
+        let node = self.g.nodes[home.0 as usize];
         let b = self.g.lists.len() as u32;
         self.g
             .lists
@@ -1691,6 +1753,81 @@ impl Checker {
             a,
             b,
         })
+    }
+
+    /// The variant arm of `update_level` (compiler/ml/ctype.ml:615-621)
+    /// for variant node `ty` above `level`, whose descriptor is `node`:
+    ///
+    /// ```text
+    /// | Tvariant row ->
+    ///   let row = row_repr row in
+    ///   (match row.row_name with
+    ///   | Some (p, _tl) when level < get_level env p ->
+    ///     log_type ty;
+    ///     ty.desc <- Tvariant {row with row_name = None}
+    ///   | _ -> ());
+    /// ```
+    ///
+    /// Returns the descriptor `ty` has afterwards, which the caller
+    /// lowers and whose slots it walks. The name read is that of the
+    /// last row of the chain (`row_repr`, btype.ml:126-135): one
+    /// descriptor load, one `VariantRow` load and one node load a chain
+    /// node, then, when the row has a name, one `TypeInfo` load and one
+    /// compare of its scope (`get_level`, as for a constructor). No
+    /// write, no step, when the row has no name or its name's scope is
+    /// not above `level`. Otherwise [`Checker::unname_row`].
+    /// (CHECKER_REWRITE 8.6, decision 75)
+    pub(super) fn lower_row_name(&mut self, ty: Ty, node: Node, level: u32) -> Node {
+        let mut current = node;
+        let row = loop {
+            let ExtraDescriptor::Variant(index) = self.extras.descriptors[current.a as usize]
+            else {
+                unreachable!("a variant node");
+            };
+            let row = self.extras.variants[index as usize];
+            let more = self.g.repr(self.g.lists[(current.b + row.more) as usize]);
+            let next = self.g.nodes[more.0 as usize];
+            let variant = next.head & EXTENDED != 0
+                && matches!(self.extras.descriptors[next.a as usize], ExtraDescriptor::Variant(_));
+            if !variant {
+                break row;
+            }
+            current = next;
+        };
+        if row.name == NONE || self.types.info(row.name).scope <= level {
+            return node;
+        }
+        self.unname_row(ty, row)
+    }
+
+    /// `ty.desc <- Tvariant {row with row_name = None}`, `row` being
+    /// `row_repr` of the row of variant node `ty` and `last` the
+    /// `VariantRow` its chain ends in: `ty` is written
+    /// (`Graph::write`, logged in a speculation, as `log_type ty`) as
+    /// one row of every field of its chain, outermost first, each copied
+    /// as its row has it with the reference its home has
+    /// ([`Checker::flatten_row`], [`Checker::build_variant`]), with the
+    /// `more`, `closed` and `fixed` of `last` and no name. The level is
+    /// kept. Only `ty` is written: another node whose chain ends in the
+    /// same row still reads the name, and the name's arguments are
+    /// children of `ty` no longer (they are not lowered through it, as
+    /// `iter_row` reads the name of the new descriptor,
+    /// btype.ml:229-241). O(fields of the chain): one node, one
+    /// descriptor row, one `VariantRow`, one `RowFieldRow` a field; the
+    /// node `build_variant` makes is not reachable afterwards.
+    #[cold]
+    #[inline(never)]
+    fn unname_row(&mut self, ty: Ty, last: VariantRow) -> Node {
+        let opened = self.open_row(ty);
+        let scratch = self.extras.row_scratch.len();
+        let (_, more) = self.flatten_row(opened);
+        let fields = scratch..self.extras.row_scratch.len();
+        let unnamed = VariantRow { name: NONE, name_arguments: Range::default(), ..last };
+        let flat = self.build_variant(fields, more, last.closed, last.fixed, (unnamed, 0));
+        self.extras.row_scratch.truncate(scratch);
+        let written = Node { level: opened.level, ..self.g.nodes[flat.0 as usize] };
+        self.g.write(ty, written);
+        written
     }
 
     /// `row_fixed row` (compiler/ml/btype.ml:153-160) for a flattened row:
@@ -2451,29 +2588,33 @@ impl Checker {
         // `more = repr row.row_more` of the flattened row (ctype.ml:803),
         // read in the copy: a generic `more` is one this session copied.
         let mut more = self.g.repr(self.g.lists[(node.b + row.more) as usize]);
+        // `row.row_fixed` of the flattened row is the flag of the last
+        // variant node on the way to `more` (btype.ml:126-135).
+        let mut fixed = row.fixed;
         while let next = self.g.nodes[more.0 as usize]
             && next.head & EXTENDED != 0
             && let ExtraDescriptor::Variant(next_row) = self.extras.descriptors[next.a as usize]
         {
-            let slot = next.b + self.extras.variants[next_row as usize].more;
-            more = self.g.repr(self.g.lists[slot as usize]);
+            let next_row = self.extras.variants[next_row as usize];
+            fixed = next_row.fixed;
+            more = self.g.repr(self.g.lists[(next.b + next_row.more) as usize]);
         }
-        // `let m = if row.row_fixed then fixed else m` (btype.ml:375, with
-        // `fixed = true` from `Ctype.copy`, ctype.ml:868) is not built:
-        // nothing through R3g makes a fixed row with a `Reither` field
-        // that is not matched (CHECKER_REWRITE 8.6, decision 47). The
-        // slice that makes one (R3h's `reify`) builds the rule here.
-        debug_assert!(
-            !self.fixed_with_unmatched(node, row, more),
-            "a fixed row with an unmatched `Reither` field is copied: btype.ml:375"
-        );
-        // `let keep = more.level <> generic_level` (ctype.ml:806).
+        // `| {desc = Tconstr _} when not row.row_fixed -> {row with
+        // row_fixed = true}` (PR#6163, ctype.ml:826-830): a row over a
+        // constructor is copied as a fixed one.
+        fixed |= self.g.nodes[more.0 as usize].tag() == CONSTR;
+        // `let keep = more.level <> generic_level` (ctype.ml:813).
         let keep = more.0 < first;
         let source = self.g.work[(copy.0 - first) as usize];
         if published >= self.g.nodes[source.0 as usize].arity() {
             if keep {
                 let level = self.g.nodes[more.0 as usize].level;
                 self.open_shared([copy, source], node, level, published, fields);
+            }
+            // `let m = if row.row_fixed then fixed else m` (btype.ml:375,
+            // with `fixed = true` from `Ctype.copy`, ctype.ml:868).
+            if fixed {
+                self.match_fixed_fields(copy, first);
             }
             return;
         }
@@ -2550,30 +2691,68 @@ impl Checker {
                 self.g.lists[slot as usize] = self.g.push(ref_node(self.g.level, head));
             }
         }
+        if fixed {
+            self.match_fixed_fields(copy, first);
+        }
     }
 
-    /// Whether the row of variant node `node` is fixed by its flag
-    /// (`row.row_fixed` of the flattened row: the `VariantRow` of the last
-    /// variant node on the way to `more`, the row variable) and has, in
-    /// `node`, a `Reither` field that is not matched. Debug builds only:
-    /// the assertion of [`Checker::copy_refs`]. O(fields + chain).
-    fn fixed_with_unmatched(&mut self, node: Node, row: VariantRow, more: Ty) -> bool {
-        let mut last = row;
-        let mut at = self.g.repr(self.g.lists[(node.b + row.more) as usize]);
-        while at != more {
-            let next = self.g.nodes[at.0 as usize];
-            let ExtraDescriptor::Variant(index) = self.extras.descriptors[next.a as usize] else {
-                break;
-            };
-            last = self.extras.variants[index as usize];
-            at = self.g.repr(self.g.lists[(next.b + last.more) as usize]);
+    /// The fixed-row rule of a copy (`let m = if row.row_fixed then fixed
+    /// else m`, compiler/ml/btype.ml:375, with `fixed = true` from
+    /// `Ctype.copy`, ctype.ml:868): every `Reither` field of `copy`, the
+    /// copy of a variant node whose flattened row is fixed, reads
+    /// matched. Called by [`Checker::copy_refs`] for such a copy, after
+    /// its references are in place. One [`field_repr`] per `Reither`
+    /// field; a field that reads matched already costs nothing more, and
+    /// the first one that does not hands the node to
+    /// [`Checker::match_unmatched`]. A row from a declaration or an
+    /// annotation has matched fields when it is fixed
+    /// (`make_fixed_univars`, typetexp.ml:684-696); the rows `reify`
+    /// fixes do not (CHECKER_REWRITE 8.6, decision 47). O(fields of the
+    /// node + their chains).
+    fn match_fixed_fields(&mut self, copy: Ty, first: u32) {
+        let node = self.g.nodes[copy.0 as usize];
+        let ExtraDescriptor::Variant(row) = self.extras.descriptors[node.a as usize] else {
+            unreachable!("a variant node");
+        };
+        let row = self.extras.variants[row as usize];
+        for index in row.fields.start..row.fields.start + row.fields.len {
+            let field = self.extras.row_fields[index as usize];
+            let now = field_repr(&self.g, node.b, node.arity(), field);
+            if matches!(now.kind, RowFieldKind::Either { matched: false, .. }) {
+                return self.match_unmatched(copy, first);
+            }
         }
-        let fields = row.fields.start as usize..(row.fields.start + row.fields.len) as usize;
-        last.fixed
-            && self.extras.row_fields[fields].iter().any(|&field| {
-                let now = field_repr(&self.g, node.b, node.arity(), field);
-                matches!(now.kind, RowFieldKind::Either { matched: false, .. })
-            })
+    }
+
+    /// [`Checker::match_fixed_fields`] for a copy that has a `Reither`
+    /// field which reads unmatched. The copy is opened
+    /// ([`Checker::open_fresh`]: an unopened copy reads `m` from the
+    /// shared `RowFieldRow`, which is not written; the store is not
+    /// logged, since the copy may be [`Checker::duplicate`]'s). Then, per `Reither` field
+    /// whose chain ends unresolved and reads unmatched ([`field_repr`]
+    /// gives the flags of the LAST [`RES_EITHER`] node of the chain):
+    /// - the chain has such a node and the session made it (its handle is
+    ///   at or above `first`): [`RES_MATCHED`] is set in its `a`, a plain
+    ///   store on a fresh node;
+    /// - the chain has none (a field without types, whose slot names the
+    ///   reference itself): a new [`RES_EITHER`] node at the copy's level
+    ///   with the field's `c`, [`RES_MATCHED`], no type and the reference
+    ///   as its one slot goes into the field's reference slot;
+    /// - the last such node is not the session's (the copy shares it with
+    ///   its source): it is copied as [`Checker::copy_refs`] copies a
+    ///   shared chain node (one node, the same slots in a new list, the
+    ///   slot that named it pointed at the copy, a holder of the
+    ///   reference when it has types), with [`RES_MATCHED`].
+    ///
+    /// The source's field keeps its `m`: the two share the reference
+    /// (`e`), not the flags (`Reither (c, tl, m, e)` is a new value,
+    /// btype.ml:373-377). O(fields of the node + their chains); per field
+    /// changed at most one node and its slots. (R3h; CHECKER_REWRITE 8.6,
+    /// decision 47)
+    #[cold]
+    #[inline(never)]
+    fn match_unmatched(&mut self, copy: Ty, first: u32) {
+        todo!("R3h")
     }
 
     /// O(1): make chain node `chain` a holder of the unresolved reference
@@ -3410,53 +3589,214 @@ impl Checker {
         if compatible { Ok(()) } else { Err(Clash) }
     }
 
-    /// `reify` (compiler/ml/ctype.ml:1813-1859): every variable `ty`
-    /// reaches becomes a new locally abstract type of the newtype level,
-    /// and the row variable of every variant that is neither static nor
-    /// fixed a fixed row without tags over one; the steps are in
-    /// CHECKER_REWRITE 8.9 ("`reify`"). Visits each node once (a new mark
-    /// generation, `g.work`), children in `iter_type_expr`'s order. A
-    /// variable below [`Checker::newtype_level`] is linked and then a
-    /// clash (ctype.ml:1837-1839). Needs [`Checker::locals`] when there
-    /// is a variable. O(nodes reached). (R3h)
+    /// `Not_found` of two packages (compiler/ml/ctype.ml:2420-2422: `if
+    /// !(umode ()) = Expression then raise (Unify []); List.iter (reify
+    /// env) (tl1 @ tl2)`), for the two package nodes `left` and `right`:
+    /// in expression mode a clash; in pattern mode [`Checker::reify`] of
+    /// every argument of the left package, then of the right one, in
+    /// order, and `Ok` unless one clashes. Its two callers: the package
+    /// arm of pattern mode when [`Checker::unify_package`] clashes in its
+    /// merge (a completion that is no type, or no supplier), and the pop
+    /// of a [`FrameKind::PackageEnd`] frame whose
+    /// [`Checker::package_end`] clashed (the two paths are not
+    /// compatible). One load of `umode`, on a failure path; then
+    /// O(arguments) plus the walks. (R3r; CHECKER_REWRITE 8.9, decision
+    /// 63)
+    #[cold]
+    #[inline(never)]
+    pub fn package_fallback(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
+        if self.umode == super::unify::UnifyMode::Expression {
+            return Err(Clash);
+        }
+        todo!("R3r")
+    }
+
+    /// `reify env t` (compiler/ml/ctype.ml:1813-1859): every variable
+    /// `ty` reaches becomes a new locally abstract type of the newtype
+    /// level, and the row variable of every variant that is neither
+    /// static nor fixed a fixed row without tags over one. A clash when
+    /// such a variable is below [`Checker::newtype_level`]: it is linked
+    /// first (ctype.ml:1837-1838, 1851-1853) and the link stays.
+    ///
+    /// One walk: a new mark generation, the stack `g.work` (nothing is
+    /// expanded, so nothing else uses it), children pushed so that they
+    /// pop in the order OCaml visits them: the fresh types are named in
+    /// visit order. Per representative not yet marked:
+    ///
+    /// - a variable: [`Checker::fresh_abstract`] at its level with its
+    ///   name; `Graph::link` of the variable to that node; then the level
+    ///   test (`if ty.level < newtype_level then raise (Unify [(t,
+    ///   newvar2 ty.level)])`): in `Mode::Explain` the pair of the new
+    ///   node and a new variable at the variable's level goes on
+    ///   [`Checker::trace`];
+    /// - a variant: its row is read as `row_repr` reads it (the chain of
+    ///   variant nodes down to the last one, whose `VariantRow` has the
+    ///   flags and the name; each field through its references,
+    ///   [`field_repr`]). Unless it is static (closed and no field is
+    ///   `Reither`, btype.ml `static_row`): for a `fixed` last row the
+    ///   representative of its `more` is visited FIRST; otherwise that
+    ///   `more` is a variable (anything else is an invariant failure) and
+    ///   becomes, through `Graph::link`, a new variant node at its level
+    ///   with no field, `fixed`, the `closed` and the name of the last
+    ///   row (`{r with row_fields = []; row_fixed = true; row_more = t}`,
+    ///   ctype.ml:1848-1850) and the fresh type as its `more`; the last
+    ///   node, whose `more` is a variant now, loses the arguments of its
+    ///   name as children (`Checker::forget_name_children`, without a
+    ///   frame: the link stays when the unification fails); then the same
+    ///   level test for the row variable. Then, in order: the types of
+    ///   the fields, chain node by chain node (`Rpresent (Some ty)`: the
+    ///   type; `Reither`: every type), and the arguments of the last
+    ///   row's name (`iter_row`, btype.ml:229-241). The `more` of a row
+    ///   that is static is not visited;
+    /// - a constructor whose path is an object type (`is_object_type`,
+    ///   ctype.ml:1856-1857): no kernel type has such a path; not built;
+    /// - anything else: its children in `iter_type_expr`'s order.
+    ///
+    /// No supplier ([`Checker::locals`] is `None`) and a variable to
+    /// reify: a panic that names `Checker::locals`.
+    ///
+    /// Cost: one step and one mark a node reached; per variable one
+    /// `TypeInfo` row (16 bytes), one `Newtype` row (8), one node and one
+    /// list slot; per row variable also what `Checker::build_variant`
+    /// allocates for a row without fields. A variant node costs one
+    /// descriptor load and one `VariantRow` load per chain node and one
+    /// `field_repr` per field. (R3h; CHECKER_REWRITE 8.9)
     pub fn reify(&mut self, ty: Ty) -> Result<(), Clash> {
         todo!("R3h")
     }
 
-    /// `add_gadt_equation` (compiler/ml/ctype.ml:2093-2100): when
-    /// [`Checker::non_recursive_abbrev`], the locally abstract type
-    /// `source` gets [`Checker::duplicate`] of `destination` as its
-    /// manifest, the entry goes to [`Checker::equations`] and the memos
-    /// are cleaned; the five steps are in CHECKER_REWRITE 8.9, decision
-    /// 67. Otherwise nothing. O(nodes of `destination`) plus the
-    /// cleanup. (R3h)
-    pub fn add_gadt_equation(&mut self, source: u32, destination: Ty) {
+    /// `create_fresh_constr lev name` of `reify` (compiler/ml/ctype.ml:
+    /// 1815-1826): a node of a new locally abstract type at `level`.
+    /// [`LocalDecls::fresh_abstract`] gives the type index for the
+    /// variable's name index `name` (or `NONE`); the `TypeTable` row of
+    /// that index is pushed (`rows.len()` must equal the index: the
+    /// supplier counts with the table): abstract, [`NEWTYPE`], a
+    /// `Newtype` row of `(newtype_level, newtype_level)`
+    /// (`new_declaration (Some (newtype_level, newtype_level)) None`),
+    /// scope `newtype_level` (`get_level`, ctype.ml:562-569), and
+    /// `TypeTable::scoped` counts it. Then a constructor node without
+    /// arguments of it at `level`. Panics, naming `Checker::locals`, when
+    /// no supplier is installed. O(1) amortized: two rows, one node, one
+    /// list slot. (R3h)
+    fn fresh_abstract(&mut self, level: u32, name: u32) -> Ty {
+        todo!("R3h")
+    }
+
+    /// `raise (Unify [(t, newvar2 level)])` of `reify`
+    /// (compiler/ml/ctype.ml:1838, 1852-1853): in `Mode::Explain` the pair
+    /// of `fresh` and a new variable at `level` goes on
+    /// [`Checker::trace`]. O(1) amortized: one node and one trace entry.
+    #[cold]
+    fn below_newtype_level(&mut self, fresh: Ty, level: u32) -> Clash {
+        todo!("R3h")
+    }
+
+    /// `add_gadt_equation env source destination` (compiler/ml/ctype.ml:
+    /// 2093-2100). In this order:
+    ///
+    /// 1. [`Checker::non_recursive_abbrev`]: `Ok(false)`, nothing happens
+    ///    and it is no clash; a clash of an expansion it makes is this
+    ///    call's clash;
+    /// 2. [`Checker::cleanup_abbrev`] (OCaml runs it last, ctype.ml:2100;
+    ///    nothing reads a memo in between, and step 3 must copy with no
+    ///    live memo: a copy of a constructor without arguments would
+    ///    otherwise link to a memorized node that is not generic);
+    /// 3. [`Checker::duplicate`] of `destination`: the body;
+    /// 4. a `Manifest` row `{ template: an empty template, params: the
+    ///    length of `roots`, body }`, never instantiated: `subst` takes
+    ///    the equation arm for a row with [`NEWTYPE`] and copies `body`;
+    /// 5. the entry `Equation { type_index: source, previous: the row }`
+    ///    goes on [`Checker::equations`]; then the row gets [`ABBREV`],
+    ///    [`NEWTYPE`], the manifest, and a NEW `Newtype` row `(level,
+    ///    newtype_level)`: `level` is the first of
+    ///    [`Checker::find_newtype_level`] of the source as it was
+    ///    (`new_declaration (Some source_lev)`), and the expansion level
+    ///    is the level of the pattern being typed
+    ///    (`Env.add_local_constraint source decl newtype_level`,
+    ///    compiler/ml/env.ml:1805-1810). The scope of the row does not
+    ///    change.
+    ///
+    /// Cost: the walk of step 1, the cleanup, the three passes of step 3
+    /// over `destination`, and 28 + 8 + 20 bytes of rows. (R3h;
+    /// CHECKER_REWRITE 8.9, decision 67)
+    pub fn add_gadt_equation(&mut self, source: u32, destination: Ty) -> Result<(), Clash> {
         todo!("R3h")
     }
 
     /// `local_non_recursive_abbrev env p ty` (compiler/ml/ctype.ml:
-    /// 1478-1535): `ty` does not name the type `source`, through its
-    /// children or through the expansions of the constructors it names
-    /// ([`Checker::expand_once`] in `ExpandMode::Opt`). Marks and
-    /// `g.work`; O(nodes reached). (R3h)
-    pub fn non_recursive_abbrev(&mut self, source: u32, ty: Ty) -> bool {
+    /// 1503-1536, called with `strict = false`): `Ok(false)` when `ty`
+    /// names the type `source` where the walk below looks; a clash when
+    /// an expansion the walk makes clashes (`try_expand_once` "may raise
+    /// Unify", ctype.ml:1249-1256, and only `Occur` is caught, 1536).
+    /// Each entry of the walk is a node and whether it is visited
+    /// STRICTLY; `ty` is not. Per representative:
+    ///
+    /// - a constructor of `source`: `Ok(false)` (`if Path.same p p' then
+    ///   raise Occur`, 1508);
+    /// - any other constructor: nothing when the visit is not strict and
+    ///   its type is [`TypeTable::contractive`] (1509). Otherwise its
+    ///   head is expanded ([`Checker::expand_head`] in
+    ///   [`ExpandMode::Unif`]: `try_expand_head try_expand_once`, 1515,
+    ///   not the `_opt` form) and, when that gives another node, the walk
+    ///   goes on in it with the same strictness; when it does not expand,
+    ///   each argument is visited, strictly when the visit is strict or
+    ///   the parameter of the declaration is not a variable
+    ///   ([`TypeTable::constrained`]; for a type without a row, when the
+    ///   argument itself is not a variable: `with Not_found -> args`,
+    ///   1517-1524);
+    /// - any other node: its children, strictly, when the visit is
+    ///   strict; nothing otherwise (`| _ -> if strict then`, 1525-1529).
+    ///
+    /// So with `strict = false` a tuple or an arrow at the top is not
+    /// searched, and `a := (a, int)`, `a := array<a>` and `a := box<a>`
+    /// for a data type `box` are equations, while `a := M.t<a>` for an
+    /// abstract `M.t` is none (both compilers; 8.9, decision 67).
+    ///
+    /// OCaml's `visited` is the list of the nodes on the way from `ty`,
+    /// which only stops a cycle and walks a shared node once per path.
+    /// The kernel marks: two generations, one for a node visited strictly
+    /// and one for a node visited otherwise; a strict visit of a node
+    /// that was visited otherwise visits it again (it reaches more), so a
+    /// node is visited at most twice and the answer is OCaml's. The stack
+    /// is [`Checker::frames`] above the length the call finds: an
+    /// expansion lowers and unifies, which use `g.work` and the frames
+    /// above. Cost: at most two steps a node reached, one `TypeInfo` load
+    /// a constructor, one [`Checker::expand_head`] a constructor that is
+    /// entered. (R3h; CHECKER_REWRITE 8.9, decision 67)
+    pub fn non_recursive_abbrev(&mut self, source: u32, ty: Ty) -> Result<bool, Clash> {
         todo!("R3h")
     }
 
-    /// `duplicate_type` for an equation: a copy of `ty` in which every
-    /// node is generic, sharing kept; `ty` is as it was afterwards. Made
-    /// of `g.speculate()`, `generalize(ty)` with `g.level` 0,
-    /// `copy(ty)` with `g.level` generic, and `g.restore`: the copy's
-    /// nodes are new and not on the trail (CHECKER_REWRITE 8.9, decision
-    /// 67). Three passes over `ty`. (R3h)
+    /// `duplicate_type` for an equation (`Subst.type_expr Subst.identity`,
+    /// compiler/ml/ctype.ml:496; subst.ml:132-158): a copy of `ty` in
+    /// which every node is generic, sharing kept; `ty` is as it was
+    /// afterwards. Made of parts that exist: `g.speculate()`;
+    /// `Graph::generalize(ty)` with `g.level` 0, which makes every node
+    /// of `ty` generic and logs each level it writes; [`Checker::copy`]
+    /// with `g.level` generic; `g.level` put back; `Graph::restore` of
+    /// the token, which puts the levels of `ty` back. The copy's nodes
+    /// are new and not on the trail, so they stay. It is
+    /// `Graph::generalize` and not [`Checker::generalize`]: the second
+    /// forgets the memo of constructors without arguments, which is not
+    /// on the trail (the caller has cleaned the memos already, step 2 of
+    /// [`Checker::add_gadt_equation`], so no copy is linked to a
+    /// memorized node). OCaml's copy keeps a variable and a universal
+    /// variable as the node they are (subst.ml:135-143); the destination
+    /// of an equation has no variable (`reify` ran first, or it is a
+    /// constructor without arguments), and a universal variable that is
+    /// free in it is COPIED here: no program is known that has one
+    /// (8.9, decision 67). Cost: three passes over `ty`: one step and
+    /// one trail entry (20 bytes) a node generalized, one step a node
+    /// copied, one step a level restored. (R3h)
     pub fn duplicate(&mut self, ty: Ty) -> Ty {
         todo!("R3h")
     }
 
-    /// `find_newtype_level env path` (compiler/ml/ctype.ml:2085-2091):
+    /// `find_newtype_level env path` (compiler/ml/ctype.ml:2084-2091):
     /// the `Newtype` row's `(level, expansion_level)` of a type with
-    /// `NEWTYPE`, otherwise `(scope, scope)` (`Path.binding_time`).
-    /// Compared as pairs. A type without a row: `(0, 0)`. O(1). (R3h)
+    /// [`NEWTYPE`], otherwise `(scope, scope)` (`Path.binding_time`).
+    /// Compared as pairs. A type without a row: `(0, 0)`. O(1): one row
+    /// load and at most one `Newtype` load. (R3h)
     pub fn find_newtype_level(&self, type_index: u32) -> (u32, u32) {
         todo!("R3h")
     }
@@ -3465,17 +3805,25 @@ impl Checker {
     /// have a common instance; never links, never lowers. The arms are
     /// in CHECKER_REWRITE 8.9, decision 70. Its table is
     /// [`Checker::compatible`], emptied when it returns; its stack is
-    /// `g.work`. O(pairs). (R3r)
+    /// [`Checker::frames`] above the length it finds (it expands, and an
+    /// expansion uses `g.work`): a [`FrameKind::Pair`] frame is a pair to
+    /// compare, a [`FrameKind::LeavePoly`] frame, which
+    /// [`Checker::enter_poly`] pushes below the pair of two bodies, cuts
+    /// [`Checker::scopes`] back to its `extra` when it is popped. A clash
+    /// cuts `frames` and `scopes` back to the lengths the call found
+    /// (`univar_pairs := old_univars`, ctype.ml:1677-1679). One step a
+    /// pair popped; O(pairs). (R3r)
     pub fn mcomp(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
         todo!("R3r")
     }
 
     /// One more pair for the `mcomp` in progress: what
     /// [`LocalDecls::compare`] calls for each pair of member types.
-    /// O(1) amortized: two entries of `g.work`. (R3r)
+    /// O(1) amortized: one [`FrameKind::Pair`] frame. (R3r)
     pub fn push_compatible(&mut self, left: Ty, right: Ty) {
         todo!("R3r")
     }
+
 }
 
 #[cfg(test)]
@@ -3487,6 +3835,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<FieldRef>(), 12);
         assert_eq!(std::mem::size_of::<Holder>(), 8);
         assert_eq!(std::mem::size_of::<FieldRepr>(), 16);
+        // One per equation in force (CHECKER_REWRITE 8.9, decision 67).
+        assert_eq!(std::mem::size_of::<Equation>(), 20);
     }
 
     /// O(1): push a node.
