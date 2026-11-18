@@ -975,6 +975,19 @@ struct OldSeen {
     cells: Option<Vec<crate::types::type_expr::MutabilityRef>>,
     /// [`REFS`]: the references of `Reither` fields numbered so far.
     refs: Option<Vec<crate::types::type_expr::RowFieldRef>>,
+    /// The bodies of equations: a `Tnil` prints as `nil`, with no number
+    /// and no level. The body of an equation is `duplicate_type
+    /// destination` (compiler/ml/ctype.ml:2095), `Subst.type_expr
+    /// Subst.identity`, which keeps a variable and a universal variable
+    /// and copies every other node as a generic one, `Tnil` included
+    /// (compiler/ml/subst.ml:132-158). The old checker keeps a `Tnil` as
+    /// the node it is (`subst_identity_copy_rec`, types/ctype.rs), so the
+    /// `nil` of a body is the destination's on the old side, shared by
+    /// two bodies of one destination, and a new generic node on the new
+    /// one. Nothing reads the level or the identity of a `nil`; the
+    /// difference is on record (CHECKER_REWRITE 8.6, decision 77) and
+    /// not compared.
+    bare_nil: bool,
 }
 
 /// O(printed nodes²): the form of every operand, and the text of a trace
@@ -990,6 +1003,7 @@ fn old_forms(
         nodes: Vec::new(),
         cells: plan.has(CELLS).then(Vec::new),
         refs: plan.has(REFS).then(Vec::new),
+        bare_nil: false,
     };
     for (index, &operand) in operands.iter().enumerate() {
         let _ = write!(form, "{index} = ");
@@ -1254,6 +1268,7 @@ pub(crate) fn old_equations(old: &Old, env: &Env) -> String {
         nodes: Vec::new(),
         cells: None,
         refs: None,
+        bare_nil: true,
     };
     for (name, body) in equations {
         let _ = write!(out, "= {name} := ");
@@ -1273,6 +1288,10 @@ fn old_form(
     out: &mut String,
 ) {
     let ty = ctx.repr(ty);
+    if seen.bare_nil && matches!(*ctx.get_desc(ty), TypeDesc::Tnil) {
+        out.push_str("nil");
+        return;
+    }
     if let Some(number) = seen.nodes.iter().position(|&other| other == ty) {
         let _ = write!(out, "@{number}");
         return;
@@ -1466,6 +1485,9 @@ pub(crate) struct New {
     /// [`PATTERN`]: the names of the locally abstract types `reify` made,
     /// by type index from the segment's last path on ([`FreshNames`]).
     fresh: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    /// Set while the bodies of equations are printed: a `nil` prints as
+    /// `nil`, as on the old side (`OldSeen::bare_nil`).
+    bare_nil: bool,
 }
 
 /// The supplier of a [`PATTERN`] case (`rows::LocalDecls`): a fresh
@@ -1567,6 +1589,7 @@ impl New {
             cells: Vec::new(),
             refs: Vec::new(),
             fresh: Default::default(),
+            bare_nil: false,
             open,
             segment,
             checker,
@@ -1602,6 +1625,7 @@ impl New {
             // predefined types are bare identifiers (`LOCAL`).
             if PREDEFINED.contains(&self.string(name)) {
                 self.checker.types.set_local(index as u32);
+                self.checker.types.set_predefined(index as u32);
             }
             let Some(offset) = NEWTYPES
                 .iter()
@@ -1638,34 +1662,34 @@ impl New {
 
     /// O(equations × printed nodes): [`PATTERN`]: the equations in force
     /// (`Checker::equations`), as [`old_equations`] prints them: one line
-    /// a type, sorted by name, the body an instance of the equation's
-    /// manifest made at the generic level, the bodies numbered together.
+    /// a type, sorted by name, the body the equation's own generic copy
+    /// of its destination, the bodies numbered together.
     fn equations(&mut self) -> String {
         let mut equations: Vec<(String, Ty)> = Vec::new();
         for at in 0..self.checker.equations.len() {
             let index = self.checker.equations[at].type_index;
             let info = self.checker.types.info(index);
+            // The body of an equation is a generic node of the graph
+            // (`Checker::add_gadt_equation`), not a template.
             let manifest = self.checker.types.manifests[info.manifest as usize];
-            let base = self.checker.g.nodes.len() as u32;
-            let level = std::mem::replace(&mut self.checker.g.level, GENERIC);
-            self.checker.g.instance(manifest.template);
-            self.checker.g.level = level;
-            let body = if manifest.body.0 & RELATIVE != 0 {
-                Ty(base + (manifest.body.0 & !RELATIVE))
-            } else {
-                manifest.body
-            };
-            equations.push((self.type_name(index), body));
+            equations.push((self.type_name(index), manifest.body));
         }
         equations.sort_by(|left, right| left.0.cmp(&right.0));
         let mut seen = vec![NONE; self.checker.g.nodes.len()];
         let mut count = 0;
         let mut out = String::new();
+        // As `old_equations`: no class of a reference or of a cell, and
+        // a `nil` without a number or a level.
+        let plan = self.plan;
+        self.plan.with &= !(REFS | CELLS);
+        self.bare_nil = true;
         for (name, body) in equations {
             let _ = write!(out, "= {name} := ");
             self.node_form(body, &mut seen, &mut count, &mut out);
             out.push('\n');
         }
+        self.plan = plan;
+        self.bare_nil = false;
         out
     }
 
@@ -1881,14 +1905,14 @@ impl New {
                     if node.level > level {
                         self.checker.g.nodes[ty.0 as usize].level = level;
                     }
-                } else if !self.tier.scoped_lower() {
+                } else if !self.tier.scoped_lower() || !self.plan.has(SCOPED) {
+                    // Without late types the old side lowers without an
+                    // environment (`ctype::update_level`): no scope
+                    // clashes, also when a pattern case has given `n1`
+                    // and the types `reify` made a scope.
                     self.checker.g.lower(ty, level);
                 } else {
-                    // Without late types the old side lowers without an
-                    // environment (`ctype::update_level`): no scope clashes.
-                    let lowered = self.checker.lower(ty, level);
-                    assert!(lowered.is_ok() || self.plan.has(SCOPED), "no scoped type");
-                    return lowered.map_err(|_| ());
+                    return self.checker.lower(ty, level).map_err(|_| ());
                 }
             }
             Op::Unify(left, right) => {
@@ -2010,10 +2034,18 @@ impl New {
                     return self.checker.unify(left, right).map_err(|_| ());
                 }
                 let level = self.checker.g.level;
-                return self
-                    .checker
-                    .unify_pattern(level, flags & 1 != 0, flags & 2 != 0, left, right)
-                    .map_err(|_| ());
+                // A caller that goes on after a failed pattern
+                // unification drops the environment it made (`set_state`,
+                // compiler/ml/typecore.ml:1299-1305), as the old side of
+                // the harness does: the equations it added are cut.
+                let equations = self.checker.equations.len();
+                let result =
+                    self.checker
+                        .unify_pattern(level, flags & 1 != 0, flags & 2 != 0, left, right);
+                if result.is_err() {
+                    self.checker.cut_equations(equations);
+                }
+                return result.map_err(|_| ());
             }
         }
         Ok(())
@@ -2060,6 +2092,19 @@ impl New {
     /// O(nodes reachable): print one new node.
     fn node_form(&mut self, ty: Ty, seen: &mut [u32], count: &mut u32, out: &mut String) {
         let ty = self.checker.g.repr(ty);
+        if self.bare_nil {
+            // As the old side's `OldSeen::bare_nil`.
+            let node = self.checker.g.nodes[ty.0 as usize];
+            if node.head & super::segment::EXTENDED != 0
+                && matches!(
+                    self.checker.extras.descriptors[node.a as usize],
+                    super::segment::ExtraDescriptor::Nil
+                )
+            {
+                out.push_str("nil");
+                return;
+            }
+        }
         if seen[ty.0 as usize] != NONE {
             let _ = write!(out, "@{}", seen[ty.0 as usize]);
             return;
@@ -5015,16 +5060,63 @@ mod tests {
         );
     }
 
+    /// The seeds of the explained pattern plan (20 programs of 100 cases)
+    /// that differ. The first five wait for R3s as [`UNTIL_R3S`] does (a
+    /// nullary constructor's memo while instances are traced; in
+    /// 20,000,132 it is the old side that links a copy and the new one
+    /// that makes a node, after a failed case: which memo holds the
+    /// expansion differs the same way). The last two are differences of
+    /// the old checker from OCaml, on record in CHECKER_REWRITE 8.6
+    /// (decisions 77 and 78), which the build of R3s leaves listed:
+    ///
+    /// - 11,000,046: the body of an equation keeps the `Tnil` of the
+    ///   destination on the old side (`OldSeen::bare_nil`), so an
+    ///   instance of the body shares it with the destination;
+    /// - 8,000,098: a lowering that clashes on its first pass runs again
+    ///   expanding every constructor with arguments in place
+    ///   (`| Tconstr (_, _ :: _, _) when expand -> (try link_type ty
+    ///   (!forward_try_expand_once env ty)`, compiler/ml/ctype.ml:602-604),
+    ///   and in the explaining mode what it wrote stays (decision 14):
+    ///   `po<int>` is its expansion afterwards. The old side leaves
+    ///   `po<int>`.
+    const EXPLAINED_UNTIL_R3S: [u64; 5] =
+        [10_000_129, 11_000_054, 17_000_100, 18_000_066, 20_000_132];
+    const EXPLAINED_OLD_DIFFERS: [u64; 2] = [8_000_098, 11_000_046];
+
+    /// The seeds of the pattern plan on which the new side differs from
+    /// OCaml (and from the old checker, which is right here) until slice
+    /// R3s. In each, an instance is taken after a pattern case has added
+    /// an equation and expanded a locally abstract type inside a later
+    /// case: the copy of a nullary constructor of that type links to the
+    /// node that was expanded, where OCaml makes a node. While GADT
+    /// instances are traced (an equation is in the environment),
+    /// `proper_abbrevs` gives a nullary constructor its own memo and not
+    /// `simple_abbrevs`:
+    ///
+    /// ```text
+    /// let proper_abbrevs path tl abbrev =
+    ///   if tl <> [] || !(trace_gadt_instances ()) || is_object_type path then abbrev
+    ///   else simple_abbrevs ()
+    /// ```
+    ///
+    /// (compiler/ml/ctype.ml:200-202), so `find_repr` of a later copy
+    /// finds nothing (ctype.ml:720). Tracing is R3s (section 8.11); its
+    /// build empties this list and changes nothing else of this test.
+    const UNTIL_R3S: [u64; 7] = [
+        37_000_127, 59_000_216, 70_000_293, 76_000_291, 83_000_307, 87_000_306, 88_000_320,
+    ];
+
     /// The acceptance test of pattern mode on generated cases (section
     /// 8.9): 10,000 cases of the pattern plan, each run on the
     /// operations the old checker is a judge of ([`old_judges`]), agree,
     /// in the success mode and, 2,000 of them, in the explaining mode;
     /// and the fixed cases of the observation tests above agree
     /// (equations and their direction, the arguments of one path by the
-    /// flags, `reify`, what a failure leaves, rows that clash). No seed
-    /// is pinned: the design turn had no build to run them against, so a
-    /// seed that differs is read against the OCaml lines of 8.9 before
-    /// anything is pinned (the build prompt says how).
+    /// flags, `reify`, what a failure leaves, rows that clash). The
+    /// seven seeds of [`UNTIL_R3S`] differ and are listed, each read
+    /// against OCaml; any other seed that differs is read against the
+    /// OCaml lines of 8.9 before anything is pinned (the build prompt
+    /// says how).
     ///
     /// Reaches: R3m, R3e, R3f, R3n, R3h, R3r.
     #[test]
@@ -5078,10 +5170,17 @@ mod tests {
             compare(index as u64, &program, plan, ops, Fault::None)
                 .unwrap_or_else(|e| panic!("{e}"));
         }
-        let coverage = run_cases_except(Plan::new(Tier::Full, PATTERN_PLAN), &[]);
-        assert_eq!(coverage.cases, 10_000);
+        let coverage = run_cases_except(Plan::new(Tier::Full, PATTERN_PLAN), &UNTIL_R3S);
+        assert_eq!(coverage.cases + UNTIL_R3S.len(), 10_000);
         assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
-        run_cases(Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN), 1, 20, 100);
+        let (explained, differing) =
+            run_plan(Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN), 1, 20, 100);
+        let mut known = [&EXPLAINED_UNTIL_R3S[..], &EXPLAINED_OLD_DIFFERS[..]].concat();
+        known.sort_unstable();
+        let seeds: Vec<u64> = differing.iter().map(|(seed, _)| *seed).collect();
+        let unknown = differing.iter().find(|(seed, _)| !known.contains(seed));
+        assert!(seeds == known, "{seeds:?}\n{}", unknown.map_or("", |(_, report)| report.as_str()));
+        assert_eq!(explained.cases + known.len(), 2_000);
     }
 
     /// 10,000 cases of everything on programs with polymorphic fields,

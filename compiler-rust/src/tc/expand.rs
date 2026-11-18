@@ -61,6 +61,13 @@ pub const OPEN_ROW: u8 = 64;
 /// does not say whether it is the unit being checked or one it imports,
 /// whose types are paths through a module. Read by R3h.
 pub const LOCAL: u8 = 128;
+/// [`TypeInfo::reserved`]: a predefined type (`in_pervasives`,
+/// compiler/ml/ctype.ml:1374: a bare identifier that `Predef` binds).
+/// With no manifest such a type is contractive
+/// ([`TypeTable::contractive`]). Set by the caller that owns the table,
+/// with [`TypeTable::set_predefined`] (R5a; the tests of R3h):
+/// [`TypeTable::from_segment`] does not set it. Read by R3h.
+pub const PREDEF: u8 = 1;
 /// Head flag of a constructor node whose slot 0 holds a private expansion
 /// (`Mcons (Private, ..)`, compiler/ml/btype.ml:612). Bit 4 is
 /// `segment::EXTENDED`.
@@ -81,6 +88,9 @@ pub struct TypeInfo {
     pub newtype: u32,
     pub arity: u16,
     pub flags: u8,
+    /// Bit 0 is [`PREDEF`]; the other bits are zero. The name is the
+    /// one the field had while it held nothing: rows are built by it
+    /// outside this module (benches/tc_kernel.rs).
     pub reserved: u8,
 }
 
@@ -129,6 +139,13 @@ pub struct TypeTable {
     /// without an injective parameter ([`TypeTable::injective`]). Filled
     /// by the caller that owns the table (R5a). (R3h)
     pub injective_bits: Vec<u32>,
+    /// Per row of `rows`: bit `i` is set when parameter `i` of the
+    /// declaration is not a variable (a constrained parameter: `not
+    /// (is_Tvar (repr tv))` over `type_params`, compiler/ml/ctype.ml:
+    /// 1517-1523). Empty, or shorter than `rows`, for types whose
+    /// parameters are all variables ([`TypeTable::constrained`]). Filled
+    /// by the caller that owns the table (R5a). (R3h)
+    pub constrained_bits: Vec<u32>,
 }
 
 impl TypeTable {
@@ -331,10 +348,47 @@ impl TypeTable {
         }
     }
 
+    /// Whether parameter `parameter` of the declaration of the type is
+    /// not a variable (compiler/ml/ctype.ml:1517-1523): bit `parameter`
+    /// of `constrained_bits[type_index]`; a type past the end of that
+    /// table has variables only, and a parameter past the 32nd reads as
+    /// constrained (the strict walk of
+    /// `Checker::non_recursive_abbrev` visits more, never less). O(1):
+    /// one bounds test and one load. (R3h; CHECKER_REWRITE 8.9, decision
+    /// 67)
+    #[inline]
+    pub fn constrained(&self, type_index: u32, parameter: u32) -> bool {
+        match self.constrained_bits.get(type_index as usize) {
+            Some(&bits) => parameter >= 32 || bits >> parameter & 1 != 0,
+            None => false,
+        }
+    }
+
     /// O(1): `type_index` is a bare identifier for the unit being checked
     /// ([`LOCAL`]). One bounds test and one byte written.
     pub fn set_local(&mut self, type_index: u32) {
         self.rows[type_index as usize].flags |= LOCAL;
+    }
+
+    /// O(1): `type_index` is a predefined type ([`PREDEF`]). One bounds
+    /// test and one byte written.
+    pub fn set_predefined(&mut self, type_index: u32) {
+        self.rows[type_index as usize].reserved |= PREDEF;
+    }
+
+    /// `is_contractive env p` (compiler/ml/ctype.ml:1371-1375) for a row:
+    /// a data type ([`DATATYPE`]), or a predefined type ([`PREDEF`])
+    /// without a manifest (none of [`ABBREV`], [`PRIVATE`], [`ALIAS`]).
+    /// A type without a row is not contractive (`with Not_found ->
+    /// false`): [`TypeTable::info`] answers the abstract row for it,
+    /// which has neither bit. O(1), no load. Read in pattern mode only:
+    /// by the occurrence test of a variable and by
+    /// `Checker::non_recursive_abbrev`. (R3h; CHECKER_REWRITE 8.9,
+    /// decisions 67 and 69)
+    #[inline]
+    pub fn contractive(row: TypeInfo) -> bool {
+        row.flags & DATATYPE != 0
+            || (row.reserved & PREDEF != 0 && row.flags & (ABBREV | PRIVATE | ALIAS) == 0)
     }
 
     /// `non_aliasable p decl` (compiler/ml/ctype.ml:1870-1872) for a
@@ -1267,7 +1321,11 @@ impl Checker {
     /// the walk may lower or unify, and those use the stack above it).
     /// Cost: one step and one node load per popped entry, one `TypeInfo`
     /// load per constructor above `level`, one push per child; each
-    /// expansion is one [`Checker::expand_once`] and one link. Nodes are
+    /// expansion is one [`Checker::expand_once`] and one link. A node
+    /// above `level` that is not a constructor costs one test of the
+    /// extended bit of the head already loaded; an extended one (an
+    /// object, a field, a polymorphic type, a variant, a package) one
+    /// descriptor load; a variant what [`Checker::lower_row_name`] says. Nodes are
     /// visited in OCaml's order (children pushed last first). On a clash the
     /// stack is cut back to where it was and the error is the constructor
     /// that clashed; the caller undoes or keeps the writes.
@@ -1291,7 +1349,7 @@ impl Checker {
             if node.level <= level {
                 continue;
             }
-            if node.tag() == CONSTR {
+            let node = if node.tag() == CONSTR {
                 // `level < get_level env p` (ctype.ml:590).
                 let escapes = level < self.types.info(node.a).scope;
                 if escapes || (expand && node.arity() != 0) {
@@ -1319,7 +1377,19 @@ impl Checker {
                         return Err(ty);
                     }
                 }
-            }
+                node
+            } else if node.head & super::segment::EXTENDED != 0
+                && matches!(
+                    self.extras.descriptors[node.a as usize],
+                    super::segment::ExtraDescriptor::Variant(_)
+                )
+            {
+                // A row whose name is below its scope loses the name
+                // (ctype.ml:615-621).
+                self.lower_row_name(ty, node, level)
+            } else {
+                node
+            };
             self.g.write(ty, Node { level, ..node });
             self.push_lowering_children(node);
         }
