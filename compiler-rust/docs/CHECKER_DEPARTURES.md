@@ -8762,7 +8762,7 @@ reads one.
   `instance`: OCaml has no copy there (`typecore.ml:3165` stores the copy
   of `3153`). `5f8d821f9` copies the expected type of `assert(false)` with
   the environment (`typecore.ml:3780`), where Rust used it uncopied. Of the
-  83 copy sites of `typecore.rs`, 60 copy with the environment as OCaml's
+  84 copy sites of `typecore.rs`, 61 copy with the environment as OCaml's
   `instance env` / `instance_list env` (and typetexp's `instance env`), 19
   without it as OCaml's `instance_def` and typetexp's `instance_list`, and
   4 have no OCaml counterpart and keep trunk's call. Three OCaml sites have
