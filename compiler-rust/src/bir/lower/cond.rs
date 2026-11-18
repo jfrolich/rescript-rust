@@ -256,6 +256,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// Rows R1 to R5 on the probed branches. Both free costs one deferred
     /// record, or one realization when the test has statements.
+    /// Cost: O(1) when both branches are free and no statement was pushed;
+    /// otherwise what `FreePool::realize` of the two branches costs, each
+    /// deferred record consumed once, and one conditional.
     fn finish_if(
         &mut self,
         cx: Cx,

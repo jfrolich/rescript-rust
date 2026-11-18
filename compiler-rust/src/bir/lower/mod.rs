@@ -732,6 +732,7 @@ impl<'a> State<'a> {
 impl<B: js_stmt::JsStmt> State<'_, B> {
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
     /// leaves immediately instead of allocating deferred expression records.
+    /// Cost: O(1): one leaf output, or one deferred record.
     fn probe_leaf(&mut self, cx: Cx, value: NodeId) -> Probed {
         if self.direct && !cx.probing {
             Probed::Out(self.leaf(cx, B::from_node(value)))
@@ -1173,7 +1174,8 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
         }
     }
     /// K2: C:4715 append_effect_output, where the value is kept: a comma,
-    /// or the tail alone when the head has no effect. Constant.
+    /// or the tail alone when the head has no effect. Cost: O(1), plus one
+    /// step per node released when the head has no effect.
     fn seq(&mut self, _: Cx, first: B::E, mut second: Out) -> Out {
         let first = B::node(first);
         if self.arena.node(first).flags().contains(super::NodeFlags::STRICT) {
@@ -1193,6 +1195,8 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
         self.statements.since(mark)
     }
     /// R1–R5: realize a deferred conditional from its value operands.
+    /// Cost: that of `realize_conditional`: O(1), plus `free_effect` and
+    /// `effect_output` in an effect continuation.
     fn cond(&mut self, cx: Cx, test: B::E, yes: Out, no: Out) -> Out {
         self.realize_conditional(cx, B::node(test), yes, no)
     }

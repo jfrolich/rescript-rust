@@ -661,6 +661,7 @@ impl<B: Js> FreePool<B> {
 
     /// K1/K6: C:1529 compile_expr / C:5144 compile_if_return_output; preserve
     /// the first pass's operands rather than recompiling the source subtree.
+    /// Cost: O(1): one record in a slot the pool reserved.
     pub(super) fn push(&mut self, free: Free<B>) -> FreeId {
         let id = FreeId(u32::try_from(self.nodes.len()).expect("free pool capacity"));
         self.nodes.push(Some(free));
@@ -669,6 +670,9 @@ impl<B: Js> FreePool<B> {
     /// K1/K2/K6: C:1529 compile_expr, C:4715 append_effect_output,
     /// C:5144 compile_if_return_output. Probe one combination of already-lowered
     /// children. A non-free child is realized for cx, not lowered again.
+    /// Cost: O(1) for an output, a sequence, and a conditional whose
+    /// branches are both free; otherwise what [`FreePool::realize`] of the
+    /// two branches costs, each deferred record consumed once.
     pub fn probe(&mut self, cx: Cx, input: ProbeInput<B>, emit: &mut impl Realizer<B>) -> Probed {
         self.probes += 1;
         match input {
