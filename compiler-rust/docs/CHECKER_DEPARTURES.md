@@ -8743,6 +8743,21 @@ reads one.
   environment and, only under local constraints with an instance scope,
   walk the finished copy's table once (`add_copied_gadt_instances`,
   `ctype.rs:12503`); the typecore sites of OCaml's `instance env` use them.
+- `de5bef189` makes the copy sites of `typecore.rs` OCaml's in both
+  directions. Six had been converted where OCaml copies without an
+  environment and adds nothing: the declaration parameters of a type
+  constructor (typetexp's `instance_list`, `Ctype.instance_list Env.empty`,
+  `typetexp.ml:61`, `373`), the constructor result under local constraints
+  (`typecore.ml:4739` `instance_def ty_res`), and the label result and
+  argument of a record field and of a field assignment (`typecore.ml:4315`,
+  `4319` `instance_def`). They are `instance` / `instance_list` again.
+  Where OCaml passes the environment and Rust did not: `rue`
+  (`typecore.ml:2607` `instance env ty_expected`; `rue_unify` and
+  `finish_expected` now take the environment), `object_field_use_type`
+  (`typecore.ml:2553` `instance env ty`), and the copies of the expected
+  type of a record (`typecore.ml:3044`, `3148`) and of a coercion's `rue`
+  (`instance_if_generic_in`). The tuple's copy (`instance_if_generic`) has
+  no OCaml counterpart: `typecore.ml:2940` unifies `ty_expected` itself.
 - `752db1e00` keeps these tests off the default path (see "Cost" below);
   `b46a3af77` adds nothing where an environment has an equation but no
   instance scope at its level, a state OCaml asserts against
@@ -8790,6 +8805,27 @@ first function adds the instance (`[y, 0]` under `Int`) and two later
 functions with no generalized constructor lower types through a `switch`
 (`Some(n) => [n, f(Int, n)]`, and a `ref([])` assigned in a case): both
 compilers accept it with the same JavaScript.
+
+Nineteen programs aimed at these sites agree with OCaml on the head
+before `de5bef189` and after it; none is a witness, so none is a fixture.
+The sites were corrected because the copy must do what OCaml's does.
+(a) For `rue` and the other `instance env` sites, inside a case with
+`Int: t<int>`: a function `(z: a) => z + 1` generalized in the case and
+passed through a constructor `Box(g)`, a record field `{fn: g}`, a
+coercion `(g :> a => int)`, an object field read and written
+(`o["fn"]`, `o["v"]`), a tuple `(g, 1)`, `Some(g)` against
+`Some((z: int) => z)`, a polymorphic field `{fn: g, n: y}`, a pattern
+`let Box(h) = b`, a constructor with two arguments `Box(y, 0)`, nested
+constructors `Box(Box(g))`, and the labels `{p: y, q: 0}`, returned and
+behind an `if`. (b) For the label sites: a record declared in a local
+module inside the case, `module M = { type r = {v: a} }`, built with `0`
+or `y`, its mutable field assigned `m.v = 0`, read after the case, behind
+an `if` against `1` or `2`, with a second field `w: int` built from `y`,
+and with a type parameter beside `v: a`. OCaml and Rust refuse the same
+eight with "This instance of int is ambiguous" at the same place (`Some`
+behind `if`, the object field read, `Box(y, 0)`, both label programs, and
+three of the local records), and accept the other eleven with the same
+JavaScript.
 
 Cost: accepted at the figures below. Every read of an instance set answers nothing while every set
 is empty, and a set gets its first member only from the test of
