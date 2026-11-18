@@ -8985,8 +8985,8 @@ applied, and `y` bound and returned behind an `if`; with
 `O: t<{"m": int}>`, a method of `o: a` read and `o` behind an `if`.
 `local_non_recursive_abbrev` (`ctype.ml:1533-1534`): an equation whose
 right side is an abbreviation `abbr = int` or `box<int>`, another
-locally abstract type, `box<b>` and `list<b>`. Seven of them are refused
-by both compilers, four with the ambiguity lines, and eleven accepted
+locally abstract type, `box<b>` and `list<b>`. Six of them are refused
+by both compilers, four with the ambiguity lines, and twelve accepted
 with the same JavaScript.
 
 ## Fourth round: modules, aliases and usage marks
