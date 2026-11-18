@@ -1,0 +1,1 @@
+- Checker rewrite R3, seventh skeleton: the design of pattern mode (R3h, R3r) is corrected after review and after its tests were run against a prototype; lowering a polymorphic variant row below the scope of its name drops the name in the new kernel; `instance_poly` (R3q) and the ambiguity of GADT instances (R3s) are designed.

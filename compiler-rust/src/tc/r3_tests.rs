@@ -4777,8 +4777,9 @@ fn the_newer_of_two_locally_abstract_types_is_expanded_once() {
 /// first, so `wrap<a>` with `type wrap<'x> = k<'x>` is refused and
 /// `pa<a>` with `type pa<'x> = ('x, int)` is added; below an abstract
 /// constructor the walk is still not strict, so `k<(a, int)>` is added
-/// (also run through both compilers in the seventh turn, as `T` =
-/// `M.t<(a, int)>`: both accept), unless the parameter of the
+/// (`strict || not (is_Tvar (repr tv))`, ctype.ml:1522: the declared
+/// parameter of `k` is a variable; this case was NOT run through the
+/// compilers), unless the parameter of the
 /// declaration is not a variable (`TypeTable::constrained`), or the type
 /// has no declaration and the argument is not a variable (`with
 /// Not_found -> args`).
