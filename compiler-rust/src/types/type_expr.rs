@@ -1144,6 +1144,30 @@ impl<T> TypeExprRefMap<T> {
         self.entry_count += 1;
     }
 
+    /// Call `f` on every entry, in no particular order. Cost: one step per
+    /// entry, or per handle of the span in dense storage.
+    pub(crate) fn for_each(&self, mut f: impl FnMut(TypeExprRef, &T)) {
+        match &self.storage {
+            TypeExprRefMapStorage::Inline { entries, len } => {
+                for (key, value) in entries[..*len].iter().flatten() {
+                    f(*key, value);
+                }
+            }
+            TypeExprRefMapStorage::Dense { offset, values } => {
+                for (index, value) in values.iter().enumerate() {
+                    if let Some(value) = value {
+                        f(TypeExprRef(offset + index as u32), value);
+                    }
+                }
+            }
+            TypeExprRefMapStorage::Sparse(values) => {
+                for (key, value) in values {
+                    f(*key, value);
+                }
+            }
+        }
+    }
+
     #[inline]
     pub(crate) fn get(&self, key: TypeExprRef) -> Option<&T> {
         match &self.storage {

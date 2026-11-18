@@ -184,3 +184,142 @@ module WhileRef = {
     r.contents
   }
 }
+
+module ChainEquality = {
+  type rec t<_> = Int: t<int>
+  let f = (type a, x: t<a>, y: a) =>
+    switch x {
+    | Int => {
+        let w = 1
+        ignore(y == w)
+        if true { w } else { w }
+      }
+    }
+}
+
+module ChainAnnot = {
+  type rec t<_> = Int: t<int>
+  let f = (type a, x: t<a>, y: a) =>
+    switch x {
+    | Int => {
+        let w = 1
+        let _ = [y, w]
+        w
+      }
+    }
+}
+
+module ChainAbbrev = {
+  type rec t<_> = Int: t<int>
+  type u = int
+  let f = (type a, x: t<a>, y: a) =>
+    switch x {
+    | Int => {
+        let w: u = 1
+        ignore(y == w)
+        [w]
+      }
+    }
+}
+
+module ChainOuterParam = {
+  type rec t<_> = Int: t<int>
+  let f = (type a, x: t<a>, y: a, w: int) =>
+    switch x {
+    | Int => {
+        ignore(y == w)
+        w
+      }
+    }
+}
+
+module ObjectFields = {
+  type rec t<_> = Int: t<int>
+  let f = (type a, x: t<a>, y: a, o) =>
+    switch x {
+    | Int => {
+        ignore(o["g"] == 1)
+        if true { o } else { {"f": y, "g": 0} }
+      }
+    }
+}
+
+module PolyvariantOpenMore = {
+  type rec t<_> = Int: t<int>
+  let f = (type a, x: t<a>, y: a) => {
+    let r = ref(None)
+    switch x {
+    | Int => r := Some(#A(y))
+    }
+    r
+  }
+}
+
+module LocalRecAbbrev = {
+  type rec t<_> = Int: t<int> | Lst: t<list<int>>
+  let f = (type a, x: t<a>, y: a) =>
+    switch x {
+    | Int => y + 1
+    | Lst => List.length(y)
+    }
+}
+
+module EqChain = {
+  type rec eq<'a, 'b> = Refl: eq<'a, 'a>
+  let f = (type a, e: eq<a, int>, y: a) =>
+    switch e {
+    | Refl => {
+        let w = 2
+        ignore(y == w)
+        w
+      }
+    }
+}
+
+module ChainRef = {
+  type rec t<_> = Int: t<int>
+  let f = (type a, x: t<a>, y: a) =>
+    switch x {
+    | Int => {
+        let w = ref(1)
+        ignore(y == w.contents)
+        w.contents
+      }
+    }
+}
+
+module ChainRefArray = {
+  type rec t<_> = Int: t<int>
+  let f = (type a, x: t<a>, y: a) =>
+    switch x {
+    | Int => {
+        let w = [1]
+        ignore(y == w[0]->Option.getOr(0))
+        w
+      }
+    }
+}
+
+module ChainParamFn = {
+  type rec t<_> = Int: t<int>
+  let f = (type a, x: t<a>, y: a) =>
+    switch x {
+    | Int => {
+        let g = n => n
+        ignore(g(y) == 1)
+        g
+      }
+    }
+}
+
+module ChainRefReverse = {
+  type rec t<_> = Int: t<int>
+  let f = (type a, x: t<a>, y: a) =>
+    switch x {
+    | Int => {
+        let w = ref(1)
+        ignore(w.contents == y)
+        w
+      }
+    }
+}

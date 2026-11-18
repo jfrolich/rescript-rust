@@ -12430,6 +12430,70 @@ pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     copy_type_cached(ctx, ty, &mut cache)
 }
 
+/// OCaml `instance env sch` (compiler/ml/ctype.ml:879-887): [`instance`],
+/// and when `env` has local constraints, a copy of a GADT instance joins
+/// the instance's set (`copy ?env`, ctype.ml:770-774). Without an instance
+/// scope in the unit this costs one load and one branch more than
+/// [`instance`].
+pub fn instance_in(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+    let Some(scope) = copy_instance_scope(ctx, env) else {
+        return instance(ctx, ty);
+    };
+    let ty = ctx.repr(ty);
+    if ctx.get_level(ty) != GENERIC_LEVEL {
+        return ty;
+    }
+    let mut cache = CopyCache::new(ctx);
+    let copy = copy_type_cached(ctx, ty, &mut cache);
+    add_copied_gadt_instances(ctx, scope, &cache);
+    copy
+}
+
+/// OCaml `instance_list env schl` (compiler/ml/ctype.ml:891-894): as
+/// [`instance_in`], sharing one copy session.
+pub fn instance_list_in(ctx: &TypeContext, env: &Env, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
+    let Some(scope) = copy_instance_scope(ctx, env) else {
+        return instance_list(ctx, types);
+    };
+    let mut cache = CopyCache::new(ctx);
+    let copies = types
+        .iter()
+        .map(|&ty| copy_type_cached(ctx, ty, &mut cache))
+        .collect();
+    add_copied_gadt_instances(ctx, scope, &cache);
+    copies
+}
+
+/// The GADT instance scope a copy in `env` adds to: OCaml's `gadt_env`
+/// (ctype.ml:877), an environment with local constraints, and in it an
+/// instance scope. One load and one branch when the unit has none.
+#[inline]
+fn copy_instance_scope(ctx: &TypeContext, env: &Env) -> Option<super::context::GadtScopeRef> {
+    if !ctx.has_gadt_instance_scopes() || !env.has_local_constraints() {
+        return None;
+    }
+    let scope = env.gadt_instance_scope();
+    (!scope.is_none()).then_some(scope)
+}
+
+/// `copy ?env` (compiler/ml/ctype.ml:770-774) for a finished copy session:
+/// the copy of each node in an instance set joins that set. The originals
+/// are not changed by the copy, so testing them afterwards is testing them
+/// when they were copied. Cost: per copied node, one
+/// [`TypeContext::gadt_instance_level`]; run only under local constraints
+/// with an instance scope.
+fn add_copied_gadt_instances(
+    ctx: &TypeContext,
+    scope: super::context::GadtScopeRef,
+    cache: &CopyCache<'_>,
+) {
+    cache.nodes.for_each(|original, &copy| {
+        if let Some(level) = ctx.gadt_instance_level(scope, ctx.repr(original)) {
+            ctx.add_gadt_instances(scope, level, &[copy]);
+        }
+    });
+}
+
 /// For the compiler counters (see `TypeContext::counts_this_call`): count
 /// the instantiation of `roots` that `again`, the caller called again,
 /// runs.
@@ -16072,6 +16136,34 @@ mod tests {
         // Every required label is an existing one: no lookup, one merge step each.
         assert_eq!(completed.map(|completed| completed.len()), Some(10_000));
         assert_eq!(steps, 10_000);
+    }
+
+    #[test]
+    fn instance_in_tests_each_copied_node_once_at_ten_thousand() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let mut env = Env::empty();
+        let local = Path::pident(crate::ident::Ident::create_persistent("a"));
+        env.add_local_constraint(local, reified_type_decl(7));
+        env.add_gadt_instance_level(&ctx, 7);
+        let member = ctx.new_generic_type(TypeDesc::Tvar(None));
+        let mut items = vec![member];
+        items.extend((1..9_999).map(|_| ctx.new_generic_type(TypeDesc::Tvar(None))));
+        let tuple = ctx.new_generic_type(TypeDesc::Ttuple(ctx.new_type_list(&items)));
+        ctx.add_gadt_instances(env.gadt_instance_scope(), 7, &[member]);
+        let mut copy = tuple;
+        // One lookup per copied node, one step per member: the member's
+        // own lookup comes first and adds its copy, so each later lookup
+        // scans two members.
+        let steps = crate::tc::steps::scope(|| copy = instance_in(&ctx, &env, tuple));
+        assert_eq!(steps, 1 + 2 * 9_999);
+        let copied_member = match &*ctx.borrow_desc(copy) {
+            TypeDesc::Ttuple(items) => ctx.type_list(items).get(0).expect("first item"),
+            _ => unreachable!("a tuple copies to a tuple"),
+        };
+        assert_eq!(gadt_instance_level(&ctx, &env, copied_member), Some(7));
+        // Outside local constraints the copy adds nothing and tests nothing.
+        let steps = crate::tc::steps::scope(|| copy = instance_in(&ctx, &Env::empty(), tuple));
+        assert_eq!(steps, 0);
     }
 
     #[test]
