@@ -425,8 +425,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         let keys = crate::bir::KeySpan { start: self.arena.pools.switch_keys.len() as u32, len: plan.len };
         let clauses = crate::bir::ClauseSpan { start: self.arena.pools.switch_clauses.len() as u32, len: plan.len };
-        let actions = self.arena.lists.push_iter(plan.len as usize,
-            std::iter::repeat_n(NodeId(u32::MAX), plan.len as usize));
+        let mark = self.statements.mark();
         let mut slot = 0;
         for group in 0..plan.groups.heads.len as usize {
             let mut case = self.group_indices[plan.groups.heads.start as usize + group];
@@ -434,14 +433,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.arena.pools.switch_keys.push(CaseKey::Lambda(crate::lambda::SwitchKey::Int(plan.first + case as i32)));
                 let next = self.group_indices[plan.groups.next.start as usize + case];
                 let (action, clause) = if next == super::switch::NONE {
-                    (B::stmt_node(self.switch_output_nodes[plan.output.start as usize + group].take().expect("lowered handler")),
+                    (self.switch_output_nodes[plan.output.start as usize + group].take().expect("lowered handler"),
                      self.switch_output_clauses[plan.output.start as usize + group])
                 } else {
                     let empty = self.js.list(&mut self.arena, 0, std::iter::empty());
                     let empty = self.js.block_of(&mut self.arena, empty);
-                    (B::stmt_node(empty), ClauseMeta { should_break: false, comment: None, loc: None })
+                    (empty, ClauseMeta { should_break: false, comment: None, loc: None })
                 };
-                self.arena.lists.set(actions, slot, action);
+                self.statements.push(action);
                 self.arena.pools.switch_clauses.push(clause);
                 slot += 1;
                 if next == super::switch::NONE { break; }
@@ -449,12 +448,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
         }
         assert_eq!(slot, plan.len as usize);
+        let actions = self.statements.take_actions(&mut self.js, &mut self.arena, self.statements.since(mark));
         let header = self.arena.switch_record(crate::bir::SwitchRecord {
             constants: plan.len, keys, clauses, has_default: false, consts_full: false,
             blocks_full: false, dispatch: crate::lambda::SwitchDispatch::Direct,
         });
         let scrutinee = self.js.var(&mut self.arena, exit);
-        let statement = self.js.switch(&mut self.arena, scrutinee, B::list_from(actions), header, false);
+        let statement = self.js.switch(&mut self.arena, scrutinee, actions, header, false);
         self.statements.push(statement);
     }
 

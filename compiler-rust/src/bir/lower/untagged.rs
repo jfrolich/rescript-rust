@@ -948,10 +948,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let default = self.untagged_storage.outputs.get(&p.outputs, base);
         let has_default = !value_switch || self.statements.has_statements(default.run);
         let action_count = count + usize::from(has_default);
-        let actions = self.arena.lists.push_iter(
-            action_count,
-            std::iter::repeat_n(NodeId(u32::MAX), action_count),
-        );
+        // The clause runs are taken below while the actions are assembled,
+        // so the actions go into holes reserved above them, one per action.
+        let mark = self.statements.mark();
+        for _ in 0..action_count {
+            self.statements.reserve();
+        }
         let clauses = crate::bir::ClauseSpan {
             start: self.arena.pools.switch_clauses.len() as u32,
             len: action_count as u32,
@@ -980,13 +982,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             if let Clause::FallsThrough(Some(arm)) = clause {
                 meta.loc = self.switch_location(self.source.lists.get(p.operands)[*arm as usize]);
             }
-            self.arena.lists.set(actions, i, B::stmt_node(body));
+            self.statements.fill(mark.start + i as u32, body);
             self.arena.pools.switch_clauses.push(meta);
         }
         if has_default {
             let list = self.statements.take_list(&mut self.js, &mut self.arena, default.run);
             let body = self.js.block_of(&mut self.arena, list);
-            self.arena.lists.set(actions, count, B::stmt_node(body));
+            self.statements.fill(mark.start + count as u32, body);
             self.arena.pools.switch_clauses.push(ClauseMeta {
                 should_break: false,
                 comment: None,
@@ -995,6 +997,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         } else {
             self.statements.kill(default.run);
         }
+        let actions = self.statements.take_actions(&mut self.js, &mut self.arena, self.statements.since(mark));
         p.outputs.len = base as u32;
         let mut scrutinee = B::from_node(self.untagged_scrutinee(p));
         if typeof_ {
@@ -1009,7 +1012,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             has_default,
             dispatch: SwitchDispatch::Direct,
         });
-        let statement = self.js.switch(&mut self.arena, scrutinee, B::list_from(actions), header, true);
+        let statement = self.js.switch(&mut self.arena, scrutinee, actions, header, true);
         self.statements.fill(start.start, statement);
         self.untagged_storage.outputs.push(
             &mut p.outputs,

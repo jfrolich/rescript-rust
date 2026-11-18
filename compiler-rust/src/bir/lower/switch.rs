@@ -768,11 +768,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 start: self.arena.pools.switch_clauses.len() as u32,
                 len: 0,
             };
-            let capacity = source_keys.len as usize + usize::from(plan.default.is_some());
-            let actions = self
-                .arena
-                .lists
-                .push_iter(capacity, std::iter::repeat_n(NodeId(u32::MAX), capacity));
+            let mark = self.statements.mark();
             for group in 0..plan.groups.heads.len as usize {
                 let mut case = self.group_indices[plan.groups.heads.start as usize + group];
                 loop {
@@ -781,12 +777,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     let next = self.group_indices[plan.groups.next.start as usize + case];
                     let (action, clause) = if next == NONE {
                         (
-                            B::stmt_node(self.switch_output_nodes[plan.output.start as usize + group].take().expect("lowered switch body")),
+                            self.switch_output_nodes[plan.output.start as usize + group].take().expect("lowered switch body"),
                             self.switch_output_clauses[plan.output.start as usize + group],
                         )
                     } else {
                         let empty = self.js.list(&mut self.arena, 0, std::iter::empty());
-                        let action = B::stmt_node(self.js.block_of(&mut self.arena, empty));
+                        let action = self.js.block_of(&mut self.arena, empty);
                         let source = self.source.lists.get(plan.operands)[case];
                         let loc = self.switch_location(source);
                         (
@@ -798,7 +794,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             },
                         )
                     };
-                    self.arena.lists.set(actions, clauses.len as usize, action);
+                    self.statements.push(action);
                     self.arena.pools.switch_clauses.push(clause);
                     clauses.len += 1;
                     if next == NONE {
@@ -817,7 +813,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     self.js.release_stmt(&mut self.arena, body);
                     has_default = false;
                 } else {
-                    self.arena.lists.set(actions, clauses.len as usize, B::stmt_node(body));
+                    self.statements.push(body);
                     self.arena.pools.switch_clauses.push(
                         self.switch_output_clauses
                             [(plan.output.start + plan.output.len - 1) as usize],
@@ -825,7 +821,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     clauses.len += 1;
                 }
             }
-            self.arena.lists.truncate(actions, clauses.len as usize);
+            let actions = self.statements.take_actions(&mut self.js, &mut self.arena, self.statements.since(mark));
             let header = self.arena.switch_record(crate::bir::SwitchRecord {
                 constants: keys.len,
                 keys,
@@ -838,7 +834,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let statement = self.js.switch(
                 &mut self.arena,
                 scrutinee,
-                B::list_from(actions),
+                actions,
                 header,
                 plan.kind != Kind::Integer,
             );

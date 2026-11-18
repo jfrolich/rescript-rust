@@ -499,6 +499,17 @@ impl<B: JsStmt> StatementStack<B> {
     /// (`close::decide`: one more step per statement) when the arena counts
     /// JavaScript occurrences.
     pub fn take_list(&mut self, js: &mut B, a: &mut Pools, span: Span) -> B::L {
+        let list = self.take_actions(js, a, span);
+        // T6x-b: `close.rs` takes the interface; until then the pool list.
+        self.close(a, B::list_id(list));
+        list
+    }
+    /// The actions of a switch, pushed or filled above the runs
+    /// they were made from, as one list: `take_list` without the
+    /// close. An action is a block, and `close::decide` reads
+    /// `return`s and declarations only. One step per slot of the
+    /// run and per statement, each moved once.
+    pub(super) fn take_actions(&mut self, js: &mut B, a: &mut Pools, span: Span) -> B::L {
         if span.len == 0 {
             // An empty run holds no slot. Its start is above the top when
             // the run before it was the top and has been taken.
@@ -509,8 +520,6 @@ impl<B: JsStmt> StatementStack<B> {
         let list = js.list(a, count as u32, self.take_run(span));
         self.copied += count;
         self.kill(span);
-        // T6x-b: `close.rs` takes the interface; until then the pool list.
-        self.close(a, B::list_id(list));
         list
     }
     /// THREE_TREES 11.4, step A: decide the declarations of a copied list.
