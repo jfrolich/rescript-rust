@@ -8970,6 +8970,25 @@ files from the OCaml compiler) and
 neighbours). Cost: one local-constraint test and one branch per
 application.
 
+The three other tracing wrappers stay open; 18 programs aimed at them
+agree with OCaml on this head, and on trunk all but one (a tuple-pattern
+parameter applied in the case, refused by OCaml for the same cause as
+above and now the fixture `gadt_instance_application_parameter_pattern`).
+`unify_var`'s wrapper (`ctype.ml:2759-2766`): a case's pattern variable,
+a tuple pattern of the scrutinee, a coercion `(y :> int)`, a `let module`
+and a `let` annotated with `a`, each inside the case. `expand_head_trace`
+(`ctype.ml:2781-2784`, used by `filter_arrow_n`, `filter_method`,
+`filter_method_field` and `filter_object_field_for_write`): with
+`Fn: t<int => int>`, a function literal against the result type `a`
+annotated and through a `let h: a`, against `y` behind an `if`, `y`
+applied, and `y` bound and returned behind an `if`; with
+`O: t<{"m": int}>`, a method of `o: a` read and `o` behind an `if`.
+`local_non_recursive_abbrev` (`ctype.ml:1533-1534`): an equation whose
+right side is an abbreviation `abbr = int` or `box<int>`, another
+locally abstract type, `box<b>` and `list<b>`. Seven of them are refused
+by both compilers, four with the ambiguity lines, and eleven accepted
+with the same JavaScript.
+
 ## Fourth round: modules, aliases and usage marks
 
 ### Scope, commands and calibration
