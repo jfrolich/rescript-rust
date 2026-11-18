@@ -12440,22 +12440,8 @@ pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
 /// This replaces all generic type variables with fresh ones,
 /// creating a new instance of a polymorphic type.
 pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
-    instance_copy(ctx, None, ty)
-}
-
-/// OCaml `instance env sch` (compiler/ml/ctype.ml:879-887): [`instance`],
-/// and when `env` has local constraints, a copy of a GADT instance joins
-/// the instance's set (`copy ?env`, ctype.ml:770-774). Beyond
-/// [`instance`], a copy made in a unit without an instance scope costs one
-/// load and one branch.
-pub fn instance_in(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
-    instance_copy(ctx, Some(env), ty)
-}
-
-#[inline(always)]
-fn instance_copy(ctx: &TypeContext, env: Option<&Env>, ty: TypeExprRef) -> TypeExprRef {
     if ctx.counts_this_call() {
-        return counted_instance(ctx, [ty], || instance_copy(ctx, env, ty));
+        return counted_instance(ctx, [ty], || instance(ctx, ty));
     }
     let ty = ctx.repr(ty);
     // OCaml compiler/ml/ctype.ml:762: a non-generic root needs no copy session.
@@ -12464,21 +12450,68 @@ fn instance_copy(ctx: &TypeContext, env: Option<&Env>, ty: TypeExprRef) -> TypeE
         return ty;
     }
     let mut cache = CopyCache::new(ctx);
-    let copy = copy_type_cached(ctx, ty, &mut cache);
-    if let Some(env) = env
-        && ctx.has_gadt_instance_scopes()
-    {
-        add_copied_gadt_instances(ctx, env, &cache);
+    copy_type_cached(ctx, ty, &mut cache)
+}
+
+/// OCaml `instance env sch` (compiler/ml/ctype.ml:879-887): [`instance`],
+/// and in an environment with an instance scope, [`instance_with_gadt_instances`].
+/// The test is one load and one branch in a unit without an instance scope.
+pub fn instance_in(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+    if has_gadt_instance_scope(ctx, env) {
+        instance_with_gadt_instances(ctx, env, ty)
+    } else {
+        instance(ctx, ty)
     }
-    copy
 }
 
 /// OCaml `instance_list env schl` (compiler/ml/ctype.ml:891-894): as
 /// [`instance_in`], sharing one copy session.
 pub fn instance_list_in(ctx: &TypeContext, env: &Env, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
+    if has_gadt_instance_scope(ctx, env) {
+        instance_list_with_gadt_instances(ctx, env, types)
+    } else {
+        instance_list(ctx, types)
+    }
+}
+
+/// The guard of every GADT instance test outside unification: `env`, the
+/// environment at hand, has an instance scope (it is inside a `switch` or
+/// function whose patterns may add equations). The unit's flag is tested
+/// first: one load and one branch in a unit without an instance scope.
+fn has_gadt_instance_scope(ctx: &TypeContext, env: &Env) -> bool {
+    ctx.has_gadt_instance_scopes() && !env.gadt_instance_scope().is_none()
+}
+
+/// [`instance`] in an environment with an instance scope: `copy ?env`
+/// (compiler/ml/ctype.ml:770-774) adds the copy of each instance to its
+/// set when `env` has local constraints. Cost: the copy, then per copied
+/// node one [`TypeContext::gadt_instance_level`].
+#[inline(never)]
+fn instance_with_gadt_instances(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, [ty], || instance_with_gadt_instances(ctx, env, ty));
+    }
+    let ty = ctx.repr(ty);
+    if ctx.get_level(ty) != GENERIC_LEVEL {
+        return ty;
+    }
+    let mut cache = CopyCache::new(ctx);
+    let copy = copy_type_cached(ctx, ty, &mut cache);
+    add_copied_gadt_instances(ctx, env, &cache);
+    copy
+}
+
+/// [`instance_list`] in an environment with an instance scope, as
+/// [`instance_with_gadt_instances`].
+#[inline(never)]
+fn instance_list_with_gadt_instances(
+    ctx: &TypeContext,
+    env: &Env,
+    types: &[TypeExprRef],
+) -> Vec<TypeExprRef> {
     if ctx.counts_this_call() {
         return counted_instance(ctx, types.iter().copied(), || {
-            instance_list_in(ctx, env, types)
+            instance_list_with_gadt_instances(ctx, env, types)
         });
     }
     let mut cache = CopyCache::new(ctx);
@@ -12486,9 +12519,7 @@ pub fn instance_list_in(ctx: &TypeContext, env: &Env, types: &[TypeExprRef]) -> 
         .iter()
         .map(|&ty| copy_type_cached(ctx, ty, &mut cache))
         .collect();
-    if ctx.has_gadt_instance_scopes() {
-        add_copied_gadt_instances(ctx, env, &cache);
-    }
+    add_copied_gadt_instances(ctx, env, &cache);
     copies
 }
 
@@ -12498,13 +12529,11 @@ pub fn instance_list_in(ctx: &TypeContext, env: &Env, types: &[TypeExprRef]) -> 
 /// not changed by the copy, so testing them afterwards is testing them when
 /// they were copied. Cost: per copied node, one
 /// [`TypeContext::gadt_instance_level`].
-#[cold]
-#[inline(never)]
 fn add_copied_gadt_instances(ctx: &TypeContext, env: &Env, cache: &CopyCache<'_>) {
-    let scope = env.gadt_instance_scope();
-    if !env.has_local_constraints() || scope.is_none() {
+    if !env.has_local_constraints() {
         return;
     }
+    let scope = env.gadt_instance_scope();
     cache.nodes.for_each(|original, &copy| {
         if let Some(level) = ctx.gadt_instance_level(scope, ctx.repr(original)) {
             ctx.add_gadt_instances(scope, level, &[copy]);
