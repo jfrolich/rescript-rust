@@ -607,6 +607,7 @@ fn is_newtype(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
 /// before. `None` when the arm does not apply or the type cannot be
 /// expanded, and unification goes on as `unify2`. One call is four
 /// declaration lookups and one expansion; only under local constraints.
+#[inline(never)]
 fn unify_newtypes(
     ctx: &TypeContext,
     state: &mut UnifyState,
