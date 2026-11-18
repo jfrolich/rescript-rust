@@ -323,11 +323,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// child is a block (K3: C: compile_effect_block_output). A handler
     /// of a table with several becomes its clause: one step per statement of
     /// the handler, copied to its list once.
-    pub(super) fn catch_child(&mut self, cx: Cx, frame: Catch, index: usize, child: Probed) -> Probed {
+    pub(super) fn catch_child(&mut self, cx: Cx, frame: Catch, index: usize, child: Probed<B>) -> Probed<B> {
         let mut out = self.realize(cx, child);
         if let Some(value) = out.value.take() {
             debug_assert!(matches!(cx.cont, Cont::Effect(Tail::No)));
-            self.drop_pure_effect(value);
+            self.drop_pure_effect(B::node(value));
         }
         let run = self.statements.trim(Span { start: out.stmts.start, len: 0 });
         let finished = out.finished;
@@ -361,7 +361,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// `if_statement` over its statements; one step per handler of a table
     /// with several. A finished body drops what follows it, releasing each
     /// dropped statement once.
-    pub(super) fn finish_catch(&mut self, cx: Cx, frame: Catch) -> Probed {
+    pub(super) fn finish_catch(&mut self, cx: Cx, frame: Catch) -> Probed<B> {
         let plan = self.catches[frame.0 as usize].take().expect("live catch frame");
         while self.catches.last().is_some_and(Option::is_none) {
             self.catches.pop();
@@ -392,13 +392,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             // C: compile_staticcatch_expr: never finished.
             Cont::Value(_) => Out {
                 stmts,
-                value: Some(B::node(self.js.var(&mut self.arena, plan.target.expect("value catch result")))),
+                value: Some(self.js.var(&mut self.arena, plan.target.expect("value catch result"))),
                 finished: Finished::False,
             },
             // K2: C: compile_effect_output keeps `undefined` as the value.
             Cont::Effect(Tail::No) => Out {
                 stmts,
-                value: Some(B::node(self.js.undefined(&mut self.arena, false))),
+                value: Some(self.js.undefined(&mut self.arena, false)),
                 finished,
             },
             _ => Out { stmts, value: None, finished },
@@ -512,7 +512,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// As each argument completes. With several arguments the run moves to
     /// the argument's slot, so that the output is in source order: one step
     /// per statement of the argument.
-    pub(super) fn exit_child(&mut self, cx: Cx, exit: &Exit, index: usize, child: Probed) -> Probed {
+    pub(super) fn exit_child(&mut self, cx: Cx, exit: &Exit, index: usize, child: Probed<B>) -> Probed<B> {
         let out = self.realize(cx, child);
         debug_assert!(out.value.is_none());
         if exit.kept > 1 {
@@ -537,8 +537,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         exit: Exit,
-        children: impl Iterator<Item = Probed>,
-    ) -> Probed {
+        children: impl Iterator<Item = Probed<B>>,
+    ) -> Probed<B> {
         // Children arrive last argument first: the last match is the first
         // finished argument in source order.
         let mut finished_at = None;
@@ -574,7 +574,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         let value = match cx.cont {
             Cont::Value(_) | Cont::Effect(Tail::No) => {
-                Some(B::node(self.js.undefined(&mut self.arena, false)))
+                Some(self.js.undefined(&mut self.arena, false))
             }
             Cont::Declare(kind, var) => {
                 if finished != Finished::True {
@@ -1308,7 +1308,7 @@ mod tests {
             let output = s.probe(Cx::effect(), root).unwrap();
             let output = s.realize(Cx::effect(), output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
-            if let Some(value) = output.value { s.arena.release(value); }
+            if let Some(value) = output.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(output.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

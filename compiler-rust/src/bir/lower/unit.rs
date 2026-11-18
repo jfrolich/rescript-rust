@@ -33,7 +33,7 @@ pub(super) fn lower(
     if locations.is_some() {
         state.source_functions = u32::try_from(state.arena.vars.funcs.len()).expect("function header count");
     }
-    let mut accumulated: Option<Out> = None;
+    let mut accumulated: Option<Out<_>> = None;
     loop {
         let view = state.source.view(node);
         let record_candidate = matches!(view, View::Let { value: Some(value), .. }
@@ -67,7 +67,7 @@ pub(super) fn lower(
         let mut out = state.realize(cx, probed);
         if next.is_some() {
             if let Some(value) = out.value.take() {
-                state.drop_pure_effect(value);
+                state.drop_pure_effect(<crate::bir::j::rows::Rows as js::Js>::node(value));
                 out.stmts = state.statements.since(Span { start: out.stmts.start, len: 0 });
             }
         }
@@ -81,15 +81,17 @@ pub(super) fn lower(
                 out = state.append_outputs(out, tail, None);
                 out.value = value;
                 if let Some(first) = accumulated.take() {
-                    let value = out.value;
+                    let value = out.value.take();
                     out = state.append_outputs(first, out, value);
                 }
                 return Ok(state.complete_unit(Probed::Out(out)));
             }
         }
-        let value = out.value;
         let out = match accumulated.take() {
-            Some(first) => state.append_outputs(first, out, value),
+            Some(first) => {
+                let value = out.value.take();
+                state.append_outputs(first, out, value)
+            }
             None => out,
         };
         if let Some(next) = next {

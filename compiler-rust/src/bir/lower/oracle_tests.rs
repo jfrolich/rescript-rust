@@ -247,7 +247,7 @@ fn strict_and_delay_safe_flags_use_variable_facts() {
     let mut state = State::new(input);
     let probed = state.probe(Cx::value(), source_root).unwrap();
     let out = state.realize(Cx::value(), probed);
-    let flags = state.arena.node(out.value.unwrap()).flags();
+    let flags = state.arena.node(crate::bir::lower::out::row(out.value.unwrap())).flags();
     assert!(flags.contains(crate::bir::NodeFlags::PURE));
     assert!(flags.contains(crate::bir::NodeFlags::STRICT));
     assert!(!flags.contains(crate::bir::NodeFlags::DELAY_SAFE));
@@ -1444,7 +1444,8 @@ fn a_copied_function_doubles_the_legacy_count_of_the_variables_declared_inside_i
     let mut state = State::new(input);
     let probed = state.probe(Cx::value(), source_root).unwrap();
     let out = state.realize(Cx::value(), probed);
-    let copy = crate::bir::j::logic::copy_j(&mut state.arena, out.value.unwrap());
+    let row = crate::bir::lower::out::row_of(&state.arena, out.value.as_ref().unwrap());
+    let copy = crate::bir::j::logic::copy_j(&mut state.arena, row);
     let statement = state.arena.new_node(View::SExp { value: copy }, 0);
     state.statements.push(<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::stmt_from_node(statement));
     let lowered = state.complete(Cx::value(), Probed::Out(out));
@@ -1569,7 +1570,7 @@ fn cached_external_templates_keep_fresh_binders_and_import_once() {
             assert_eq!(state.inline_templates.len(), 1); assert_eq!(state.inline_param_stats.len(), width as usize);
             assert!(state.inline_foreign.is_empty() && state.inline_engine.stats.renames.is_empty());
             for node in state.statements.statements(out.stmts) { state.arena.release(node); }
-            if let Some(value) = out.value { state.arena.release(value); }
+            if let Some(value) = out.value { state.arena.release(crate::bir::lower::out::row(value)); }
             state.statements.kill(out.stmts);
         }
     }
