@@ -6075,8 +6075,9 @@ skeletons of R3q and R3s: 5 to 10.
     changed there).
 
 **Corrections after the review of R3h** (pull request 356). Item 1 is
-decided here and built by R3r; 2 to 4 are owed by the next design
-turn; 5 records what the builder changed in the skeleton's words.
+decided here and built by R3r; 2 to 4 and 6 are owed by the next
+design turn; 5 records what the builder changed in the skeleton's
+words.
 
 1. `duplicate` is total. As built it is `Graph::generalize` at level 0
    and a copy, and `Graph::generalize` stops at a node that is generic
@@ -6123,6 +6124,22 @@ turn; 5 records what the builder changed in the skeleton's words.
    `push_children` (`#[inline(always)]`, kept by measurement: out of
    line it cost `unify_ground3` and `unify_datatype2` 28 instructions
    an operation).
+6. Owed by the next design turn, found in the final review:
+   `non_recursive_abbrev` enters a constructor again when it meets it
+   strictly after a visit that was not strict, also when the first
+   visit is still on the path. OCaml's `visited` is the list of the
+   path and holds a node whatever the strictness it was met with
+   (`List.memq ty visited`, ctype.ml:1505, 1511): the second meeting
+   is skipped. The two differ only on a type that reaches itself: a
+   constructor `c` that is not contractive, with a first parameter
+   that is not constrained and a second that is, whose node is `c<(p),
+   (itself)>` and `p` the source: OCaml's walk does not enter the
+   first tuple (not strict) and skips the node below the second, and
+   answers "not recursive"; the walk as built enters the node again
+   strictly and finds `p`. Pattern mode alone makes such a type. Build
+   the case by hand and follow OCaml (a mark for "on the path", taken
+   off when the node's frame is left), or say why the kernel's answer
+   is kept.
 
 ### 8.10 `instance_poly` and `instance_label` (R3q)
 
