@@ -606,14 +606,14 @@ fn is_newtype(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
 /// level is expanded, once, and unified with the other; no level is lowered
 /// before. `None` when the arm does not apply or the type cannot be
 /// expanded, and unification goes on as `unify2`. One call is four
-/// declaration lookups and one expansion.
+/// declaration lookups and one expansion; only under local constraints.
 fn unify_newtypes(
     ctx: &TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
 ) -> Option<TypeResult<()>> {
-    let env = state.env().filter(|env| env.has_local_constraints())?;
+    let env = state.env()?;
     let nullary_path = |ty: TypeExprRef| match &*ctx.borrow_desc(ty) {
         TypeDesc::Tconstr { path, args, abbrev } if args.is_empty() => Some((*path, *abbrev)),
         _ => None,
@@ -629,8 +629,9 @@ fn unify_newtypes(
     }
     let expand_first = find_newtype_level(ctx, env, &p1) >= find_newtype_level(ctx, env, &p2);
     let expanded = if expand_first { t1 } else { t2 };
-    match try_expand_head_traced(ctx, env, expanded, ExpandHeadMode::Unify) {
-        Ok(Some(expansion)) => {
+    let mut ambiguous = None;
+    match try_expand_head_with_mode(ctx, env, expanded, ExpandHeadMode::Unify, &mut ambiguous) {
+        Some(expansion) => {
             let expansion = ctx.repr(expansion);
             Some(if expand_first {
                 unify(ctx, state, expansion, t2)
@@ -638,14 +639,7 @@ fn unify_newtypes(
                 unify(ctx, state, t1, expansion)
             })
         }
-        Ok(None) => None,
-        Err(ambiguous) => {
-            let level = ctx.get_level(ambiguous);
-            Some(Err(TypeError::Unify(vec![(
-                ambiguous,
-                new_var_at_level(ctx, level),
-            )])))
-        }
+        None => ambiguous.map(|ambiguous| Err(ambiguous_instance(ctx, ambiguous))),
     }
 }
 
@@ -875,7 +869,7 @@ fn expands_to_datatype(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
         return true;
     }
     drop(decl);
-    match try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General) {
+    match try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General, &mut None) {
         Some(expanded) => expands_to_datatype(ctx, env, expanded),
         None => false,
     }
@@ -4745,28 +4739,20 @@ enum ExpandHeadMode {
     Optimize,
 }
 
+/// OCaml `expand_abbrev_gen` (compiler/ml/ctype.ml:1190-1229) of one head.
+/// While GADT instances are traced, an expansion of `ty` known only at an
+/// instance level above `ty`'s level is OCaml's `Unify [(ty, newvar2
+/// level)]` (ctype.ml:1225): it returns `None` with `ty` in `ambiguous`,
+/// having changed nothing. A caller that expands safely
+/// (`try_expand_safe`, ctype.ml:1260-1265) takes that as a type that cannot
+/// be expanded.
 fn try_expand_head_with_mode(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     mode: ExpandHeadMode,
+    ambiguous: &mut Option<TypeExprRef>,
 ) -> Option<TypeExprRef> {
-    // OCaml `try_expand_safe` (ctype.ml:1260-1265): an ambiguous GADT
-    // instance is a type that cannot be expanded. It is found before the
-    // expansion changes anything, so there is nothing to backtrack.
-    try_expand_head_traced(ctx, env, ty, mode).unwrap_or(None)
-}
-
-/// OCaml `expand_abbrev_gen` (compiler/ml/ctype.ml:1190-1229) of one head.
-/// `Err(ty)` is its `Unify [(ty, newvar2 level)]` (ctype.ml:1225): while
-/// GADT instances are traced, the expansion of `ty` is known only at an
-/// instance level above `ty`'s own level.
-fn try_expand_head_traced(
-    ctx: &TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-    mode: ExpandHeadMode,
-) -> Result<Option<TypeExprRef>, TypeExprRef> {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
@@ -4805,50 +4791,34 @@ fn try_expand_head_traced(
                 }
                 // The cached expansion is returned even when it is `ty`
                 // itself (ctype.ml:1360-1362, PR#7324).
-                return Ok(Some(ctx.repr(cached)));
+                return Some(ctx.repr(cached));
             }
 
-            // `expansion_level` is the expansion level of the declaration
-            // (`Env.find_type_expansion`'s `lv`, env.ml:902): set for a
-            // GADT equation.
-            let expand_with_subst = |params: &[TypeExprRef],
-                                     manifest: TypeExprRef,
-                                     expansion_level: Option<i32>|
-             -> Result<TypeExprRef, TypeExprRef> {
-                // ctype.ml:1218-1227: the highest level of the equation and
-                // of an instance set holding `ty`. The test is made before
-                // `subst` here: it reads only `ty`, which `subst` leaves as
-                // it is.
-                let instance_level = if ctx.trace_gadt_instances() {
-                    expansion_level.max(gadt_instance_level(ctx, env, ty))
-                } else {
-                    None
+            // `expansion_level` is the declaration's expansion level
+            // (`Env.find_type_expansion`'s `lv`, env.ml:902), set for a GADT
+            // equation.
+            let mut expand_with_subst = |params: &[TypeExprRef],
+                                         manifest: TypeExprRef,
+                                         expansion_level: Option<i32>|
+             -> Option<TypeExprRef> {
+                let subst = || {
+                    subst_with_memo(
+                        ctx,
+                        env,
+                        ty,
+                        lookup_abbrev,
+                        private_flag,
+                        AbbrevDefinition {
+                            params: params.into(),
+                            body: manifest,
+                        },
+                        ctx.type_list(args),
+                    )
                 };
-                if let Some(instance_level) = instance_level
-                    && ctx.get_level(ty) < instance_level
-                {
-                    return Err(ty);
+                if ctx.trace_gadt_instances() {
+                    return subst_gadt_instance(ctx, env, ty, expansion_level, ambiguous, subst);
                 }
-                let expanded = subst_with_memo(
-                    ctx,
-                    env,
-                    ty,
-                    lookup_abbrev,
-                    private_flag,
-                    AbbrevDefinition {
-                        params: params.into(),
-                        body: manifest,
-                    },
-                    ctx.type_list(args),
-                );
-                if let Some(instance_level) = instance_level {
-                    ctx.add_gadt_instances(
-                        env.gadt_instance_scope(),
-                        instance_level,
-                        &[ty, expanded],
-                    );
-                }
-                Ok(expanded)
+                Some(subst())
             };
 
             let can_expand_decl_manifest =
@@ -4871,7 +4841,7 @@ fn try_expand_head_traced(
                     if params.len() == args.len() {
                         let expansion_level =
                             constraint_decl.type_newtype_level.map(|(_, level)| level);
-                        return expand_with_subst(params, manifest, expansion_level).map(Some);
+                        return expand_with_subst(params, manifest, expansion_level);
                     }
                 }
             }
@@ -4885,7 +4855,7 @@ fn try_expand_head_traced(
                     .find_type_by_ident(id)
                     .is_ok_and(|decl| decl.type_manifest.is_none())
             {
-                return Ok(None);
+                return None;
             }
 
             // Qualified heads: the outcome depends only on the module scope,
@@ -4916,11 +4886,11 @@ fn try_expand_head_traced(
                         expansion
                     }
                 };
-                return Ok(match expansion {
-                    // A declaration reached through a module has no
-                    // newtype level, hence no expansion level.
+                return match expansion {
+                    // A declaration reached through a module has no newtype
+                    // level, hence no expansion level.
                     PdotExpansion::Expand { params, manifest } => {
-                        expand_with_subst(&params, manifest, None).map(Some)?
+                        expand_with_subst(&params, manifest, None)
                     }
                     PdotExpansion::Rewrite(target) => {
                         let level = ctx.get_level(ty);
@@ -4933,7 +4903,7 @@ fn try_expand_head_traced(
                         Some(rewritten)
                     }
                     PdotExpansion::None => None,
-                });
+                };
             }
 
             // 1. Prefer environment lookup when the declaration matches the
@@ -5013,8 +4983,7 @@ fn try_expand_head_traced(
                             if params.len() == args.len() {
                                 let expansion_level =
                                     env_decl.type_newtype_level.map(|(_, level)| level);
-                                return expand_with_subst(params, manifest, expansion_level)
-                                    .map(Some);
+                                return expand_with_subst(params, manifest, expansion_level);
                             } else {
                                 forbid_fallback_manifest_expansion = true;
                             }
@@ -5100,14 +5069,14 @@ fn try_expand_head_traced(
                                 abbrev: orig_abbrev,
                             });
                             ctx.set_level(rewritten, level);
-                            return Ok(Some(rewritten));
+                            return Some(rewritten);
                         }
                     }
                     if can_expand_decl_manifest(&decl, manifest) {
                         let params = &decl.type_params;
                         if params.len() == args.len() {
                             let expansion_level = decl.type_newtype_level.map(|(_, level)| level);
-                            return expand_with_subst(params, manifest, expansion_level).map(Some);
+                            return expand_with_subst(params, manifest, expansion_level);
                         } else {
                             forbid_fallback_manifest_expansion = true;
                         }
@@ -5122,7 +5091,7 @@ fn try_expand_head_traced(
             // `expand_head_unif`, so keep unification on the same path instead
             // of recovering later with Rust-only alias fallback work.
             if local_env_type_is_authoritative && forbid_fallback_manifest_expansion {
-                return Ok(None);
+                return None;
             }
             {
                 let path_norm = match mode {
@@ -5139,18 +5108,48 @@ fn try_expand_head_traced(
                         abbrev: orig_abbrev,
                     });
                     ctx.set_level(normalized, level);
-                    Ok(Some(normalized))
+                    Some(normalized)
                 } else {
-                    Ok(None)
+                    None
                 }
             }
         }
-        _ => Ok(None),
+        _ => None,
     }
 }
 
+/// The traced end of `expand_abbrev_gen` (compiler/ml/ctype.ml:1215-1227):
+/// the highest of the declaration's expansion level and the level of an
+/// instance set holding `ty`; below it, `ty` is ambiguous and is not
+/// expanded; otherwise `ty` and its expansion join that set. The test is
+/// made before `subst`, which leaves `ty` as it is. Cost: one
+/// [`gadt_instance_level`] and the substitution.
+#[cold]
+#[inline(never)]
+fn subst_gadt_instance(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    expansion_level: Option<i32>,
+    ambiguous: &mut Option<TypeExprRef>,
+    subst: impl FnOnce() -> TypeExprRef,
+) -> Option<TypeExprRef> {
+    let instance_level = expansion_level.max(gadt_instance_level(ctx, env, ty));
+    if let Some(instance_level) = instance_level
+        && ctx.get_level(ty) < instance_level
+    {
+        *ambiguous = Some(ty);
+        return None;
+    }
+    let expanded = subst();
+    if let Some(instance_level) = instance_level {
+        ctx.add_gadt_instances(env.gadt_instance_scope(), instance_level, &[ty, expanded]);
+    }
+    Some(expanded)
+}
+
 fn try_expand_head(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
-    try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General)
+    try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General, &mut None)
 }
 
 /// Fully expand a type through all aliases until it can't be expanded further.
@@ -5169,7 +5168,7 @@ pub(crate) fn expand_abbrev_opt_once(
     // OCaml compiler/ml/ctype.ml:4165 calls `expand_abbrev_opt` from
     // `cyclic_abbrev`; ctype.ml:1464-1478 defines that as the Private
     // expansion path through `Env.find_type_expansion_opt`.
-    try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Optimize)
+    try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Optimize, &mut None)
         .map(|expanded| ctx.repr(expanded))
 }
 
@@ -6393,7 +6392,7 @@ fn subtype_rec(
             Ok(())
         }
         (TypeDesc::Tconstr { path: p1, .. }, _) if generic_private_abbrev(ctx, env, p1) => {
-            match try_expand_head_with_mode(ctx, env, t1, ExpandHeadMode::Optimize) {
+            match try_expand_head_with_mode(ctx, env, t1, ExpandHeadMode::Optimize, &mut None) {
                 Some(expanded) => subtype_rec(ctx, env, subtypes, trace, expanded, t2, cstrs),
                 None => {
                     push_subtype_cstr(cstrs, trace, t1, t2, None);
@@ -7338,7 +7337,7 @@ fn expand_head_with_mode(
     ty: TypeExprRef,
     mode: ExpandHeadMode,
 ) -> TypeExprRef {
-    match expand_head_traced(ctx, env, ty, mode, false) {
+    match expand_head_loop::<false>(ctx, env, ty, mode) {
         Ok(expanded) => expanded,
         Err(_) => unreachable!("a safe expansion reports no ambiguous GADT instance"),
     }
@@ -7346,35 +7345,42 @@ fn expand_head_with_mode(
 
 /// OCaml `expand_head_unif` (compiler/ml/ctype.ml:1279) for unification:
 /// an expansion that would let a GADT instance out of its equation's scope
-/// is OCaml's `Unify [(ty, newvar2 level)]` (ctype.ml:1225).
+/// fails with OCaml's `Unify [(ty, newvar2 level)]` (ctype.ml:1225).
 fn expand_head_unif_traced(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     mode: ExpandHeadMode,
 ) -> TypeResult<TypeExprRef> {
-    expand_head_traced(ctx, env, ty, mode, true).map_err(|ambiguous| {
-        let level = ctx.get_level(ambiguous);
-        TypeError::Unify(vec![(ambiguous, new_var_at_level(ctx, level))])
-    })
+    expand_head_loop::<true>(ctx, env, ty, mode)
+        .map_err(|ambiguous| ambiguous_instance(ctx, ambiguous))
+}
+
+/// OCaml's `Unify [(ty, newvar2 level)]` for an ambiguous GADT instance
+/// `ty` (compiler/ml/ctype.ml:589, 1225).
+#[cold]
+fn ambiguous_instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeError {
+    let level = ctx.get_level(ty);
+    TypeError::Unify(vec![(ty, new_var_at_level(ctx, level))])
 }
 
 /// OCaml `try_expand_head` (compiler/ml/ctype.ml:1266-1276): expand the head
-/// of `ty` until it cannot be expanded, with `try_expand_once` when
-/// `unsafe_once` (an ambiguous instance is `Err`) and `try_expand_safe`
-/// otherwise. When the result is a GADT instance, `ty` and the expansions
-/// memorized from it join its set. At most 20 expansions; the instance test
-/// is one load and one branch when the unit has no instance scope.
-fn expand_head_traced(
+/// of `ty` until it cannot be expanded. With `PROPAGATE` an ambiguous GADT
+/// instance is `Err` (`try_expand_once`); without, it ends the expansion
+/// (`try_expand_safe`). While instances are traced, a result that is one
+/// makes `ty` and the expansions memorized from it members of its set. At
+/// most 20 expansions; the instance test is one load and one branch while
+/// instances are not traced.
+#[inline(always)]
+fn expand_head_loop<const PROPAGATE: bool>(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     mode: ExpandHeadMode,
-    unsafe_once: bool,
 ) -> Result<TypeExprRef, TypeExprRef> {
     let start = ctx.repr(ty);
     let mut current = start;
-    let mut expanded_once = false;
+    let mut ambiguous = None;
     // Stack-allocated cycle detection for up to 20 iterations.
     // Linear scan is faster than HashSet for this small size.
     let mut seen = [TypeExprRef(0); 20];
@@ -7384,14 +7390,8 @@ fn expand_head_traced(
         }
         seen[seen_len] = current;
         let seen_len = seen_len + 1;
-        let next = if unsafe_once {
-            try_expand_head_traced(ctx, env, current, mode)?
-        } else {
-            try_expand_head_with_mode(ctx, env, current, mode)
-        };
-        match next {
+        match try_expand_head_with_mode(ctx, env, current, mode, &mut ambiguous) {
             Some(expanded) => {
-                expanded_once = true;
                 let expanded = ctx.repr(expanded);
                 if expanded == current {
                     break;
@@ -7401,15 +7401,33 @@ fn expand_head_traced(
                 }
                 current = expanded;
             }
-            None => break,
+            None => {
+                if PROPAGATE && let Some(ambiguous) = ambiguous {
+                    return Err(ambiguous);
+                }
+                break;
+            }
         }
     }
-    // ctype.ml:1273-1275: `ty` and its expansions are instances where the
-    // full expansion is one.
-    if expanded_once && let Some(level) = gadt_instance_level(ctx, env, current) {
-        ctx.add_gadt_instance_chain(env.gadt_instance_scope(), level, start);
+    // ctype.ml:1273-1275. OCaml makes this test after every expansion; it
+    // is made here only while instances are traced, so that an expansion
+    // outside a unification pays one load and one branch. No program found
+    // shows the difference (CHECKER_DEPARTURES.md, A1).
+    if current != start && ctx.trace_gadt_instances() {
+        add_expansion_chain(ctx, env, start, current);
     }
     Ok(current)
+}
+
+/// ctype.ml:1273-1275: when the full expansion `expanded` of `ty` is a GADT
+/// instance, `ty` and its memorized expansions join its set. One
+/// [`gadt_instance_level`] plus [`TypeContext::add_gadt_instance_chain`].
+#[cold]
+#[inline(never)]
+fn add_expansion_chain(ctx: &TypeContext, env: &Env, ty: TypeExprRef, expanded: TypeExprRef) {
+    if let Some(level) = gadt_instance_level(ctx, env, expanded) {
+        ctx.add_gadt_instance_chain(env.gadt_instance_scope(), level, ty);
+    }
 }
 
 // ============================================================================
@@ -8216,14 +8234,19 @@ pub fn unify(
         return Ok(());
     }
 
-    let reset_tracing =
-        ctx.check_trace_gadt_instances(state.env().is_some_and(|env| env.has_local_constraints()));
+    let has_local_constraints = state.env().is_some_and(|env| env.has_local_constraints());
+    let reset_tracing = ctx.check_trace_gadt_instances(has_local_constraints);
 
     // Mark as being unified
     state.mark_unified(t1, t2);
 
     // Get descriptors
-    let result = match unify_newtypes(ctx, state, t1, t2) {
+    let newtypes = if has_local_constraints {
+        unify_newtypes(ctx, state, t1, t2)
+    } else {
+        None
+    };
+    let result = match newtypes {
         Some(result) => result,
         None => unify_types(ctx, state, t1, t2, t2),
     };
@@ -12417,8 +12440,22 @@ pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
 /// This replaces all generic type variables with fresh ones,
 /// creating a new instance of a polymorphic type.
 pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    instance_copy(ctx, None, ty)
+}
+
+/// OCaml `instance env sch` (compiler/ml/ctype.ml:879-887): [`instance`],
+/// and when `env` has local constraints, a copy of a GADT instance joins
+/// the instance's set (`copy ?env`, ctype.ml:770-774). Beyond
+/// [`instance`], a copy made in a unit without an instance scope costs one
+/// load and one branch.
+pub fn instance_in(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+    instance_copy(ctx, Some(env), ty)
+}
+
+#[inline(always)]
+fn instance_copy(ctx: &TypeContext, env: Option<&Env>, ty: TypeExprRef) -> TypeExprRef {
     if ctx.counts_this_call() {
-        return counted_instance(ctx, [ty], || instance(ctx, ty));
+        return counted_instance(ctx, [ty], || instance_copy(ctx, env, ty));
     }
     let ty = ctx.repr(ty);
     // OCaml compiler/ml/ctype.ml:762: a non-generic root needs no copy session.
@@ -12427,66 +12464,47 @@ pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
         return ty;
     }
     let mut cache = CopyCache::new(ctx);
-    copy_type_cached(ctx, ty, &mut cache)
-}
-
-/// OCaml `instance env sch` (compiler/ml/ctype.ml:879-887): [`instance`],
-/// and when `env` has local constraints, a copy of a GADT instance joins
-/// the instance's set (`copy ?env`, ctype.ml:770-774). Without an instance
-/// scope in the unit this costs one load and one branch more than
-/// [`instance`].
-pub fn instance_in(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
-    let Some(scope) = copy_instance_scope(ctx, env) else {
-        return instance(ctx, ty);
-    };
-    let ty = ctx.repr(ty);
-    if ctx.get_level(ty) != GENERIC_LEVEL {
-        return ty;
-    }
-    let mut cache = CopyCache::new(ctx);
     let copy = copy_type_cached(ctx, ty, &mut cache);
-    add_copied_gadt_instances(ctx, scope, &cache);
+    if let Some(env) = env
+        && ctx.has_gadt_instance_scopes()
+    {
+        add_copied_gadt_instances(ctx, env, &cache);
+    }
     copy
 }
 
 /// OCaml `instance_list env schl` (compiler/ml/ctype.ml:891-894): as
 /// [`instance_in`], sharing one copy session.
 pub fn instance_list_in(ctx: &TypeContext, env: &Env, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
-    let Some(scope) = copy_instance_scope(ctx, env) else {
-        return instance_list(ctx, types);
-    };
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, types.iter().copied(), || {
+            instance_list_in(ctx, env, types)
+        });
+    }
     let mut cache = CopyCache::new(ctx);
     let copies = types
         .iter()
         .map(|&ty| copy_type_cached(ctx, ty, &mut cache))
         .collect();
-    add_copied_gadt_instances(ctx, scope, &cache);
+    if ctx.has_gadt_instance_scopes() {
+        add_copied_gadt_instances(ctx, env, &cache);
+    }
     copies
 }
 
-/// The GADT instance scope a copy in `env` adds to: OCaml's `gadt_env`
-/// (ctype.ml:877), an environment with local constraints, and in it an
-/// instance scope. One load and one branch when the unit has none.
-#[inline]
-fn copy_instance_scope(ctx: &TypeContext, env: &Env) -> Option<super::context::GadtScopeRef> {
-    if !ctx.has_gadt_instance_scopes() || !env.has_local_constraints() {
-        return None;
-    }
+/// `copy ?env` (compiler/ml/ctype.ml:770-774) for a finished copy session in
+/// `env`: under local constraints (OCaml's `gadt_env`, ctype.ml:877), the
+/// copy of each node in an instance set joins that set. The originals are
+/// not changed by the copy, so testing them afterwards is testing them when
+/// they were copied. Cost: per copied node, one
+/// [`TypeContext::gadt_instance_level`].
+#[cold]
+#[inline(never)]
+fn add_copied_gadt_instances(ctx: &TypeContext, env: &Env, cache: &CopyCache<'_>) {
     let scope = env.gadt_instance_scope();
-    (!scope.is_none()).then_some(scope)
-}
-
-/// `copy ?env` (compiler/ml/ctype.ml:770-774) for a finished copy session:
-/// the copy of each node in an instance set joins that set. The originals
-/// are not changed by the copy, so testing them afterwards is testing them
-/// when they were copied. Cost: per copied node, one
-/// [`TypeContext::gadt_instance_level`]; run only under local constraints
-/// with an instance scope.
-fn add_copied_gadt_instances(
-    ctx: &TypeContext,
-    scope: super::context::GadtScopeRef,
-    cache: &CopyCache<'_>,
-) {
+    if !env.has_local_constraints() || scope.is_none() {
+        return;
+    }
     cache.nodes.for_each(|original, &copy| {
         if let Some(level) = ctx.gadt_instance_level(scope, ctx.repr(original)) {
             ctx.add_gadt_instances(scope, level, &[copy]);
