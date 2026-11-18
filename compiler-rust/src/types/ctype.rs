@@ -630,7 +630,7 @@ fn unify_newtypes(
     let expand_first = find_newtype_level(ctx, env, &p1) >= find_newtype_level(ctx, env, &p2);
     let expanded = if expand_first { t1 } else { t2 };
     let mut ambiguous = None;
-    match try_expand_head_with_mode(ctx, env, expanded, ExpandHeadMode::Unify, &mut ambiguous) {
+    match try_expand_head_with_mode::<true>(ctx, env, expanded, ExpandHeadMode::Unify, &mut ambiguous) {
         Some(expansion) => {
             let expansion = ctx.repr(expansion);
             Some(if expand_first {
@@ -869,7 +869,7 @@ fn expands_to_datatype(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
         return true;
     }
     drop(decl);
-    match try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General, &mut None) {
+    match try_expand_head(ctx, env, ty) {
         Some(expanded) => expands_to_datatype(ctx, env, expanded),
         None => false,
     }
@@ -4745,8 +4745,10 @@ enum ExpandHeadMode {
 /// level)]` (ctype.ml:1225): it returns `None` with `ty` in `ambiguous`,
 /// having changed nothing. A caller that expands safely
 /// (`try_expand_safe`, ctype.ml:1260-1265) takes that as a type that cannot
-/// be expanded.
-fn try_expand_head_with_mode(
+/// be expanded. Only the `TRACED` instantiation, called in an environment
+/// with an instance scope, makes the test; without one the test cannot
+/// fail, and the other instantiation is trunk's expansion.
+fn try_expand_head_with_mode<const TRACED: bool>(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
@@ -4815,7 +4817,7 @@ fn try_expand_head_with_mode(
                         ctx.type_list(args),
                     )
                 };
-                if ctx.trace_gadt_instances() {
+                if TRACED && ctx.trace_gadt_instances() {
                     return subst_gadt_instance(ctx, env, ty, expansion_level, ambiguous, subst);
                 }
                 Some(subst())
@@ -5124,8 +5126,6 @@ fn try_expand_head_with_mode(
 /// expanded; otherwise `ty` and its expansion join that set. The test is
 /// made before `subst`, which leaves `ty` as it is. Cost: one
 /// [`gadt_instance_level`] and the substitution.
-#[cold]
-#[inline(never)]
 fn subst_gadt_instance(
     ctx: &TypeContext,
     env: &Env,
@@ -5149,7 +5149,11 @@ fn subst_gadt_instance(
 }
 
 fn try_expand_head(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
-    try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General, &mut None)
+    if has_gadt_instance_scope(ctx, env) {
+        try_expand_head_with_mode::<true>(ctx, env, ty, ExpandHeadMode::General, &mut None)
+    } else {
+        try_expand_head_with_mode::<false>(ctx, env, ty, ExpandHeadMode::General, &mut None)
+    }
 }
 
 /// Fully expand a type through all aliases until it can't be expanded further.
@@ -5168,7 +5172,7 @@ pub(crate) fn expand_abbrev_opt_once(
     // OCaml compiler/ml/ctype.ml:4165 calls `expand_abbrev_opt` from
     // `cyclic_abbrev`; ctype.ml:1464-1478 defines that as the Private
     // expansion path through `Env.find_type_expansion_opt`.
-    try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Optimize, &mut None)
+    try_expand_head_with_mode::<false>(ctx, env, ty, ExpandHeadMode::Optimize, &mut None)
         .map(|expanded| ctx.repr(expanded))
 }
 
@@ -6392,7 +6396,7 @@ fn subtype_rec(
             Ok(())
         }
         (TypeDesc::Tconstr { path: p1, .. }, _) if generic_private_abbrev(ctx, env, p1) => {
-            match try_expand_head_with_mode(ctx, env, t1, ExpandHeadMode::Optimize, &mut None) {
+            match try_expand_head_with_mode::<false>(ctx, env, t1, ExpandHeadMode::Optimize, &mut None) {
                 Some(expanded) => subtype_rec(ctx, env, subtypes, trace, expanded, t2, cstrs),
                 None => {
                     push_subtype_cstr(cstrs, trace, t1, t2, None);
@@ -7337,50 +7341,25 @@ fn expand_head_with_mode(
     ty: TypeExprRef,
     mode: ExpandHeadMode,
 ) -> TypeExprRef {
-    match expand_head_loop::<false>(ctx, env, ty, mode) {
-        Ok(expanded) => expanded,
-        Err(_) => unreachable!("a safe expansion reports no ambiguous GADT instance"),
+    if has_gadt_instance_scope(ctx, env) {
+        match expand_head_traced::<false>(ctx, env, ty, mode) {
+            Ok(expanded) => expanded,
+            Err(_) => unreachable!("a safe expansion reports no ambiguous GADT instance"),
+        }
+    } else {
+        expand_head_plain(ctx, env, ty, mode)
     }
 }
 
-/// OCaml `expand_head_unif` (compiler/ml/ctype.ml:1279) for unification:
-/// an expansion that would let a GADT instance out of its equation's scope
-/// fails with OCaml's `Unify [(ty, newvar2 level)]` (ctype.ml:1225).
-fn expand_head_unif_traced(
+/// Trunk's head expansion: [`expand_head_with_mode`] outside an instance
+/// scope.
+fn expand_head_plain(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     mode: ExpandHeadMode,
-) -> TypeResult<TypeExprRef> {
-    expand_head_loop::<true>(ctx, env, ty, mode)
-        .map_err(|ambiguous| ambiguous_instance(ctx, ambiguous))
-}
-
-/// OCaml's `Unify [(ty, newvar2 level)]` for an ambiguous GADT instance
-/// `ty` (compiler/ml/ctype.ml:589, 1225).
-#[cold]
-fn ambiguous_instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeError {
-    let level = ctx.get_level(ty);
-    TypeError::Unify(vec![(ty, new_var_at_level(ctx, level))])
-}
-
-/// OCaml `try_expand_head` (compiler/ml/ctype.ml:1266-1276): expand the head
-/// of `ty` until it cannot be expanded. With `PROPAGATE` an ambiguous GADT
-/// instance is `Err` (`try_expand_once`); without, it ends the expansion
-/// (`try_expand_safe`). While instances are traced, a result that is one
-/// makes `ty` and the expansions memorized from it members of its set. At
-/// most 20 expansions; the instance test is one load and one branch while
-/// instances are not traced.
-#[inline(always)]
-fn expand_head_loop<const PROPAGATE: bool>(
-    ctx: &TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-    mode: ExpandHeadMode,
-) -> Result<TypeExprRef, TypeExprRef> {
-    let start = ctx.repr(ty);
-    let mut current = start;
-    let mut ambiguous = None;
+) -> TypeExprRef {
+    let mut current = ctx.repr(ty);
     // Stack-allocated cycle detection for up to 20 iterations.
     // Linear scan is faster than HashSet for this small size.
     let mut seen = [TypeExprRef(0); 20];
@@ -7390,7 +7369,71 @@ fn expand_head_loop<const PROPAGATE: bool>(
         }
         seen[seen_len] = current;
         let seen_len = seen_len + 1;
-        match try_expand_head_with_mode(ctx, env, current, mode, &mut ambiguous) {
+        match try_expand_head_with_mode::<false>(ctx, env, current, mode, &mut None) {
+            Some(expanded) => {
+                let expanded = ctx.repr(expanded);
+                if expanded == current {
+                    break;
+                }
+                if seen[..seen_len].contains(&expanded) {
+                    break;
+                }
+                current = expanded;
+            }
+            None => break,
+        }
+    }
+    current
+}
+
+/// OCaml `expand_head_unif` (compiler/ml/ctype.ml:1279) at the expansions
+/// of unification (`unify2`, ctype.ml:2289-2292): in an environment with an
+/// instance scope, an expansion that would let a GADT instance out of its
+/// equation's scope is `Err` with the instance; elsewhere trunk's
+/// expansion.
+fn expand_head_for_unify(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    mode: ExpandHeadMode,
+) -> Result<TypeExprRef, TypeExprRef> {
+    if has_gadt_instance_scope(ctx, env) {
+        expand_head_traced::<true>(ctx, env, ty, mode)
+    } else {
+        Ok(expand_head_plain(ctx, env, ty, mode))
+    }
+}
+
+/// OCaml's `Unify [(ty, newvar2 level)]` for an ambiguous GADT instance
+/// `ty` (compiler/ml/ctype.ml:589, 1225).
+fn ambiguous_instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeError {
+    let level = ctx.get_level(ty);
+    TypeError::Unify(vec![(ty, new_var_at_level(ctx, level))])
+}
+
+/// OCaml `try_expand_head` (compiler/ml/ctype.ml:1266-1276) in an
+/// environment with an instance scope: expand the head of `ty` until it
+/// cannot be expanded. With `PROPAGATE` an ambiguous GADT instance is `Err`
+/// (`try_expand_once`); without, it ends the expansion (`try_expand_safe`).
+/// When the result is an instance, `ty` and the expansions memorized from
+/// it join its set. At most 20 expansions.
+fn expand_head_traced<const PROPAGATE: bool>(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    mode: ExpandHeadMode,
+) -> Result<TypeExprRef, TypeExprRef> {
+    let start = ctx.repr(ty);
+    let mut current = start;
+    let mut ambiguous = None;
+    let mut seen = [TypeExprRef(0); 20];
+    for seen_len in 0..seen.len() {
+        if seen[..seen_len].contains(&current) {
+            break;
+        }
+        seen[seen_len] = current;
+        let seen_len = seen_len + 1;
+        match try_expand_head_with_mode::<true>(ctx, env, current, mode, &mut ambiguous) {
             Some(expanded) => {
                 let expanded = ctx.repr(expanded);
                 if expanded == current {
@@ -7409,25 +7452,13 @@ fn expand_head_loop<const PROPAGATE: bool>(
             }
         }
     }
-    // ctype.ml:1273-1275. OCaml makes this test after every expansion; it
-    // is made here only while instances are traced, so that an expansion
-    // outside a unification pays one load and one branch. No program found
-    // shows the difference (CHECKER_DEPARTURES.md, A1).
-    if current != start && ctx.trace_gadt_instances() {
-        add_expansion_chain(ctx, env, start, current);
+    // ctype.ml:1273-1275.
+    if current != start
+        && let Some(level) = gadt_instance_level(ctx, env, current)
+    {
+        ctx.add_gadt_instance_chain(env.gadt_instance_scope(), level, start);
     }
     Ok(current)
-}
-
-/// ctype.ml:1273-1275: when the full expansion `expanded` of `ty` is a GADT
-/// instance, `ty` and its memorized expansions join its set. One
-/// [`gadt_instance_level`] plus [`TypeContext::add_gadt_instance_chain`].
-#[cold]
-#[inline(never)]
-fn add_expansion_chain(ctx: &TypeContext, env: &Env, ty: TypeExprRef, expanded: TypeExprRef) {
-    if let Some(level) = gadt_instance_level(ctx, env, expanded) {
-        ctx.add_gadt_instance_chain(env.gadt_instance_scope(), level, ty);
-    }
 }
 
 // ============================================================================
@@ -8882,8 +8913,10 @@ fn unify_types(
         if !facts.is_some_and(|facts| facts.var_free) {
             if ty_is_constr && state.env().is_some() && deep_occur(ctx, var, ty) {
                 let env = state.env().expect("checked above");
-                let exp1 = expand_head_unif_traced(ctx, env, t1, ExpandHeadMode::Unify)?;
-                let exp2 = expand_head_unif_traced(ctx, env, t2, ExpandHeadMode::Unify)?;
+                let exp1 = expand_head_for_unify(ctx, env, t1, ExpandHeadMode::Unify)
+                    .map_err(|ty| ambiguous_instance(ctx, ty))?;
+                let exp2 = expand_head_for_unify(ctx, env, t2, ExpandHeadMode::Unify)
+                    .map_err(|ty| ambiguous_instance(ctx, ty))?;
                 return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
             }
             if occur_check(ctx, state.env(), state.mode, var, ty).is_err() {
@@ -9016,8 +9049,10 @@ fn unify_types(
                     // OCaml compiler/ml/ctype.ml:2338-2344 (`unify2`) expands
                     // both constructor heads before the constructor-path cases
                     // at ctype.ml:2412-2414 are considered.
-                    let exp1 = expand_head_unif_traced(ctx, env, t1, ExpandHeadMode::Unify)?;
-                    let exp2 = expand_head_unif_traced(ctx, env, t2, ExpandHeadMode::Unify)?;
+                    let exp1 = expand_head_for_unify(ctx, env, t1, ExpandHeadMode::Unify)
+                    .map_err(|ty| ambiguous_instance(ctx, ty))?;
+                    let exp2 = expand_head_for_unify(ctx, env, t2, ExpandHeadMode::Unify)
+                    .map_err(|ty| ambiguous_instance(ctx, ty))?;
                     if exp1 != t1 || exp2 != t2 {
                         return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                     }
@@ -9131,8 +9166,10 @@ fn unify_types(
                 // persistent aliases such as `Stdlib.Lazy.t` do not repeatedly
                 // allocate normalized-but-still-abstract heads before argument
                 // unification.
-                let exp1 = expand_head_unif_traced(ctx, env, t1, ExpandHeadMode::Unify)?;
-                let exp2 = expand_head_unif_traced(ctx, env, t2, ExpandHeadMode::Unify)?;
+                let exp1 = expand_head_for_unify(ctx, env, t1, ExpandHeadMode::Unify)
+                    .map_err(|ty| ambiguous_instance(ctx, ty))?;
+                let exp2 = expand_head_for_unify(ctx, env, t2, ExpandHeadMode::Unify)
+                    .map_err(|ty| ambiguous_instance(ctx, ty))?;
                 if exp1 != t1 || exp2 != t2 {
                     return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                 }
@@ -9399,12 +9436,14 @@ fn unify_types(
                     // An ambiguous GADT instance fails as in OCaml's
                     // `expand_head_unif` (ctype.ml:2291-2292).
                     let exp1 = if is_constr1 {
-                        expand_head_unif_traced(ctx, env, t1, ExpandHeadMode::General)?
+                        expand_head_for_unify(ctx, env, t1, ExpandHeadMode::General)
+                    .map_err(|ty| ambiguous_instance(ctx, ty))?
                     } else {
                         t1
                     };
                     let exp2 = if is_constr2 {
-                        expand_head_unif_traced(ctx, env, t2, ExpandHeadMode::General)?
+                        expand_head_for_unify(ctx, env, t2, ExpandHeadMode::General)
+                    .map_err(|ty| ambiguous_instance(ctx, ty))?
                     } else {
                         t2
                     };
