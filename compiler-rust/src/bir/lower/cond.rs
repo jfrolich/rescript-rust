@@ -888,7 +888,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 };
                 self.statements.trim(Self::from(parts.start));
                 if self.statements.since(Self::from(parts.start)).len == 0 {
-                    return self.probe_leaf(cx, B::node(value));
+                    return self.probe_leaf(cx, value);
                 }
                 let out = self.leaf(cx, value);
                 return Probed::Out(self.output(parts.start, out.value, out.finished));

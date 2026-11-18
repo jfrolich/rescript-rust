@@ -292,7 +292,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if !self.statements.has_statements(statements) {
             // Holes carry no effects; pop them before returning a free value.
             self.statements.remove_empty(statements);
-            self.probe_leaf(cx, B::node(value))
+            self.probe_leaf(cx, value)
         } else {
             let out = self.leaf(cx, value);
             Probed::Out(Out {

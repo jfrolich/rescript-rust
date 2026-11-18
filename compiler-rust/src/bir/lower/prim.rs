@@ -727,7 +727,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn primitive_result(&mut self, cx: Cx, statements: Span, value: NodeId) -> Probed<B> {
         if !self.statements.has_statements(statements) {
             self.statements.remove_empty(statements);
-            self.probe_leaf(cx, value)
+            self.probe_leaf(cx, B::from_node(value))
         } else {
             let out = self.leaf(cx, B::from_node(value));
             Probed::Out(Out {

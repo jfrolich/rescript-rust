@@ -275,7 +275,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let out = self.append_outputs(first, second, value);
                 if !self.statements.has_statements(out.stmts) && let Some(value) = out.value {
                     self.statements.remove_empty(out.stmts);
-                    self.probe_leaf(cx, B::node(value))
+                    self.probe_leaf(cx, value)
                 } else { Probed::Out(out) }
             }
             Resume::Fun { header, loop_, .. } => {
@@ -301,7 +301,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if let Some(loc) = source_loc {
                     self.js.locate(&mut self.arena, &mut value, loc);
                 }
-                self.probe_leaf(cx, B::node(value))
+                self.probe_leaf(cx, value)
             }
         }
     }

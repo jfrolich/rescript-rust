@@ -39,6 +39,7 @@ pub(crate) mod scope;
 use super::bridge::Unsupported;
 use super::{Bir, NodeId, VarId, View};
 use crate::ident::Ident;
+use crate::emit::row;
 use crate::lambda::lam_compat::LetKind;
 pub use out::{Finished, Free, FreeId, FreePool, Out, Probed, Span, StatementStack};
 
@@ -734,11 +735,11 @@ impl<'a> State<'a> {
 impl<B: js_stmt::JsStmt> State<'_, B> {
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
     /// leaves immediately instead of allocating deferred expression records.
-    fn probe_leaf(&mut self, cx: Cx, value: NodeId) -> Probed<B> {
+    fn probe_leaf(&mut self, cx: Cx, value: B::E) -> Probed<B> {
         if self.direct && !cx.probing {
-            Probed::Out(self.leaf(cx, B::from_node(value)))
+            Probed::Out(self.leaf(cx, value))
         } else {
-            Probed::Free(self.free.push(Free::Leaf(B::from_node(value))))
+            Probed::Free(self.free.push(Free::Leaf(value)))
         }
     }
     /// H13: A:28 delay_safe; K1: C:1529 compile_expr. The supported literal,
@@ -772,9 +773,9 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     fn append_outputs(&mut self, first: Out<B>, mut second: Out<B>, mut value: Option<B::E>) -> Out<B> {
         if first.finished == Finished::True {
             for statement in self.statements.take_run(second.stmts) { self.js.release_stmt(&mut self.arena, statement); }
-            if let Some(value) = second.value.take() { self.arena.release(B::node(value)); }
+            if let Some(value) = second.value.take() { self.js.release(&mut self.arena, value); }
             // The callers move the second output's value out to give it here.
-            if let Some(value) = value.take() { self.arena.release(B::node(value)); }
+            if let Some(value) = value.take() { self.js.release(&mut self.arena, value); }
         }
         self.statements.append(first, second, value)
     }
@@ -784,21 +785,26 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// and of `finish`.
     fn complete_unit(mut self, probed: Probed<B>) -> Lowered {
         let out = self.realize(Cx::value(), probed);
-        let value = out.value.map(B::node);
         // Export coercion takes ownership of the root's identifier vector.
         // Isolate that output-boundary payload so shared source/block shapes
         // remain immutable for any other surviving block occurrence.
-        if let Some(mut end) = value {
-            while let View::JSeq { second, .. } = self.arena.view(end) { end = second; }
-            if let View::JBlockLit { info, .. } = self.arena.view(end) {
+        if let Some(value) = &out.value {
+            let mut end = B::of(value);
+            while self.js.kind(&self.arena, end) == row::Kind::Seq { end = self.js.operand(&self.arena, end, 1); }
+            if self.js.kind(&self.arena, end) == row::Kind::BlockLit {
+                let info = self.js.info_of(&self.arena, end).expect("block information");
                 if let crate::lambda::TagInfo::ModuleExport(exports) = self.arena.block_tag(info) {
                     let tag = crate::lambda::TagInfo::ModuleExport(exports.clone());
+                    // PROBE-GAP 2: a write of the payload of a node below an
+                    // expression in hand.
+                    let end = NodeId(self.js.id(&self.arena, end));
                     let owned = self.arena.js_info(crate::bir::JsPayload::Block(tag));
                     self.arena.nodes[end.index()].set_block_info(owned);
                 }
             }
         }
-        let exports = self.extract_exports(value, out.finished);
+        // `extract_exports` takes a row until T6x-e.
+        let exports = self.extract_exports(out.value.map(B::node), out.finished);
         let run = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,
@@ -806,13 +812,13 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
         let (list, coerced) = match exports {
             Some(exports) if !exports.is_empty() => {
                 let coerced = self.coerce_exports(run, exports, out.finished);
-                let list = self.coerced_list(run);
                 // `coerced_list` gives a pool list until T6x-e.
-                self.statements.close(&self.js, &mut self.arena, B::list_from(list));
+                let list = B::list_from(self.coerced_list(run));
+                self.statements.close(&self.js, &mut self.arena, list);
                 (list, coerced)
             }
             _ => (
-                B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, run)),
+                self.statements.take_list(&mut self.js, &mut self.arena, run),
                 export::Coerced::default(),
             ),
         };
@@ -824,30 +830,32 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     #[cfg(test)]
     fn complete(mut self, cx: Cx, probed: Probed<B>) -> Lowered {
         let out = self.realize(cx, probed);
-        let value = out
-            .value
-            .map(B::node)
-            .unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
-        let value = self.arena.new_node(View::SExp { value }, 0);
-        self.statements.push(B::stmt_from_node(value));
+        let value = out.value.unwrap_or_else(|| {
+            let mut undefined = self.js.undefined(&mut self.arena, false);
+            self.js.assume_strict(&mut self.arena, &mut undefined);
+            undefined
+        });
+        let statement = self.js.exp(&mut self.arena, value);
+        self.statements.push(statement);
         let run = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,
         });
-        let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, run));
+        let list = self.statements.take_list(&mut self.js, &mut self.arena, run);
         self.finish(list, out.finished, export::Coerced::default())
     }
 
     /// The root block over the top-level list. One step per statement of
     /// the list and one write per catch of the unit.
-    fn finish(mut self, list: crate::bir::ListId, _finished: Finished, coerced: export::Coerced) -> Lowered {
+    fn finish(mut self, list: B::L, _finished: Finished, coerced: export::Coerced) -> Lowered {
         #[cfg(test)]
         let coerced = export::Coerced {
             steps: self.coercion.steps,
             site_visits: self.coercion.site_visits,
             ..coerced
         };
-        let root = self.arena.block_from_list(list);
+        // The root block is a row for the rest of the unit's finish.
+        let root = B::stmt_node(self.js.block_of(&mut self.arena, list));
         // The headers keep their labels and parameters; the exits they count
         // stay in the source, which reads the counts while a function of
         // another module is inlined. One write per catch of the unit.
@@ -955,15 +963,14 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
     /// performed twice.
     fn enter(&mut self, cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume, B>, Unsupported> {
         let value = match self.source.view(node) {
-            View::Var { var } => self.pure_expression(View::Var { var }, 0),
-            View::Global { module } => self.pure_expression(
-                View::JQualified {
-                    module,
-                    member: None,
-                },
-                0,
-            ),
-            View::Const { value } => self.constant(value),
+            View::Var { var } => self.js.var(&mut self.arena, var),
+            View::Global { module } => {
+                let mut value = self.js.qualified(&mut self.arena, module, None);
+                self.js.assume_strict(&mut self.arena, &mut value);
+                value
+            }
+            // `constant` gives a row until T6x-d.
+            View::Const { value } => B::from_node(self.constant(value)),
             View::Apply { callee, info, .. } => {
                 let args = self.source.node(node).apply_args();
                 let tail = self.self_call(cx, callee);
@@ -1023,7 +1030,7 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
                 use crate::lambda::lam_primitive::Primitive;
                 if matches!(self.arena.primitive(primitive).primitive,
                     Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }) if name.as_str() == "make") {
-                    if let Some(value) = self.flat_make_field(node).map(B::node) {
+                    if let Some(value) = self.flat_make_field(node) {
                         return Ok(ProbePlan::Ready(self.probe_leaf(cx, value)));
                     }
                 }
@@ -1150,7 +1157,6 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
     /// K4/K5/K6: C:6648 declare_compiled, C:6667 assign_compiled, C:6658 return_compiled.
     /// O(1): at most one statement built and pushed.
     fn leaf(&mut self, cx: Cx, value: B::E) -> Out<B> {
-        let value = B::node(value);
         let start = self.statements.mark();
         let mut finished = Finished::False;
         let value = match cx.cont {
@@ -1158,46 +1164,45 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
                 Some(value)
             }
             Cont::Declare(kind, var) => {
-                let stmt = super::j::declare(&mut self.arena, kind, var, value);
-                self.statements.push(B::stmt_from_node(stmt));
+                let stmt = self.js.declare(&mut self.arena, kind, var, Some(value));
+                self.statements.push(stmt);
                 None
             }
             Cont::Assign(var) => {
-                let stmt = super::j::assign(&mut self.arena, var, value);
-                self.statements.push(B::stmt_from_node(stmt));
+                let stmt = self.js.assign(&mut self.arena, var, value);
+                self.statements.push(stmt);
                 None
             }
             Cont::Effect(Tail::Return(_)) => {
-                let stmt = super::j::return_value(&mut self.arena, value);
-                self.statements.push(B::stmt_from_node(stmt));
+                let stmt = self.js.return_(&mut self.arena, value);
+                self.statements.push(stmt);
                 finished = Finished::True;
                 None
             }
         };
         Out {
             stmts: self.statements.since(start),
-            value: value.map(B::from_node),
+            value,
             finished,
         }
     }
     /// K2: C:4715 append_effect_output, where the value is kept: a comma,
     /// or the tail alone when the head has no effect. Constant.
     fn seq(&mut self, _: Cx, first: B::E, mut second: Out<B>) -> Out<B> {
-        let first = B::node(first);
-        if self.arena.node(first).flags().contains(super::NodeFlags::STRICT) {
-            self.arena.release(first);
+        if self.js.has(&self.arena, B::of(&first), row::flag::STRICT) {
+            self.js.release(&mut self.arena, first);
         } else {
-            let value = B::node(second.value.expect("the tail of a kept sequence has a value"));
-            second.value = Some(B::from_node(super::j::norm::jm1_js_seq(&mut self.arena, first, value)));
+            let value = second.value.take().expect("the tail of a kept sequence has a value");
+            second.value = Some(self.js.seq_rule(&mut self.arena, first, value));
         }
         second
     }
     /// O:339 push_effect_expression: the head of a deferred sequence as
     /// statements. One step per comma operand of the head.
     fn effect(&mut self, first: B::E) -> Span {
-        let first = B::node(first);
         let mark = self.statements.mark();
-        self.drop_pure_effect(first);
+        let statements = &mut self.statements;
+        self.js.effect(&mut self.arena, first, |s| statements.push(s));
         self.statements.since(mark)
     }
     /// R1–R5: realize a deferred conditional from its value operands.
