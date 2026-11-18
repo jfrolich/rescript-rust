@@ -7400,21 +7400,53 @@ fn expand_head_plain(
     current
 }
 
-/// OCaml `expand_head_unif` (compiler/ml/ctype.ml:1279) at the expansions
-/// of unification (`unify2`, ctype.ml:2289-2292): in an environment with an
-/// instance scope, an expansion that would let a GADT instance out of its
-/// equation's scope is `Err` with the instance; elsewhere trunk's
-/// expansion.
-fn expand_head_for_unify(
+/// OCaml `expand_head_unif` (compiler/ml/ctype.ml:2289-2292) of both sides
+/// of a unification: trunk's expansions while no instance can be expanded
+/// (one load and one branch for the pair), otherwise the traced ones, which
+/// refuse an ambiguous GADT instance.
+fn expand_heads_unif(
+    ctx: &TypeContext,
+    env: &Env,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> Result<(TypeExprRef, TypeExprRef), TypeError> {
+    if expands_gadt_instances(ctx, env) {
+        expand_heads_traced(ctx, env, t1, t2)
+    } else {
+        Ok((
+            expand_head_plain(ctx, env, t1, ExpandHeadMode::Unify),
+            expand_head_plain(ctx, env, t2, ExpandHeadMode::Unify),
+        ))
+    }
+}
+
+/// The traced expansions of [`expand_heads_unif`].
+fn expand_heads_traced(
+    ctx: &TypeContext,
+    env: &Env,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> Result<(TypeExprRef, TypeExprRef), TypeError> {
+    let traced = |ty| {
+        expand_head_traced::<true>(ctx, env, ty, ExpandHeadMode::Unify)
+            .map_err(|ty| ambiguous_instance(ctx, ty))
+    };
+    Ok((traced(t1)?, traced(t2)?))
+}
+
+/// OCaml `expand_head` in `unify`'s fully expanded comparison: trunk's
+/// expansion while no instance can be expanded (one load and one branch),
+/// otherwise the traced one, which refuses an ambiguous GADT instance.
+fn expand_head_in_unify(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
-    mode: ExpandHeadMode,
-) -> Result<TypeExprRef, TypeExprRef> {
+) -> Result<TypeExprRef, TypeError> {
     if expands_gadt_instances(ctx, env) {
-        expand_head_traced::<true>(ctx, env, ty, mode)
+        expand_head_traced::<true>(ctx, env, ty, ExpandHeadMode::General)
+            .map_err(|ty| ambiguous_instance(ctx, ty))
     } else {
-        Ok(expand_head_plain(ctx, env, ty, mode))
+        Ok(expand_head_plain(ctx, env, ty, ExpandHeadMode::General))
     }
 }
 
@@ -8927,10 +8959,7 @@ fn unify_types(
         if !facts.is_some_and(|facts| facts.var_free) {
             if ty_is_constr && state.env().is_some() && deep_occur(ctx, var, ty) {
                 let env = state.env().expect("checked above");
-                let exp1 = expand_head_for_unify(ctx, env, t1, ExpandHeadMode::Unify)
-                    .map_err(|ty| ambiguous_instance(ctx, ty))?;
-                let exp2 = expand_head_for_unify(ctx, env, t2, ExpandHeadMode::Unify)
-                    .map_err(|ty| ambiguous_instance(ctx, ty))?;
+                let (exp1, exp2) = expand_heads_unif(ctx, env, t1, t2)?;
                 return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
             }
             if occur_check(ctx, state.env(), state.mode, var, ty).is_err() {
@@ -9063,10 +9092,7 @@ fn unify_types(
                     // OCaml compiler/ml/ctype.ml:2338-2344 (`unify2`) expands
                     // both constructor heads before the constructor-path cases
                     // at ctype.ml:2412-2414 are considered.
-                    let exp1 = expand_head_for_unify(ctx, env, t1, ExpandHeadMode::Unify)
-                        .map_err(|ty| ambiguous_instance(ctx, ty))?;
-                    let exp2 = expand_head_for_unify(ctx, env, t2, ExpandHeadMode::Unify)
-                        .map_err(|ty| ambiguous_instance(ctx, ty))?;
+                    let (exp1, exp2) = expand_heads_unif(ctx, env, t1, t2)?;
                     if exp1 != t1 || exp2 != t2 {
                         return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                     }
@@ -9180,10 +9206,7 @@ fn unify_types(
                 // persistent aliases such as `Stdlib.Lazy.t` do not repeatedly
                 // allocate normalized-but-still-abstract heads before argument
                 // unification.
-                let exp1 = expand_head_for_unify(ctx, env, t1, ExpandHeadMode::Unify)
-                    .map_err(|ty| ambiguous_instance(ctx, ty))?;
-                let exp2 = expand_head_for_unify(ctx, env, t2, ExpandHeadMode::Unify)
-                    .map_err(|ty| ambiguous_instance(ctx, ty))?;
+                let (exp1, exp2) = expand_heads_unif(ctx, env, t1, t2)?;
                 if exp1 != t1 || exp2 != t2 {
                     return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                 }
@@ -9450,14 +9473,12 @@ fn unify_types(
                     // An ambiguous GADT instance fails as in OCaml's
                     // `expand_head_unif` (ctype.ml:2291-2292).
                     let exp1 = if is_constr1 {
-                        expand_head_for_unify(ctx, env, t1, ExpandHeadMode::General)
-                            .map_err(|ty| ambiguous_instance(ctx, ty))?
+                        expand_head_in_unify(ctx, env, t1)?
                     } else {
                         t1
                     };
                     let exp2 = if is_constr2 {
-                        expand_head_for_unify(ctx, env, t2, ExpandHeadMode::General)
-                            .map_err(|ty| ambiguous_instance(ctx, ty))?
+                        expand_head_in_unify(ctx, env, t2)?
                     } else {
                         t2
                     };
