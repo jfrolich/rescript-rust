@@ -51,6 +51,16 @@ pub const INHERITS: u8 = 32;
 /// with [`INHERITS`], in the same pass over the template
 /// ([`TypeTable::mark_manifests`]). (R3e)
 pub const OPEN_ROW: u8 = 64;
+/// The path is a bare identifier for the unit being checked: one of its
+/// own types or a predefined type (`in_current_module`,
+/// compiler/ml/ctype.ml:1870-1872: `Pident`). With no [`NEWTYPE`] such a
+/// type is `non_aliasable`: no equation refines it and it is compatible
+/// with no other type ([`TypeTable::non_aliasable`]). Set by the caller
+/// that owns the table, with [`TypeTable::set_local`] (R5a; the tests of
+/// R3h): [`TypeTable::from_segment`] does not set it, since a segment
+/// does not say whether it is the unit being checked or one it imports,
+/// whose types are paths through a module. Read by R3h.
+pub const LOCAL: u8 = 128;
 /// Head flag of a constructor node whose slot 0 holds a private expansion
 /// (`Mcons (Private, ..)`, compiler/ml/btype.ml:612). Bit 4 is
 /// `segment::EXTENDED`.
@@ -114,6 +124,11 @@ pub struct TypeTable {
     /// Number of rows with a non-zero `scope`: when 0, lowering never tests a
     /// scope ([`Checker::lower`]).
     pub scoped: u32,
+    /// Per row of `rows`: bit `i` is set when parameter `i` is injective
+    /// (`Variance.(mem Inj)`). Empty, or shorter than `rows`, for types
+    /// without an injective parameter ([`TypeTable::injective`]). Filled
+    /// by the caller that owns the table (R5a). (R3h)
+    pub injective_bits: Vec<u32>,
 }
 
 impl TypeTable {
@@ -300,6 +315,52 @@ impl TypeTable {
         match self.variances.get(type_index as usize) {
             Some(&start) if start != NONE => self.occurs[(start + parameter) as usize] != 0,
             _ => true,
+        }
+    }
+
+    /// `Variance.(mem Inj)` of parameter `parameter` of the type
+    /// (compiler/ml/ctype.ml:2361, 2018): bit `parameter` of
+    /// `injective_bits[type_index]`; a type past the end of that table
+    /// and a parameter past the 32nd are not injective. O(1): one bounds
+    /// test and one load. (R3h; CHECKER_REWRITE 8.9, decision 66)
+    #[inline]
+    pub fn injective(&self, type_index: u32, parameter: u32) -> bool {
+        match self.injective_bits.get(type_index as usize) {
+            Some(&bits) => parameter < 32 && bits >> parameter & 1 != 0,
+            None => false,
+        }
+    }
+
+    /// O(1): `type_index` is a bare identifier for the unit being checked
+    /// ([`LOCAL`]). One bounds test and one byte written.
+    pub fn set_local(&mut self, type_index: u32) {
+        self.rows[type_index as usize].flags |= LOCAL;
+    }
+
+    /// `non_aliasable p decl` (compiler/ml/ctype.ml:1870-1872) for a
+    /// row: a bare identifier that is not a locally abstract type. O(1),
+    /// no load.
+    #[inline]
+    pub fn non_aliasable(row: TypeInfo) -> bool {
+        row.flags & (LOCAL | NEWTYPE) == LOCAL
+    }
+
+    /// `is_instantiable env p` (compiler/ml/ctype.ml:1874-1881) for the
+    /// type of a constructor node WITHOUT arguments: the type has a row
+    /// (`Env.find_type` did not raise), is abstract (not [`DATATYPE`]),
+    /// has no manifest (none of [`ABBREV`], [`PRIVATE`], [`ALIAS`]: a
+    /// private abstract type always has one, so `type_private = Public`
+    /// follows) and is not [`TypeTable::non_aliasable`]. `type_arity = 0`
+    /// is the node's own arity. One bounds test and one row load. A type
+    /// an equation refined has [`ABBREV`] and is no longer instantiable,
+    /// as its local constraint has a manifest. (R3h)
+    #[inline]
+    pub fn instantiable(&self, type_index: u32) -> bool {
+        match self.rows.get(type_index as usize) {
+            Some(&row) => {
+                row.flags & (DATATYPE | ABBREV | PRIVATE | ALIAS) == 0 && !Self::non_aliasable(row)
+            }
+            None => false,
         }
     }
 

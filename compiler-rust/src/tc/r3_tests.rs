@@ -3352,6 +3352,480 @@ fn the_types_that_hold_a_universal_variable_are_unified_not_gained() {
     }
 }
 
+/// A closed row with the one tag `#A`, `Reither (false, types, false, ref
+/// None)` with any number of types (a conjunction), unopened, at level 2.
+fn conjunctive_row(c: &mut Checker, types: &[Ty], more: Ty) -> Ty {
+    let name = name_index(c, "A");
+    let start = c.extras.row_fields.len() as u32;
+    let kind = RowFieldKind::Either {
+        constant: false,
+        matched: false,
+    };
+    let published = types.len() as u32 + 1;
+    c.extras.row_fields.push(RowFieldRow {
+        name,
+        types: Range {
+            start: 0,
+            len: types.len() as u32,
+        },
+        link: published,
+        kind,
+    });
+    c.extras.variants.push(VariantRow {
+        fields: Range { start, len: 1 },
+        more: types.len() as u32,
+        name: NONE,
+        name_arguments: Range::default(),
+        closed: true,
+        fixed: false,
+    });
+    let index = c.extras.variants.len() as u32 - 1;
+    let mut slots = types.to_vec();
+    slots.push(more);
+    extended_at(c, 2, ExtraDescriptor::Variant(index), &slots)
+}
+
+/// What two `Reither` fields gain is decided before the types that hold
+/// a universal variable are unified (section 8.6, decisions 53 and 58;
+/// compiler/ml/ctype.ml:2685-2706):
+///
+/// ```text
+/// let tl2' = remq tl2 tl1 and tl1' = remq tl1 tl2 in
+/// let tl1', tlu1 = split_univars tl1' and tl2', tlu2 = split_univars tl2' in
+/// (match (tlu1, tlu2) with
+/// | [], [] -> ()
+/// | tu1 :: tlu1, _ :: _ ->
+///   if not !(passive_variants ()) then List.iter (unify env tu1) (tlu1 @ tlu2)
+/// | tu :: _, [] | [], tu :: _ -> occur_univar !env tu);
+/// List.iter (update_level !env (repr more).level) (tl1' @ tl2');
+/// let e = ref None in
+/// let f1' = Reither (c1 || c2, tl1', m1 || m2, e)
+/// and f2' = Reither (c1 || c2, tl2', m1 || m2, e) in
+/// ```
+///
+/// Witness (the old checker's side is `differential::tests::
+/// old_checker_gains_a_type_the_holders_made_a_duplicate`): `poly([< #A((u,
+/// x)) & x]; u)` against `poly([< #A((u', x')) & x']; u')`. `tl1'` is
+/// `[(u', x'); x']`: the tuple holds a universal variable, `x'` is kept.
+/// The two tuples are unified, which makes `x'` a link to `x`... and the
+/// field of row 1 still gains `x'`: it reads `[(u, x); x; x]`, three
+/// types of which the last two are one node, and so does the field of
+/// row 2. A join that compared the lists again after the unification
+/// would gain nothing (two types): what `split_univars` did before the
+/// sixth skeleton turn. The body is `Checker::join_either`'s second run
+/// and the arm of `Checker::split_univars` with holders on both sides.
+/// Reaches: R3f, R3g.
+#[test]
+fn a_field_gains_what_it_lacked_before_the_holders_were_unified() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let side = |c: &mut Checker| {
+            let u = univar_at(c, 2);
+            let x = var(c);
+            let holder = tuple(c, &[u, x]);
+            let more = var(c);
+            let row = conjunctive_row(c, &[holder, x], more);
+            (poly_of(c, 2, row, &[u]), row, holder, x)
+        };
+        let (left, _, holder1, x1) = side(&mut c);
+        let (right, row2, holder2, x2) = side(&mut c);
+        let rows = rows_now(&c);
+        c.unify(left, right).unwrap();
+        assert_rows_kept(&c, &rows);
+        assert_eq!(c.g.repr(holder1), c.g.repr(holder2));
+        assert_eq!(c.g.repr(x1), c.g.repr(x2));
+        let (tags, _, _) = read_row(&mut c, row2);
+        assert_eq!(tags[0].1.types, 3, "{mode:?}");
+        let mut types = Vec::new();
+        let row2 = c.g.repr(row2);
+        let node = c.g.nodes[row2.0 as usize];
+        let ExtraDescriptor::Variant(index) = c.extras.descriptors[node.a as usize] else {
+            panic!("a variant");
+        };
+        let field = c.extras.row_fields[c.extras.variants[index as usize].fields.start as usize];
+        super::rows::field_types(&c.g, node.b, node.arity(), field, &mut types);
+        let types: Vec<Ty> = types.into_iter().map(|ty| c.g.repr(ty)).collect();
+        let x = c.g.repr(x1);
+        assert_eq!(types, [c.g.repr(holder1), x, x]);
+        assert!(c.scopes.is_empty() && c.frames.is_empty() && c.saved.is_empty());
+    }
+}
+
+/// An open row `[> #tag] as P<argument>` at `level`, unopened: slot 0 its
+/// row variable (new, at `level`), slot 1 the argument of its name.
+fn named_row(c: &mut Checker, level: u32, tag: &str, argument: Option<Ty>) -> Ty {
+    let name = name_index(c, tag);
+    let start = c.extras.row_fields.len() as u32;
+    c.extras.row_fields.push(RowFieldRow {
+        name,
+        types: Range::default(),
+        link: NONE,
+        kind: RowFieldKind::Present,
+    });
+    c.extras.variants.push(VariantRow {
+        fields: Range { start, len: 1 },
+        more: 0,
+        name: if argument.is_some() { PA } else { NONE },
+        name_arguments: Range {
+            start: 1,
+            len: u32::from(argument.is_some()),
+        },
+        closed: false,
+        fixed: false,
+    });
+    let index = c.extras.variants.len() as u32 - 1;
+    let mut slots = vec![var_at(c, level)];
+    slots.extend(argument);
+    extended_at(c, level, ExtraDescriptor::Variant(index), &slots)
+}
+
+/// The arguments of a row's name are children of the row only while the
+/// row is the one its chain ends in (section 8.6, decision 60;
+/// compiler/ml/btype.ml:229-241, `iter_row`):
+///
+/// ```text
+/// match (repr row.row_more).desc with
+/// | Tvariant row -> iter_row f row
+/// | Tvar _ | Tunivar _ | Tsubst _ | Tconstr _ | Tnil ->
+///   Misc.may (fun (_, l) -> List.iter f l) row.row_name
+/// ```
+///
+/// Witness, per walk: `[> #B]` unified with `[> #A] as P<y>` at level 2,
+/// `y` in no field. The named row is the right node, gains `#B` through
+/// a variant node its row variable is linked to, and the merged row has
+/// no name (ctype.ml:2574-2586, 2596-2616). Then, each on a graph of its
+/// own:
+/// - `Checker::lower` of the row to level 1 leaves `y` at 2
+///   (`update_level`, ctype.ml:584-630, through `iter_type_expr`);
+/// - `Checker::generalize` after the definition leaves `y` at 2
+///   (`generalize`, ctype.ml:509-516);
+/// - `Checker::deep_occur` of `y` in the row is false (ctype.ml:1735-1782);
+/// - a variable of level 1 bound to the row (the binding walk, which
+///   lowers below a row) leaves `y` at 2;
+/// - with `y` a universal variable, `Checker::free_univar` of the row
+///   finds none (`occur_univar`, ctype.ml:1563-1607);
+/// - `Checker::univars_escape` of a binder of that universal variable in
+///   a polymorphic type whose body is the row is false
+///   (ctype.ml:1630-1652);
+/// - a `Checker::copy` of the generalized row with `y` generic makes one
+///   variable, the row variable's, and no copy of `y` (`row_repr` gives a
+///   copy the innermost row's name, compiler/ml/btype.ml:126-135,
+///   ctype.ml:800-868).
+///
+/// The old checker's side, observed: `differential::tests::
+/// old_checker_does_not_reach_the_arguments_of_a_stale_row_name`. Before
+/// the sixth skeleton turn every one of these walks reached `y` (each
+/// pushes every slot of a node); the body is
+/// `Checker::drop_name_children`, called by `Checker::unify_row`. While
+/// the row IS the innermost, its name's arguments are children: the
+/// last block.
+/// Reaches: R3f, R3n, R3g.
+#[test]
+fn the_arguments_of_a_stale_row_name_are_not_children() {
+    // The named row after it gained `#B`, and the argument of its name.
+    let stale = |c: &mut Checker, y: Ty| {
+        let other = named_row(c, 2, "B", None);
+        let named = named_row(c, 2, "A", Some(y));
+        let rows = rows_now(c);
+        c.unify(other, named).unwrap();
+        assert_rows_kept(c, &rows);
+        assert_eq!(shape(c, named), "[A B | ']");
+        named
+    };
+    let level = |c: &mut Checker, ty: Ty| {
+        let ty = c.g.repr(ty);
+        c.g.nodes[ty.0 as usize].level
+    };
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let y = var(&mut c);
+        let named = stale(&mut c, y);
+        c.lower(named, 1).unwrap();
+        assert_eq!((level(&mut c, named), level(&mut c, y)), (1, 2), "lower");
+
+        let mut c = checker(mode);
+        let y = var(&mut c);
+        let named = stale(&mut c, y);
+        c.g.end_def();
+        c.generalize(named);
+        assert_eq!(
+            (level(&mut c, named), level(&mut c, y)),
+            (GENERIC, 2),
+            "generalize"
+        );
+
+        let mut c = checker(mode);
+        let y = var(&mut c);
+        let named = stale(&mut c, y);
+        assert!(!c.deep_occur(y, named), "deep_occur");
+
+        let mut c = checker(mode);
+        let y = var(&mut c);
+        let named = stale(&mut c, y);
+        let v = var_at(&mut c, 1);
+        c.unify(v, named).unwrap();
+        assert_eq!((level(&mut c, named), level(&mut c, y)), (1, 2), "binding");
+
+        let mut c = checker(mode);
+        let u = univar_at(&mut c, 2);
+        let named = stale(&mut c, u);
+        assert_eq!(c.free_univar(named), Ty(NONE), "free_univar");
+        let binder = poly_of(&mut c, 2, u, &[u]);
+        let w = univar_at(&mut c, 2);
+        let other = poly_of(&mut c, 2, named, &[w]);
+        let (binder, other) = (c.g.nodes[binder.0 as usize], c.g.nodes[other.0 as usize]);
+        assert!(!c.univars_escape(binder, other), "univars_escape");
+
+        let mut c = checker(mode);
+        let y = var_at(&mut c, GENERIC);
+        let named = stale(&mut c, y);
+        c.g.end_def();
+        c.generalize(named);
+        let first = c.g.nodes.len();
+        let copy = c.copy(named);
+        assert_eq!(shape(&mut c, copy), "[A B | ']");
+        let variables = c.g.nodes[first..]
+            .iter()
+            .filter(|node| node.tag() == VAR)
+            .count();
+        assert_eq!(variables, 1, "copy");
+    }
+    // The innermost row's name: its argument is a child.
+    let mut c = checker(Mode::Success);
+    let y = var(&mut c);
+    let named = named_row(&mut c, 2, "A", Some(y));
+    assert!(c.deep_occur(y, named));
+    c.lower(named, 1).unwrap();
+    assert_eq!(level(&mut c, y), 1);
+}
+
+/// `free_univar` over a variant row (compiler/ml/btype.ml:229-241,
+/// 263-265; ctype.ml:1563-1607): the fields' types, then the arguments
+/// of the name, then the row variable:
+///
+/// ```text
+/// | Tvariant row ->
+///   iter_row f row;
+///   f (row_more row)
+/// ```
+///
+/// Witnesses, each a row at level 2 with free universal variables in
+/// three places, found in that order:
+/// - `[> #A(u0)] as P<u1>` whose row variable is the universal variable
+///   `u2`: `u0`;
+/// - `[> #A(int)] as P<u1>` over `u2`: `u1`;
+/// - `[> #A(int)]` over `u2`: `u2`;
+/// - inside `poly(...; u2)`, the same row: none (the row variable is
+///   bound);
+/// - an OPENED row `[< #A(u0)]` (`Reither`, its type under the chain
+///   node of its reference): `u0`; and after that reference is resolved
+///   to absent, none: `iter_row` visits what `row_field_repr` gives.
+///
+/// The body is the `Variant` arm of
+/// `Checker::push_free_univar_children`.
+/// Reaches: R3f, R3g.
+#[test]
+fn a_free_universal_variable_is_found_in_a_row_in_order() {
+    let mut c = checker(Mode::Success);
+    // `[> #A(argument)] as P<named>` over `more`.
+    let row = |c: &mut Checker, argument: Ty, named: Option<Ty>, more: Ty| {
+        let name = name_index(c, "A");
+        let start = c.extras.row_fields.len() as u32;
+        c.extras.row_fields.push(RowFieldRow {
+            name,
+            types: Range { start: 0, len: 1 },
+            link: NONE,
+            kind: RowFieldKind::Present,
+        });
+        c.extras.variants.push(VariantRow {
+            fields: Range { start, len: 1 },
+            more: 1,
+            name: if named.is_some() { PA } else { NONE },
+            name_arguments: Range {
+                start: 2,
+                len: u32::from(named.is_some()),
+            },
+            closed: false,
+            fixed: false,
+        });
+        let index = c.extras.variants.len() as u32 - 1;
+        let mut slots = vec![argument, more];
+        slots.extend(named);
+        extended_at(c, 2, ExtraDescriptor::Variant(index), &slots)
+    };
+    let [u0, u1, u2] = [(); 3].map(|()| univar_at(&mut c, 2));
+    let int = constr(&mut c, INT, &[]);
+    let first = row(&mut c, u0, Some(u1), u2);
+    assert_eq!(c.free_univar(first), u0);
+    let second = row(&mut c, int, Some(u1), u2);
+    assert_eq!(c.free_univar(second), u1);
+    let third = row(&mut c, int, None, u2);
+    assert_eq!(c.free_univar(third), u2);
+    let bound = poly_of(&mut c, 2, third, &[u2]);
+    assert_eq!(c.free_univar(bound), Ty(NONE));
+
+    let more = var(&mut c);
+    let either = variant_at(
+        &mut c,
+        2,
+        &[("A", Tag::Either(false, Some(u0), false))],
+        more,
+        true,
+        NONE,
+    );
+    c.open_row(either);
+    assert_eq!(c.free_univar(either), u0);
+    let (tags, _, _) = read_row(&mut c, either);
+    let holders = c.resolve(tags[0].1.end, super::rows::RES_ABSENT, Ty(NONE));
+    c.settle(holders, super::rows::RES_ABSENT);
+    assert_eq!(c.free_univar(either), Ty(NONE));
+}
+
+/// The split of the types that hold a universal variable while the
+/// variants are passive (compiler/ml/ctype.ml:2693-2703):
+///
+/// ```text
+/// | tu1 :: tlu1, _ :: _ ->
+///   (* Attempt to merge all the types containing univars *)
+///   if not !(passive_variants ()) then
+///     List.iter (unify env tu1) (tlu1 @ tlu2)
+/// | tu :: _, [] | [], tu :: _ -> occur_univar !env tu);
+/// (* Is this handling of levels really principal? *)
+/// List.iter (update_level !env (repr more).level) (tl1' @ tl2');
+/// ```
+///
+/// Witness: `poly([< #A(z & (u, x))]; u)` against `poly([< #A(z' & (u',
+/// x'))]; u')`, every type at level 2 and the two row variables at level
+/// 1, with `Extras::passive_variants` set (nothing in `tc` sets it: the
+/// typing of a pattern for an exhaustiveness check does, `with_passive_
+/// variants`, ctype.ml:2189-2202, from typecore.ml:1931; section 8.9).
+/// The two tuples hold a universal variable and are NOT unified and NOT
+/// lowered: they stay two nodes at level 2. `z` and `z'` are gained and
+/// lowered to the level of the merged row variable, 1. Each field then
+/// has its two types and the one it gained. The holder comes after the
+/// kept type in each list, so that the place between the two kept
+/// ranges of the scratch holds a holder: the range `Checker::join_either`
+/// lowered before the review of R3g (section 8.6, decision 54). The
+/// bodies are the passive arm of `Checker::split_univars` and the two
+/// lowering loops of `Checker::join_either`.
+/// Reaches: R3f, R3g.
+#[test]
+fn passive_variants_keep_the_levels_of_the_types_that_hold_a_universal_variable() {
+    let mut c = checker(Mode::Success);
+    c.extras.passive_variants = true;
+    let side = |c: &mut Checker| {
+        let u = univar_at(c, 2);
+        let (x, z) = (var(c), var(c));
+        let holder = tuple(c, &[u, x]);
+        let more = var_at(c, 1);
+        let row = conjunctive_row(c, &[z, holder], more);
+        (poly_of(c, 2, row, &[u]), row, holder, z)
+    };
+    let (left, _, holder1, z1) = side(&mut c);
+    let (right, row2, holder2, z2) = side(&mut c);
+    c.unify(left, right).unwrap();
+    let level = |c: &Checker, ty: Ty| c.g.nodes[ty.0 as usize].level;
+    assert_ne!(c.g.repr(holder1), c.g.repr(holder2));
+    assert_eq!((level(&c, holder1), level(&c, holder2)), (2, 2));
+    assert_eq!((level(&c, z1), level(&c, z2)), (1, 1));
+    let (tags, _, more) = read_row(&mut c, row2);
+    assert_eq!(tags[0].1.types, 3);
+    assert_eq!(level(&c, more), 1);
+    assert!(c.scopes.is_empty() && c.frames.is_empty() && c.saved.is_empty());
+}
+
+/// The cost of the two walks for universal variables, as relations
+/// between n = 1,000 and n = 10,000 (section 8.6, decisions 56 and 59).
+/// - `Checker::free_univar` over a tuple of n variables inside one
+///   binder: one visit a node, linear.
+/// - `Checker::free_univar` over a chain of n polymorphic types WITHOUT
+///   bound variables in which every type is held twice, once under such
+///   a type and once outside it: `t(0)` is the bound variable, `t(i + 1)`
+///   is `(poly(t(i);), t(i))`, the whole inside one binder. A
+///   polymorphic type without bound variables adds nothing to `bound`
+///   (`List.fold_right Type_set.add (List.map repr tyl) bound`,
+///   compiler/ml/ctype.ml:1587-1589), so OCaml visits each node once
+///   (ctype.ml:1569-1581: with the same `bound` a node is not visited
+///   again). So does the walk: exactly `2n + 1` visits (n tuples, n
+///   polymorphic types, the binder), ZERO extra. Before the sixth
+///   skeleton turn such a type opened a context, a node first met inside
+///   it was visited again after it was left, and this chain took `2^n`
+///   visits: the test would not end.
+/// - `Checker::univars_escape` of a known binder over a tuple of n
+///   variables: the family pass and one visit a node, linear.
+///
+/// Reaches: R3g.
+#[test]
+fn the_walks_for_universal_variables_at_ten_thousand() {
+    let wide = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let u = univar_at(&mut c, 2);
+        let mut elements: Vec<Ty> = (0..n).map(|_| var(&mut c)).collect();
+        elements.push(u);
+        let body = tuple(&mut c, &elements);
+        let ty = poly_of(&mut c, 2, body, &[u]);
+        let mut found = u;
+        let count = steps::scope(|| found = c.free_univar(ty));
+        assert_eq!(found, Ty(NONE));
+        count
+    };
+    let (small, large) = (wide(1_000), wide(10_000));
+    assert!(large <= 11 * small, "wide: {small} {large}");
+
+    let shared = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let u = univar_at(&mut c, 2);
+        let mut ty = u;
+        for _ in 0..n {
+            let inner = poly_of(&mut c, 2, ty, &[]);
+            ty = tuple(&mut c, &[inner, ty]);
+        }
+        let ty = poly_of(&mut c, 2, ty, &[u]);
+        let mut found = u;
+        let count = steps::scope(|| found = c.free_univar(ty));
+        assert_eq!(found, Ty(NONE));
+        count
+    };
+    assert_eq!(shared(1_000), 2 * 1_000 + 1);
+    assert_eq!(shared(10_000), 2 * 10_000 + 1);
+
+    let escape = |n: u32| {
+        let mut c = checker(Mode::Success);
+        // An open scope that pairs `u` with `u2`, so that a type that
+        // binds `u` again has a known binder.
+        let (u, u2) = (univar_at(&mut c, 2), univar_at(&mut c, 2));
+        let (outer1, outer2) = (poly_of(&mut c, 2, u, &[u]), poly_of(&mut c, 2, u2, &[u2]));
+        let (n1, n2) = (c.g.nodes[outer1.0 as usize], c.g.nodes[outer2.0 as usize]);
+        let partners = c.g.push(partner_node(Ty(NONE)));
+        c.g.push(partner_node(Ty(NONE)));
+        c.scopes.push(PolyScope {
+            left: n1.b + 1,
+            right: n2.b + 1,
+            left_len: 1,
+            right_len: 1,
+            partners,
+        });
+        let binder = poly_of(&mut c, 2, u, &[u]);
+        let w = univar_at(&mut c, 2);
+        let elements: Vec<Ty> = (0..n).map(|_| var(&mut c)).collect();
+        let body = tuple(&mut c, &elements);
+        let other = poly_of(&mut c, 2, body, &[w]);
+        let (binder, other) = (c.g.nodes[binder.0 as usize], c.g.nodes[other.0 as usize]);
+        let mut escapes = true;
+        let count = steps::scope(|| escapes = c.univars_escape(binder, other));
+        assert!(!escapes);
+        // With `u2` in the body it escapes: `u2` is in the family of `u`.
+        let body = tuple(&mut c, &[u2]);
+        let other = poly_of(&mut c, 2, body, &[w]);
+        let other = c.g.nodes[other.0 as usize];
+        assert!(c.univars_escape(binder, other));
+        c.scopes.clear();
+        count
+    };
+    let (small, large) = (escape(1_000), escape(10_000));
+    assert!(large <= 11 * small, "escape: {small} {large}");
+}
+
 /// The cost of universal variables, as relations between n = 1,000 and
 /// n = 10,000.
 /// - n bound variables, the body the last of them: `unify_univar` scans
@@ -3734,4 +4208,737 @@ fn packages_of_ten_thousand_names_are_linear() {
     };
     let (small, large) = (run(1_000), run(10_000));
     assert!(large <= 11 * small, "{small} {large}");
+}
+
+// ---------------------------------------------------------------------------
+// Pattern mode (R3h, R3r; CHECKER_REWRITE 8.9)
+// ---------------------------------------------------------------------------
+
+use super::expand::{DATATYPE, NEWTYPE, Newtype};
+use super::rows::{DeclMatch, LocalDecls};
+use super::unify::UnifyMode;
+
+/// `(type n0)` at level 1 and `(type n1)` at level 2: locally abstract.
+const N0: u32 = 14;
+const N1: u32 = 15;
+/// `type k<'a>` of another unit: abstract, not injective.
+const K: u32 = 16;
+/// `type d<'a> = D('a)` and `type e<'a> = E('a)` of another unit.
+const D: u32 = 17;
+const E: u32 = 18;
+/// `type t2` of another unit: abstract, as `T`.
+const T2: u32 = 19;
+/// The first type `reify` makes.
+const FRESH: u32 = 20;
+
+/// The supplier of the hand-built tests: counts the fresh types from
+/// [`FRESH`], records the name index each was asked with, and answers
+/// `compare` with `answer` after pushing `members`.
+struct Fresh {
+    next: u32,
+    asked: std::rc::Rc<std::cell::RefCell<Vec<u32>>>,
+    answer: DeclMatch,
+    members: Vec<[Ty; 2]>,
+}
+
+impl LocalDecls for Fresh {
+    fn fresh_abstract(&mut self, name: u32) -> u32 {
+        self.asked.borrow_mut().push(name);
+        self.next += 1;
+        self.next - 1
+    }
+
+    fn compare(&mut self, c: &mut Checker, _: u32, _: u32) -> DeclMatch {
+        for &[left, right] in &self.members {
+            c.push_compatible(left, right);
+        }
+        self.answer
+    }
+}
+
+/// [`checker`] with the declarations of pattern mode: `int`, `string`
+/// and `unit` are bare identifiers (`LOCAL`), `n0` and `n1` locally
+/// abstract types of the newtype levels 1 and 2, `k`, `d`, `e` and `t2`
+/// types of another unit, and a supplier whose record of asked names is
+/// returned.
+fn pattern_checker(mode: Mode) -> (Checker, std::rc::Rc<std::cell::RefCell<Vec<u32>>>) {
+    let mut c = checker(mode);
+    for ty in [INT, STRING, UNIT] {
+        c.types.set_local(ty);
+    }
+    let row = |arity: u16, flags: u8| TypeInfo {
+        manifest: NONE,
+        scope: 0,
+        newtype: NONE,
+        arity,
+        flags,
+        reserved: 0,
+    };
+    for level in [1, 2] {
+        c.types.newtypes.push(Newtype {
+            level,
+            expansion_level: level,
+        });
+        c.types.rows.push(TypeInfo {
+            scope: level,
+            newtype: c.types.newtypes.len() as u32 - 1,
+            ..row(0, NEWTYPE)
+        });
+        c.types.scoped += 1;
+    }
+    c.types
+        .rows
+        .extend([row(1, 0), row(1, DATATYPE), row(1, DATATYPE), row(0, 0)]);
+    assert_eq!(c.types.rows.len() as u32, FRESH);
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    c.locals = Some(Box::new(Fresh {
+        next: FRESH,
+        asked: asked.clone(),
+        answer: DeclMatch::Clash,
+        members: Vec::new(),
+    }));
+    (c, asked)
+}
+
+/// A variable at `level` whose name is `text`.
+fn named_var_at(c: &mut Checker, level: u32, text: &str) -> Ty {
+    let name = name_index(c, text);
+    let ty = var_at(c, level);
+    c.g.nodes[ty.0 as usize].a = name;
+    ty
+}
+
+/// The checker is as a pattern unification must leave it, on either
+/// result: expression mode, both flags off, no newtype level, no pair
+/// assumed, no frame, no open attempt.
+fn assert_pattern_left(c: &Checker) {
+    assert!(c.umode == UnifyMode::Expression);
+    assert!(!c.generate_equations && !c.assume_injective);
+    assert_eq!(c.newtype_level, 0);
+    assert!(c.pairs.keys.is_empty() && c.compatible.keys.is_empty());
+    assert!(c.frames.is_empty() && c.tries.is_empty() && c.scopes.is_empty());
+}
+
+/// Witness: `let f = (type a, x: t<a>) => switch x { | Int => ... }`
+/// with `type rec t<_> = Int: t<int>`: the result `t<int>` of the
+/// constructor against `t<a>`, at the arguments. A locally abstract type
+/// against a type that is not one gets the equation on either side
+/// (compiler/ml/ctype.ml:2385-2392), the two nodes stay two nodes, and
+/// the type is no longer `instantiable`. Under the equation an
+/// expression unification of the two succeeds by expansion. After
+/// `cut_equations(0)` the row is what it was and a new `n0` does not
+/// unify with `int`.
+///
+/// Reaches: R3h.
+#[test]
+#[ignore = "R3h build"]
+fn an_equation_goes_to_the_locally_abstract_type_and_links_nothing() {
+    for swapped in [false, true] {
+        let (mut c, _) = pattern_checker(Mode::Success);
+        let before = c.types.rows[N0 as usize];
+        let (n0, int) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
+        let pair = if swapped { [int, n0] } else { [n0, int] };
+        assert!(c.unify_pattern(2, true, true, pair[0], pair[1]).is_ok());
+        assert_pattern_left(&c);
+        assert_eq!(c.equations.len(), 1);
+        assert_eq!(
+            (c.equations[0].type_index, c.equations[0].previous),
+            (N0, before)
+        );
+        let row = c.types.rows[N0 as usize];
+        assert_eq!(row.flags & (ABBREV | NEWTYPE), ABBREV | NEWTYPE);
+        assert!(!c.types.instantiable(N0));
+        assert_eq!((c.g.repr(n0), c.g.repr(int)), (n0, int));
+        let (other, target) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
+        assert!(c.unify(other, target).is_ok());
+        c.cut_equations(0);
+        assert!(c.equations.is_empty());
+        assert_eq!(c.types.rows[N0 as usize], before);
+        let (other, target) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
+        assert!(c.unify(other, target).is_err());
+    }
+}
+
+/// Witness: `(type a, type b, x: eq<a, b>) => switch x { | Refl => ... }`
+/// with `Refl: eq<'c, 'c>`, `b` declared inside `a`. Of two locally
+/// abstract types the one of the higher newtype level gets the equation,
+/// on either side (compiler/ml/ctype.ml:2373-2384): `n1` (level 2), with
+/// `n0` (level 1) its body. A locally abstract type against an abstract
+/// type of another unit (`find_newtype_level` gives `(0, 0)` for it,
+/// ctype.ml:2085-2091): the locally abstract one. Two abstract types of
+/// another unit have one level: the RIGHT one gets it (`else (path',
+/// t1')`).
+///
+/// Reaches: R3h.
+#[test]
+#[ignore = "R3h build"]
+fn of_two_instantiable_types_the_newer_gets_the_equation() {
+    for (left, right, source) in [
+        (N0, N1, N1),
+        (N1, N0, N1),
+        (N0, T, N0),
+        (T, N0, N0),
+        (T, T2, T2),
+        (T2, T, T),
+    ] {
+        let (mut c, _) = pattern_checker(Mode::Success);
+        let (l, r) = (constr(&mut c, left, &[]), constr(&mut c, right, &[]));
+        assert!(c.unify_pattern(2, true, true, l, r).is_ok());
+        assert_eq!(c.equations.len(), 1, "{left} {right}");
+        assert_eq!(c.equations[0].type_index, source, "{left} {right}");
+        let other = if source == left { right } else { left };
+        let node = constr(&mut c, source, &[]);
+        let expansion = c.expand_head(node, ExpandMode::Unif).unwrap();
+        assert_eq!(path(&mut c, expansion), other);
+    }
+}
+
+/// Witness: `Pair: t<(int, string)>` against `t<a>`. The body of an
+/// equation is a generic copy (`duplicate_type destination`,
+/// compiler/ml/ctype.ml:2095): every node of it is generic, it is not
+/// the destination, and the destination has the levels it had. An
+/// expansion of the type is a copy at the level of the node expanded.
+///
+/// Reaches: R3h.
+#[test]
+#[ignore = "R3h build"]
+fn the_body_of_an_equation_is_a_generic_copy() {
+    let (mut c, _) = pattern_checker(Mode::Success);
+    let (int, string) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]));
+    let destination = tuple(&mut c, &[int, string]);
+    let n0 = constr(&mut c, N0, &[]);
+    assert!(c.unify_pattern(2, true, true, n0, destination).is_ok());
+    let manifest = c.types.manifests[c.types.rows[N0 as usize].manifest as usize];
+    let body = manifest.body;
+    assert_ne!(body, destination);
+    for ty in [body, child(&mut c, body, 0), child(&mut c, body, 1)] {
+        assert_eq!(c.g.nodes[ty.0 as usize].level, GENERIC);
+    }
+    for ty in [destination, int, string] {
+        assert_eq!(c.g.nodes[ty.0 as usize].level, 2);
+    }
+    let expansion = c.expand_head(n0, ExpandMode::Unif).unwrap();
+    assert!(expansion != body && expansion != destination);
+    assert_eq!(c.g.nodes[expansion.0 as usize].level, 2);
+    let second = child(&mut c, expansion, 1);
+    assert_eq!(path(&mut c, second), STRING);
+}
+
+/// Witness: `Pack: t<('x, ('y, 'x))>` against `t<a>` after the instance
+/// of the constructor: its variables are at the newtype level. `reify`
+/// makes one new abstract type for each variable, in the order
+/// `iter_type_expr` visits them, each once (compiler/ml/ctype.ml:
+/// 1828-1840): the supplier is asked with the name of `x`, then of `y`.
+/// Each variable is a link to a nullary constructor of its type at the
+/// variable's level; the type's row is a locally abstract type of the
+/// newtype level (`new_declaration (Some (newtype_level, newtype_level))
+/// None`, ctype.ml:1816).
+///
+/// Reaches: R3h.
+#[test]
+#[ignore = "R3h build"]
+fn reify_makes_one_type_for_each_variable_in_visit_order() {
+    let (mut c, asked) = pattern_checker(Mode::Success);
+    let (x, y) = (named_var_at(&mut c, 2, "x"), named_var_at(&mut c, 3, "y"));
+    let inner = tuple(&mut c, &[y, x]);
+    let destination = tuple(&mut c, &[x, inner]);
+    let n0 = constr(&mut c, N0, &[]);
+    assert!(c.unify_pattern(2, true, true, n0, destination).is_ok());
+    assert_eq!(
+        *asked.borrow(),
+        [name_index(&mut c, "x"), name_index(&mut c, "y")]
+    );
+    for (variable, level, ty) in [(x, 2, FRESH), (y, 3, FRESH + 1)] {
+        let node = c.g.repr(variable);
+        assert_ne!(node, variable);
+        assert_eq!(path(&mut c, node), ty);
+        assert_eq!(c.g.nodes[node.0 as usize].level, level);
+        let row = c.types.rows[ty as usize];
+        assert_eq!((row.flags, row.arity), (NEWTYPE, 0));
+        let newtype = c.types.newtypes[row.newtype as usize];
+        assert_eq!((newtype.level, newtype.expansion_level), (2, 2));
+    }
+    assert_eq!(c.equations.len(), 1);
+}
+
+/// Witness: a variable of the scrutinee's type that is older than the
+/// pattern (`(x: t<'a>) => switch x { | Int => ... }` inside a function
+/// whose `'a` is not generalized yet). `reify` links the variable to its
+/// new type and THEN refuses it, because it is below the newtype level
+/// (`link_type ty t; if ty.level < newtype_level then raise (Unify [(t,
+/// newvar2 ty.level)])`, compiler/ml/ctype.ml:1837-1839): the
+/// unification fails, the variable stays a link (observed on the old
+/// checker: decision 62), no equation is added, and in the explaining
+/// mode the last pair of the trace is the new type and a new variable at
+/// the variable's level.
+///
+/// Reaches: R3h.
+#[test]
+#[ignore = "R3h build"]
+fn reify_links_a_variable_below_the_newtype_level_and_clashes() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let (mut c, _) = pattern_checker(mode);
+        let old = var_at(&mut c, 1);
+        let int = constr(&mut c, INT, &[]);
+        let destination = tuple(&mut c, &[old, int]);
+        let n0 = constr(&mut c, N0, &[]);
+        assert!(c.unify_pattern(2, true, true, n0, destination).is_err());
+        assert_pattern_left(&c);
+        assert!(c.equations.is_empty());
+        let node = c.g.repr(old);
+        assert_ne!(node, old);
+        assert_eq!(path(&mut c, node), FRESH);
+        assert_eq!(c.g.nodes[node.0 as usize].level, 1);
+        if mode == Mode::Explain {
+            let [left, right] = *c.trace.last().unwrap();
+            assert_eq!(left, node);
+            let variable = c.g.nodes[right.0 as usize];
+            assert_eq!((variable.tag(), variable.level), (VAR, 1));
+        }
+    }
+}
+
+/// Witness: `Int: t<int>` against `t<k<a>>`'s argument and its
+/// relatives: two constructors of one type in pattern mode
+/// (compiler/ml/ctype.ml:2349-2358). As `unify_gadt` runs it
+/// (`assume_injective`) the arguments are unified with equations:
+/// `k<n0>` against `k<int>` gives `n0 := int`. Without
+/// `assume_injective` a data type (`d`) and a type of the unit (`LOCAL`,
+/// here set on `box`) still do. Without `generate_equations` the
+/// arguments are unified without equations: `n0` against `int` is then
+/// reified and nothing more (ctype.ml:2393-2397): a success and no
+/// equation. The two constructor nodes are never linked, and the flags
+/// are what they were afterwards (`set_mode_pattern` puts them back,
+/// ctype.ml:256-273).
+///
+/// Reaches: R3h.
+#[test]
+#[ignore = "R3h build"]
+fn the_arguments_of_one_type_are_unified_by_the_flags() {
+    for (ty, generate, injective, equation) in [
+        (K, true, true, true),
+        (D, true, false, true),
+        (BOX, true, false, true),
+        (K, false, true, false),
+        (K, false, false, false),
+        (D, false, false, false),
+    ] {
+        let (mut c, _) = pattern_checker(Mode::Success);
+        c.types.set_local(BOX);
+        let (n0, int) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
+        let (left, right) = (constr(&mut c, ty, &[n0]), constr(&mut c, ty, &[int]));
+        assert!(c.unify_pattern(2, generate, injective, left, right).is_ok());
+        assert_pattern_left(&c);
+        assert_eq!(
+            c.equations.len(),
+            usize::from(equation),
+            "{ty} {generate} {injective}"
+        );
+        assert_eq!((c.g.repr(left), c.g.repr(right)), (left, right));
+        assert_eq!((c.g.repr(n0), c.g.repr(int)), (n0, int));
+    }
+}
+
+/// Witness: `Pair: t<(int, int)>` against `t<(a, int)>`. Two structures
+/// in pattern mode are assumed equal and NOT linked (`Pattern ->
+/// add_type_equality t1' t2'`, compiler/ml/ctype.ml:2327-2331): the old
+/// checker links them and is no judge here (decision 62). The two
+/// tuples are two nodes afterwards, the equation `n0 := int` is added,
+/// and the table of assumed pairs is empty again. A clash below
+/// (`(n0, int)` against `(int, string)`) leaves both tuples as they
+/// were, in both modes, and the equation its first element added stays
+/// until the caller cuts it (`env` is not restored by a failure).
+///
+/// Reaches: R3h.
+#[test]
+#[ignore = "R3h build"]
+fn two_structures_are_assumed_equal_and_not_linked() {
+    for mode in [Mode::Success, Mode::Explain] {
+        for clash in [false, true] {
+            let (mut c, _) = pattern_checker(mode);
+            let (n0, int) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
+            let second = constr(&mut c, if clash { STRING } else { INT }, &[]);
+            let (left, right) = (tuple(&mut c, &[n0, int]), tuple(&mut c, &[int, second]));
+            let (l, r) = (c.g.nodes[left.0 as usize], c.g.nodes[right.0 as usize]);
+            let result = c.unify_pattern(2, true, true, left, right);
+            assert_eq!(result.is_err(), clash);
+            assert_pattern_left(&c);
+            assert_eq!(
+                (c.g.nodes[left.0 as usize], c.g.nodes[right.0 as usize]),
+                (l, r)
+            );
+            assert_eq!(c.equations.len(), 1);
+            assert_eq!(c.equations[0].type_index, N0);
+            if clash && mode == Mode::Explain {
+                assert_eq!(c.trace.first(), Some(&[left, right]));
+            }
+        }
+    }
+}
+
+/// Witness: `(type a, type b, x: eq<a, b>, y: a): b => switch x { | Refl
+/// => y }`: in the case, `a` against `b` in expression mode under `b :=
+/// a`. The arm of `unify` for two locally abstract types under local
+/// constraints expands the NEWER one once and no more
+/// (compiler/ml/ctype.ml:2258-2270): `n1` expands to a copy of `n0`,
+/// which is linked to the other `n0` node by the arm for two nullary
+/// constructors of one type, and that node is still `n0`, not its own
+/// expansion `int`.
+///
+/// Reaches: R3h.
+#[test]
+#[ignore = "R3h build"]
+fn the_newer_of_two_locally_abstract_types_is_expanded_once() {
+    let (mut c, _) = pattern_checker(Mode::Success);
+    let (n0, int) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
+    assert!(c.unify_pattern(2, true, true, n0, int).is_ok());
+    let (n1, older) = (constr(&mut c, N1, &[]), constr(&mut c, N0, &[]));
+    assert!(c.unify_pattern(2, true, true, n1, older).is_ok());
+    assert_eq!(c.equations.len(), 2);
+    assert_eq!(c.equations[1].type_index, N1);
+    let (left, right) = (constr(&mut c, N1, &[]), constr(&mut c, N0, &[]));
+    assert!(c.unify(left, right).is_ok());
+    assert_eq!(path(&mut c, right), N0);
+    assert_eq!(c.g.repr(left), left);
+}
+
+/// Witness: `Wrap: t<(a, int)>` against `t<a>` for the same `a`: an
+/// equation of a type with a type that names it. `add_gadt_equation`
+/// adds nothing and does not clash (`if local_non_recursive_abbrev !env
+/// source destination then ...`, compiler/ml/ctype.ml:2093-2094).
+///
+/// Reaches: R3h.
+#[test]
+#[ignore = "R3h build"]
+fn a_recursive_equation_is_not_added() {
+    // Review of pull request 347: this expectation is not what OCaml
+    // does (compiler/ml/ctype.ml:1503-1536, called with `strict = false`:
+    // a tuple at the top is not searched, so this equation IS added).
+    // A design turn corrects the test before the slice is built
+    // (CHECKER_REWRITE 8.9, "Corrections owed after review", item 1).
+    let (mut c, _) = pattern_checker(Mode::Success);
+    let (inner, int) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
+    let destination = tuple(&mut c, &[inner, int]);
+    let n0 = constr(&mut c, N0, &[]);
+    assert!(c.unify_pattern(2, true, true, n0, destination).is_ok());
+    assert!(c.equations.is_empty());
+    assert_eq!(c.types.rows[N0 as usize].flags, NEWTYPE);
+}
+
+/// Witness: a pattern whose type has 10,000 components. Relations
+/// between 1,000 and 10,000 (CHECKER_REWRITE 8.9, "Step tests"):
+/// - a chain of n nested tuples against a second chain of the same
+///   shape in pattern mode: the steps are linear in the pairs, no node
+///   of either chain is a link, the table of assumed pairs is empty;
+/// - `reify` of a tuple of n variables, each named twice: every
+///   variable is visited once, steps linear, n types made;
+/// - n equations added and cut: steps linear, every row what it was.
+///
+/// Reaches: R3h.
+#[test]
+#[ignore = "R3h build"]
+fn pattern_mode_at_ten_thousand() {
+    let chain = |c: &mut Checker, n: u32| {
+        let mut ty = constr(c, INT, &[]);
+        for _ in 0..n {
+            let int = constr(c, INT, &[]);
+            ty = tuple(c, &[int, ty]);
+        }
+        ty
+    };
+    let structures = |n: u32| {
+        let (mut c, _) = pattern_checker(Mode::Success);
+        let (left, right) = (chain(&mut c, n), chain(&mut c, n));
+        let nodes = c.g.nodes.len();
+        let mut result = Err(super::unify::Clash);
+        let count = steps::scope(|| result = c.unify_pattern(2, true, true, left, right));
+        assert!(result.is_ok());
+        assert_pattern_left(&c);
+        // The nullary `int` pairs are linked in every mode
+        // (ctype.ml:2248-2257); no tuple is.
+        for index in 0..nodes {
+            let node = c.g.nodes[index];
+            assert!(node.tag() != LINK || path(&mut c, Ty(index as u32)) == INT);
+        }
+        count
+    };
+    let (small, large) = (structures(1_000), structures(10_000));
+    assert!(large <= 11 * small, "structures: {small} {large}");
+
+    let reified = |n: u32| {
+        let (mut c, asked) = pattern_checker(Mode::Success);
+        let variables: Vec<Ty> = (0..n).map(|_| var(&mut c)).collect();
+        let mut elements = variables.clone();
+        elements.extend(&variables);
+        let ty = tuple(&mut c, &elements);
+        c.newtype_level = 2;
+        let mut result = Err(super::unify::Clash);
+        let count = steps::scope(|| result = c.reify(ty));
+        assert!(result.is_ok());
+        assert_eq!(asked.borrow().len(), n as usize);
+        count
+    };
+    let (small, large) = (reified(1_000), reified(10_000));
+    assert!(large <= 11 * small, "reify: {small} {large}");
+
+    let equations = |n: u32| {
+        let (mut c, _) = pattern_checker(Mode::Success);
+        let first = c.types.rows.len() as u32;
+        for _ in 0..n {
+            let row = c.types.rows[T as usize];
+            c.types.rows.push(row);
+        }
+        let before = c.types.rows.clone();
+        let count = steps::scope(|| {
+            for index in 0..n {
+                let (ty, int) = (constr(&mut c, first + index, &[]), constr(&mut c, INT, &[]));
+                assert!(c.unify_pattern(2, true, true, ty, int).is_ok());
+            }
+            assert_eq!(c.equations.len(), n as usize);
+            c.cut_equations(0);
+        });
+        assert_eq!(c.types.rows, before);
+        count
+    };
+    let (small, large) = (equations(1_000), equations(10_000));
+    assert!(large <= 11 * small, "equations: {small} {large}");
+}
+
+/// Witness: `Int: t<k<int>>` against `t<k<a>>` below a constructor
+/// whose arguments were already entered (`generate_equations` on,
+/// `assume_injective` off), `k` abstract and of another unit. Its
+/// argument is not injective: it is unified without equations under a
+/// snapshot, and when that fails the graph goes back and both arguments
+/// are reified (compiler/ml/ctype.ml:2359-2371).
+/// - `k<n0>` against `k<int>`: no equation, a success.
+/// - `k<'v>` against `k<int>`: the attempt succeeds and is kept: `'v`
+///   is a link to `int`.
+/// - `k<('v, int)>` against `k<string>`: the attempt fails; `'v` is not
+///   bound by it and is reified: a link to the first fresh type.
+/// - with the parameter marked injective (`injective_bits`), `k<n0>`
+///   against `k<int>` gives `n0 := int`.
+///
+/// No attempt is left open and, in `Mode::Success`, no speculation.
+///
+/// Reaches: R3h, R3r.
+#[test]
+#[ignore = "R3r build"]
+fn an_argument_that_is_not_injective_is_tried_and_then_reified() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let (mut c, _) = pattern_checker(mode);
+        let (n0, int) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
+        let (left, right) = (constr(&mut c, K, &[n0]), constr(&mut c, K, &[int]));
+        assert!(c.unify_pattern(2, true, false, left, right).is_ok());
+        assert_pattern_left(&c);
+        assert!(c.equations.is_empty());
+        assert_eq!(c.g.speculation_depth, 0);
+
+        let (v, int) = (var(&mut c), constr(&mut c, INT, &[]));
+        let (left, right) = (constr(&mut c, K, &[v]), constr(&mut c, K, &[int]));
+        assert!(c.unify_pattern(2, true, false, left, right).is_ok());
+        assert_eq!(c.g.repr(v), int);
+
+        let (v, int, string) = (
+            var(&mut c),
+            constr(&mut c, INT, &[]),
+            constr(&mut c, STRING, &[]),
+        );
+        let pair = tuple(&mut c, &[v, int]);
+        let (left, right) = (constr(&mut c, K, &[pair]), constr(&mut c, K, &[string]));
+        assert!(c.unify_pattern(2, true, false, left, right).is_ok());
+        assert_pattern_left(&c);
+        let node = c.g.repr(v);
+        assert_eq!(path(&mut c, node), FRESH);
+        assert_eq!(c.g.speculation_depth, 0);
+
+        c.types.injective_bits = vec![0; K as usize + 1];
+        c.types.injective_bits[K as usize] = 1;
+        let (n0, int) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
+        let (left, right) = (constr(&mut c, K, &[n0]), constr(&mut c, K, &[int]));
+        assert!(c.unify_pattern(2, true, false, left, right).is_ok());
+        assert_eq!(c.equations.len(), 1);
+    }
+}
+
+/// Witness: a constructor whose result is `t<[> #A]>` against a
+/// scrutinee `t<[> #A | #B]>` whose row was fixed by an earlier case.
+/// Two variants in pattern mode are unified under a snapshot; when that
+/// fails the graph goes back, both are reified and, with equations,
+/// compared with `mcomp` (compiler/ml/ctype.ml:2400-2408).
+/// - a fixed row `[> #A]` (made by `reify`) against an open row with
+///   one more tag: `unify_row` refuses to extend the fixed row, `mcomp`
+///   accepts (no row is closed): a success, the two rows are two nodes,
+///   the open one is a fixed row afterwards (observed on the old
+///   checker: decision 62);
+/// - two closed rows `[#A]` and `[#B]`: `mcomp` refuses (a present tag
+///   the other closed row lacks, ctype.ml:1988-1995): a clash;
+/// - the same without `generate_equations`: no `mcomp`, a success.
+///
+/// Reaches: R3f, R3h, R3r.
+#[test]
+#[ignore = "R3r build"]
+fn rows_that_clash_are_reified_and_compared() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let (mut c, _) = pattern_checker(mode);
+        let (more1, more2) = (var(&mut c), var(&mut c));
+        let fixed = variant_at(&mut c, 2, &[("A", Tag::Present(None))], more1, false, NONE);
+        c.newtype_level = 2;
+        assert!(c.reify(fixed).is_ok());
+        c.newtype_level = 0;
+        assert!(shape(&mut c, fixed).contains("fixed"));
+        let open = variant_at(
+            &mut c,
+            2,
+            &[("A", Tag::Present(None)), ("B", Tag::Present(None))],
+            more2,
+            false,
+            NONE,
+        );
+        assert!(c.unify_pattern(2, true, true, fixed, open).is_ok());
+        assert_pattern_left(&c);
+        assert_eq!((c.g.repr(fixed), c.g.repr(open)), (fixed, open));
+        assert!(shape(&mut c, open).contains("fixed"));
+        assert_eq!(path(&mut c, more2), FRESH + 1);
+
+        for (generate, clash) in [(true, true), (false, false)] {
+            let (nil1, nil2) = (
+                extended_at(&mut c, 2, ExtraDescriptor::Nil, &[]),
+                extended_at(&mut c, 2, ExtraDescriptor::Nil, &[]),
+            );
+            let left = variant_at(&mut c, 2, &[("A", Tag::Present(None))], nil1, true, NONE);
+            let right = variant_at(&mut c, 2, &[("B", Tag::Present(None))], nil2, true, NONE);
+            let result = c.unify_pattern(2, generate, true, left, right);
+            assert_eq!(result.is_err(), clash);
+            assert_pattern_left(&c);
+            assert_eq!((c.g.repr(left), c.g.repr(right)), (left, right));
+        }
+    }
+}
+
+/// Witness: `Int: t<int>` against `t<string>`, `t<M.t>`, `t<d<int>>`:
+/// what `mcomp` answers (compiler/ml/ctype.ml:1905-2039), one line an
+/// arm. It never links: every node is its own representative
+/// afterwards, and its table is empty.
+/// - a variable against anything: compatible;
+/// - `int` against `string`, both bare identifiers that are not locally
+///   abstract (`non_aliasable`): a clash;
+/// - `M.t`, abstract and of another unit, against `int`: compatible
+///   (`Type_abstract, Type_abstract`);
+/// - `M.t` against a tuple: compatible; `int` against a tuple: a clash
+///   (`non_aliasable p decl || is_datatype decl`);
+/// - a tuple against an arrow: a clash; `(int, M.t)` against `(int,
+///   myint)`: compatible, through the expansion of `myint`;
+/// - `d<int>` against `d<string>`: compatible while the parameter is
+///   not injective, a clash when it is;
+/// - `d<int>` against `e<int>`, two data types: what the supplier
+///   answers: `Clash`; `Members` with no pair: compatible; `Members`
+///   after pushing the pair of `int` and `string`: a clash; with no
+///   supplier: a clash (CHECKER_REWRITE 8.9, "No supplier").
+///
+/// Reaches: R3r.
+#[test]
+#[ignore = "R3r build"]
+fn mcomp_answers_by_the_declarations() {
+    let (mut c, _) = pattern_checker(Mode::Success);
+    let int = |c: &mut Checker| constr(c, INT, &[]);
+    let (v, i, s, t) = (
+        var(&mut c),
+        int(&mut c),
+        constr(&mut c, STRING, &[]),
+        constr(&mut c, T, &[]),
+    );
+    let pair = {
+        let (a, b) = (int(&mut c), int(&mut c));
+        tuple(&mut c, &[a, b])
+    };
+    let function = {
+        let (a, b) = (int(&mut c), int(&mut c));
+        arrow(&mut c, &[a], b)
+    };
+    let (with_t, with_myint) = {
+        let (a, b, m) = (int(&mut c), int(&mut c), constr(&mut c, MYINT, &[]));
+        let t = constr(&mut c, T, &[]);
+        (tuple(&mut c, &[a, t]), tuple(&mut c, &[b, m]))
+    };
+    let (d_int, d_string) = {
+        let (a, b) = (int(&mut c), constr(&mut c, STRING, &[]));
+        (constr(&mut c, D, &[a]), constr(&mut c, D, &[b]))
+    };
+    let nodes = c.g.nodes.len();
+    for (left, right, compatible) in [
+        (v, pair, true),
+        (i, s, false),
+        (t, i, true),
+        (t, pair, true),
+        (i, pair, false),
+        (pair, function, false),
+        (with_t, with_myint, true),
+        (d_int, d_string, true),
+    ] {
+        assert_eq!(
+            c.mcomp(left, right).is_ok(),
+            compatible,
+            "{left:?} {right:?}"
+        );
+        assert!(c.compatible.keys.is_empty());
+    }
+    for node in &c.g.nodes[..nodes] {
+        assert_ne!(node.tag(), LINK);
+    }
+    c.types.injective_bits = vec![0; D as usize + 1];
+    c.types.injective_bits[D as usize] = 1;
+    assert!(c.mcomp(d_int, d_string).is_err());
+
+    let e_int = {
+        let a = int(&mut c);
+        constr(&mut c, E, &[a])
+    };
+    let supplier = |answer: DeclMatch, members: Vec<[Ty; 2]>| -> Option<Box<dyn LocalDecls>> {
+        Some(Box::new(Fresh {
+            next: FRESH,
+            asked: Default::default(),
+            answer,
+            members,
+        }))
+    };
+    assert!(c.mcomp(d_int, e_int).is_err());
+    c.locals = supplier(DeclMatch::Members, Vec::new());
+    assert!(c.mcomp(d_int, e_int).is_ok());
+    c.locals = supplier(DeclMatch::Members, vec![[i, s]]);
+    assert!(c.mcomp(d_int, e_int).is_err());
+    c.locals = None;
+    assert!(c.mcomp(d_int, e_int).is_err());
+    assert!(c.compatible.keys.is_empty());
+}
+
+/// Witness: two types of 10,000 components that `mcomp` compares.
+/// Relation between 1,000 and 10,000: two tuples of n elements whose
+/// elements are the SAME n-deep chain pairwise (every element of the
+/// left is one node, every element of the right another): the table
+/// makes the second and every later pair of the chains one lookup, so
+/// the steps are linear in n and not n times the depth.
+///
+/// Reaches: R3r.
+#[test]
+#[ignore = "R3r build"]
+fn mcomp_at_ten_thousand() {
+    let run = |n: u32| {
+        let (mut c, _) = pattern_checker(Mode::Success);
+        let chain = |c: &mut Checker| {
+            let mut ty = constr(c, T, &[]);
+            for _ in 0..n {
+                let int = constr(c, INT, &[]);
+                ty = tuple(c, &[int, ty]);
+            }
+            ty
+        };
+        let (a, b) = (chain(&mut c), chain(&mut c));
+        let (left, right) = (tuple(&mut c, &vec![a; 100]), tuple(&mut c, &vec![b; 100]));
+        let mut result = Err(super::unify::Clash);
+        let count = steps::scope(|| result = c.mcomp(left, right));
+        assert!(result.is_ok());
+        count
+    };
+    let (small, large) = (run(1_000), run(10_000));
+    assert!(large <= 11 * small, "mcomp: {small} {large}");
 }

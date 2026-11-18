@@ -347,7 +347,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         work.clear();
         let mut nested = std::mem::take(&mut self.scratch);
         debug_assert!(nested.is_empty());
-        for stmt in self.statements.statements(run) {
+        for stmt in self.statements.statement_refs(run).map(|s| NodeId(self.js.stmt_id(&self.arena, s))) {
             // `nested` holds the statements of the blocks still open, last
             // first; a zero marks where a block ends.
             work.push(stmt);

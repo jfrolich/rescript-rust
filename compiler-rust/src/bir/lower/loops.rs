@@ -153,7 +153,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let guard = self.if_statement(B::node(negated), yes, no);
                 let mark = self.statements.mark();
                 self.push_loop_list(blocks[0].unwrap());
-                self.statements.push(B::stmt_from_node(guard));
+                self.statements.push(guard);
                 self.push_loop_list(blocks[1].unwrap());
                 let list = self.statements.take_list(&mut self.js, &mut self.arena, self.statements.since(mark));
                 let condition = self.js.boolean(&mut self.arena, true);

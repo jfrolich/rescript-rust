@@ -463,8 +463,8 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     variants: Vec<Option<variant::Plan>>,
     named_metadata: variant::Metadata,
     switch_spelling: String,
-    untagged: Vec<Option<untagged::Plan>>,
-    untagged_storage: untagged::Storage,
+    untagged: Vec<Option<untagged::Plan<B::S>>>,
+    untagged_storage: untagged::Storage<B::S>,
     untagged_dispatch: crate::bir::untagged_plan::Plan<u32>,
     switch_facts: Vec<switch::Facts>,
     switch_work: Vec<(NodeId, bool)>,
@@ -474,7 +474,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     group_table: hashbrown::HashTable<usize>,
     group_order: Vec<usize>,
     group_heads: Vec<usize>,
-    switch_output_nodes: Vec<NodeId>,
+    switch_output_nodes: Vec<Option<B::S>>,
     switch_output_clauses: Vec<crate::bir::ClauseMeta>,
     switch_group_steps: usize,
     switch_hash_bytes: Vec<u8>,
@@ -769,7 +769,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// for a discarded suffix; O(1) otherwise. No temporary statement vector.
     fn append_outputs(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {
         if first.finished == Finished::True {
-            for statement in self.statements.statements(second.stmts) { self.arena.release(statement); }
+            for statement in self.statements.take_run(second.stmts) { self.js.release_stmt(&mut self.arena, statement); }
             if let Some(value) = second.value { self.arena.release(value); }
         }
         self.statements.append(first, second, value)

@@ -131,12 +131,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if self.locations.is_none() {
             return;
         }
-        if let Some(first) = self.statements.first(run)
-            && !self.js.stmt_located(&self.arena, &B::stmt_from_node(first))
+        if let Some(slot) = self.statements.first_slot(run)
+            && !self.js.stmt_located(&self.arena, self.statements.head(slot))
             && let Some(loc) = self.switch_location(source)
         {
-            let mut first = B::stmt_from_node(first);
-            self.js.locate_stmt(&mut self.arena, &mut first, loc);
+            self.js.locate_stmt(&mut self.arena, self.statements.head_mut(slot), loc);
         }
     }
 }
