@@ -8770,7 +8770,36 @@ reads one.
   (31 accepted programs, the JavaScript of each compared by the
   JavaScript parity suite).
 
+The member sets keep duplicates: a type expanded again after the memo is
+cleared is pushed again, where OCaml's set holds it once, so a lookup is
+linear in additions, not in distinct members.
+
+The arm for two locally abstract types (`unify_newtypes`) runs under
+local constraints whatever the member flag, as OCaml's does.
+
+Set additions are journaled (`TypeMutation::GadtInstance`) and undone on
+backtrack, as OCaml's `set_typeset` logs them (`btype.ml:80`, `706`,
+`749`).
+
 #### Open
+
+A difference without a program: Rust adds no scope where OCaml's
+`type_cases` adds one for a `switch` without a generalized constructor
+that gets an exhaustiveness check (`typecore.ml:4913-4914`, `if do_init &&
+not has_gadts then init_env ()`); Rust's `type_match` and
+`finish_non_gadt_type_cases` raise the level there but call no
+`add_gadt_instance_level`. It cannot be seen: a member is only ever added
+at the expansion level of an equation, or at the level of a set that
+already holds the type. The patterns of that `switch` have no
+generalized constructor and add no equation, so OCaml's inner set stays
+empty and its lookups go on to the outer sets, as Rust's do. The
+exhaustiveness check types counterexample patterns in that environment,
+which can add an equation at that level; there the refusal test still
+compares with the equation's expansion level in Rust, only the member is
+not recorded, and the check's typing is undone afterwards in both. Three
+programs with a generalized type under `_` (a tuple with an `int`, an
+`option<t<a>>` with a guard, `t<int>`) give the same warnings in both
+compilers.
 
 No program of the 64 shows a difference at these OCaml sites, which are
 not ported: the chain of `unify2` after expansion (`ctype.ml:2293-2298`:
@@ -8836,11 +8865,14 @@ unit" (`has_gadt_instances`, set in `push_gadt_instance`, since
 updates test it, then the environment's scope handle; the expansion sites
 test the byte (`expands_gadt_instances`: tracing or a member), so the
 test that adds the first member still runs. Scopes are created as before:
-434 of the 788 units of `tests/tests` add one, 2,169 in all, because
-OCaml's `type_cases` adds an instance level for a `switch` without a
-generalized constructor whenever the exhaustiveness check will run
-(`typecore.ml:4814-4818`, `4913-4914`; Rust `typecore.rs` at the
-`needs_exhaust_check` test). 7 of the 788 units add an instance.
+434 of the 788 units of `tests/tests` add one, 2,169 in all. Rust adds a
+scope in two places: `type_function_nary`'s `init_env`, for a function
+whose parameters contain a generalized constructor (`has_gadts`) and for
+one with a parameter that is not a plain variable, such as `()`, whose
+patterns get an exhaustiveness check (`do_init && !has_gadts`,
+`typecore.ml:4196-4197`); and `type_match`, for a `switch` with a
+generalized constructor only (`typecore.ml:4819-4828`). Most of the 434
+are the second kind of function. 7 of the 788 units add an instance.
 
 The CI `Instruction count` check on a clean `tests/tests` build:
 +12,960,104 (+0.313%) for `7d08707fd`, +11,397,960 (+0.276%) for
@@ -8871,6 +8903,9 @@ The sites come to +1,559,169, (a) to +1,259,086 (+0.0305%, 18,666 above
 `IdTbl::find_by_ident` (-501,294) and the allocator, which move by as
 much between runs.
 
+Two `#[inline(never)]` remain, on `instance_with_gadt_instances` and
+`instance_list_with_gadt_instances`, from the copy-path attempt
+`ae16a975d`, which measured +9,118,887 against +11,678,261 before it.
 Measured locally (fat LTO, one codegen unit, five runs a side; trunk
 459b87ca5 as base): `bcc2a4ef4` +4,401,645, the flag `82e309f01`
 +6,529,629 (not lower, kept because the flag defines (a)), one

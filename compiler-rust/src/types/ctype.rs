@@ -7366,7 +7366,9 @@ fn expand_head_with_mode(
 }
 
 /// Trunk's head expansion: [`expand_head_with_mode`] outside an instance
-/// scope.
+/// scope. Cost: at most 20 expansions of the head, each one memo scan or
+/// one declaration lookup and a substitution, plus a scan of the up to 20
+/// heads already seen.
 fn expand_head_plain(
     ctx: &TypeContext,
     env: &Env,
@@ -7420,7 +7422,10 @@ fn expand_heads_unif(
     }
 }
 
-/// The traced expansions of [`expand_heads_unif`].
+/// The traced expansions of [`expand_heads_unif`]. Cost: two
+/// [`expand_head_traced`], each at most 20 expansions, every one with the
+/// instance test of [`try_expand_head_traced`] (one memo scan, one
+/// local-constraint lookup and one [`gadt_instance_level`]).
 fn expand_heads_traced(
     ctx: &TypeContext,
     env: &Env,
@@ -7451,7 +7456,8 @@ fn expand_head_in_unify(
 }
 
 /// OCaml's `Unify [(ty, newvar2 level)]` for an ambiguous GADT instance
-/// `ty` (compiler/ml/ctype.ml:589, 1225).
+/// `ty` (compiler/ml/ctype.ml:589, 1225). Cost: one fresh variable and a
+/// one-pair trace vector; only on the error path.
 fn ambiguous_instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeError {
     let level = ctx.get_level(ty);
     TypeError::Unify(vec![(ty, new_var_at_level(ctx, level))])
@@ -12540,7 +12546,9 @@ pub fn instance_in(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef
 }
 
 /// OCaml `instance_list env schl` (compiler/ml/ctype.ml:891-894): as
-/// [`instance_in`], sharing one copy session.
+/// [`instance_in`], sharing one copy session. Cost: [`instance_list`]'s
+/// after one load and one branch while no type has joined an instance set;
+/// otherwise that of `instance_list_with_gadt_instances`.
 pub fn instance_list_in(ctx: &TypeContext, env: &Env, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
     if has_gadt_instance_scope(ctx, env) {
         instance_list_with_gadt_instances(ctx, env, types)
@@ -12568,7 +12576,8 @@ fn expands_gadt_instances(ctx: &TypeContext, env: &Env) -> bool {
 /// [`instance`] in an environment with an instance scope: `copy ?env`
 /// (compiler/ml/ctype.ml:770-774) adds the copy of each instance to its
 /// set when `env` has local constraints. Cost: the copy, then per copied
-/// node one [`TypeContext::gadt_instance_level`].
+/// node one [`TypeContext::gadt_instance_level`]. Not inlined, so that
+/// `instance_in` keeps trunk's inlined `instance`.
 #[inline(never)]
 fn instance_with_gadt_instances(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     if ctx.counts_this_call() {
@@ -12585,7 +12594,11 @@ fn instance_with_gadt_instances(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -
 }
 
 /// [`instance_list`] in an environment with an instance scope, as
-/// [`instance_with_gadt_instances`].
+/// [`instance_with_gadt_instances`]. Cost: the copy of every type in one
+/// session, then per copied node one [`TypeContext::gadt_instance_level`]
+/// under local constraints. Not inlined, so that `instance_list_in` keeps
+/// trunk's inlined `instance_list` (measured with the first attempt of the
+/// second turn on the pull request).
 #[inline(never)]
 fn instance_list_with_gadt_instances(
     ctx: &TypeContext,

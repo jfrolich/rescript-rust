@@ -5859,7 +5859,12 @@ impl TypeContext {
             // the chain.
             let member = self.gadt_instance_scopes.borrow()[scope.index()]
                 .members
-                .contains(&ty);
+                .iter()
+                .any(|&member| {
+                    #[cfg(test)]
+                    crate::tc::steps::tick();
+                    member == ty
+                });
             if member {
                 return;
             }
@@ -6406,6 +6411,26 @@ mod tests {
         ctx.set_desc(members[0], TypeDesc::Tlink(other));
         assert_eq!(ctx.gadt_instance_level(inner, other), Some(5));
         assert_eq!(ctx.gadt_instance_level(GadtScopeRef::NONE, other), None);
+    }
+
+    /// A chain of one type against a set of `n` members: one membership
+    /// step per member, so ten times the members is ten times the steps.
+    #[test]
+    fn gadt_instance_chain_is_linear_in_the_members_of_its_set() {
+        let chain_steps = |n: usize| {
+            let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+            let scope = ctx.new_gadt_instance_scope(5, GadtScopeRef::NONE);
+            let members: Vec<_> = (0..n).map(|_| ctx.new_var(None)).collect();
+            ctx.add_gadt_instances(scope, 5, &members);
+            let ty = ctx.new_var(None);
+            let steps = crate::tc::steps::scope(|| ctx.add_gadt_instance_chain(scope, 5, ty));
+            assert_eq!(ctx.gadt_instance_level(scope, ty), Some(5));
+            steps
+        };
+        let small = chain_steps(1_000);
+        let large = chain_steps(10_000);
+        assert!(small > 0);
+        assert_eq!(large, 10 * small);
     }
 
     #[test]
