@@ -1,0 +1,1 @@
+- The rewritten type checker unifies in pattern mode: two structures are assumed equal instead of linked, locally abstract types get equations that are cut when the case ends, the variables of a destination are reified into fresh abstract types, and a copy of a fixed variant row matches its fields.
