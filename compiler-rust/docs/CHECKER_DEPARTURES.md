@@ -8758,6 +8758,19 @@ reads one.
   type of a record (`typecore.ml:3044`, `3148`) and of a coercion's `rue`
   (`instance_if_generic_in`). The tuple's copy (`instance_if_generic`) has
   no OCaml counterpart: `typecore.ml:2940` unifies `ty_expected` itself.
+  `66dfd8330` gives the second copy of a record's `with` base trunk's
+  `instance`: OCaml has no copy there (`typecore.ml:3165` stores the copy
+  of `3153`). `5f8d821f9` copies the expected type of `assert(false)` with
+  the environment (`typecore.ml:3780`), where Rust used it uncopied. Of the
+  83 copy sites of `typecore.rs`, 60 copy with the environment as OCaml's
+  `instance env` / `instance_list env` (and typetexp's `instance env`), 19
+  without it as OCaml's `instance_def` and typetexp's `instance_list`, and
+  4 have no OCaml counterpart and keep trunk's call. Three OCaml sites have
+  no Rust copy: `is_ignore` and the `ignore` case of `type_application`
+  (`typecore.ml:2498`, `4496`: Rust tests the primitive by name and copies
+  nothing), and the `let` with locally abstract types
+  (`typecore.ml:5092`), where Rust types the rewritten expression, whose
+  `rue` copies the expected type in the same environment.
 - `752db1e00` keeps these tests off the default path (see "Cost" below);
   `b46a3af77` adds nothing where an environment has an equation but no
   instance scope at its level, a state OCaml asserts against
@@ -8835,7 +8848,8 @@ functions with no generalized constructor lower types through a `switch`
 (`Some(n) => [n, f(Int, n)]`, and a `ref([])` assigned in a case): both
 compilers accept it with the same JavaScript.
 
-Nineteen programs aimed at these sites agree with OCaml on the head
+Twenty-one programs aimed at these sites (two of them `assert(false)`,
+in a branch and as a field of a generalized record) agree with OCaml on the head
 before `de5bef189` and after it; none is a witness, so none is a fixture.
 The sites were corrected because the copy must do what OCaml's does.
 (a) For `rue` and the other `instance env` sites, inside a case with
