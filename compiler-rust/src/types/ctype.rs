@@ -630,7 +630,13 @@ fn unify_newtypes(
     let expand_first = find_newtype_level(ctx, env, &p1) >= find_newtype_level(ctx, env, &p2);
     let expanded = if expand_first { t1 } else { t2 };
     let mut ambiguous = None;
-    match try_expand_head_with_mode::<true>(ctx, env, expanded, ExpandHeadMode::Unify, &mut ambiguous) {
+    match try_expand_head_with_mode::<true>(
+        ctx,
+        env,
+        expanded,
+        ExpandHeadMode::Unify,
+        &mut ambiguous,
+    ) {
         Some(expansion) => {
             let expansion = ctx.repr(expansion);
             Some(if expand_first {
@@ -6396,7 +6402,13 @@ fn subtype_rec(
             Ok(())
         }
         (TypeDesc::Tconstr { path: p1, .. }, _) if generic_private_abbrev(ctx, env, p1) => {
-            match try_expand_head_with_mode::<false>(ctx, env, t1, ExpandHeadMode::Optimize, &mut None) {
+            match try_expand_head_with_mode::<false>(
+                ctx,
+                env,
+                t1,
+                ExpandHeadMode::Optimize,
+                &mut None,
+            ) {
                 Some(expanded) => subtype_rec(ctx, env, subtypes, trace, expanded, t2, cstrs),
                 None => {
                     push_subtype_cstr(cstrs, trace, t1, t2, None);
@@ -9050,9 +9062,9 @@ fn unify_types(
                     // both constructor heads before the constructor-path cases
                     // at ctype.ml:2412-2414 are considered.
                     let exp1 = expand_head_for_unify(ctx, env, t1, ExpandHeadMode::Unify)
-                    .map_err(|ty| ambiguous_instance(ctx, ty))?;
+                        .map_err(|ty| ambiguous_instance(ctx, ty))?;
                     let exp2 = expand_head_for_unify(ctx, env, t2, ExpandHeadMode::Unify)
-                    .map_err(|ty| ambiguous_instance(ctx, ty))?;
+                        .map_err(|ty| ambiguous_instance(ctx, ty))?;
                     if exp1 != t1 || exp2 != t2 {
                         return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                     }
@@ -9437,13 +9449,13 @@ fn unify_types(
                     // `expand_head_unif` (ctype.ml:2291-2292).
                     let exp1 = if is_constr1 {
                         expand_head_for_unify(ctx, env, t1, ExpandHeadMode::General)
-                    .map_err(|ty| ambiguous_instance(ctx, ty))?
+                            .map_err(|ty| ambiguous_instance(ctx, ty))?
                     } else {
                         t1
                     };
                     let exp2 = if is_constr2 {
                         expand_head_for_unify(ctx, env, t2, ExpandHeadMode::General)
-                    .map_err(|ty| ambiguous_instance(ctx, ty))?
+                            .map_err(|ty| ambiguous_instance(ctx, ty))?
                     } else {
                         t2
                     };
