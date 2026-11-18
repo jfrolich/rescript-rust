@@ -8738,7 +8738,10 @@ fn type_expect_with_recarg_unscoped<'a>(
 
             // assert(false) has the expected type (polymorphic), others have type unit
             let exp_type = match &typed_e.exp_desc {
-                ExpressionDesc::Texp_construct(_, cd, _) if cd.cstr_name == "false" => expected_ty,
+                // typecore.ml:3780 `instance env ty_expected`.
+                ExpressionDesc::Texp_construct(_, cd, _) if cd.cstr_name == "false" => {
+                    crate::types::ctype::instance_in(ctx, env, expected_ty)
+                }
                 _ => {
                     // OCaml typecore.ml:3401-3414: `rue` unifies
                     // `instance_def Predef.type_unit` with `instance env ty_expected`.
