@@ -4326,6 +4326,13 @@ unless it says "ignored".
     of the field's chain, or that bit set in the chain node the session
     made), with the hand-built row above as its test. The slice that
     builds `instance_poly` owns the other two lines of the table.
+    (Seventh turn) The generated cases of the pattern plan make such a
+    row and copy it, so the debug assertion is gone: `copy_refs` tracks
+    whether the chain it copies is fixed and calls
+    `Checker::match_fixed_fields` (built: one pass over the copy's
+    fields), which calls `Checker::match_unmatched` for a field that
+    reads unmatched (R3h's first commit, as above; a `todo!` that no
+    test running today reaches).
 48. **`Op::GeneralizeStructure` is in the object plan, and it found
     nothing.** The operation is drawn under `CELLS` as it is under `REFS`
     (one operation in six, and after an `EndDef` the newest operand is
@@ -5922,6 +5929,271 @@ decision 71, the cost paragraph of `unify_row`, and the two prompts in
 
 R3q (`instance_poly`, `instance_label`) is section 8.10; the ambiguity
 of GADT instances (R3s) is section 8.11.
+
+### 8.10 `instance_poly` and `instance_label` (R3q)
+
+Designed as text in the seventh skeleton turn. NOT done: no skeleton,
+no test, no prototype run, no build prompt. A design turn makes those
+before a builder starts; what follows is what that turn starts from,
+and nothing here was run.
+
+**What OCaml does** (compiler/ml/ctype.ml:1033-1106, read at this
+trunk). `instance_poly ~fixed univars sch` makes one new variable for
+each universal variable of `univars` (named when `keep_names`) and
+copies `sch` with `copy_sep`, which differs from `copy` in three ways:
+
+1. *It copies through nodes that are not generic.* `copy` returns a
+   node below the generic level as it is. `copy_sep` asks, per node,
+   which of the free universal variables of `sch` occur in it
+   (`compute_univars`, a table from node to the set of universal
+   variables free below it). A node with none is `copy`'s business: it
+   is returned as it is when it is not generic, and otherwise copied
+   LATER, after the walk, by `copy` in the same copy session
+   (`delayed_copy`, 1040, 1093), so that the generic parts keep their
+   sharing among themselves. A node with a free universal variable is
+   copied whatever its level.
+2. *It does not share where sharing would capture.* `visited` pairs a
+   node with its copy and the list of bound variables at the time
+   (1044-1047). A node met again reuses its copy unless a universal
+   variable bound since then (`diff_list bound bound_t`) is one of the
+   node's free ones (`conflicts`); then it is copied again. A universal
+   variable itself is always its pair's copy.
+3. *A polymorphic type* (1070-1077) gets new universal variables for
+   its own (`newty t.desc`), which are pushed on `bound` and on
+   `visited`.
+
+A variant (1061-1069) is copied by `copy_row` with `fixed' = fixed &&
+is_Tvar (repr more')`: the second line of decision 47's table, the
+fixed-row rule only this slice reaches. `instance_label fixed lbl`
+(1097-1105) is one copy session over the label's result (`copy`) and
+its argument: `instance_poly ~fixed tl ty` when the argument is a
+polymorphic type, else `copy`.
+
+**The kernel's form.** One function, `Checker::instance_poly(fixed,
+keep_names, univars: &[Ty], scheme: Ty) -> Ty` (the new variables are
+written to `g.work` or returned through a caller's `Vec`; the design
+turn chooses), and `Checker::instance_label(fixed, argument, result)
+-> (Ty, Ty)`.
+
+- *The free-variable question* is `Checker::free_univar`'s (R3g): it
+  answers, for one node and one set of universal variables, whether
+  one is free below it, with marks per context (decision 56).
+  `copy_sep` asks it of EVERY node of the scheme, so it needs the
+  answer per node, computed once: one bottom-up pass over the scheme
+  that gives each node a bit "a universal variable of `univars`, or of
+  an enclosing polymorphic type of this scheme, is free below" in a
+  mark generation, and a second generation for "none". With the
+  kernel's one-context-per-polymorphic-type rule (decision 59) the
+  pass is linear in the scheme for a scheme without nested polymorphic
+  types that share nodes, and as OCaml's otherwise (decision 74).
+- *The copy* is `Graph::copy`'s walk with two changes behind one
+  parameter: a node whose bit is set is copied whatever its level, and
+  the memo of copies is keyed by (node, the length of `bound` when it
+  was copied); a hit is used unless a variable bound since is free
+  below the node. For the common scheme (no polymorphic type inside
+  the body) `bound` never grows and the memo is `Graph::copy`'s own
+  slot. The rule of step 2 costs a second table only for a scheme with
+  a polymorphic type inside; that table is a `Vec` on `Checker`,
+  truncated after the call.
+- *The delayed copies* are the nodes without the bit that are generic:
+  they are copied in the same session by the ordinary arm, which is
+  what the kernel's copy does already when it reaches them; no list is
+  needed, because the kernel's copy session shares by slot, not by
+  call order. This is the one place the design is NOT OCaml's
+  mechanism, and it must be shown equal on generated cases before it
+  is built.
+- *The fixed-row rule*: `copy_refs` gets `fixed: bool` from the caller
+  (true for `copy` and `instance`, the caller's `fixed && the copied
+  `more` is a variable` for this slice): with false, every `Reither`
+  field of the copy reads unmatched and the copy's row is not fixed
+  (btype.ml:375, 389). `match_fixed_fields` (built in the seventh
+  turn) is the place.
+
+**Cost to state and prove in the design turn:** nothing for `instance`
+and `copy` (the parameter is a constant in their callers, and
+`copy_refs` reads one more register); `instance_poly` linear in the
+scheme for a scheme without a nested polymorphic type; a step test at
+1,000 and 10,000 of a field `'a. (t, 'a) => 'a` over a body of n
+nodes, and one of n nested polymorphic types.
+
+**The old side** (the judge, and where it is known to differ: pull
+requests 302 and 304 changed its `instance_poly`; their bodies were
+not read in this turn, which is the first thing the design turn does).
+The harness needs an operation `Op::InstancePoly(operand, fixed)` on a
+polymorphic type of a value's type, on the `UNIVARS` plan.
+
+**Tests the design turn writes** (`#[ignore = "R3q build"]`): the copy
+of a node that is not generic but holds a universal variable is a new
+node, and a sibling without one is the same node; two occurrences of
+one node under different binders are two copies when the binder's
+variable is free in it and one otherwise; a row copied with `fixed`
+false loses `m` and the flag, with `fixed` true keeps both;
+`instance_label` shares between argument and result; the two step
+tests; the generated cases.
+
+### 8.11 The ambiguity of GADT instances (R3s)
+
+Designed as text in the seventh skeleton turn, after R3r in build
+order (decision 72). NOT done: no skeleton, no test, no build prompt.
+Since pull requests 350 and 352 the old checker has this mechanism
+(types/context.rs, "GADT Tracking"; types/ctype.rs
+`gadt_instance_level`, `wrap_trace_gadt_instances`), so it is a judge
+where it traces; CHECKER_DEPARTURES.md, place A1 with its "Second
+part", is the record of what it took to make the old checker agree
+with OCaml, and names the tracing wrappers that are still open there.
+
+**What OCaml does**, by line (compiler/ml/ctype.ml, env.ml):
+
+- *Tracing* is a flag (`trace_gadt_instances`, ctype.ml:176-192).
+  `check_trace_gadt_instances env` turns it on when it is off and the
+  environment has a local constraint, and then cleans the memos
+  (`cleanup_abbrev`); the caller turns it off again if it turned it
+  on. Callers: `unify` (2235, 2271, 2273), `unify_var` and its sibling
+  (2759-2766, 2782-2784), `local_non_recursive_abbrev` (1534), and
+  typecore's `lower_args` (typecore.ml:2828).
+- *A set per scope*: `Env.add_gadt_instance_level lv env` (env.ml:
+  1307-1308) pushes an empty set at level `lv`; typecore calls it at
+  typecore.ml:4040 (`type_function`) and 4826 (`type_cases`), before
+  the patterns that add equations.
+- *Reads and additions*: an expansion under tracing (1220-1227: the
+  level is the greater of the equation's expansion level and the set
+  that holds the node; `level < lv` is a clash `Unify [(ty, newvar2
+  level)]`; else the node and its expansion join the set of `lv`);
+  `try_expand_head` (1271-1276: when the expanded head is in a set,
+  the node and its memo chain join it); unify2 (2289-2298: of the two
+  nodes the one in the lower set joins the chain of the higher);
+  `update_level` (587-589: a node in a set of a level above the target
+  is a clash with the same pair); `copy` with an environment that has
+  local constraints (770-775: the copy of a member joins the member's
+  set); and two lowerings made only under tracing (2490: a field's
+  type against the row variable's level in `unify_fields`; 2610-2611:
+  a new row against `rm`'s level in `set_more`).
+- *Membership is by representative*: a set is re-read through `repr`
+  when it holds a link (env.ml:1314-1323).
+- *Undo*: every addition is `set_typeset`, which is logged, so
+  `backtrack` undoes it; the environment itself is dropped by the
+  caller at the end of a case.
+- *The memo*: under tracing every constructor has its own memo
+  (`proper_abbrevs`, 200-202), which decision 79 shows on generated
+  cases, and the arm of `unify` for two nullary constructors of one
+  type is taken only when neither has a cached expansion (2251).
+
+**(i) Where the sets live and how an addition is undone.** On
+`Checker`: `instance_scopes: Vec<InstanceScope>` (`level: u32`,
+`parent: u32`; 8 bytes), `instance_scope: u32` (the innermost scope of
+the environment the caller is in, `NONE` outside), and ONE pool
+`instance_members: Vec<InstanceMember>` (`ty: Ty`, `scope: u32`; 8
+bytes) in the order they were added. A set is the members of one
+scope. An addition is a push; nothing else is written. Undo: the pool
+is append-only and speculations nest, so the members added since a
+snapshot are exactly those above the length the pool had: the `Try`
+record of decision 68 gets the pool's length (44 bytes, pinned) and
+`recover` truncates to it; an owner's restore (R5b, which holds its
+own mark) truncates to the length it kept, as it cuts `equations`.
+`Graph::restore` knows nothing of it, as it knows nothing of
+equations. An equation is not cut where a set member is: `cut_
+equations` cuts rows, and the caller that cuts also truncates the pool
+and sets `instance_scope` back; the two are one call for R5b
+(`Checker::leave_case(mark)`), so that one cannot be done without the
+other.
+
+**(ii) The one read for a unit without a member.** The first member
+ever pushed increments `types.scoped` (once; a flag on `Checker` says
+it was done). Then:
+
+| Kernel operation | Unit without a member | With a member |
+|---|---|---|
+| lowering | nothing new: `types.scoped == 0` takes `Graph::lower` as today | `lower_scoped`: per node above the level, `instance_level(node)` |
+| expansion (`expand_once`) | one load of `tracing` (a byte of `Checker`, beside `umode`) | under tracing, `instance_level(node)` and at most two pushes |
+| `expand_head` | the same byte | `instance_level(head)`, then the chain |
+| unify2 (`unify_expanded`) | the same byte, loaded with `umode` in one read of the two adjacent bytes | two `instance_level` and a chain |
+| copy, instance | nothing: the caller that has an environment with equations calls another entry (`instance_traced`); `Graph::copy` is not touched | per copied node, `instance_level(source)` |
+| `unify_fields`, `set_more` | the same byte, on arms that already load `umode` or are per field | one lowering |
+
+`instance_level(ty)` walks the scopes from `instance_scope` outwards
+and, per scope, its members, comparing `repr(member)` with the node:
+linear in the members of the scopes visited, as the old checker's
+(types/context.rs, `gadt_instance_level`, whose step test at 10,000
+members is the model) and as OCaml's rebuild of a set that holds a
+link. Members of one scope are not contiguous in the pool; the walk
+reads the whole pool once and keeps the innermost level found (a
+member's scope is on the path from `instance_scope` when its level is
+one of the path's, read from a small array of the path's levels built
+per call: the depth of nested cases). A per-node index (a side table
+from node to its newest membership) would make the read O(1) but
+needs every link to carry memberships to the representative, which is
+a read on the hottest write of the kernel; not proposed.
+
+Tracing: `Checker::tracing: bool`. `unify` turns it on at its entry
+when it is off and `equations` is not empty (the load decision 65
+already makes for two nullary constructors moves to the entry of
+`unify` for every call: ONE load of `equations.len()` per top-level
+unification, which is the cost a unit without equations pays for this
+slice and must be measured on the five bench operations) and then
+calls `cleanup_abbrev`; the same in `unify_var`'s entry, in
+`non_recursive_abbrev` and in `Checker::traced(f)` for R5b.
+
+The memo under tracing: a nullary constructor node has no slot 0 (its
+`b` is 0). Under tracing `memorize` of a nullary node writes the
+expansion with no table: into the node's own `b`, which
+nothing reads for a nullary constructor, with a head bit `OWN_MEMO`
+that says `b` is an expansion; `find_expansion` tests the bit before
+the `simple` table (a bit of the head it has loaded), and
+`cleanup_abbrev` clears the nodes it listed. The prototype of the
+seventh turn wrote the expansion to `lists[b]` and corrupted slot 0 of
+another node; the head-bit form was not run. `has_cached_expansion`
+(2251) is that bit.
+
+**(iii) The contract R5b receives.**
+
+- *A scope is added* where typecore calls `Env.add_gadt_instance_level`
+  (typecore.ml:4040, the `init_env` of `type_function`, and 4826, the
+  `init_env` of `type_cases`, each when a pattern has a GADT
+  constructor): `Checker::enter_instance_scope(level) -> Mark` before the
+  patterns are typed; `Checker::leave_case(mark)` where the
+  environment of the case is dropped.
+- *Tracing wrappers*: typecore.ml:2828 (`lower_args`), and the three
+  that CHECKER_DEPARTURES A1 lists as still open on the old side;
+  each is `Checker::traced(|c| ...)`. The kernel's own entries trace
+  themselves.
+- *Copy sites that pass the environment*: `Ctype.instance env` and
+  `instance_list` (ctype.ml:879-894) pass it when it has local
+  constraints (`gadt_env`); `instance_def` and `instance_poly` never
+  do. R5b calls `instance_traced` exactly where typecore calls
+  `instance env` or `instance_list env` and `equations` is not empty,
+  and `instance` elsewhere.
+
+**(iv) How the refusal is reported.** The clash is `Unify [(ty,
+newvar2 level)]` in both places (587-589 and 1226). In `Mode::Success`
+it is a `Clash` like any other. In `Mode::Explain` the pair is pushed
+on `Checker::trace` by `escape_pair`, which `lower` already uses for a
+constructor below its scope (decision 14): the node and one new
+variable at the level. The text is the printer's
+(compiler/ml/printtyp.ml:1341-1359): for a pair of a variable and a
+type that the variable does not occur in, "This instance of T is
+ambiguous: it would escape the scope of its equation"; the kernel
+reports the pair and no text. What tells an ambiguity from an escaping
+constructor is the pair's shape, as in OCaml (1345-1348 against
+1352-1359), so no new kind of clash is needed.
+
+**(v) The harness.** It gets both: `Op::Scope` (the old side:
+`Env::add_gadt_instance_level` at the current level; the new side:
+`enter_instance_scope`) generated before an `Op::Gadt`, and the
+existing `Op::Instance` and `Op::Lower` run with the environment when
+a scope is open. The seeds of decision 79 are the first acceptance:
+both lists empty. Hand-built tests judge what the generated cases
+cannot reach on purpose: the clash of an expansion below its set's
+level, the chain of unify2 in both directions, a member that is a
+link, the undo inside a `Try`, and the step tests (a lookup at 1,000
+and 10,000 members; a unit without a member takes the same steps as
+before the slice on the pattern step tests).
+
+**Not decided here, for the design turn:** whether the load of
+`equations.len()` at the entry of `unify` is acceptable on the bench
+(the alternative is a flag `tracing_possible` set by
+`add_gadt_equation` and cleared by `cut_equations`, read in the same
+byte pair as `umode`); whether the head bit `OWN_MEMO` is free in the
+head's layout; the exact list of the open wrappers of A1.
 
 ## 9. R4 as designed
 
