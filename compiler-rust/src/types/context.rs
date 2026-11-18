@@ -5769,7 +5769,12 @@ impl TypeContext {
     /// the level of the innermost scope from `scope` outwards whose set holds
     /// `ty`, a representative. A member is compared by its representative,
     /// as OCaml replaces the members of a set by theirs before testing.
-    /// Cost: one step per scope and per member of the scopes visited.
+    /// Cost: one step per scope visited and one [`Self::repr`] per member of
+    /// those scopes, as added (a type added twice is two members): linear
+    /// in the members read, since a `repr` compresses the links it follows,
+    /// so a member's links are walked once. OCaml's costs, per scope, a
+    /// scan of the set for links (and a rebuild of the set when one is
+    /// found), then a set lookup logarithmic in its distinct members.
     pub(crate) fn gadt_instance_level(&self, scope: GadtScopeRef, ty: TypeExprRef) -> Option<i32> {
         let scopes = self.gadt_instance_scopes.borrow();
         let mut current = scope;
@@ -5897,7 +5902,10 @@ impl TypeContext {
     }
 
     /// Follow a link chain starting at `t` (whose next node is `first_next`)
-    /// and compress it.
+    /// and compress it. Cost: one step per link, after which each node it
+    /// compresses links to the representative directly;
+    /// [`Self::gadt_instance_level`] reaches it through the `repr` of each
+    /// member it reads.
     #[inline(never)]
     fn repr_chain(&self, t: TypeExprRef, first_next: TypeExprRef) -> TypeExprRef {
         // Follow chain to the end, collecting nodes for path compression.
