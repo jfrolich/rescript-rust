@@ -590,6 +590,65 @@ fn is_instantiable(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
     })
 }
 
+/// OCaml `is_newtype env p` (compiler/ml/ctype.ml:1862-1868): `p` is a
+/// public abstract type with a newtype level. One declaration lookup.
+fn is_newtype(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
+    lookup_type_decl_for_path(ctx, env, path).is_some_and(|decl| {
+        decl.type_newtype_level.is_some()
+            && matches!(decl.type_kind, super::TypeKind::TypeAbstract)
+            && decl.type_private == super::PrivateFlag::Public
+    })
+}
+
+/// OCaml `unify`'s arm for two nullary locally abstract types under local
+/// constraints (compiler/ml/ctype.ml:2255-2268): "do not use local
+/// constraints more than necessary". Only the type with the later newtype
+/// level is expanded, once, and unified with the other; no level is lowered
+/// before. `None` when the arm does not apply or the type cannot be
+/// expanded, and unification goes on as `unify2`. One call is four
+/// declaration lookups and one expansion.
+fn unify_newtypes(
+    ctx: &TypeContext,
+    state: &mut UnifyState,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> Option<TypeResult<()>> {
+    let env = state.env().filter(|env| env.has_local_constraints())?;
+    let nullary_path = |ty: TypeExprRef| match &*ctx.borrow_desc(ty) {
+        TypeDesc::Tconstr { path, args, abbrev } if args.is_empty() => Some((*path, *abbrev)),
+        _ => None,
+    };
+    let ((p1, a1), (p2, a2)) = (nullary_path(t1)?, nullary_path(t2)?);
+    // The arm before it (ctype.ml:2247-2254) links the same constructor
+    // without a memorized expansion; `unify_types` starts with it.
+    if p1.same(&p2) && !(has_cached_expansion(ctx, &p1, a1) || has_cached_expansion(ctx, &p2, a2)) {
+        return None;
+    }
+    if !(is_newtype(ctx, env, &p1) && is_newtype(ctx, env, &p2)) {
+        return None;
+    }
+    let expand_first = find_newtype_level(ctx, env, &p1) >= find_newtype_level(ctx, env, &p2);
+    let expanded = if expand_first { t1 } else { t2 };
+    match try_expand_head_traced(ctx, env, expanded, ExpandHeadMode::Unify) {
+        Ok(Some(expansion)) => {
+            let expansion = ctx.repr(expansion);
+            Some(if expand_first {
+                unify(ctx, state, expansion, t2)
+            } else {
+                unify(ctx, state, t1, expansion)
+            })
+        }
+        Ok(None) => None,
+        Err(ambiguous) => {
+            let level = ctx.get_level(ambiguous);
+            Some(Err(TypeError::Unify(vec![(
+                ambiguous,
+                new_var_at_level(ctx, level),
+            )])))
+        }
+    }
+}
+
 /// OCaml `find_newtype_level` (compiler/ml/ctype.ml:2084-2091): the newtype
 /// level of the declaration, else the path's binding time twice. One call is
 /// one declaration lookup.
@@ -1746,8 +1805,11 @@ fn unify_gadt_equation(
         }
         (None, None) => return None,
     };
+    let Some(newtype_level) = state.newtype_level else {
+        panic!("Ctype.add_gadt_equation: get_newtype_level called outside pattern unification");
+    };
     let env = state.env_mut()?;
-    add_gadt_equation(ctx, env, &source, destination);
+    add_gadt_equation(ctx, env, &source, destination, newtype_level);
     Some(Ok(()))
 }
 
@@ -1758,6 +1820,7 @@ fn add_gadt_equation(
     env: &mut Env,
     source_path: &Path,
     destination: TypeExprRef,
+    newtype_level: i32,
 ) {
     if !local_non_recursive_abbrev(ctx, env, source_path, destination) {
         return;
@@ -1775,7 +1838,11 @@ fn add_gadt_equation(
         type_private: super::PrivateFlag::Public,
         type_manifest: Some(destination_copy),
         type_variance: vec![],
-        type_newtype_level: Some(source_lev),
+        // OCaml `Env.add_local_constraint` (compiler/ml/env.ml:1805-1810)
+        // keeps the definition level and records the pattern's newtype
+        // level as the expansion level, the level of the GADT instance set
+        // an expansion of this equation joins (ctype.ml:1215-1227).
+        type_newtype_level: Some((source_lev.0, newtype_level)),
         type_loc: crate::types::DeclLoc::none(),
         type_attributes: vec![],
         type_immediate: false,
@@ -2693,7 +2760,12 @@ fn update_level_checked_above(
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::census_update_level(ctx, level, ty);
     }
-    if lower_plain_levels(ctx, env, level, ty) {
+    // A node in a GADT instance set may refuse to be lowered
+    // (`update_level_pass`), which the plain update does not test: it is
+    // skipped in an environment with an instance scope. One load and one
+    // branch when the unit has none.
+    let instances = ctx.has_gadt_instance_scopes() && !env.gadt_instance_scope().is_none();
+    if !instances && lower_plain_levels(ctx, env, level, ty) {
         return Ok(());
     }
     let snapshot = ctx.snapshot_type_state();
@@ -2893,6 +2965,22 @@ fn level_update_is_plain(
         .all(|child| level_update_is_plain(ctx, env, level, child, visited))
 }
 
+/// OCaml `Env.gadt_instance_level env ty` (compiler/ml/env.ml:1314-1323)
+/// of the representative of `ty`: the level of the innermost GADT instance
+/// set of `env` holding it. One load and one branch when the unit has no
+/// instance scope; otherwise [`TypeContext::gadt_instance_level`].
+#[inline]
+pub(crate) fn gadt_instance_level(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<i32> {
+    if !ctx.has_gadt_instance_scopes() {
+        return None;
+    }
+    let scope = env.gadt_instance_scope();
+    if scope.is_none() {
+        return None;
+    }
+    ctx.gadt_instance_level(scope, ctx.repr(ty))
+}
+
 /// OCaml `newvar2 level`.
 #[track_caller]
 fn new_var_at_level(ctx: &TypeContext, level: i32) -> TypeExprRef {
@@ -2914,6 +3002,14 @@ fn update_level_pass(
     let current = ctx.get_level(ty);
 
     if level < current {
+        // OCaml ctype.ml:587-589: a GADT instance cannot be lowered below
+        // the level of its set; the error is the same pair as an escaping
+        // constructor's.
+        if let Some(instance_level) = gadt_instance_level(ctx, env, ty)
+            && level < instance_level
+        {
+            return Err(ty);
+        }
         let desc = ctx.borrow_desc(ty);
         match &*desc {
             TypeDesc::Tconstr { path, args, .. } => {
@@ -4655,6 +4751,22 @@ fn try_expand_head_with_mode(
     ty: TypeExprRef,
     mode: ExpandHeadMode,
 ) -> Option<TypeExprRef> {
+    // OCaml `try_expand_safe` (ctype.ml:1260-1265): an ambiguous GADT
+    // instance is a type that cannot be expanded. It is found before the
+    // expansion changes anything, so there is nothing to backtrack.
+    try_expand_head_traced(ctx, env, ty, mode).unwrap_or(None)
+}
+
+/// OCaml `expand_abbrev_gen` (compiler/ml/ctype.ml:1190-1229) of one head.
+/// `Err(ty)` is its `Unify [(ty, newvar2 level)]` (ctype.ml:1225): while
+/// GADT instances are traced, the expansion of `ty` is known only at an
+/// instance level above `ty`'s own level.
+fn try_expand_head_traced(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    mode: ExpandHeadMode,
+) -> Result<Option<TypeExprRef>, TypeExprRef> {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
@@ -4693,24 +4805,51 @@ fn try_expand_head_with_mode(
                 }
                 // The cached expansion is returned even when it is `ty`
                 // itself (ctype.ml:1360-1362, PR#7324).
-                return Some(ctx.repr(cached));
+                return Ok(Some(ctx.repr(cached)));
             }
 
-            let expand_with_subst =
-                |params: &[TypeExprRef], manifest: TypeExprRef| -> TypeExprRef {
-                    subst_with_memo(
-                        ctx,
-                        env,
-                        ty,
-                        lookup_abbrev,
-                        private_flag,
-                        AbbrevDefinition {
-                            params: params.into(),
-                            body: manifest,
-                        },
-                        ctx.type_list(args),
-                    )
+            // `expansion_level` is the expansion level of the declaration
+            // (`Env.find_type_expansion`'s `lv`, env.ml:902): set for a
+            // GADT equation.
+            let expand_with_subst = |params: &[TypeExprRef],
+                                     manifest: TypeExprRef,
+                                     expansion_level: Option<i32>|
+             -> Result<TypeExprRef, TypeExprRef> {
+                // ctype.ml:1218-1227: the highest level of the equation and
+                // of an instance set holding `ty`. The test is made before
+                // `subst` here: it reads only `ty`, which `subst` leaves as
+                // it is.
+                let instance_level = if ctx.trace_gadt_instances() {
+                    expansion_level.max(gadt_instance_level(ctx, env, ty))
+                } else {
+                    None
                 };
+                if let Some(instance_level) = instance_level
+                    && ctx.get_level(ty) < instance_level
+                {
+                    return Err(ty);
+                }
+                let expanded = subst_with_memo(
+                    ctx,
+                    env,
+                    ty,
+                    lookup_abbrev,
+                    private_flag,
+                    AbbrevDefinition {
+                        params: params.into(),
+                        body: manifest,
+                    },
+                    ctx.type_list(args),
+                );
+                if let Some(instance_level) = instance_level {
+                    ctx.add_gadt_instances(
+                        env.gadt_instance_scope(),
+                        instance_level,
+                        &[ty, expanded],
+                    );
+                }
+                Ok(expanded)
+            };
 
             let can_expand_decl_manifest =
                 |decl: &super::decl::TypeDeclaration, manifest: TypeExprRef| {
@@ -4730,8 +4869,9 @@ fn try_expand_head_with_mode(
                 if let Some(manifest) = constraint_decl.type_manifest {
                     let params = &constraint_decl.type_params;
                     if params.len() == args.len() {
-                        let expanded = expand_with_subst(params, manifest);
-                        return Some(expanded);
+                        let expansion_level =
+                            constraint_decl.type_newtype_level.map(|(_, level)| level);
+                        return expand_with_subst(params, manifest, expansion_level).map(Some);
                     }
                 }
             }
@@ -4745,7 +4885,7 @@ fn try_expand_head_with_mode(
                     .find_type_by_ident(id)
                     .is_ok_and(|decl| decl.type_manifest.is_none())
             {
-                return None;
+                return Ok(None);
             }
 
             // Qualified heads: the outcome depends only on the module scope,
@@ -4776,9 +4916,11 @@ fn try_expand_head_with_mode(
                         expansion
                     }
                 };
-                return match expansion {
+                return Ok(match expansion {
+                    // A declaration reached through a module has no
+                    // newtype level, hence no expansion level.
                     PdotExpansion::Expand { params, manifest } => {
-                        Some(expand_with_subst(&params, manifest))
+                        expand_with_subst(&params, manifest, None).map(Some)?
                     }
                     PdotExpansion::Rewrite(target) => {
                         let level = ctx.get_level(ty);
@@ -4791,7 +4933,7 @@ fn try_expand_head_with_mode(
                         Some(rewritten)
                     }
                     PdotExpansion::None => None,
-                };
+                });
             }
 
             // 1. Prefer environment lookup when the declaration matches the
@@ -4869,8 +5011,10 @@ fn try_expand_head_with_mode(
                         if can_expand_decl_manifest(env_decl, manifest) {
                             let params = &env_decl.type_params;
                             if params.len() == args.len() {
-                                let expanded = expand_with_subst(params, manifest);
-                                return Some(expanded);
+                                let expansion_level =
+                                    env_decl.type_newtype_level.map(|(_, level)| level);
+                                return expand_with_subst(params, manifest, expansion_level)
+                                    .map(Some);
                             } else {
                                 forbid_fallback_manifest_expansion = true;
                             }
@@ -4956,14 +5100,14 @@ fn try_expand_head_with_mode(
                                 abbrev: orig_abbrev,
                             });
                             ctx.set_level(rewritten, level);
-                            return Some(rewritten);
+                            return Ok(Some(rewritten));
                         }
                     }
                     if can_expand_decl_manifest(&decl, manifest) {
                         let params = &decl.type_params;
                         if params.len() == args.len() {
-                            let expanded = expand_with_subst(params, manifest);
-                            return Some(expanded);
+                            let expansion_level = decl.type_newtype_level.map(|(_, level)| level);
+                            return expand_with_subst(params, manifest, expansion_level).map(Some);
                         } else {
                             forbid_fallback_manifest_expansion = true;
                         }
@@ -4978,7 +5122,7 @@ fn try_expand_head_with_mode(
             // `expand_head_unif`, so keep unification on the same path instead
             // of recovering later with Rust-only alias fallback work.
             if local_env_type_is_authoritative && forbid_fallback_manifest_expansion {
-                return None;
+                return Ok(None);
             }
             {
                 let path_norm = match mode {
@@ -4995,13 +5139,13 @@ fn try_expand_head_with_mode(
                         abbrev: orig_abbrev,
                     });
                     ctx.set_level(normalized, level);
-                    Some(normalized)
+                    Ok(Some(normalized))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -7194,7 +7338,43 @@ fn expand_head_with_mode(
     ty: TypeExprRef,
     mode: ExpandHeadMode,
 ) -> TypeExprRef {
-    let mut current = ctx.repr(ty);
+    match expand_head_traced(ctx, env, ty, mode, false) {
+        Ok(expanded) => expanded,
+        Err(_) => unreachable!("a safe expansion reports no ambiguous GADT instance"),
+    }
+}
+
+/// OCaml `expand_head_unif` (compiler/ml/ctype.ml:1279) for unification:
+/// an expansion that would let a GADT instance out of its equation's scope
+/// is OCaml's `Unify [(ty, newvar2 level)]` (ctype.ml:1225).
+fn expand_head_unif_traced(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    mode: ExpandHeadMode,
+) -> TypeResult<TypeExprRef> {
+    expand_head_traced(ctx, env, ty, mode, true).map_err(|ambiguous| {
+        let level = ctx.get_level(ambiguous);
+        TypeError::Unify(vec![(ambiguous, new_var_at_level(ctx, level))])
+    })
+}
+
+/// OCaml `try_expand_head` (compiler/ml/ctype.ml:1266-1276): expand the head
+/// of `ty` until it cannot be expanded, with `try_expand_once` when
+/// `unsafe_once` (an ambiguous instance is `Err`) and `try_expand_safe`
+/// otherwise. When the result is a GADT instance, `ty` and the expansions
+/// memorized from it join its set. At most 20 expansions; the instance test
+/// is one load and one branch when the unit has no instance scope.
+fn expand_head_traced(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    mode: ExpandHeadMode,
+    unsafe_once: bool,
+) -> Result<TypeExprRef, TypeExprRef> {
+    let start = ctx.repr(ty);
+    let mut current = start;
+    let mut expanded_once = false;
     // Stack-allocated cycle detection for up to 20 iterations.
     // Linear scan is faster than HashSet for this small size.
     let mut seen = [TypeExprRef(0); 20];
@@ -7204,8 +7384,14 @@ fn expand_head_with_mode(
         }
         seen[seen_len] = current;
         let seen_len = seen_len + 1;
-        match try_expand_head_with_mode(ctx, env, current, mode) {
+        let next = if unsafe_once {
+            try_expand_head_traced(ctx, env, current, mode)?
+        } else {
+            try_expand_head_with_mode(ctx, env, current, mode)
+        };
+        match next {
             Some(expanded) => {
+                expanded_once = true;
                 let expanded = ctx.repr(expanded);
                 if expanded == current {
                     break;
@@ -7218,7 +7404,12 @@ fn expand_head_with_mode(
             None => break,
         }
     }
-    current
+    // ctype.ml:1273-1275: `ty` and its expansions are instances where the
+    // full expansion is one.
+    if expanded_once && let Some(level) = gadt_instance_level(ctx, env, current) {
+        ctx.add_gadt_instance_chain(env.gadt_instance_scope(), level, start);
+    }
+    Ok(current)
 }
 
 // ============================================================================
@@ -8032,7 +8223,10 @@ pub fn unify(
     state.mark_unified(t1, t2);
 
     // Get descriptors
-    let result = unify_types(ctx, state, t1, t2, t2);
+    let result = match unify_newtypes(ctx, state, t1, t2) {
+        Some(result) => result,
+        None => unify_types(ctx, state, t1, t2, t2),
+    };
 
     let result = if let Err(TypeError::Unify(trace)) = &result {
         // Add this pair to the trace
@@ -8665,8 +8859,8 @@ fn unify_types(
         if !facts.is_some_and(|facts| facts.var_free) {
             if ty_is_constr && state.env().is_some() && deep_occur(ctx, var, ty) {
                 let env = state.env().expect("checked above");
-                let exp1 = expand_head_unif(ctx, env, t1);
-                let exp2 = expand_head_unif(ctx, env, t2);
+                let exp1 = expand_head_unif_traced(ctx, env, t1, ExpandHeadMode::Unify)?;
+                let exp2 = expand_head_unif_traced(ctx, env, t2, ExpandHeadMode::Unify)?;
                 return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
             }
             if occur_check(ctx, state.env(), state.mode, var, ty).is_err() {
@@ -8799,8 +8993,8 @@ fn unify_types(
                     // OCaml compiler/ml/ctype.ml:2338-2344 (`unify2`) expands
                     // both constructor heads before the constructor-path cases
                     // at ctype.ml:2412-2414 are considered.
-                    let exp1 = expand_head_unif(ctx, env, t1);
-                    let exp2 = expand_head_unif(ctx, env, t2);
+                    let exp1 = expand_head_unif_traced(ctx, env, t1, ExpandHeadMode::Unify)?;
+                    let exp2 = expand_head_unif_traced(ctx, env, t2, ExpandHeadMode::Unify)?;
                     if exp1 != t1 || exp2 != t2 {
                         return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                     }
@@ -8914,8 +9108,8 @@ fn unify_types(
                 // persistent aliases such as `Stdlib.Lazy.t` do not repeatedly
                 // allocate normalized-but-still-abstract heads before argument
                 // unification.
-                let exp1 = expand_head_unif(ctx, env, t1);
-                let exp2 = expand_head_unif(ctx, env, t2);
+                let exp1 = expand_head_unif_traced(ctx, env, t1, ExpandHeadMode::Unify)?;
+                let exp2 = expand_head_unif_traced(ctx, env, t2, ExpandHeadMode::Unify)?;
                 if exp1 != t1 || exp2 != t2 {
                     return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                 }
@@ -9179,13 +9373,15 @@ fn unify_types(
             if is_constr1 || is_constr2 {
                 if let Some(env) = state.env() {
                     // Fully expand both sides through all aliases
+                    // An ambiguous GADT instance fails as in OCaml's
+                    // `expand_head_unif` (ctype.ml:2291-2292).
                     let exp1 = if is_constr1 {
-                        expand_head(ctx, env, t1)
+                        expand_head_unif_traced(ctx, env, t1, ExpandHeadMode::General)?
                     } else {
                         t1
                     };
                     let exp2 = if is_constr2 {
-                        expand_head(ctx, env, t2)
+                        expand_head_unif_traced(ctx, env, t2, ExpandHeadMode::General)?
                     } else {
                         t2
                     };

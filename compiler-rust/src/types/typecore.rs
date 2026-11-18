@@ -11973,7 +11973,7 @@ fn type_match(
         gadt_lev = ctx.current_stamp();
         ctx.init_def(gadt_lev + 1000);
         let mut scoped_env = val_case_env.clone();
-        scoped_env.add_gadt_instance_level();
+        scoped_env.add_gadt_instance_level(ctx, gadt_lev);
         gadt_match_env = scoped_env;
         &gadt_match_env
     } else {
@@ -13622,7 +13622,7 @@ fn type_function_nary(
         let lev = ctx.current_stamp();
         ctx.init_def(lev + 1000);
         let mut env = env.clone();
-        env.add_gadt_instance_level();
+        env.add_gadt_instance_level(ctx, lev);
         (lev, env)
     }
     let gadt_env;

@@ -1,0 +1,1 @@
+- Refuse, as the OCaml compiler does, a value whose type is known only through a GADT equation when it leaves the case of that equation, for example `if true { y } else { 0 }` with `y: a` under `| Int =>` without a result annotation ("This instance of int is ambiguous").

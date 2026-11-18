@@ -562,8 +562,40 @@ enum TypeMutation {
     NongenLevel(i32),
     GlobalLevel(i32),
     SavedLevels(Vec<(i32, i32)>),
+    /// btype.ml `Ctypeset`: a type added to a GADT instance set
+    /// (`Env.add_gadt_instances`, env.ml:1325-1329); undone by removing the
+    /// scope's last member.
+    GadtInstance(GadtScopeRef),
 }
 
+/// Handle of a GADT instance scope of [`TypeContext`]; `NONE` for an
+/// environment outside every such scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GadtScopeRef(u32);
+
+impl GadtScopeRef {
+    /// No scope: OCaml's empty `gadt_instances` list.
+    pub const NONE: GadtScopeRef = GadtScopeRef(u32::MAX);
+
+    /// Whether this is [`Self::NONE`].
+    #[inline]
+    pub fn is_none(self) -> bool {
+        self == Self::NONE
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// One entry of OCaml `Env.gadt_instances` (compiler/ml/env.ml:368): the
+/// level of a `switch` or function whose patterns may add equations, and the
+/// types known there only through one of them.
+struct GadtInstanceScope {
+    level: i32,
+    parent: GadtScopeRef,
+    members: Vec<TypeExprRef>,
+}
 
 #[derive(Default)]
 struct TypeMutationJournal {
@@ -828,6 +860,17 @@ pub struct TypeContext {
 
     /// GADT instance tracking flag
     trace_gadt_instances: Cell<bool>,
+
+    /// The sets of OCaml `Env.gadt_instances` (compiler/ml/env.ml:1305-1345),
+    /// one per `switch` or function whose patterns may add equations,
+    /// indexed by [`GadtScopeRef`]. An environment holds the handle of its
+    /// innermost scope; each scope holds its enclosing one's, so a clone of
+    /// an environment copies a `u32` and never a set.
+    gadt_instance_scopes: RefCell<Vec<GadtInstanceScope>>,
+
+    /// Whether this unit has created a GADT instance scope: the one load
+    /// [`Self::has_gadt_instance_scopes`] tests on every level update.
+    has_gadt_instance_scopes: Cell<bool>,
 
     /// Whether this unit created or copied a polymorphic type with at least
     /// one bound variable (see [`Self::note_bound_universal`]). Only then
@@ -1390,6 +1433,8 @@ impl TypeContext {
             global_level: Cell::new(1),
             saved_levels: RefCell::new(Vec::new()),
             trace_gadt_instances: Cell::new(false),
+            gadt_instance_scopes: RefCell::new(Vec::new()),
+            has_gadt_instance_scopes: Cell::new(false),
             bound_universals: Cell::new(false),
             passive_variants: Cell::new(false),
             rigid_variants: Cell::new(false),
@@ -3697,6 +3742,12 @@ impl TypeContext {
                     *self.saved_levels.borrow_mut() = value;
                     restored += 1;
                 }
+                TypeMutation::GadtInstance(scope) => {
+                    self.gadt_instance_scopes.borrow_mut()[scope.index()]
+                        .members
+                        .pop();
+                    restored += 1;
+                }
             }
         }
         snapshot.restored = true;
@@ -5613,10 +5664,15 @@ impl TypeContext {
     // GADT Tracking
     // ========================================================================
 
-    /// Check and set GADT instance tracing.
+    /// OCaml `check_trace_gadt_instances` (compiler/ml/ctype.ml:178-184):
+    /// turn GADT instance tracing on under local constraints, forgetting the
+    /// memorized expansions (`cleanup_abbrev`) so that each is made again
+    /// through the instance test of `expand_abbrev_gen`. Returns whether
+    /// this call turned it on.
     pub fn check_trace_gadt_instances(&self, has_constraints: bool) -> bool {
         if !self.trace_gadt_instances.get() && has_constraints {
             self.trace_gadt_instances.set(true);
+            self.clear_abbrev_memos();
             true
         } else {
             false
@@ -5654,6 +5710,124 @@ impl TypeContext {
     /// Whether GADT instances are being tracked (OCaml `Ctype.trace_gadt_instances`).
     pub fn trace_gadt_instances(&self) -> bool {
         self.trace_gadt_instances.get()
+    }
+
+    /// Whether this unit has a GADT instance scope at all. One load: the
+    /// test every level update makes before it looks at an environment's
+    /// scopes (OCaml `Env.gadt_instance_level`, ctype.ml:587).
+    #[inline]
+    pub fn has_gadt_instance_scopes(&self) -> bool {
+        self.has_gadt_instance_scopes.get()
+    }
+
+    /// OCaml `Env.add_gadt_instance_level lv` (compiler/ml/env.ml:1307-1308):
+    /// a new, empty instance set at `level` inside `parent`. O(1) amortized.
+    pub(crate) fn new_gadt_instance_scope(&self, level: i32, parent: GadtScopeRef) -> GadtScopeRef {
+        let mut scopes = self.gadt_instance_scopes.borrow_mut();
+        let scope =
+            GadtScopeRef(u32::try_from(scopes.len()).expect("GADT instance scope overflow"));
+        scopes.push(GadtInstanceScope {
+            level,
+            parent,
+            members: Vec::new(),
+        });
+        self.has_gadt_instance_scopes.set(true);
+        scope
+    }
+
+    /// OCaml `Env.gadt_instance_level env t` (compiler/ml/env.ml:1314-1323):
+    /// the level of the innermost scope from `scope` outwards whose set holds
+    /// `ty`, a representative. A member is compared by its representative,
+    /// as OCaml replaces the members of a set by theirs before testing.
+    /// Cost: one step per scope and per member of the scopes visited.
+    pub(crate) fn gadt_instance_level(&self, scope: GadtScopeRef, ty: TypeExprRef) -> Option<i32> {
+        let scopes = self.gadt_instance_scopes.borrow();
+        let mut current = scope;
+        while !current.is_none() {
+            let entry = &scopes[current.index()];
+            for &member in &entry.members {
+                #[cfg(test)]
+                crate::tc::steps::tick();
+                if self.repr(member) == ty {
+                    return Some(entry.level);
+                }
+            }
+            current = entry.parent;
+        }
+        None
+    }
+
+    /// The scope at `level` from `scope` outwards: OCaml's
+    /// `List.assoc lv env.gadt_instances` (env.ml:1326-1328, 1333-1335).
+    /// One step per scope visited.
+    fn gadt_instance_scope_at(&self, scope: GadtScopeRef, level: i32) -> GadtScopeRef {
+        let scopes = self.gadt_instance_scopes.borrow();
+        let mut current = scope;
+        while !current.is_none() {
+            let entry = &scopes[current.index()];
+            if entry.level == level {
+                return current;
+            }
+            current = entry.parent;
+        }
+        panic!("Env.add_gadt_instances: no instance scope at level {level}")
+    }
+
+    /// Append `ty` to the set of `scope`, journaled. O(1) amortized. A
+    /// member added twice answers [`Self::gadt_instance_level`] as once.
+    fn push_gadt_instance(&self, scope: GadtScopeRef, ty: TypeExprRef) {
+        self.gadt_instance_scopes.borrow_mut()[scope.index()]
+            .members
+            .push(ty);
+        self.record_mutation(
+            || TypeMutation::GadtInstance(scope),
+            crate::perf_counters::TypeMutationKind::State,
+        );
+    }
+
+    /// OCaml `Env.add_gadt_instances env lv tl` (compiler/ml/env.ml:1325-1329):
+    /// add `types` to the set at `level` of the scopes from `scope` outwards.
+    /// Cost: the scopes visited plus O(1) per type.
+    pub(crate) fn add_gadt_instances(
+        &self,
+        scope: GadtScopeRef,
+        level: i32,
+        types: &[TypeExprRef],
+    ) {
+        let scope = self.gadt_instance_scope_at(scope, level);
+        for &ty in types {
+            self.push_gadt_instance(scope, ty);
+        }
+    }
+
+    /// OCaml `Env.add_gadt_instance_chain env lv t` (compiler/ml/env.ml:1332-1345):
+    /// add `ty` and, while it is a constructor with a memorized expansion,
+    /// that expansion, stopping at the first type the set already holds.
+    /// Only for a type `expand_head` has expanded. Cost: the scopes visited
+    /// plus, per type of the chain, one step per member and one walk of the
+    /// constructor's memo chain.
+    pub(crate) fn add_gadt_instance_chain(&self, scope: GadtScopeRef, level: i32, ty: TypeExprRef) {
+        let scope = self.gadt_instance_scope_at(scope, level);
+        let mut current = Some(ty);
+        while let Some(ty) = current {
+            let ty = self.repr(ty);
+            // `Type_set.mem t !r` (env.ml:1339): the node itself, which ends
+            // the chain.
+            let member = self.gadt_instance_scopes.borrow()[scope.index()]
+                .members
+                .contains(&ty);
+            if member {
+                return;
+            }
+            self.push_gadt_instance(scope, ty);
+            let constr = match &*self.borrow_desc(ty) {
+                TypeDesc::Tconstr { path, abbrev, .. } => Some((*path, *abbrev)),
+                _ => None,
+            };
+            current = constr.and_then(|(path, abbrev)| {
+                self.find_abbrev_expansion(abbrev, PrivateFlag::Private, &path)
+            });
+        }
     }
 
     // ========================================================================
@@ -5936,7 +6110,7 @@ mod tests {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let env = Env::empty();
         let mut other = env.clone();
-        other.add_gadt_instance_level();
+        other.add_gadt_instance_level(&ctx, 1);
         let path = Path::pident(Ident::create_persistent("M"));
         let signature = Arc::new(Vec::new());
         ctx.register_resolved_module_sig("M", Some(env.scope_id()), path, signature.clone());
@@ -6162,11 +6336,32 @@ mod tests {
     }
 
     #[test]
+    fn gadt_instance_level_is_one_step_per_member_at_ten_thousand() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let outer = ctx.new_gadt_instance_scope(5, GadtScopeRef::NONE);
+        let inner = ctx.new_gadt_instance_scope(9, outer);
+        let members: Vec<_> = (0..10_000).map(|_| ctx.new_var(None)).collect();
+        ctx.add_gadt_instances(inner, 5, &members);
+        let other = ctx.new_var(None);
+        // The inner set is empty: one step per member of the outer one.
+        let mut level = Some(0);
+        let steps = crate::tc::steps::scope(|| level = ctx.gadt_instance_level(inner, other));
+        assert_eq!((level, steps), (None, 10_000));
+        let steps =
+            crate::tc::steps::scope(|| level = ctx.gadt_instance_level(inner, members[9_999]));
+        assert_eq!((level, steps), (Some(5), 10_000));
+        // A member linked to another type answers for its representative.
+        ctx.set_desc(members[0], TypeDesc::Tlink(other));
+        assert_eq!(ctx.gadt_instance_level(inner, other), Some(5));
+        assert_eq!(ctx.gadt_instance_level(GadtScopeRef::NONE, other), None);
+    }
+
+    #[test]
     fn borrowed_path_keys_find_owned_cache_entries() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let scope = Env::empty().scope_id();
         let mut other = Env::empty();
-        other.add_gadt_instance_level();
+        other.add_gadt_instance_level(&ctx, 1);
         let module = Path::pdot(super::super::predef::path_int(), "M");
         let ty = Path::pdot_pos(module, "t", 3);
         ctx.register_type_newtype_level(scope, &ty, Some(2));
