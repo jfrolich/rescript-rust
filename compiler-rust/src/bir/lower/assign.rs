@@ -4,7 +4,7 @@ use super::*;
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// C:2078 compile_expr, Assign arm. O(1) excluding realization of the
     /// already visited operand. Assignment facts are final on entry.
-    pub(super) fn finish_assignment(&mut self, cx: Cx, var: VarId, child: Probed) -> Probed {
+    pub(super) fn finish_assignment(&mut self, cx: Cx, var: VarId, child: Probed<B>) -> Probed<B> {
         let mut out = self.realize(
             Cx {
                 cont: Cont::Value(Tail::No),
@@ -13,7 +13,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             child,
         );
         let value = match out.value.take() {
-            Some(value) => B::from_node(value),
+            Some(value) => value,
             None => self.js.undefined(&mut self.arena, false),
         };
         let statement = self.js.assign(&mut self.arena, var, value);

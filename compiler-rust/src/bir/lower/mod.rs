@@ -143,22 +143,22 @@ impl Cx {
 /// The caller has lowered expression operands exactly once before probing.
 pub enum ProbeInput<B: js::Js> {
     /// An already-lowered expression or statement result.
-    Output(Out),
+    Output(Out<B>),
     /// A retained effect value followed by a probed child.
     Seq {
         /// Already-lowered effect value.
         first: B::E,
         /// Result of probing the tail.
-        second: Probed,
+        second: Probed<B>,
     },
     /// An already-lowered condition and its probed branches.
     Cond {
         /// Already-lowered test value.
         test: B::E,
         /// Probed true branch.
-        then_: Probed,
+        then_: Probed<B>,
         /// Probed false branch.
-        else_: Probed,
+        else_: Probed<B>,
     },
 }
 
@@ -166,19 +166,19 @@ pub enum ProbeInput<B: js::Js> {
 /// Construction policy is supplied by J constructors, not by the output algebra.
 pub trait Realizer<B: js::Js> {
     /// K1/K6: C:6658 return_compiled; convert one lowered value.
-    fn leaf(&mut self, cx: Cx, value: B::E) -> Out;
+    fn leaf(&mut self, cx: Cx, value: B::E) -> Out<B>;
     /// K2: C:4715 append_effect_output; join an effect and a tail's value.
-    fn seq(&mut self, cx: Cx, first: B::E, second: Out) -> Out;
+    fn seq(&mut self, cx: Cx, first: B::E, second: Out<B>) -> Out<B>;
     /// O:339 push_effect_expression; an effect as statements before its tail.
     fn effect(&mut self, first: B::E) -> Span;
     /// K6: C:5144 compile_if_return_output; combine lowered branches.
-    fn cond(&mut self, cx: Cx, test: B::E, then_: Out, else_: Out) -> Out;
+    fn cond(&mut self, cx: Cx, test: B::E, then_: Out<B>, else_: Out<B>) -> Out<B>;
 }
 
 /// One source visit either completes an output or schedules child occurrences.
-pub enum ProbePlan<R> {
+pub enum ProbePlan<R, B: js::Js> {
     /// This source node has already been lowered.
-    Ready(Probed),
+    Ready(Probed<B>),
     /// Resume after the children, without re-reading the source node.
     Children(R),
 }
@@ -188,16 +188,18 @@ pub enum ProbePlan<R> {
 pub trait ProbeRules {
     /// Decoded operands required after visiting children.
     type Resume;
+    /// The implementation of the interface whose expressions the outputs hold.
+    type Js: js::Js;
     /// O(1): observe source entry for symbolic label scheduling.
     fn source_enter(&mut self, _cx: Cx, _node: NodeId) {}
     /// O(arity): compose symbolic events after one completed lowering.
-    fn source_leave(&mut self, _output: &Probed) {}
+    fn source_leave(&mut self, _output: &Probed<Self::Js>) {}
     /// K1: C:1529 compile_expr; inspect and lower a source node exactly once.
     fn enter(
         &mut self,
         cx: Cx,
         node: NodeId,
-    ) -> Result<ProbePlan<Self::Resume>, super::bridge::Unsupported>;
+    ) -> Result<ProbePlan<Self::Resume, Self::Js>, super::bridge::Unsupported>;
     /// K1/K2: C:1529 compile_expr / C:4603 compile_effect_output; child order.
     fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);
     /// Resolve a child continuation after preceding siblings have completed.
@@ -205,7 +207,7 @@ pub trait ProbeRules {
     fn child_context(&self, cx: Cx, _resume: &Self::Resume, _index: usize) -> Cx { cx }
     /// K4/K2: C:2411 compile_let_binding_output / C:4603 compile_effect_output.
     /// Consume a child's result before entering its next sibling when required.
-    fn child(&mut self, _cx: Cx, _resume: &Self::Resume, _index: usize, output: Probed) -> Probed {
+    fn child(&mut self, _cx: Cx, _resume: &Self::Resume, _index: usize, output: Probed<Self::Js>) -> Probed<Self::Js> {
         output
     }
     /// K0/K2: C:119 append / C:4715 append_effect_output; combine child outputs.
@@ -216,14 +218,14 @@ pub trait ProbeRules {
         &mut self,
         cx: Cx,
         resume: Self::Resume,
-        children: impl Iterator<Item = Probed>,
-    ) -> Result<Probed, super::bridge::Unsupported>;
+        children: impl Iterator<Item = Probed<Self::Js>>,
+    ) -> Result<Probed<Self::Js>, super::bridge::Unsupported>;
 }
 
 /// Explicit source traversal, separate from realization of deferred J operands.
-pub struct SourceProbe<R> {
+pub struct SourceProbe<R, B: js::Js> {
     work: Vec<ProbeWork<R>>,
-    values: Vec<Probed>,
+    values: Vec<Probed<B>>,
     children: Vec<(Cx, NodeId)>,
     /// Source occurrences offered to dispatch (one per incoming tree edge).
     pub steps: usize,
@@ -234,13 +236,13 @@ enum ProbeWork<R> {
     Finish(Cx, R, usize),
     Child(Cx, usize, usize),
 }
-impl<R> Default for SourceProbe<R> {
+impl<R, B: js::Js> Default for SourceProbe<R, B> {
     /// O(1): initialize empty reusable storage; backing buffers grow on demand.
     fn default() -> Self {
         Self { work: Vec::new(), values: Vec::new(), children: Vec::new(), steps: 0 }
     }
 }
-impl<R> SourceProbe<R> {
+impl<R, B: js::Js> SourceProbe<R, B> {
     /// K1/K6: C:1529 compile_expr / C:5144 compile_if_return_output.
     /// A source node is entered once. Finish frames receive the saved operands
     /// and child outputs, never a request to compile the same child again.
@@ -249,10 +251,10 @@ impl<R> SourceProbe<R> {
     /// drains completed outputs once.
     pub fn probe(
         &mut self,
-        rules: &mut impl ProbeRules<Resume = R>,
+        rules: &mut impl ProbeRules<Resume = R, Js = B>,
         cx: Cx,
         node: NodeId,
-    ) -> Result<Probed, super::bridge::Unsupported> {
+    ) -> Result<Probed<B>, super::bridge::Unsupported> {
         self.work.clear();
         self.values.clear();
         self.children.clear();
@@ -490,7 +492,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     idents: Vec<Ident>,
     statements: StatementStack<B>,
     free: FreePool<B>,
-    traversal: SourceProbe<expr::Resume>,
+    traversal: SourceProbe<expr::Resume, B>,
     list_block_info: Option<crate::bir::JsId>,
     constant_steps: usize,
     constant_children: Vec<NodeId>,
@@ -498,7 +500,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     constant_encoding: String,
     constant_work: Vec<konst::Work>,
     constant_values: Vec<(NodeId, bool)>,
-    argument_outputs: Vec<Out>,
+    argument_outputs: Vec<Out<B>>,
     argument_values: Vec<NodeId>,
     ffi_suffix: Vec<ffi_args::LaterLiteral>,
     ffi_params: Vec<usize>,
@@ -732,7 +734,7 @@ impl<'a> State<'a> {
 impl<B: js_stmt::JsStmt> State<'_, B> {
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
     /// leaves immediately instead of allocating deferred expression records.
-    fn probe_leaf(&mut self, cx: Cx, value: NodeId) -> Probed {
+    fn probe_leaf(&mut self, cx: Cx, value: NodeId) -> Probed<B> {
         if self.direct && !cx.probing {
             Probed::Out(self.leaf(cx, B::from_node(value)))
         } else {
@@ -748,7 +750,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// K1: C:1529 compile_expr. SourceProbe owns the depth-independent traversal.
     /// Cost: SourceProbe::probe cost: O(N + E) traversal events plus lowering callbacks;
     /// lends and restores the retained traversal buffers without an additional source walk.
-    fn probe(&mut self, cx: Cx, node: NodeId) -> Result<Probed, Unsupported> {
+    fn probe(&mut self, cx: Cx, node: NodeId) -> Result<Probed<B>, Unsupported> {
         let mut traversal = std::mem::take(&mut self.traversal);
         let before = traversal.steps;
         let output = traversal.probe(self, cx, node);
@@ -758,7 +760,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
         output
     }
     /// K2/K6: C:4715 append_effect_output / C:5144 compile_if_return_output.
-    fn realize(&mut self, cx: Cx, probed: Probed) -> Out {
+    fn realize(&mut self, cx: Cx, probed: Probed<B>) -> Out<B> {
         let mut free = std::mem::take(&mut self.free);
         let out = free.realize(cx, probed, self);
         self.free = free;
@@ -767,10 +769,12 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// K0: append_output drops the tail of finished output. Release its J
     /// ownership as well as truncating its statement run. O(s + released nodes)
     /// for a discarded suffix; O(1) otherwise. No temporary statement vector.
-    fn append_outputs(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {
+    fn append_outputs(&mut self, first: Out<B>, mut second: Out<B>, mut value: Option<B::E>) -> Out<B> {
         if first.finished == Finished::True {
             for statement in self.statements.take_run(second.stmts) { self.js.release_stmt(&mut self.arena, statement); }
-            if let Some(value) = second.value { self.arena.release(value); }
+            if let Some(value) = second.value.take() { self.arena.release(B::node(value)); }
+            // The callers move the second output's value out to give it here.
+            if let Some(value) = value.take() { self.arena.release(B::node(value)); }
         }
         self.statements.append(first, second, value)
     }
@@ -778,12 +782,13 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// N1: C:663 compile_deps_program_in_arena, the unit: the last value is
     /// read for the exports (`export.rs`). Cost: that of `extract_exports`
     /// and of `finish`.
-    fn complete_unit(mut self, probed: Probed) -> Lowered {
+    fn complete_unit(mut self, probed: Probed<B>) -> Lowered {
         let out = self.realize(Cx::value(), probed);
+        let value = out.value.map(B::node);
         // Export coercion takes ownership of the root's identifier vector.
         // Isolate that output-boundary payload so shared source/block shapes
         // remain immutable for any other surviving block occurrence.
-        if let Some(mut end) = out.value {
+        if let Some(mut end) = value {
             while let View::JSeq { second, .. } = self.arena.view(end) { end = second; }
             if let View::JBlockLit { info, .. } = self.arena.view(end) {
                 if let crate::lambda::TagInfo::ModuleExport(exports) = self.arena.block_tag(info) {
@@ -793,7 +798,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
                 }
             }
         }
-        let exports = self.extract_exports(out.value, out.finished);
+        let exports = self.extract_exports(value, out.finished);
         let run = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,
@@ -816,10 +821,11 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// The output of one construct in `cx`, for the rule tests: the value is
     /// carried by a plain sentinel SExp after the statements.
     #[cfg(test)]
-    fn complete(mut self, cx: Cx, probed: Probed) -> Lowered {
+    fn complete(mut self, cx: Cx, probed: Probed<B>) -> Lowered {
         let out = self.realize(cx, probed);
         let value = out
             .value
+            .map(B::node)
             .unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
         let value = self.arena.new_node(View::SExp { value }, 0);
         self.statements.push(B::stmt_from_node(value));
@@ -938,14 +944,15 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
 
 impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
     fn source_enter(&mut self, cx: Cx, node: NodeId) { self.label_enter(cx, node); }
-    fn source_leave(&mut self, output: &Probed) { self.label_leave(output); }
+    fn source_leave(&mut self, output: &Probed<B>) { self.label_leave(output); }
     type Resume = expr::Resume;
+    type Js = B;
     /// K1/H12: C:1529 compile_expr and K:60 compile_constant.
     /// Cost: O(1) tag dispatch plus the selected preparer: constant occurrences, application
     /// spine/arguments, recursive binders, function parameters, or switch metadata. Extending
     /// dense tables costs their newly initialized rows; descendant lowering is scheduled, not
     /// performed twice.
-    fn enter(&mut self, cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume>, Unsupported> {
+    fn enter(&mut self, cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume, B>, Unsupported> {
         let value = match self.source.view(node) {
             View::Var { var } => self.pure_expression(View::Var { var }, 0),
             View::Global { module } => self.pure_expression(
@@ -1120,7 +1127,7 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
         } else { cx }
     }
     /// K4/K2: C:2411 compile_let_binding_output / C:4603 compile_effect_output.
-    fn child(&mut self, cx: Cx, resume: &Self::Resume, index: usize, output: Probed) -> Probed {
+    fn child(&mut self, cx: Cx, resume: &Self::Resume, index: usize, output: Probed<B>) -> Probed<B> {
         self.expression_child(cx, resume, index, output)
     }
     /// K0/K2/K10: C:119 append / C:4715 append_effect_output / C:562 function_expr.
@@ -1128,8 +1135,8 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
         &mut self,
         cx: Cx,
         resume: Self::Resume,
-        children: impl Iterator<Item = Probed>,
-    ) -> Result<Probed, Unsupported> {
+        children: impl Iterator<Item = Probed<B>>,
+    ) -> Result<Probed<B>, Unsupported> {
         match resume {
             expr::Resume::Prim(prim) => self.finish_primitive(cx, prim, children),
             expr::Resume::Record(record) => Ok(self.finish_record(cx, record, children)),
@@ -1141,7 +1148,7 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
 impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
     /// K4/K5/K6: C:6648 declare_compiled, C:6667 assign_compiled, C:6658 return_compiled.
     /// O(1): at most one statement built and pushed.
-    fn leaf(&mut self, cx: Cx, value: B::E) -> Out {
+    fn leaf(&mut self, cx: Cx, value: B::E) -> Out<B> {
         let value = B::node(value);
         let start = self.statements.mark();
         let mut finished = Finished::False;
@@ -1168,19 +1175,19 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
         };
         Out {
             stmts: self.statements.since(start),
-            value,
+            value: value.map(B::from_node),
             finished,
         }
     }
     /// K2: C:4715 append_effect_output, where the value is kept: a comma,
     /// or the tail alone when the head has no effect. Constant.
-    fn seq(&mut self, _: Cx, first: B::E, mut second: Out) -> Out {
+    fn seq(&mut self, _: Cx, first: B::E, mut second: Out<B>) -> Out<B> {
         let first = B::node(first);
         if self.arena.node(first).flags().contains(super::NodeFlags::STRICT) {
             self.arena.release(first);
         } else {
-            let value = second.value.expect("the tail of a kept sequence has a value");
-            second.value = Some(super::j::norm::jm1_js_seq(&mut self.arena, first, value));
+            let value = B::node(second.value.expect("the tail of a kept sequence has a value"));
+            second.value = Some(B::from_node(super::j::norm::jm1_js_seq(&mut self.arena, first, value)));
         }
         second
     }
@@ -1193,7 +1200,7 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
         self.statements.since(mark)
     }
     /// R1–R5: realize a deferred conditional from its value operands.
-    fn cond(&mut self, cx: Cx, test: B::E, yes: Out, no: Out) -> Out {
+    fn cond(&mut self, cx: Cx, test: B::E, yes: Out<B>, no: Out<B>) -> Out<B> {
         self.realize_conditional(cx, B::node(test), yes, no)
     }
 }
@@ -1253,11 +1260,12 @@ mod tests {
         }
         impl ProbeRules for Rules<'_> {
             type Resume = (NodeId, NodeId);
+            type Js = crate::bir::j::rows::Rows;
             fn enter(
                 &mut self,
                 _: Cx,
                 node: NodeId,
-            ) -> Result<ProbePlan<Self::Resume>, super::super::bridge::Unsupported> {
+            ) -> Result<ProbePlan<Self::Resume, Self::Js>, super::super::bridge::Unsupported> {
                 self.seen[node.index()] += 1;
                 match self.source.view(node) {
                     super::super::View::Seq { first, second } => {
@@ -1265,7 +1273,7 @@ mod tests {
                     }
                     super::super::View::Const { .. } => Ok(ProbePlan::Ready(Probed::Out(Out {
                         stmts: Span::default(),
-                        value: Some(node),
+                        value: Some(<crate::bir::j::rows::Rows as js::Js>::from_node(node)),
                         finished: Finished::False,
                     }))),
                     other => panic!("unexpected test source: {other:?}"),
@@ -1283,8 +1291,8 @@ mod tests {
                 &mut self,
                 _: Cx,
                 _: Self::Resume,
-                mut children: impl Iterator<Item = Probed>,
-            ) -> Result<Probed, super::super::bridge::Unsupported> {
+                mut children: impl Iterator<Item = Probed<crate::bir::j::rows::Rows>>,
+            ) -> Result<Probed<crate::bir::j::rows::Rows>, super::super::bridge::Unsupported> {
                 assert!(children.next().is_some());
                 Ok(children.next().unwrap())
             }
@@ -1313,7 +1321,7 @@ mod tests {
             assert_eq!(probe.steps, 20_001);
             assert!(rules.seen.iter().all(|&visits| visits == 1));
         }
-        assert_eq!(std::mem::size_of::<SourceProbe<()>>(), 80);
-        assert_eq!(std::mem::size_of::<ProbePlan<()>>(), 20);
+        assert_eq!(std::mem::size_of::<SourceProbe<(), crate::bir::j::rows::Rows>>(), 80);
+        assert_eq!(std::mem::size_of::<ProbePlan<(), crate::bir::j::rows::Rows>>(), 20);
     }
 }

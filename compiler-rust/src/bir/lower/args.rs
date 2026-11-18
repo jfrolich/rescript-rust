@@ -164,7 +164,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn sequence_arguments(
         &mut self,
         method_callee: bool,
-        args: &[Out],
+        args: &mut [Out<B>],
         values: &mut Vec<NodeId>,
     ) -> Span {
         let start = args.first().map_or_else(
@@ -181,9 +181,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mut has_code = false;
         let mut later_defines_pure = true;
         assert!(values.is_empty(), "argument value scratch must be empty");
-        for (i, arg) in args.iter().enumerate().rev() {
+        for (i, arg) in args.iter_mut().enumerate().rev() {
             self.sequence_steps += 1;
-            let value = arg.value.expect("argument value");
+            let value = B::node(arg.value.take().expect("argument value"));
             let (held, value) =
                 if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(value)) {
                     (Span::default(), value)
@@ -266,7 +266,7 @@ mod tests {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;
@@ -426,7 +426,7 @@ mod tests {
                 state.statements.reserve();
                 args.push(Out {
                     stmts: state.statements.since(start),
-                    value: Some(value),
+                    value: Some(crate::bir::lower::out::of_row(value)),
                     finished: Finished::False,
                 });
                 expected_args.push((vec![], old_value));
@@ -453,7 +453,7 @@ mod tests {
             let value = state.pure_expression(View::JStr { text }, 0);
             args.push(Out {
                 stmts: state.statements.since(start),
-                value: Some(value),
+                value: Some(crate::bir::lower::out::of_row(value)),
                 finished: Finished::False,
             });
             let callee = exp::var(effect_id, &mut legacy.j);
@@ -462,7 +462,7 @@ mod tests {
             let value = exp::string("v", &mut legacy.j);
             expected_args.push((vec![statement], value));
             let mut values = Vec::new();
-            let span = state.sequence_arguments(method, &args, &mut values);
+            let span = state.sequence_arguments(method, &mut args, &mut values);
             if method || shape != 0 {
                 assert!(state.arena.node(values[0]).flags().contains(NodeFlags::JS_LOC_PRESENT));
             }
@@ -488,7 +488,7 @@ mod tests {
                 Cx::value(),
                 Probed::Out(Out {
                     stmts: span,
-                    value: Some(value),
+                    value: Some(crate::bir::lower::out::of_row(value)),
                     finished: Finished::False,
                 }),
             );
