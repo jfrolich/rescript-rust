@@ -729,7 +729,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.statements.remove_empty(statements);
             self.probe_leaf(cx, value)
         } else {
-            let out = self.leaf(cx, value);
+            let out = self.leaf(cx, B::from_node(value));
             Probed::Out(Out {
                 stmts: self.statements.since(Span {
                     start: statements.start,

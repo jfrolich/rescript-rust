@@ -188,7 +188,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         self.statements.push(statement);
         let unit = self.js.undefined(&mut self.arena, false);
-        let mut out = self.leaf(cx, B::node(unit));
+        let mut out = self.leaf(cx, unit);
         out.stmts = self.statements.since(start);
         Probed::Out(out)
     }

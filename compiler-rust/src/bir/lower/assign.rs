@@ -19,7 +19,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let statement = self.js.assign(&mut self.arena, var, value);
         self.statements.push(statement);
         let unit = self.js.undefined(&mut self.arena, false);
-        let tail = self.leaf(cx, B::node(unit));
+        let tail = self.leaf(cx, unit);
         out.stmts = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,

@@ -1,0 +1,1 @@
+- Probe, not for merge: the backend lowering's outputs hold expression handles of its JavaScript interface (row T6x-b of the three-trees plan, measured on trunk).
