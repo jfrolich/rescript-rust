@@ -3725,8 +3725,11 @@ impl Checker {
     ///   variant nodes down to the last one, whose `VariantRow` has the
     ///   flags and the name; each field through its references,
     ///   [`field_repr`]). Unless it is static (closed and no field is
-    ///   `Reither`, btype.ml `static_row`): for a `fixed` last row the
-    ///   representative of its `more` is visited FIRST; otherwise that
+    ///   `Reither`, btype.ml `static_row`): for a `fixed` last row, and
+    ///   for one over a constructor, which OCaml's copy has made fixed
+    ///   (PR#6163, ctype.ml:826-830; the kernel's copy shares the row,
+    ///   [`Checker::copy_refs`]), the representative of its `more` is
+    ///   visited FIRST; otherwise that
     ///   `more` is a variable (anything else is an invariant failure) and
     ///   becomes, through `Graph::link`, a new variant node at its level
     ///   with no field, `fixed`, the `closed` and the name of the last
@@ -3754,7 +3757,124 @@ impl Checker {
     /// descriptor load and one `VariantRow` load per chain node and one
     /// `field_repr` per field. (R3h; CHECKER_REWRITE 8.9)
     pub fn reify(&mut self, ty: Ty) -> Result<(), Clash> {
-        todo!("R3h")
+        let generation = self.fresh_marks();
+        self.g.work.clear();
+        self.g.work.push(ty);
+        while let Some(entry) = self.g.work.pop() {
+            let t = self.g.repr(entry);
+            // A fresh type is a node past the marks.
+            if t.0 as usize >= self.marks.len() {
+                self.marks.resize(self.g.nodes.len(), 0);
+            }
+            if self.marks[t.0 as usize] == generation {
+                continue;
+            }
+            self.marks[t.0 as usize] = generation;
+            #[cfg(test)]
+            super::steps::tick();
+            let node = self.g.nodes[t.0 as usize];
+            if node.tag() == VAR {
+                let fresh = self.fresh_abstract(node.level, node.a);
+                self.g.link(t, fresh);
+                if node.level < self.newtype_level {
+                    self.g.work.clear();
+                    return Err(self.below_newtype_level(fresh, node.level));
+                }
+                continue;
+            }
+            if node.head & EXTENDED != 0
+                && matches!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Variant(_))
+            {
+                self.reify_row(t, node)?;
+                continue;
+            }
+            // `iter_type_expr`'s order: pushed last first.
+            let count = match node.tag() {
+                ARROW => node.arity() + 1,
+                CONSTR | TUPLE => node.arity(),
+                _ => 0,
+            };
+            for index in (0..count).rev() {
+                let child = self.child(node, index).expect("a child below the count");
+                self.g.work.push(child);
+            }
+        }
+        Ok(())
+    }
+
+    /// The variant arm of [`Checker::reify`] for variant node `ty`, whose
+    /// descriptor is `node`, read as `row_repr` reads it
+    /// (compiler/ml/btype.ml:126-135, 229-241; ctype.ml:1841-1855): the
+    /// types of every field of the chain and the arguments of the last
+    /// row's name go on `g.work` so that they pop in order, and above
+    /// them the `more` of a fixed row, which pops first; or the row
+    /// variable of a row that is neither static nor fixed is linked to a
+    /// fixed row without tags over a fresh type. A row over a constructor
+    /// is read as fixed, as [`Checker::copy_refs`] reads it (PR#6163,
+    /// ctype.ml:826-830: OCaml's copy sets the flag, the kernel's copy
+    /// shares the row). O(chain nodes + fields + their types), no
+    /// allocation but what the fixed row allocates.
+    fn reify_row(&mut self, ty: Ty, node: Node) -> Result<(), Clash> {
+        let start = self.g.work.len();
+        let mut work = std::mem::take(&mut self.g.work);
+        let (mut home, mut current, mut static_fields) = (ty, node, true);
+        let (row, more) = loop {
+            let ExtraDescriptor::Variant(index) = self.extras.descriptors[current.a as usize] else {
+                unreachable!("a variant node");
+            };
+            let row = self.extras.variants[index as usize];
+            for at in row.fields.start..row.fields.start + row.fields.len {
+                let field = self.extras.row_fields[at as usize];
+                let read = field_repr(&self.g, current.b, current.arity(), field);
+                match read.kind {
+                    RowFieldKind::Present if read.first.0 != NONE => work.push(read.first),
+                    RowFieldKind::Either { .. } => {
+                        static_fields = false;
+                        each_field_types(&self.g, current.b, current.arity(), field, |types| {
+                            work.extend_from_slice(types)
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            let more = self.g.repr(self.g.lists[(current.b + row.more) as usize]);
+            let next = self.g.nodes[more.0 as usize];
+            if next.head & EXTENDED == 0
+                || !matches!(self.extras.descriptors[next.a as usize], ExtraDescriptor::Variant(_))
+            {
+                break (row, more);
+            }
+            (home, current) = (more, next);
+        };
+        if row.name != NONE {
+            let arguments = row.name_arguments;
+            let from = (current.b + arguments.start) as usize;
+            work.extend_from_slice(&self.g.lists[from..from + arguments.len as usize]);
+        }
+        work[start..].reverse();
+        self.g.work = work;
+        if row.closed && static_fields {
+            return Ok(());
+        }
+        let variable = self.g.nodes[more.0 as usize];
+        if row.fixed || variable.tag() == CONSTR {
+            self.g.work.push(more);
+            return Ok(());
+        }
+        assert_eq!(variable.tag(), VAR, "the row variable of a row that is not fixed");
+        let fresh = self.fresh_abstract(variable.level, variable.a);
+        let scratch = self.extras.row_scratch.len();
+        let tail = self.build_variant(scratch..scratch, fresh, row.closed, true, (row, current.b));
+        self.g.nodes[tail.0 as usize].level = variable.level;
+        self.g.link(more, tail);
+        if row.name != NONE && row.name_arguments.len != 0 {
+            self.forget_name_children(home, row);
+        }
+        if variable.level < self.newtype_level {
+            self.g.work.clear();
+            return Err(self.below_newtype_level(fresh, variable.level));
+        }
+        Ok(())
     }
 
     /// `create_fresh_constr lev name` of `reify` (compiler/ml/ctype.ml:
@@ -3771,7 +3891,30 @@ impl Checker {
     /// no supplier is installed. O(1) amortized: two rows, one node, one
     /// list slot. (R3h)
     fn fresh_abstract(&mut self, level: u32, name: u32) -> Ty {
-        todo!("R3h")
+        let mut locals = self
+            .locals
+            .take()
+            .expect("Checker::locals: reify needs a supplier of locally abstract types");
+        let fresh = locals.fresh_abstract(name);
+        self.locals = Some(locals);
+        assert_eq!(self.types.rows.len() as u32, fresh, "the supplier counts with the table");
+        let newtype = self.types.newtypes.len() as u32;
+        let newtype_level = self.newtype_level;
+        self.types.newtypes.push(Newtype { level: newtype_level, expansion_level: newtype_level });
+        self.types.rows.push(TypeInfo {
+            manifest: NONE,
+            scope: newtype_level,
+            newtype,
+            arity: 0,
+            flags: NEWTYPE,
+            reserved: 0,
+        });
+        if newtype_level != 0 {
+            self.types.scoped += 1;
+        }
+        let b = self.g.lists.len() as u32;
+        self.g.lists.push(Ty(NONE));
+        self.g.push(Node { head: CONSTR, level, a: fresh, b })
     }
 
     /// `raise (Unify [(t, newvar2 level)])` of `reify`
@@ -3780,7 +3923,11 @@ impl Checker {
     /// [`Checker::trace`]. O(1) amortized: one node and one trace entry.
     #[cold]
     fn below_newtype_level(&mut self, fresh: Ty, level: u32) -> Clash {
-        todo!("R3h")
+        if self.g.mode == Mode::Explain {
+            let variable = self.g.push(Node { head: VAR, level, a: NONE, b: 0 });
+            self.trace.push([fresh, variable]);
+        }
+        Clash
     }
 
     /// `add_gadt_equation env source destination` (compiler/ml/ctype.ml:
