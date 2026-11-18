@@ -8820,8 +8820,7 @@ r01-r04, r12-r16 were written for it and agree), the level test of
 `unify_fields` (`ctype.ml:2490`: q03, r05, r06), of `unify_row`'s row
 variable (`ctype.ml:2609-2611`: q05, q06, r07, r08), the tracing wrappers
 of `unify_var` (`ctype.ml:2759-2766`), `expand_head_trace`
-(`ctype.ml:2782-2784`), the application's `lower_args`
-(`typecore.ml:2828`: q09, q10, r09, r10) and `local_non_recursive_abbrev`
+(`ctype.ml:2782-2784`) and `local_non_recursive_abbrev`
 (`ctype.ml:1533-1534`: q11, r11), and `copy ?env ~partial` through
 `instance ~partial env` (Rust's `instance_partial`). The level updates
 that Rust makes without an environment (`update_level`, for the same
@@ -8932,6 +8931,44 @@ was `IdTbl::find_by_ident` and the path iterator), and was reverted
 base 4,135,460,618, head 4,141,213,244, +5,752,626 (+0.139%), every
 function of the table above unchanged and `IdTbl::find_by_ident` at
 +706,988.
+
+#### Second part: the application's lower_args is traced
+
+Programs (each starts with `type rec t<_> = Int: t<int>`): OCaml refuses
+`switch x { | Int => ((z: a) => z)(y) }` and
+`switch x { | Int => { let g = (z: a) => z; g(y) } }` with `x: t<a>`,
+`y: a` and no result annotation, "This instance of int is ambiguous",
+and so on through an equality witness, two nested equations, an object
+parameter, a field of a record declared in the case, a tuple component,
+a polymorphic variant payload and a unit whose first function has no
+generalized constructor. Trunk accepted all of them and emitted
+JavaScript; with `if true { g(y) } else { 0 }` both refused, OCaml at
+`g(y)` and Rust at `0`. Of 48 programs (27 new, 21 aimed at the copy
+sites before), trunk agreed with OCaml on 35 and differed on 13; after
+the fix all 48 agree, diagnostics, warnings and JavaScript.
+
+The cause first given, the level update's expansion arm
+(`ctype.ml:591-596`), was wrong. A trace of both compilers on the second
+program: `get_level` of `a` after the equation is 1004 in both (OCaml
+reads the definition level, `ctype.ml:566`, which Rust stores too), and
+the last lowering is the same in both, the node `a` from 2006 to 1004,
+where `1004 < 1004` is false, so the arm never expands. OCaml refuses
+because the node is then a member of the set of 1006
+(`ctype.ml:587-589`); in Rust no type ever joined a set in that unit.
+OCaml adds it in `expand_abbrev_gen` (`ctype.ml:1227`), reached by
+`expand_head` from `Typecore.lower_args` (`typecore.ml:2504`), which the
+application runs inside `wrap_trace_gadt_instances` (`ctype.ml:188-192`,
+`typecore.ml:2828`): the expansion of the function's result type `a`
+under tracing adds `a` and `int` to the equation's set. Rust's
+`lower_args` ran untraced. Now `ctype::wrap_trace_gadt_instances` is
+OCaml's helper and the application calls `lower_args` through it
+(`4234cb251`); its unit test checks that it traces only under local
+constraints and turns tracing off only if it turned it on. Fixtures:
+super_errors `gadt_instance_application_*` (the 13 programs, expected
+files from the OCaml compiler) and
+`tests/tests/src/gadt_instance_application_accepted.res` (14 accepted
+neighbours). Cost: one local-constraint test and one branch per
+application.
 
 ## Fourth round: modules, aliases and usage marks
 
