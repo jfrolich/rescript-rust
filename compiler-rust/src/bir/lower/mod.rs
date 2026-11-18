@@ -769,7 +769,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// for a discarded suffix; O(1) otherwise. No temporary statement vector.
     fn append_outputs(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {
         if first.finished == Finished::True {
-            for statement in self.statements.statements(second.stmts) { self.arena.release(statement); }
+            for statement in self.statements.take_run(second.stmts) { self.js.release_stmt(&mut self.arena, statement); }
             if let Some(value) = second.value { self.arena.release(value); }
         }
         self.statements.append(first, second, value)
