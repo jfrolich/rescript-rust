@@ -3047,136 +3047,202 @@ for two equal paths; a change in unify.rs or outside rows.rs and the
 three ignore lines. At most 150 lines.
 ```
 
-Not issued as it stands: the review of this turn found corrections the
-design owes first (8.9, "Corrections owed after review"). The prompt is
-issued when they are in the document and the tests.
+Reissued in the seventh skeleton turn. The searches of both prompts
+were run on the head of that turn and print what the prompt says they
+print there. The commits of a slice cannot fail alone: the tests of a
+slice stay ignored until its last commit, and nothing that runs today
+reaches a `todo!` of either slice (`cargo test --lib tc::` passes on
+the skeleton: 282 passed, 19 ignored). The cut between the two slices
+was run: with R3h's bodies present and R3r's `todo!`, the twelve tests
+of R3h pass and the six R3r tests of `r3_tests.rs` fail.
 
 ```text
-R3h. Read section 8.9 whole and section 8.6, decisions 47, 60, 61 and
-62; compiler/ml/ctype.ml 253-273, 1478-1535, 1802-1881, 2085-2104,
-2229-2440 and 2739-2750; in src/tc/unify.rs the doc comments of
-PairSet, FrameKind::Flags, Checker::{unify_pattern, cut_equations} and
-the bodies of unify_pair, unify_expanded, unify3 and run_frames; in
+R3h. Read section 8.9 whole and section 8.6, decisions 47, 60, 61, 62
+and 72 to 80; compiler/ml/ctype.ml 253-273, 1371-1408, 1467-1536,
+1802-1881, 2084-2108, 2229-2440 and 2739-2750; compiler/ml/env.ml
+1805-1810; in src/tc/unify.rs the doc comments of PairSet,
+FrameKind::{Flags, Assumed, Try}, Checker::{unify_pattern,
+cut_equations, unify_newtypes, occur_pattern, unify3_pattern,
+assumed_equal, put_flags} and the bodies of unify_pair,
+occur_expanding, unify_expanded, unify3 and run_frames; in
 src/tc/rows.rs the doc comments of Equation, LocalDecls and
-Checker::{reify, add_gadt_equation, non_recursive_abbrev, duplicate,
-find_newtype_level, drop_name_children, copy_refs}; in src/tc/expand.rs
-TypeTable::{instantiable, non_aliasable, injective}, LOCAL, and the body
-of Checker::subst. R3g, R3n and R3p are merged.
+Checker::{match_unmatched, open_fresh, reify, fresh_abstract,
+below_newtype_level, forget_name_children, add_gadt_equation,
+non_recursive_abbrev, duplicate, find_newtype_level} and the bodies of
+copy_refs and match_fixed_fields; in src/tc/expand.rs
+TypeTable::{instantiable, non_aliasable, injective, contractive,
+constrained}, LOCAL, PREDEF, and the doc comment and body of
+Checker::subst.
+
+A prototype of this slice was written in the design turn and every
+test of the slice passed against it. It is not in the repository (it
+was over the size set for committing it): you write the bodies from
+the doc comments and section 8.9.
+
+On your first commit this prints rows.rs:8 and unify.rs:5, and the
+second prints r3_tests.rs:12:
+  grep -c 'todo!("R3h")' compiler-rust/src/tc/*.rs | grep -v ':0$'
+  grep -c '#\[ignore = "R3h build"\]' compiler-rust/src/tc/*.rs | grep -v ':0$'
+When you end, both print nothing.
 
 Commits, in this order, each pushed with
   cargo test --manifest-path compiler-rust/Cargo.toml --lib tc::
-seen to pass:
-1. The fixed-row rule of Checker::copy_refs (decision 47, last
-   paragraph), with the hand-built row of that decision as a running
-   test in src/tc/r3_tests.rs.
+seen to pass (the tests of this slice are ignored until commit 5; after
+each commit run them with `-- --ignored` and say in the commit message
+which pass):
+1. Checker::match_unmatched in rows.rs (decision 47, last paragraph),
+   with the hand-built row of that decision as a running test in
+   src/tc/r3_tests.rs.
 2. Checker::{find_newtype_level, non_recursive_abbrev, duplicate,
    add_gadt_equation} in rows.rs, Checker::cut_equations in unify.rs,
    and the equation arm at the top of Checker::subst in expand.rs
    (decision 67).
-3. Checker::reify in rows.rs (section 8.9, "reify").
-4. Checker::unify_pattern; `pattern` loaded once in unify_expanded and
-   passed to unify3, with the lookup of the table before unify3; the
-   arms of decision 64 marked 1, each `todo!("R3h")` of unify.rs
-   replaced; the Flags arm of run_frames; the arm of decision 65 in
-   unify_pair. The three places marked 2 in the table of decision 64
-   become `todo!("R3r")`. Then the `#[ignore = "R3h build"]` lines of
-   src/tc/r3_tests.rs removed and nothing else in those tests changed.
-End your turn after the fourth commit is pushed and no test is ignored
-for "R3h build".
+3. Checker::{fresh_abstract, below_newtype_level, reify} in rows.rs
+   (section 8.9, "reify").
+4. Checker::{unify_pattern, unify_newtypes, occur_pattern,
+   unify3_pattern} in unify.rs and the call of unify_newtypes in
+   unify_pair (decisions 64, 65, 69). In unify3_pattern the three arms
+   marked 2 in the table of decision 64 are `todo!("R3r")`, and the
+   call of mcomp in the arm "a constructor on either side" is the
+   existing Checker::mcomp, whose body is R3r's.
+5. The `#[ignore = "R3h build"]` lines of src/tc/r3_tests.rs removed
+   and nothing else in those tests changed.
+End your turn after the fifth commit is pushed.
+
+Not yours: Checker::{mcomp, push_compatible, package_fallback,
+try_frame, recover, recover_frames, resume_frames} are R3r's. Leave
+their `todo!("R3r")` and the tests ignored for "R3r build" as they are.
 
 Steps: one `#[cfg(test)] super::steps::tick()` per node `reify`,
-`non_recursive_abbrev` and `duplicate` visit, and per entry
-`cut_equations` pops; unify_pair's own tick counts the pairs.
+`non_recursive_abbrev`, `occur_pattern` and `duplicate` visit, and per
+entry `cut_equations` pops; unify_pair's own tick counts the pairs.
 
 Relations to hold: every tc:: test that passed before passes
-unchanged; pattern_mode_at_ten_thousand as written; after
-unify_pattern, on either result, what
-r3_tests::assert_pattern_left asserts.
+unchanged; pattern_mode_at_ten_thousand and
+an_equation_over_ten_thousand_shared_nodes_is_linear as written; after
+unify_pattern, on either result, what r3_tests::assert_pattern_left
+asserts.
 
 Report, before and after, the instructions of the tc_kernel bench
 operations unify_vars, unify_ground1, unify_ground3, unify_datatype2
 and unify_abbrev2 (compiler-rust/docs/TC_KERNEL_R3.md, "Machine and
-method"). No target is set (decision 46). Report also what
-Checker::generalize does to a memo or to anything that is not a node's
-level when `duplicate` calls it: if it writes something
-`Graph::restore` does not put back, stop and report it.
+method"). No target is set (decision 46).
 
-If a test of yours fails where your code does what the ctype.ml lines
-say, stop and report the test with the lines: do not change the test.
+Report what Graph::generalize writes when `duplicate` calls it under
+its speculation (decision 76): every kind of write, and whether
+Graph::restore puts it back. If it writes anything but levels through
+the trail, stop and report it: do not add a second copy.
+
+The hand-built tests are the judge. If a test of yours fails where
+your code does what the ctype.ml lines say, stop and report the test
+with the lines: do not change the test.
 
 Shortcuts that count as failure: linking two structures in pattern
 mode; an occurrence test for a structure pair in pattern mode; reading
 `pairs` or `umode` in unify_pair or anywhere in expression mode beyond
-the one load of unify_expanded; a recursive walk (use g.work and
-Checker::marks with a new generation); a hash set or a `Vec` allocated
-per call; cutting equations in Graph::restore or on a failed
-unification; a body of an equation that shares a node with its
-destination; writing a TypeTable row of an equation anywhere but
-add_gadt_equation and cut_equations; a change in graph.rs, level.rs or
+the one load of unify_expanded and the one of occur_expanding; a
+recursive walk (reify: g.work; non_recursive_abbrev and occur_pattern:
+Checker::frames above its length; marks with a new generation); a hash
+set or a `Vec` allocated per call; cutting equations in Graph::restore
+or on a failed unification; a body of an equation that shares a node
+with its destination; writing a TypeTable row of an equation anywhere
+but add_gadt_equation and cut_equations; a logged write of a node the
+copy of `duplicate` made; a change in graph.rs, level.rs or
 template.rs, or under src/types. At most 450 lines.
 ```
 
-Not issued as it stands: the review of this turn found corrections the
-design owes first (8.9, "Corrections owed after review"). The prompt is
-issued when they are in the document and the tests.
-
 ```text
 R3r. R3h is merged. Read section 8.9, decisions 63, 64 (the rows
-marked 2), 68 and 70 and "No supplier"; compiler/ml/ctype.ml 1886-2080,
-2359-2371, 2400-2408 and 2416-2421; in src/tc/unify.rs the doc comments
-of Try, FrameKind::Try and Checker::recover, and the body of
-run_frames; in src/tc/rows.rs the doc comments of LocalDecls,
-DeclMatch, Checker::{mcomp, push_compatible, enter_poly, unify_univar,
-unify_row, unify_fields, flatten_row, merge_rows, unify_package} and
-the body of Checker::leave_scopes in unify.rs.
+marked 2), 68, 70 and "No supplier", and section 8.6, decisions 60 (its
+last paragraph), 77 to 80; compiler/ml/ctype.ml 1886-2080, 2358-2375,
+2402-2411 and 2416-2424; in src/tc/unify.rs the doc comments of Try,
+TRY_ARGUMENT, TRY_ROWS, FrameKind::Try and Checker::{try_frame,
+recover, recover_frames, resume_frames}, and the bodies of
+unify_distinct and run_frames; in src/tc/rows.rs the doc comments of
+LocalDecls, DeclMatch, Checker::{mcomp, push_compatible,
+package_fallback, enter_poly, unify_univar, unify_row, unify_fields,
+flatten_row, merge_rows, unify_package}.
 
-Commits, in this order, each pushed with the tc:: tests seen to pass:
-1. Checker::{mcomp, push_compatible} in rows.rs (decision 70), and the
-   call of mcomp in the constructor arm of unify3 that R3h left
-   `todo!("R3r")`.
-2. Checker::recover and the Try arm of run_frames in unify.rs: every
-   place where run_frames returns a clash first asks `recover(base)`
-   and goes on with the loop when it answers `Some(Ok(()))`; a
-   `Some(Err(_))` is a clash again and asks again. Then the argument
-   arm and the variant arm of unify3 (decision 64, the rows marked 2)
-   and the package arm of decision 63.
+A prototype of this slice was written in the design turn and every
+test of the slice passed against it. It is not in the repository: you
+write the bodies from the doc comments and section 8.9.
+
+Before R3h this prints rows.rs:3 and unify.rs:5 (four bodies and the
+doc comment of unify3_pattern); R3h adds its `todo!("R3r")` in
+unify3_pattern, so count yours on your base and say the number. The
+second prints differential.rs:1 and r3_tests.rs:6:
+  grep -c 'todo!("R3r")' compiler-rust/src/tc/*.rs | grep -v ':0$'
+  grep -c '#\[ignore = "R3r build"\]' compiler-rust/src/tc/*.rs | grep -v ':0$'
+When you end, both print nothing (reword the doc comment of
+unify3_pattern that names the marker).
+
+Commits, in this order, each pushed with the tc:: tests seen to pass
+(the tests of this slice are ignored until commit 3; after each commit
+run them with `-- --ignored` and say which pass):
+1. Checker::{mcomp, push_compatible, package_fallback} in rows.rs
+   (decisions 70 and 63).
+2. Checker::{try_frame, recover, recover_frames, resume_frames} in
+   unify.rs and the three arms R3h left `todo!("R3r")` in
+   unify3_pattern (decision 68; decision 64, the rows marked 2). They
+   are one commit: an arm that pushes a Try frame cannot run without
+   try_frame, and try_frame has no caller without the arms.
 3. The `#[ignore = "R3r build"]` lines of src/tc/r3_tests.rs and
    src/tc/differential.rs removed, nothing else in those tests changed.
-End your turn after the third commit is pushed and no test is ignored
-for "R3r build".
+End your turn after the third commit is pushed.
 
-Steps: one tick per pair `mcomp` takes off its stack.
+Not yours: everything R3h built (Checker::{unify_pattern,
+cut_equations, unify_newtypes, occur_pattern, reify,
+add_gadt_equation, non_recursive_abbrev, duplicate,
+find_newtype_level, match_unmatched} and the arms of unify3_pattern
+marked 1). If one of them is wrong for a test of yours, stop and
+report it; do not edit it.
+
+Steps: one tick per pair `mcomp` takes off its stack, and one per
+record `recover` takes off.
 
 Relations to hold: every tc:: test that passed before passes
-unchanged; mcomp_at_ten_thousand as written; `Checker::compatible` and
-`Checker::tries` are empty when unify_pattern and mcomp return;
-`g.speculation_depth` is what it was.
+unchanged; mcomp_at_ten_thousand and
+recovering_ten_thousand_attempts_is_linear as written;
+`Checker::compatible` and `Checker::tries` are empty when unify_pattern
+and mcomp return; `g.speculation_depth` is what it was.
 
-If pattern_plan_agrees_on_generated_cases reports a seed, read the
-ctype.ml lines of the arm first. If your code does what they say, stop
-and report the seed with the lines: do not copy the old checker, and do
-not pin the seed yourself. The old checker is not a judge of a pattern
-unification that succeeds on two structures (decision 62), and
-`differential::old_judges` already ends a case before one; a seed that
-differs there means old_judges missed a link: report it.
+The hand-built tests are the judge. If a test of yours fails where
+your code does what the ctype.ml lines say, stop and report the test
+with the lines: do not change the test.
 
-Report the same five bench operations as R3h, before and after.
+pattern_plan_agrees_on_generated_cases lists the seeds that differ and
+why (UNTIL_R3S, EXPLAINED_UNTIL_R3S, EXPLAINED_OLD_DIFFERS; decisions
+77 to 79). If it reports a seed that is not listed, or a listed seed
+agrees, read the ctype.ml lines of the arm first. If your code does
+what they say, stop and report the seed with the lines: do not copy
+the old checker, and do not edit a list yourself. The old checker is
+not a judge of a pattern unification that succeeds on two structures
+(decision 62), and `differential::old_judges` already ends a case
+before one; a seed that differs there means old_judges missed a link:
+report it.
+
+Report the same five bench operations as R3h, before and after. No
+target is set (decision 46).
 
 Shortcuts that count as failure: a nested call of Checker::unify for
-an attempt (the attempt is frames above a Try frame); cutting
-`equations` in recover; a second table of pairs for unification (the
-table of mcomp is `compatible`, the table of unification `pairs`);
-comparing declarations in the kernel (LocalDecls::compare is the only
-reader of a declaration); answering compatible for two data types
-without a supplier; calling leave_scopes anywhere but in recover and
-mcomp's marker; a change in graph.rs, level.rs, template.rs or
-expand.rs, or under src/types. At most 450 lines.
+an attempt (the attempt is frames above a Try frame); taking the
+snapshot when the Try frame is pushed and not when it is popped
+pending; reading any record of `tries` but the last, or searching
+`frames` for a frame; a test of `tries` in the loop of run_frames or on
+the success path; cutting `equations` in recover; a second table of
+pairs for unification (the table of mcomp is `compatible`, the table
+of unification `pairs`); `g.work` as the stack of mcomp; comparing
+declarations in the kernel (LocalDecls::compare is the only reader of
+a declaration); answering compatible for two data types without a
+supplier; calling leave_scopes from mcomp or recover; a change in
+graph.rs, level.rs, template.rs or expand.rs, or under src/types. At
+most 450 lines.
 ```
 
 The prompt of K2 is in section 8.7. The last prompt below is superseded by
 decision 5 of 8.6: no builder starts a slice from it. R3e, R3f, R3n, R3g
-and R3p, R3h and R3r have their own prompts above it; R3q, R3i and R3j
-have none yet.
+and R3p, R3h and R3r have their own prompts above it; R3q, R3s, R3i and
+R3j have none yet (R3q and R3s are designed as text, 8.10 and 8.11).
 
 ```text
 R3e..R3j. First commit, before any body: extend
@@ -5811,6 +5877,7 @@ not at first, and why.
 | `the_newer_of_two_locally_abstract_types_is_expanded_once` | failed | the test expected the `Newtype` row of a type with an equation to stay, and the memo of `n0` to hold an entry: `Env.add_local_constraint` writes `(level, newtype_level)`, and a nullary copy links to the node expanded before | the test; decision 67 step 5 |
 | `rows_that_clash_are_reified_and_compared` | failed | the test expected the row variable a link to the fresh constructor; `reify` links it to a fixed variant node over it (ctype.ml:1848-1853) | the test asserts the shape `[fixed \| t]` and the path of `more` |
 | `an_argument_that_is_not_injective_is_tried_and_then_reified` | passed for the wrong reason | its failing attempt failed before anything was bound, so a snapshot taken too early could not show | the attempt binds `'v` and then fails at two tuples of different lengths; a second case over `k2` shows the first argument kept and the second rolled back; decision 68 (two phases) |
+| `two_structures_are_assumed_equal_and_not_linked` | passed, but reached `mcomp` (R3r) in its clash case, `int` against `string` | found by running the R3h tests with only R3h's bodies present: eleven of twelve passed | the clash is two tuples of different lengths; then the twelve pass with R3r's bodies `todo!` and exactly the six R3r tests of `r3_tests.rs` fail |
 | `mcomp_at_ten_thousand` | passed without the table | width 100 | width n |
 | `pattern_mode_at_ten_thousand` | passed without the marks of `reify` | no shared structure | the shared chain |
 | `a_named_row_on_the_left_loses_its_arguments_in_pattern_mode` | failed on the shape | in pattern mode the left node keeps its own tag first (`A B`), in expression mode the right node is read (`B A`) | the test; decision 60 |

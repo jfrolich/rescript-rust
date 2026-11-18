@@ -4643,7 +4643,8 @@ fn the_arguments_of_one_type_are_unified_by_the_flags() {
 /// checker links them and is no judge here (decision 62). The two
 /// tuples are two nodes afterwards, the equation `n0 := int` is added,
 /// and the table of assumed pairs is empty again. A clash below
-/// (`(n0, int)` against `(int, string)`) leaves both tuples as they
+/// (`(n0, (int, int))` against `(int, (int, int, int))`: `unify_list`
+/// of two lengths) leaves both tuples as they
 /// were, in both modes, and the equation its first element added stays
 /// until the caller cuts it (`env` is not restored by a failure).
 ///
@@ -4655,8 +4656,15 @@ fn two_structures_are_assumed_equal_and_not_linked() {
         for clash in [false, true] {
             let (mut c, _) = pattern_checker(mode);
             let (n0, int) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
-            let second = constr(&mut c, if clash { STRING } else { INT }, &[]);
-            let (left, right) = (tuple(&mut c, &[n0, int]), tuple(&mut c, &[int, second]));
+            // The clash is two tuples of different lengths, which no
+            // arm of a constructor takes (`mcomp` is R3r's).
+            let ints: Vec<Ty> = (0..5).map(|_| constr(&mut c, INT, &[])).collect();
+            let (first, second) = if clash {
+                (tuple(&mut c, &ints[..2]), tuple(&mut c, &ints[2..]))
+            } else {
+                (ints[0], ints[1])
+            };
+            let (left, right) = (tuple(&mut c, &[n0, first]), tuple(&mut c, &[int, second]));
             let (l, r) = (c.g.nodes[left.0 as usize], c.g.nodes[right.0 as usize]);
             let result = c.unify_pattern(2, true, true, left, right);
             assert_eq!(result.is_err(), clash);

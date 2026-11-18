@@ -898,6 +898,14 @@ impl Checker {
     /// instance's nodes gives each copied constructor with arguments its
     /// place in the chain ([`Checker::link_memorized`]); `info` is the row
     /// [`Checker::expand_once`] loaded. (R3m)
+    ///
+    /// An equation (R3h; CHECKER_REWRITE 8.9, decision 67, step 4) gets
+    /// one arm at the top, taken when `info.flags` has [`NEWTYPE`]: the
+    /// body of its manifest is a node of the graph, so the entry is
+    /// memorized with the handle the copy is about to get (the next
+    /// node) and then the body is copied at the node's level with
+    /// [`Checker::copy`]. Not built: no row has both [`NEWTYPE`] and a
+    /// manifest until `add_gadt_equation` writes one.
     fn subst(&mut self, ty: Ty, node: Node, info: TypeInfo, mode: ExpandMode) -> Result<Ty, Clash> {
         let manifest = self.types.manifests[info.manifest as usize];
         let base = self.g.nodes.len() as u32;
