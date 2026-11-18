@@ -104,7 +104,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(a + field-name bytes): turn the self block's already lowered fields
     /// into writes. Moving the primitive pool permits borrowing field names
     /// across J construction without cloning a tag or allocating field strings.
-    fn recursive_block(&mut self, member: usize, value: NodeId) {
+    fn recursive_block(&mut self, member: usize, value: B::E) {
         let row = &self.rec_members[member];
         let (var, mode, source) = (row.var, row.mode, row.source);
         let View::Prim { primitive, .. } = self.source.view(source) else { unreachable!() };
@@ -112,7 +112,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let Primitive::Pmakeblock(tag, _) = &prims[primitive.index()].primitive else { unreachable!() };
         if mode == Mode::Update {
             let target = self.js.var(&mut self.arena, var);
-            let call = self.primitive_runtime("Primitive_object", "updateDummy", &[B::node(target), value]);
+            let call = self.primitive_runtime("Primitive_object", "updateDummy", &[B::node(target), B::node(value)]);
             self.drop_pure_effect(call);
             let dummy = self.recursive_dummy(tag);
             let placeholder = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(B::from_node(dummy)));
@@ -121,7 +121,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let dummy = self.recursive_dummy(tag);
             let declaration = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(B::from_node(dummy)));
             self.statements.push(declaration);
-            let mut shell = B::from_node(value);
+            let mut shell = value;
             assert!(self.js.kind(&self.arena, B::of(&shell)) == Kind::BlockLit, "recursive self block");
             let count = self.js.take_operands(&mut self.arena, &mut shell) as usize;
             for index in 0..count {
@@ -159,7 +159,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let member = group.base as usize + count - 1 - index;
         let mut out = self.realize(cx, child);
         if self.rec_members[member].mode != Mode::Declare {
-            let value = B::node(out.value.take().unwrap_or_else(|| self.js.undefined(&mut self.arena, false)));
+            let value = out.value.take().unwrap_or_else(|| self.js.undefined(&mut self.arena, false));
             self.recursive_block(member, value);
             // Legacy updateDummy/self initialization always produces a normal
             // block output, even when the block value's prelude was finished.

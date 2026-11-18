@@ -235,35 +235,36 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if first.finished == Finished::True {
                     let second = self.realize(cx, tail);
                     if !keeps_value && let Some(value) = first.value.take() {
-                        self.hold_effect(slot, B::node(value));
+                        self.hold_effect(slot, value);
                     }
                     return Probed::Out(self.append_outputs(first, second, None));
                 }
-                let head = first.value.take().map(B::node);
-                let tail = match (head, tail) {
+                let head = first.value.take();
+                let tail = match tail {
                     // 1.5: a free tail after a head without statements is free
                     // in the continuations that convert a value (1.4) too.
-                    (Some(head), Probed::Free(tail))
-                        if !keeps_value && !self.statements.has_statements(first.stmts) =>
+                    Probed::Free(tail)
+                        if head.is_some() && !keeps_value && !self.statements.has_statements(first.stmts) =>
                     {
+                        let Some(head) = head else { unreachable!("a head was checked") };
                         self.statements.remove_empty(first.stmts);
-                        if self.js.has(&self.arena, B::at(head), flag::STRICT) {
-                            self.js.release(&mut self.arena, B::from_node(head));
+                        if self.js.has(&self.arena, B::of(&head), flag::STRICT) {
+                            self.js.release(&mut self.arena, head);
                             return Probed::Free(tail);
                         }
-                        return Probed::Free(self.free.push(Free::Seq { first: B::from_node(head), second: tail }));
+                        return Probed::Free(self.free.push(Free::Seq { first: head, second: tail }));
                     }
-                    (_, tail) => tail,
+                    tail => tail,
                 };
                 let mut second = self.realize(cx, tail);
                 if let Some(value) = head {
                     if keeps_value && !self.statements.has_statements(second.stmts) {
                         let second_value = second.value.expect("value continuation");
-                        let value = if self.js.has(&self.arena, B::at(value), flag::STRICT) {
-                            self.js.release(&mut self.arena, B::from_node(value));
+                        let value = if self.js.has(&self.arena, B::of(&value), flag::STRICT) {
+                            self.js.release(&mut self.arena, value);
                             second_value
                         } else {
-                            self.js.seq_rule(&mut self.arena, B::from_node(value), second_value)
+                            self.js.seq_rule(&mut self.arena, value, second_value)
                         };
                         second.value = Some(value);
                     } else {
@@ -274,7 +275,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let out = self.append_outputs(first, second, value);
                 if !self.statements.has_statements(out.stmts) && let Some(value) = out.value {
                     self.statements.remove_empty(out.stmts);
-                    self.probe_leaf(cx, B::node(value))
+                    self.probe_leaf(cx, value)
                 } else { Probed::Out(out) }
             }
             Resume::Fun { header, loop_, .. } => {
@@ -300,17 +301,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if let Some(loc) = source_loc {
                     self.js.locate(&mut self.arena, &mut value, loc);
                 }
-                self.probe_leaf(cx, B::node(value))
+                self.probe_leaf(cx, value)
             }
         }
     }
     /// K2: O:339 push_effect_expression into the slot reserved after the head
     /// of a sequence. One step per comma operand of the value; each
     /// statement is held once, O(1), and the hold placed in O(1).
-    fn hold_effect(&mut self, slot: u32, value: NodeId) {
+    fn hold_effect(&mut self, slot: u32, value: B::E) {
         let statements = &mut self.statements;
         let mark = statements.held_mark();
-        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.hold(s));
+        self.js.effect(&mut self.arena, value, |s| statements.hold(s));
         statements.fill_held_since(slot, mark);
     }
     /// K2: O:339 push_effect_expression. Calls may have effects; pure values

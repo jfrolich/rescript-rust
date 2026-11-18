@@ -39,6 +39,7 @@ pub(crate) mod scope;
 use super::bridge::Unsupported;
 use super::{Bir, NodeId, VarId, View};
 use crate::ident::Ident;
+use crate::emit::row;
 use crate::lambda::lam_compat::LetKind;
 pub use out::{Finished, Free, FreeId, FreePool, Out, Probed, Span, StatementStack};
 
@@ -736,11 +737,11 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
     /// leaves immediately instead of allocating deferred expression records.
     /// Cost: O(1): one leaf output, or one deferred record.
-    fn probe_leaf(&mut self, cx: Cx, value: NodeId) -> Probed<B> {
+    fn probe_leaf(&mut self, cx: Cx, value: B::E) -> Probed<B> {
         if self.direct && !cx.probing {
-            Probed::Out(self.leaf(cx, B::from_node(value)))
+            Probed::Out(self.leaf(cx, value))
         } else {
-            Probed::Free(self.free.push(Free::Leaf(B::from_node(value))))
+            Probed::Free(self.free.push(Free::Leaf(value)))
         }
     }
     /// H13: A:28 delay_safe; K1: C:1529 compile_expr. The supported literal,
@@ -781,8 +782,8 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     fn append_outputs(&mut self, first: Out<B>, mut second: Out<B>, mut value: Option<B::E>) -> Out<B> {
         if first.finished == Finished::True {
             for statement in self.statements.take_run(second.stmts) { self.js.release_stmt(&mut self.arena, statement); }
-            if let Some(value) = second.value.take() { self.arena.release(B::node(value)); }
-            if let Some(value) = value.take() { self.arena.release(B::node(value)); }
+            if let Some(value) = second.value.take() { self.js.release(&mut self.arena, value); }
+            if let Some(value) = value.take() { self.js.release(&mut self.arena, value); }
         }
         self.statements.append(first, second, value)
     }
@@ -963,15 +964,14 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
     /// performed twice.
     fn enter(&mut self, cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume, B>, Unsupported> {
         let value = match self.source.view(node) {
-            View::Var { var } => self.pure_expression(View::Var { var }, 0),
-            View::Global { module } => self.pure_expression(
-                View::JQualified {
-                    module,
-                    member: None,
-                },
-                0,
-            ),
-            View::Const { value } => self.constant(value),
+            View::Var { var } => self.js.var(&mut self.arena, var),
+            View::Global { module } => {
+                let mut value = self.js.qualified(&mut self.arena, module, None);
+                self.js.assume_strict(&mut self.arena, &mut value);
+                value
+            }
+            // `constant` gives a row until T6x-d.
+            View::Const { value } => B::from_node(self.constant(value)),
             View::Apply { callee, info, .. } => {
                 let args = self.source.node(node).apply_args();
                 let tail = self.self_call(cx, callee);
@@ -1031,7 +1031,7 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
                 use crate::lambda::lam_primitive::Primitive;
                 if matches!(self.arena.primitive(primitive).primitive,
                     Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }) if name.as_str() == "make") {
-                    if let Some(value) = self.flat_make_field(node).map(B::node) {
+                    if let Some(value) = self.flat_make_field(node) {
                         return Ok(ProbePlan::Ready(self.probe_leaf(cx, value)));
                     }
                 }
@@ -1163,7 +1163,6 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
     /// K4/K5/K6: C:6648 declare_compiled, C:6667 assign_compiled, C:6658 return_compiled.
     /// O(1): at most one statement built and pushed.
     fn leaf(&mut self, cx: Cx, value: B::E) -> Out<B> {
-        let value = B::node(value);
         let start = self.statements.mark();
         let mut finished = Finished::False;
         let value = match cx.cont {
@@ -1171,25 +1170,25 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
                 Some(value)
             }
             Cont::Declare(kind, var) => {
-                let stmt = super::j::declare(&mut self.arena, kind, var, value);
-                self.statements.push(B::stmt_from_node(stmt));
+                let stmt = self.js.declare(&mut self.arena, kind, var, Some(value));
+                self.statements.push(stmt);
                 None
             }
             Cont::Assign(var) => {
-                let stmt = super::j::assign(&mut self.arena, var, value);
-                self.statements.push(B::stmt_from_node(stmt));
+                let stmt = self.js.assign(&mut self.arena, var, value);
+                self.statements.push(stmt);
                 None
             }
             Cont::Effect(Tail::Return(_)) => {
-                let stmt = super::j::return_value(&mut self.arena, value);
-                self.statements.push(B::stmt_from_node(stmt));
+                let stmt = self.js.return_(&mut self.arena, value);
+                self.statements.push(stmt);
                 finished = Finished::True;
                 None
             }
         };
         Out {
             stmts: self.statements.since(start),
-            value: value.map(B::from_node),
+            value,
             finished,
         }
     }
@@ -1197,28 +1196,27 @@ impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
     /// or the tail alone when the head has no effect. Cost: O(1), plus one
     /// step per node released when the head has no effect.
     fn seq(&mut self, _: Cx, first: B::E, mut second: Out<B>) -> Out<B> {
-        let first = B::node(first);
-        if self.arena.node(first).flags().contains(super::NodeFlags::STRICT) {
-            self.arena.release(first);
+        if self.js.has(&self.arena, B::of(&first), row::flag::STRICT) {
+            self.js.release(&mut self.arena, first);
         } else {
-            let value = B::node(second.value.expect("the tail of a kept sequence has a value"));
-            second.value = Some(B::from_node(super::j::norm::jm1_js_seq(&mut self.arena, first, value)));
+            let value = second.value.take().expect("the tail of a kept sequence has a value");
+            second.value = Some(self.js.seq_rule(&mut self.arena, first, value));
         }
         second
     }
     /// O:339 push_effect_expression: the head of a deferred sequence as
     /// statements. One step per comma operand of the head.
     fn effect(&mut self, first: B::E) -> Span {
-        let first = B::node(first);
         let mark = self.statements.mark();
-        self.drop_pure_effect(first);
+        let statements = &mut self.statements;
+        self.js.effect(&mut self.arena, first, |s| statements.push(s));
         self.statements.since(mark)
     }
     /// R1–R5: realize a deferred conditional from its value operands.
     /// Cost: that of `realize_conditional`: O(1), plus `free_effect` and
     /// `effect_output` in an effect continuation.
     fn cond(&mut self, cx: Cx, test: B::E, yes: Out<B>, no: Out<B>) -> Out<B> {
-        self.realize_conditional(cx, B::node(test), yes, no)
+        self.realize_conditional(cx, test, yes, no)
     }
 }
 
