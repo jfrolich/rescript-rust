@@ -8720,12 +8720,12 @@ reads one.
   level as its expansion level (`env.ml:1805-1810`;
   `add_gadt_equation`, `ctype.rs:1839`); `check_trace_gadt_instances`
   forgets the memorized expansions (`ctype.ml:182`); the expansion test is
-  `subst_gadt_instance` (`ctype.rs:5129`), reached from
-  `try_expand_head_with_mode` (`ctype.rs:4749`) only while tracing and
-  made before the substitution, which it does not affect; the traced
-  head expansion (`expand_head_traced`) adds the chain; the unifier's
-  expansions (`unify2`, `ctype.ml:2289-2292`) propagate the refusal
-  (`expand_head_for_unify`);
+  `try_expand_head_traced`, which wraps trunk's `try_expand_head_with_mode`
+  (since `cbaf8d70d`) and, while tracing, tests an equation before the
+  expansion, which it does not affect; the traced head expansion
+  (`expand_head_traced`) adds the chain; the unifier's expansions
+  (`unify2`, `ctype.ml:2289-2292`) propagate the refusal
+  (`expand_heads_unif`, `expand_head_in_unify`);
   `update_level_pass` (`ctype.rs:2999`) makes the level test. Without OCaml's arm of `unify`
   for two nullary locally abstract types (`ctype.ml:2255-2268`: expand
   only the later one, lower nothing first), p11 became refused. A trace
@@ -8733,9 +8733,8 @@ reads one.
   (level 2008) and `a` to the outer level 1005 before expanding, and the
   expansion of the copy of `b` then refused (1005 below the instance
   level 1008); OCaml's arm expands that copy at its own level.
-  `unify_newtypes` (`ctype.rs:610`) is that arm. The level test costs one load (`has_gadt_instance_scopes`) and one
-  branch per level update in a unit without an instance scope; the plain
-  level update is skipped only in an environment with one.
+  `unify_newtypes` (`ctype.rs:610`) is that arm. The level test costs one load (`has_gadt_instances`) and one
+  branch per level update in a unit where no type has joined a set.
 - `22a53a612`. OCaml's `copy ?env` (`ctype.ml:770-774`), reached through
   `instance env` and `instance_list env` (`ctype.ml:877-894`), adds the
   copy of an instance to its set under local constraints. A function
@@ -8782,39 +8781,65 @@ the outer environment after its cases. Five programs aimed at that moment
 bound in a `let` used after the `switch`, with and without a result
 annotation) are accepted by OCaml and by Rust.
 
-Cost: open. The guard of every test outside unification is that the
-environment at hand has an instance scope: the type context's flag (one
-load, false in a unit with no instance scope) and then the environment's
-handle (`has_gadt_instance_scope`). 434 of the 788 units of `tests/tests`
-add an instance scope, 2,169 in all: OCaml's `contains_gadt`
-(`typecore.ml:2372`) looks a pattern's constructors up by name with
-`lookup_all_constructors`, and Rust ports that rule.
+Two programs aimed at the guard (see "Cost" below) agree. In the first,
+the unit's first `switch` (on an `option<int>`) has no generalized
+constructor and its second, `switch x { | Int => if true { y } else { 0 } }`
+with `x: t<a>` and `y: a`, refuses the instance: OCaml and Rust both
+print "This instance of int is ambiguous" at `9:33`. In the second, a
+first function adds the instance (`[y, 0]` under `Int`) and two later
+functions with no generalized constructor lower types through a `switch`
+(`Some(n) => [n, f(Int, n)]`, and a `ref([])` assigned in a case): both
+compilers accept it with the same JavaScript.
+
+Cost: open. Every read of an instance set answers nothing while every set
+is empty, and a set gets its first member only from the test of
+`expand_abbrev_gen` (`ctype.ml:1217-1227`) while tracing. So the type
+context's flag is "a type has been added to an instance set in this
+unit" (`has_gadt_instances`, set in `push_gadt_instance`, since
+`82e309f01`), kept in one byte with the tracing flag. Copies and level
+updates test it, then the environment's scope handle; the expansion sites
+test the byte (`expands_gadt_instances`: tracing or a member), so the
+test that adds the first member still runs. Scopes are created as before:
+434 of the 788 units of `tests/tests` add one, 2,169 in all, because
+OCaml's `type_cases` adds an instance level for a `switch` without a
+generalized constructor whenever the exhaustiveness check will run
+(`typecore.ml:4814-4818`, `4913-4914`; Rust `typecore.rs` at the
+`needs_exhaust_check` test). 7 of the 788 units add an instance.
 
 The CI `Instruction count` check on a clean `tests/tests` build:
 +12,960,104 (+0.313%) for `7d08707fd`, +11,397,960 (+0.276%) for
-`c0daf094f`, +7,466,613 (+0.181%) for `4679c1d94` (base 4,134,982,569,
-head 4,142,449,182). The last, split:
+`c0daf094f`, +7,466,613 (+0.181%) for `4679c1d94`, +5,138,728
+(+0.124%) for `fe245f217` (base 4,134,734,897, head 4,139,873,625). The
+last, split into the guard sites (one load and one branch each), (a) the
+rest of what a unit pays that adds no instance, and (b) the work while
+tracing or after a member:
 
 | | function | change |
 | --- | --- | ---: |
-| a | `try_expand_head_with_mode::<false>` (+20,876,059) and its closure (+268,694) against trunk's `try_expand_head_with_mode` (-29,369,475) and closure (-109,870), with `find_abbrev_expansion` +8,176,501, `find_pdot_expansion` +1,412,464, `register_pdot_expansion` +382,131, `pdot_expansion` +222,207 no longer inlined | +1,858,711 |
-| a | `expand_head_plain` against `expand_head_with_mode` | -571,304 |
-| a | `expand_head_for_unify` (the guard at the unifier's expansions) | +852,103 |
-| a | the guard of `instance_in` at its sites: `type_application_parts` +601,508, `type_identifier` +168,826, `type_function_nary` +135,577, `instance_in` +91,230 | +997,141 |
-| a | `moregen` | +219,454 |
-| b | `gadt_instance_level` +471,915, `repr_chain` +391,308 (the lookups) | +863,223 |
-| b | `try_expand_head_with_mode::<true>` | +423,762 |
-| b | `instance_with_gadt_instances` +342,857 against `instance` -313,577 | +29,280 |
-| b | the general level update in place of the plain one: `update_level_checked_above` +283,546, `update_level_pass` +238,663, `update_level_children` +104,313, `TypeMutationSnapshot::drop` +104,168, `restore_type_state` +97,172, `lower_plain_levels::lower` -160,692 | +667,170 |
-| b | `Env::data_mut` +190,067, `Env::add_gadt_instance_level` +91,766 (a scope per `switch` with a generalized constructor) | +281,833 |
-| b | `unify` (the newtype arm and `cleanup_abbrev` under local constraints) | +257,776 |
+| site | the unifier's pairs (`expand_heads_unif`) | +497,792 |
+| site | `instance_in` / `instance_list_in` at typecore's sites: `type_application_parts` +398,277, `type_identifier` +130,678, `type_function_nary` +96,633, `instance_in` +65,613, `instance_list_in` +44,386 | +735,587 |
+| site | `update_level_checked_above` | +140,409 |
+| site | `expand_head_with_mode`'s guard, inlined into `moregen` at its two `expand_head` calls | +129,160 |
+| site | `try_expand_head` | +56,221 |
+| a | `unify`: the newtype arm (`unify_newtypes`, `is_newtype`, `find_newtype_level`) is inlined into it since `82e309f01`, its frame grows from 0x1e8 to 0x238 bytes and every call spills more | +1,130,695 |
+| a | `expand_head_plain` +12,100,981 against `expand_head_with_mode` -12,250,409 | -149,428 |
+| a | scope creation: `Env::data_mut` +190,067, `Env::add_gadt_instance_level` +89,597, `make_mut` +76,159 and +46,401 | +402,224 |
+| a | `restore_type_state` (the journal's new entry) | +97,242 |
+| a | `unify_types` -166,879, `lower_plain_levels::lower` -54,768 | -221,647 |
+| b | `gadt_instance_level` +679,023, `repr_chain` +642,364 | +1,321,387 |
+| b | `try_expand_head_traced` +242,590, `expand_head_traced::<true>` +108,040, `::<false>` +64,273, `Env::find_local_constraint` +46,958 | +461,861 |
+| b | `update_level_pass` +89,441, `instance_with_gadt_instances` +45,419 | +134,860 |
 
-(a) is about +3.36M (+0.081%), above the +0.03% limit; (b) about +2.52M.
-`IdTbl::find_by_ident` (+525,453), the path iterator and the allocator
-make up the rest and move by as much between runs. The largest part of
-(a) is the second instantiation of the head expansion: each calls
-`find_abbrev_expansion` and `find_pdot_expansion`, which are no longer
-inlined into trunk's instantiation.
+The sites come to +1,559,169, (a) to +1,259,086 (+0.0305%, 18,666 above
++0.03%) and (b) to +1,918,108. The remaining +402,365 is
+`IdTbl::find_by_ident` (-501,294) and the allocator, which move by as
+much between runs.
+
+Measured locally (fat LTO, one codegen unit, five runs a side; trunk
+459b87ca5 as base): `bcc2a4ef4` +4,401,645, the flag `82e309f01`
++6,529,629 (not lower, kept because the flag defines (a)), one
+instantiation of the expansion `cbaf8d70d` +5,694,179, trunk's calls at
+the unifier's sites `fe245f217` +5,213,073.
 
 ## Fourth round: modules, aliases and usage marks
 
