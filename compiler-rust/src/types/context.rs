@@ -5832,8 +5832,13 @@ impl TypeContext {
                 TypeDesc::Tconstr { path, abbrev, .. } => Some((*path, *abbrev)),
                 _ => None,
             };
+            // `find_expans Private p !memo` (env.ml:1342): a memorized
+            // expansion of `path` of any privacy. Its own scan, so that
+            // `find_abbrev_expansion` keeps its one caller.
             current = constr.and_then(|(path, abbrev)| {
-                self.find_abbrev_expansion(abbrev, PrivateFlag::Private, &path)
+                self.scan_abbrev_chain(abbrev, |_, cached_path, _, expansion| {
+                    path.same(cached_path).then_some(expansion)
+                })
             });
         }
     }
