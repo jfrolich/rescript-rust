@@ -349,7 +349,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let block = self.js.block_of(&mut self.arena, list);
             let plan = self.catches[frame.0 as usize].as_mut().expect("live catch frame");
             let slot = plan.output.start as usize + index - 1;
-            self.switch_output_nodes[slot] = B::stmt_node(block);
+            self.switch_output_nodes[slot] = Some(block);
             self.switch_output_clauses[slot] = ClauseMeta { should_break, comment: None, loc: None };
         }
         Probed::Out(Out { stmts: self.statements.mark(), value: None, finished })
@@ -373,7 +373,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let dropped = self.statements.since(after_body);
             self.release_run(dropped);
             for i in 0..plan.output.len {
-                let block = B::stmt_from_node(self.switch_output_nodes[(plan.output.start + i) as usize]);
+                let block = self.switch_output_nodes[(plan.output.start + i) as usize].take().expect("lowered handler");
                 self.js.release_stmt(&mut self.arena, block);
             }
             Finished::True
@@ -434,7 +434,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.arena.pools.switch_keys.push(CaseKey::Lambda(crate::lambda::SwitchKey::Int(plan.first + case as i32)));
                 let next = self.group_indices[plan.groups.next.start as usize + case];
                 let (action, clause) = if next == super::switch::NONE {
-                    (self.switch_output_nodes[plan.output.start as usize + group],
+                    (B::stmt_node(self.switch_output_nodes[plan.output.start as usize + group].take().expect("lowered handler")),
                      self.switch_output_clauses[plan.output.start as usize + group])
                 } else {
                     let empty = self.js.list(&mut self.arena, 0, std::iter::empty());
