@@ -2764,7 +2764,7 @@ fn update_level_checked_above(
     // (`update_level_pass`), which the plain update does not test: it is
     // skipped in an environment with an instance scope. One load and one
     // branch when the unit has none.
-    let instances = ctx.has_gadt_instance_scopes() && !env.gadt_instance_scope().is_none();
+    let instances = ctx.has_gadt_instances() && !env.gadt_instance_scope().is_none();
     if !instances && lower_plain_levels(ctx, env, level, ty) {
         return Ok(());
     }
@@ -2971,7 +2971,7 @@ fn level_update_is_plain(
 /// instance scope; otherwise [`TypeContext::gadt_instance_level`].
 #[inline]
 pub(crate) fn gadt_instance_level(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<i32> {
-    if !ctx.has_gadt_instance_scopes() {
+    if !ctx.has_gadt_instances() {
         return None;
     }
     let scope = env.gadt_instance_scope();
@@ -5155,7 +5155,7 @@ fn subst_gadt_instance(
 }
 
 fn try_expand_head(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
-    if has_gadt_instance_scope(ctx, env) {
+    if expands_gadt_instances(ctx, env) {
         try_expand_head_with_mode::<true>(ctx, env, ty, ExpandHeadMode::General, &mut None)
     } else {
         try_expand_head_with_mode::<false>(ctx, env, ty, ExpandHeadMode::General, &mut None)
@@ -7353,7 +7353,7 @@ fn expand_head_with_mode(
     ty: TypeExprRef,
     mode: ExpandHeadMode,
 ) -> TypeExprRef {
-    if has_gadt_instance_scope(ctx, env) {
+    if expands_gadt_instances(ctx, env) {
         match expand_head_traced::<false>(ctx, env, ty, mode) {
             Ok(expanded) => expanded,
             Err(_) => unreachable!("a safe expansion reports no ambiguous GADT instance"),
@@ -7409,7 +7409,7 @@ fn expand_head_for_unify(
     ty: TypeExprRef,
     mode: ExpandHeadMode,
 ) -> Result<TypeExprRef, TypeExprRef> {
-    if has_gadt_instance_scope(ctx, env) {
+    if expands_gadt_instances(ctx, env) {
         expand_head_traced::<true>(ctx, env, ty, mode)
     } else {
         Ok(expand_head_plain(ctx, env, ty, mode))
@@ -12525,12 +12525,20 @@ pub fn instance_list_in(ctx: &TypeContext, env: &Env, types: &[TypeExprRef]) -> 
     }
 }
 
-/// The guard of every GADT instance test outside unification: `env`, the
-/// environment at hand, has an instance scope (it is inside a `switch` or
-/// function whose patterns may add equations). The unit's flag is tested
-/// first: one load and one branch in a unit without an instance scope.
+/// The guard of the GADT instance tests of copies and level updates: a type
+/// has joined an instance set in this unit (until one has, every set is
+/// empty and each test answers nothing) and `env`, the environment at hand,
+/// has an instance scope. One load and one branch while no type has.
 fn has_gadt_instance_scope(ctx: &TypeContext, env: &Env) -> bool {
-    ctx.has_gadt_instance_scopes() && !env.gadt_instance_scope().is_none()
+    ctx.has_gadt_instances() && !env.gadt_instance_scope().is_none()
+}
+
+/// The guard of the traced expansion: instances are traced (the test of
+/// `expand_abbrev_gen`, ctype.ml:1215-1227, may add the first member of a
+/// set) or a type has joined a set, and `env` has an instance scope. One
+/// load and one branch while neither holds.
+fn expands_gadt_instances(ctx: &TypeContext, env: &Env) -> bool {
+    ctx.expands_gadt_instances() && !env.gadt_instance_scope().is_none()
 }
 
 /// [`instance`] in an environment with an instance scope: `copy ?env`

@@ -568,6 +568,11 @@ enum TypeMutation {
     GadtInstance(GadtScopeRef),
 }
 
+/// [`TypeContext`]'s GADT state bit for OCaml's `trace_gadt_instances`.
+const GADT_TRACING: u8 = 1;
+/// [`TypeContext`]'s GADT state bit: a type has joined an instance set.
+const GADT_MEMBERS: u8 = 2;
+
 /// Handle of a GADT instance scope of [`TypeContext`]; `NONE` for an
 /// environment outside every such scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -858,8 +863,13 @@ pub struct TypeContext {
     /// Saved levels stack
     saved_levels: RefCell<Vec<(i32, i32)>>,
 
-    /// GADT instance tracking flag
-    trace_gadt_instances: Cell<bool>,
+    /// OCaml's GADT instance state in one byte, so that a site that needs
+    /// to know whether either is set tests it with one load:
+    /// [`GADT_TRACING`], OCaml `Ctype.trace_gadt_instances`, and
+    /// [`GADT_MEMBERS`], set when a type is first added to an instance set
+    /// in this unit (it stays set if a backtrack removes the member: that is
+    /// only slower).
+    gadt_state: Cell<u8>,
 
     /// The sets of OCaml `Env.gadt_instances` (compiler/ml/env.ml:1305-1345),
     /// one per `switch` or function whose patterns may add equations,
@@ -867,10 +877,6 @@ pub struct TypeContext {
     /// innermost scope; each scope holds its enclosing one's, so a clone of
     /// an environment copies a `u32` and never a set.
     gadt_instance_scopes: RefCell<Vec<GadtInstanceScope>>,
-
-    /// Whether this unit has created a GADT instance scope: the one load
-    /// [`Self::has_gadt_instance_scopes`] tests on every level update.
-    has_gadt_instance_scopes: Cell<bool>,
 
     /// Whether this unit created or copied a polymorphic type with at least
     /// one bound variable (see [`Self::note_bound_universal`]). Only then
@@ -1432,9 +1438,8 @@ impl TypeContext {
             nongen_level: Cell::new(0),
             global_level: Cell::new(1),
             saved_levels: RefCell::new(Vec::new()),
-            trace_gadt_instances: Cell::new(false),
+            gadt_state: Cell::new(0),
             gadt_instance_scopes: RefCell::new(Vec::new()),
-            has_gadt_instance_scopes: Cell::new(false),
             bound_universals: Cell::new(false),
             passive_variants: Cell::new(false),
             rigid_variants: Cell::new(false),
@@ -5670,8 +5675,8 @@ impl TypeContext {
     /// through the instance test of `expand_abbrev_gen`. Returns whether
     /// this call turned it on.
     pub fn check_trace_gadt_instances(&self, has_constraints: bool) -> bool {
-        if !self.trace_gadt_instances.get() && has_constraints {
-            self.trace_gadt_instances.set(true);
+        if !self.trace_gadt_instances() && has_constraints {
+            self.gadt_state.set(self.gadt_state.get() | GADT_TRACING);
             self.clear_abbrev_memos();
             true
         } else {
@@ -5682,7 +5687,7 @@ impl TypeContext {
     /// Reset GADT instance tracing.
     pub fn reset_trace_gadt_instances(&self, was_set: bool) {
         if was_set {
-            self.trace_gadt_instances.set(false);
+            self.gadt_state.set(self.gadt_state.get() & !GADT_TRACING);
         }
     }
 
@@ -5709,15 +5714,24 @@ impl TypeContext {
 
     /// Whether GADT instances are being tracked (OCaml `Ctype.trace_gadt_instances`).
     pub fn trace_gadt_instances(&self) -> bool {
-        self.trace_gadt_instances.get()
+        self.gadt_state.get() & GADT_TRACING != 0
     }
 
-    /// Whether this unit has a GADT instance scope at all. One load: the
-    /// test every level update makes before it looks at an environment's
-    /// scopes (OCaml `Env.gadt_instance_level`, ctype.ml:587).
+    /// Whether a type has been added to a GADT instance set in this unit.
+    /// While it has not, every set is empty and every test of OCaml's
+    /// `Env.gadt_instance_level` answers `None`. One load.
     #[inline]
-    pub fn has_gadt_instance_scopes(&self) -> bool {
-        self.has_gadt_instance_scopes.get()
+    pub fn has_gadt_instances(&self) -> bool {
+        self.gadt_state.get() & GADT_MEMBERS != 0
+    }
+
+    /// Whether GADT instances are traced or a type has been added to an
+    /// instance set: where an expansion may make the test of OCaml's
+    /// `expand_abbrev_gen` (ctype.ml:1215-1227), which adds the first
+    /// member of a set. One load.
+    #[inline]
+    pub fn expands_gadt_instances(&self) -> bool {
+        self.gadt_state.get() != 0
     }
 
     /// OCaml `Env.add_gadt_instance_level lv` (compiler/ml/env.ml:1307-1308):
@@ -5731,7 +5745,6 @@ impl TypeContext {
             parent,
             members: Vec::new(),
         });
-        self.has_gadt_instance_scopes.set(true);
         scope
     }
 
@@ -5783,6 +5796,7 @@ impl TypeContext {
         self.gadt_instance_scopes.borrow_mut()[scope.index()]
             .members
             .push(ty);
+        self.gadt_state.set(self.gadt_state.get() | GADT_MEMBERS);
         self.record_mutation(
             || TypeMutation::GadtInstance(scope),
             crate::perf_counters::TypeMutationKind::State,
