@@ -4429,7 +4429,6 @@ fn assert_pattern_left(c: &Checker) {
 ///
 /// Reaches: R3h.
 #[test]
-#[ignore = "R3h build"]
 fn an_equation_goes_to_the_locally_abstract_type_and_links_nothing() {
     for swapped in [false, true] {
         let (mut c, _) = pattern_checker(Mode::Success);
@@ -4469,7 +4468,6 @@ fn an_equation_goes_to_the_locally_abstract_type_and_links_nothing() {
 ///
 /// Reaches: R3h.
 #[test]
-#[ignore = "R3h build"]
 fn of_two_instantiable_types_the_newer_gets_the_equation() {
     for (left, right, source) in [
         (N0, N1, N1),
@@ -4499,7 +4497,6 @@ fn of_two_instantiable_types_the_newer_gets_the_equation() {
 ///
 /// Reaches: R3h.
 #[test]
-#[ignore = "R3h build"]
 fn the_body_of_an_equation_is_a_generic_copy() {
     let (mut c, _) = pattern_checker(Mode::Success);
     let (int, string) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]));
@@ -4534,7 +4531,6 @@ fn the_body_of_an_equation_is_a_generic_copy() {
 ///
 /// Reaches: R3h.
 #[test]
-#[ignore = "R3h build"]
 fn reify_makes_one_type_for_each_variable_in_visit_order() {
     let (mut c, asked) = pattern_checker(Mode::Success);
     let (x, y) = (named_var_at(&mut c, 2, "x"), named_var_at(&mut c, 3, "y"));
@@ -4572,7 +4568,6 @@ fn reify_makes_one_type_for_each_variable_in_visit_order() {
 ///
 /// Reaches: R3h.
 #[test]
-#[ignore = "R3h build"]
 fn reify_links_a_variable_below_the_newtype_level_and_clashes() {
     for mode in [Mode::Success, Mode::Explain] {
         let (mut c, _) = pattern_checker(mode);
@@ -4611,7 +4606,6 @@ fn reify_links_a_variable_below_the_newtype_level_and_clashes() {
 ///
 /// Reaches: R3h.
 #[test]
-#[ignore = "R3h build"]
 fn the_arguments_of_one_type_are_unified_by_the_flags() {
     for (ty, generate, injective, equation) in [
         (K, true, true, true),
@@ -4650,7 +4644,6 @@ fn the_arguments_of_one_type_are_unified_by_the_flags() {
 ///
 /// Reaches: R3h.
 #[test]
-#[ignore = "R3h build"]
 fn two_structures_are_assumed_equal_and_not_linked() {
     for mode in [Mode::Success, Mode::Explain] {
         for clash in [false, true] {
@@ -4709,7 +4702,6 @@ fn two_structures_are_assumed_equal_and_not_linked() {
 ///
 /// Reaches: R3h.
 #[test]
-#[ignore = "R3h build"]
 fn the_newer_of_two_locally_abstract_types_is_expanded_once() {
     let (mut c, _) = pattern_checker(Mode::Success);
     let (n1, older) = (constr(&mut c, N1, &[]), constr(&mut c, N0, &[]));
@@ -4794,7 +4786,6 @@ fn the_newer_of_two_locally_abstract_types_is_expanded_once() {
 ///
 /// Reaches: R3h.
 #[test]
-#[ignore = "R3h build"]
 fn an_equation_names_its_type_only_below_a_structure_or_a_contractive_type() {
     /// A type index the table has no row for.
     const UNDECLARED: u32 = 1_000;
@@ -4878,7 +4869,6 @@ fn an_equation_names_its_type_only_below_a_structure_or_a_contractive_type() {
 ///
 /// Reaches: R3h.
 #[test]
-#[ignore = "R3h build"]
 fn a_variable_is_bound_to_a_type_that_holds_it_below_a_structure() {
     for mode in [Mode::Success, Mode::Explain] {
         let build = |c: &mut Checker, shape: u32, v: Ty| -> Ty {
@@ -4945,7 +4935,6 @@ fn a_variable_is_bound_to_a_type_that_holds_it_below_a_structure() {
 ///
 /// Reaches: R3h.
 #[test]
-#[ignore = "R3h build"]
 fn pattern_mode_at_ten_thousand() {
     let chain = |c: &mut Checker, n: u32| {
         let mut ty = constr(c, INT, &[]);
@@ -5046,7 +5035,6 @@ fn pattern_mode_at_ten_thousand() {
 ///
 /// Reaches: R3h.
 #[test]
-#[ignore = "R3h build"]
 fn an_equation_over_ten_thousand_shared_nodes_is_linear() {
     let run = |n: u32, strict: bool, bottom: u32| {
         let (mut c, _) = pattern_checker(Mode::Success);
