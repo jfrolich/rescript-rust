@@ -246,7 +246,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         // 3.7, C:3187 compile_short_circuit_return_output: the If rule with
         // a constant branch; no L node is built.
         let constant = self.js.boolean(&mut self.arena, !and);
-        let constant = Probed::Free(self.free.push(Free::Leaf(B::node(constant))));
+        let constant = Probed::Free(self.free.push(Free::Leaf(constant)));
         if and {
             self.finish_if(cx, Target::None, parts, test, yes, constant)
         } else {
@@ -270,7 +270,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 // Nothing follows the reserved slots: drop them.
                 self.statements.trim(Self::from(parts.start));
                 if self.statements.since(Self::from(parts.start)).len == 0 {
-                    return Probed::Free(self.free.push(Free::Cond { test, then_, else_ }));
+                    return Probed::Free(self.free.push(Free::Cond { test: B::from_node(test), then_, else_ }));
                 }
                 if matches!(cx.cont, Cont::Effect(Tail::No)) {
                     // C:7612 compiled_from_effect_block reads the whole block.
@@ -279,7 +279,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     self.free_effect(test, then_, else_);
                     return self.effect_output(parts.start);
                 }
-                let free = self.free.push(Free::Cond { test, then_, else_ });
+                let free = self.free.push(Free::Cond { test: B::from_node(test), then_, else_ });
                 let out = self.realize(cx, Probed::Free(free));
                 return Probed::Out(self.output(parts.start, out.value, out.finished));
             }
@@ -890,7 +890,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if self.statements.since(Self::from(parts.start)).len == 0 {
                     return self.probe_leaf(cx, value);
                 }
-                let out = self.leaf(cx, value);
+                let out = self.leaf(cx, B::from_node(value));
                 return Probed::Out(self.output(parts.start, out.value, out.finished));
             }
             Probed::Out(right) => right,
@@ -972,7 +972,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let yes = B::from_node(yes.value.expect("free value"));
                 let no = B::from_node(no.value.expect("free value"));
                 let value = self.js.cond(&mut self.arena, B::from_node(test), yes, no);
-                self.leaf(cx, B::node(value))
+                self.leaf(cx, value)
             }
         }
     }

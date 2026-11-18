@@ -141,20 +141,20 @@ impl Cx {
 
 /// K1/K2/K6: deferred, already-lowered operands, not a second L tree.
 /// The caller has lowered expression operands exactly once before probing.
-pub enum ProbeInput {
+pub enum ProbeInput<B: js::Js> {
     /// An already-lowered expression or statement result.
     Output(Out),
     /// A retained effect value followed by a probed child.
     Seq {
         /// Already-lowered effect value.
-        first: NodeId,
+        first: B::E,
         /// Result of probing the tail.
         second: Probed,
     },
     /// An already-lowered condition and its probed branches.
     Cond {
         /// Already-lowered test value.
-        test: NodeId,
+        test: B::E,
         /// Probed true branch.
         then_: Probed,
         /// Probed false branch.
@@ -164,15 +164,15 @@ pub enum ProbeInput {
 
 /// K2/K6: C:4715 append_effect_output and C:5144 compile_if_return_output.
 /// Construction policy is supplied by J constructors, not by the output algebra.
-pub trait Realizer {
+pub trait Realizer<B: js::Js> {
     /// K1/K6: C:6658 return_compiled; convert one lowered value.
-    fn leaf(&mut self, cx: Cx, value: NodeId) -> Out;
+    fn leaf(&mut self, cx: Cx, value: B::E) -> Out;
     /// K2: C:4715 append_effect_output; join an effect and a tail's value.
-    fn seq(&mut self, cx: Cx, first: NodeId, second: Out) -> Out;
+    fn seq(&mut self, cx: Cx, first: B::E, second: Out) -> Out;
     /// O:339 push_effect_expression; an effect as statements before its tail.
-    fn effect(&mut self, first: NodeId) -> Span;
+    fn effect(&mut self, first: B::E) -> Span;
     /// K6: C:5144 compile_if_return_output; combine lowered branches.
-    fn cond(&mut self, cx: Cx, test: NodeId, then_: Out, else_: Out) -> Out;
+    fn cond(&mut self, cx: Cx, test: B::E, then_: Out, else_: Out) -> Out;
 }
 
 /// One source visit either completes an output or schedules child occurrences.
@@ -489,7 +489,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     arena: Bir,
     idents: Vec<Ident>,
     statements: StatementStack<B>,
-    free: FreePool,
+    free: FreePool<B>,
     traversal: SourceProbe<expr::Resume>,
     list_block_info: Option<crate::bir::JsId>,
     constant_steps: usize,
@@ -734,9 +734,9 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// leaves immediately instead of allocating deferred expression records.
     fn probe_leaf(&mut self, cx: Cx, value: NodeId) -> Probed {
         if self.direct && !cx.probing {
-            Probed::Out(self.leaf(cx, value))
+            Probed::Out(self.leaf(cx, B::from_node(value)))
         } else {
-            Probed::Free(self.free.push(Free::Leaf(value)))
+            Probed::Free(self.free.push(Free::Leaf(B::from_node(value))))
         }
     }
     /// H13: A:28 delay_safe; K1: C:1529 compile_expr. The supported literal,
@@ -1138,10 +1138,11 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
     }
 }
 
-impl<B: js_stmt::JsStmt> Realizer for State<'_, B> {
+impl<B: js_stmt::JsStmt> Realizer<B> for State<'_, B> {
     /// K4/K5/K6: C:6648 declare_compiled, C:6667 assign_compiled, C:6658 return_compiled.
     /// O(1): at most one statement built and pushed.
-    fn leaf(&mut self, cx: Cx, value: NodeId) -> Out {
+    fn leaf(&mut self, cx: Cx, value: B::E) -> Out {
+        let value = B::node(value);
         let start = self.statements.mark();
         let mut finished = Finished::False;
         let value = match cx.cont {
@@ -1173,7 +1174,8 @@ impl<B: js_stmt::JsStmt> Realizer for State<'_, B> {
     }
     /// K2: C:4715 append_effect_output, where the value is kept: a comma,
     /// or the tail alone when the head has no effect. Constant.
-    fn seq(&mut self, _: Cx, first: NodeId, mut second: Out) -> Out {
+    fn seq(&mut self, _: Cx, first: B::E, mut second: Out) -> Out {
+        let first = B::node(first);
         if self.arena.node(first).flags().contains(super::NodeFlags::STRICT) {
             self.arena.release(first);
         } else {
@@ -1184,14 +1186,15 @@ impl<B: js_stmt::JsStmt> Realizer for State<'_, B> {
     }
     /// O:339 push_effect_expression: the head of a deferred sequence as
     /// statements. One step per comma operand of the head.
-    fn effect(&mut self, first: NodeId) -> Span {
+    fn effect(&mut self, first: B::E) -> Span {
+        let first = B::node(first);
         let mark = self.statements.mark();
         self.drop_pure_effect(first);
         self.statements.since(mark)
     }
     /// R1–R5: realize a deferred conditional from its value operands.
-    fn cond(&mut self, cx: Cx, test: NodeId, yes: Out, no: Out) -> Out {
-        self.realize_conditional(cx, test, yes, no)
+    fn cond(&mut self, cx: Cx, test: B::E, yes: Out, no: Out) -> Out {
+        self.realize_conditional(cx, B::node(test), yes, no)
     }
 }
 
