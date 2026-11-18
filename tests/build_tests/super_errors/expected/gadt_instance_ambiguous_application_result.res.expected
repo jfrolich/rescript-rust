@@ -1,0 +1,14 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/gadt_instance_ambiguous_application_result.res[0m:[2m6:9[0m
+
+  4 [2m┆[0m | Int => {
+  5 [2m┆[0m     ignore(g(y) + 1)
+  [1;31m6[0m [2m┆[0m     g([1;31m0[0m)
+  7 [2m┆[0m   }
+  8 [2m┆[0m }
+
+  This has type: [1;31mint[0m
+  But this function argument is expecting: [1;33ma[0m [2m(defined as[0m [1;33mint[0m[2m)[0m
+  This instance of int is ambiguous:
+  it would escape the scope of its equation

@@ -8579,6 +8579,360 @@ programs all agree after this commit, program 10 included.
 
 Nothing of this place.
 
+### A1 - an instance of a type that is ambiguous outside its equation is refused
+
+Found while fixing: the Rust compiler accepted, and compiled, programs whose
+value has a type known only through a GADT equation and leaves the case of
+that equation. OCaml refuses them. Witnesses, both verified on trunk
+`109b2bd4c`:
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => if true { y } else { 0 }
+  }
+```
+
+OCaml refuses at 4:33: "This has type: int / But this if statement is
+expected to return: a (defined as int) / This instance of int is ambiguous:
+/ it would escape the scope of its equation / if expressions must return
+the same type in all branches (if, else if, else)." Rust emitted
+`function f(x, y) { return y; }`. The second witness, `[y, 0]` under
+`Int =>` next to `Str => []`, is refused at 4:16 ("This array item has
+type: int / But this array is expected to have items of type: a (defined
+as int)" and the same two lines, then the array advice and its "Possible
+solutions:"); Rust accepted it.
+
+Commands are the ones in "Scope, calibration and reproducibility": each
+program is `Main.res` alone, run with `bsc -w +A -bs-jsx 4 -color never
+Main.res` through both compilers; "agree" is the same exit status and the
+same output byte for byte (the whole diagnostic, its location, the
+JavaScript and every warning). Rust before is trunk `109b2bd4c`, after is
+the second commit below. The witnesses are p01 and p02; p03 to p30 are the
+shapes asked for (each expression form whose branches are unified, the
+`eq<'a, 'b>` witness, a nested constructor pattern, two equations for one
+type, an outer function's locally abstract type, the programs that must
+stay accepted, an object and a variant row, abbreviations as the
+equation's right side); q01 to q18 and r01 to r16 probe the remaining
+OCaml sites. `T` is `type rec t<_> = Int: t<int>` and the function is
+`(type a, x: t<a>, y: a) => switch x { ... }` unless the row says
+otherwise.
+
+| # | program | OCaml | Rust before | Rust after |
+| --- | --- | --- | --- | --- |
+| p01 | `if true { y } else { 0 }` under `Int =>` (witness 1) | refused at 4:33 | DIFFER (accepted) | agree |
+| p02 | `[y, 0]` under `Int =>`, `Str => []` (witness 2) | refused at 4:16 | DIFFER (accepted) | agree |
+| p03 | witness 1 with `: int` on `f` | accepted | agree | agree |
+| p04 | `Int => y + 1` | accepted | agree | agree |
+| p05 | a `switch b` inside the branch returning `y` and `0` | refused at 7:16 | DIFFER (accepted) | agree |
+| p06 | `(0, 1)` and `(y, 2)` from two cases of `t<int>` | accepted | agree | agree |
+| p07 | `{a: y, b: 0}` of `r<'a>` | refused at 5:12-23 | DIFFER (accepted) | agree |
+| p08 | `let z = switch ...` unannotated, used after it | refused at 6:28 | DIFFER (accepted) | agree |
+| p09 | `b => if b { y } else { 0 }` returned | refused at 4:35 | DIFFER (accepted) | agree |
+| p10 | `r := Some(if true { y } else { 0 })` | refused at 5:43 | DIFFER (accepted) | agree |
+| p11 | `eq<a, b>`, `Refl => if true { x } else { y }` | accepted | agree | agree |
+| p12 | `eq<a, int>`, `Refl => if true { y } else { 0 }` | refused at 4:34 | DIFFER (accepted) | agree |
+| p13 | `Some(Int) =>` (nested constructor) | refused at 4:39 | DIFFER (accepted) | agree |
+| p14 | `Int` and `Str` cases, each mixing `y` and a literal | refused at 4:33 | DIFFER (accepted) | agree |
+| p15 | `a` of the outer function, `switch` in an inner one | refused at 5:35 | DIFFER (accepted) | agree |
+| p16 | `(y: int)` in the branch | accepted | agree | agree |
+| p17 | `h(y)` with `h: int => int` | accepted | agree | agree |
+| p18 | `Ex(Int, v) => v + 1` | accepted | agree | agree |
+| p19 | `{"f": y}` and `{"f": 0}` (object row) | refused at 4:40-47 | DIFFER (accepted) | agree |
+| p20 | `#A(y)` and `#A(0)` (variant row) | refused at 4:40 | DIFFER (accepted) | agree |
+| p21 | `type u = int`, `U: t<u>`, `y` and `0` | refused at 5:31 | DIFFER (accepted) | agree |
+| p22 | the same with `(1: u)` first | refused at 5:36 | DIFFER (accepted) | agree |
+| p23 | witness 2 with `: array<int>` | accepted | agree | agree |
+| p24 | `Ex(Int, v) => ignore(v)` | accepted | agree | agree |
+| p25 | `#A(y)` and `#B(0)` | accepted | agree | agree |
+| p26 | witness 1 with `: a` on `f` | accepted | agree | agree |
+| p27 | an open object parameter and `{"f": y}` | refused at 6:28-35 | DIFFER (accepted) | agree |
+| p28 | `type v = u`, `type u = int`, `V: t<v>`, `[y, 0]` | refused at 6:14 | DIFFER (accepted) | agree |
+| p29 | `{v: 0}` and `{v: y}` from `Int` and `Str` | refused at 6:16 | agree | agree |
+| p30 | `let k = switch x { \| Int => y }; k + 1` | refused at 6:3 | agree | agree |
+| q01 | `let k = () => if true { y } else { 0 }; k()` | refused at 6:7-9 | DIFFER (accepted) | agree |
+| q02 | `let k = z => if true { z } else { 0 }; [k(y)]` | refused at 6:8-11 | DIFFER (accepted) | agree |
+| q03 | `{"f": 0, "g": y}` against an open object | accepted | agree | agree |
+| q04 | `r := Some({"f": if true { y } else { 1 }})` | refused at 5:22-52 | DIFFER (accepted) | agree |
+| q05 | `#A(0)`, `#A(y)` and a variant parameter | refused at 6:52 | DIFFER (accepted) | agree |
+| q06 | `[< #A(int) \| #B]` parameter, `#A(n)` or `#A(y)` | accepted | agree | agree |
+| q07 | `let z: u = y; [z, y]` | refused at 7:11 | DIFFER (accepted) | agree |
+| q08 | `let z: u = y; r := [z]` | accepted | agree | agree |
+| q09 | `g(y, ...)`, `g: (int, 'm) => int` | accepted | agree | agree |
+| q10 | `g(y, ...)`, `g = (n, m: int) => if ... n else m` | refused at 5:12-20 | DIFFER (accepted) | agree |
+| q11 | `L: t<list<'b>>`, `List.length(y)` | accepted | agree | agree |
+| q12 | `id(if true { y } else { 0 })` | refused at 5:12-39 | DIFFER (accepted) | agree |
+| q13 | `Some(if true { 1 } else { y })` | refused at 4:38 | DIFFER (accepted) | agree |
+| q14 | two switches, two equations, `(y + 1, w ++ "")` | accepted | agree | agree |
+| q15 | the same returning `(y, w)` or `(0, "")` | refused at 7:41 | DIFFER (accepted) | agree |
+| q16 | `Box(y)` or `Box(0)` | refused at 5:42 | DIFFER (accepted) | agree |
+| q17 | `o["m"] + 0` with `o = {"m": y}` | accepted | agree | agree |
+| q18 | `r = ref(y)` outside, `r.contents + 1` inside | accepted | agree | agree |
+| r01 | `let w = 1; y == w; w` | accepted | agree | agree |
+| r02 | `let _ = [y, w]; w` | accepted | agree | agree |
+| r03 | `let w: u = 1; y == w; [w]` | accepted | agree | agree |
+| r04 | `y == w` with a parameter `w: int` | accepted | agree | agree |
+| r05 | `o["g"] == 1`, `{"f": y, "g": 0}` | accepted | agree | agree |
+| r06 | `o := Some({"f": y})`, read after the switch | refused at 9:13 | agree | agree |
+| r07 | `v == #A(1)`, then `v` or `#A(y)` | refused at 6:31 | DIFFER (accepted) | agree |
+| r08 | `r := Some(#A(y))` | accepted | agree | agree |
+| r09 | `g(y) + 1` then `g(0)`, `g` a parameter | refused at 6:9 | DIFFER (accepted) | agree |
+| r10 | `g(if true { y } else { 0 })` | refused at 4:35 | DIFFER (accepted) | agree |
+| r11 | `Lst: t<list<int>>`, `List.length(y)` | accepted | agree | agree |
+| r12 | `eq<a, int>`, `y == w; w` | accepted | agree | agree |
+| r13 | `let w = ref(1); y == w.contents; w.contents` | accepted | agree | agree |
+| r14 | `let w = [1]`, `y == w[0]...`, `w` | accepted | agree | agree |
+| r15 | `let g = n => n; g(y) == 1; g` | accepted | agree | agree |
+| r16 | `w.contents == y; w` | accepted | agree | agree |
+
+There is no principal mode in this compiler, and none of the sites below
+reads one.
+
+#### Fixed
+
+- `92862d207`. OCaml keeps, per `switch` (or function) whose patterns may
+  add equations, a set of the types known only through an equation
+  (`gadt_instances`, `compiler/ml/env.ml:368`, `1305-1345`; a level is
+  added by `type_cases` and the function form,
+  `compiler/ml/typecore.ml:4034-4042`, `4822-4828`). While tracing is on
+  (under local constraints, `compiler/ml/ctype.ml:176-191`, which also
+  forgets the memorized expansions), `expand_abbrev_gen`
+  (`ctype.ml:1215-1227`) refuses to expand a type whose level is below the
+  equation's expansion level or its set's, and adds the type and its
+  expansion to the set; `try_expand_head` (`ctype.ml:1270-1276`) adds the
+  chain of an expansion that ends in an instance; `update_level`
+  (`ctype.ml:587-589`) refuses to lower an instance below its set's level.
+  The refusal is `Unify [(ty, newvar2 level)]`, which `printtyp.ml:1340-1362`
+  prints as "This instance of ... is ambiguous". Rust's
+  `Env::add_gadt_instance_level` took no level and tracked nothing. Now
+  the sets are in the type context (`TypeContext::new_gadt_instance_scope`,
+  `gadt_instance_level`, `add_gadt_instances`, `add_gadt_instance_chain`,
+  `compiler-rust/src/types/context.rs:5725-5845`), each scope holding its
+  enclosing one's handle, and the environment holds the innermost handle
+  (`compiler-rust/src/types/env.rs:2810`). Both callers of
+  `add_gadt_instance_level` (`typecore.rs:11976`, `13625`) build the case
+  environment as a clone of the outer one; with the handle in the shared
+  bindings record, a clone copies a `u32` and never a set, and every
+  environment of a case sees the set as OCaml's share its `ref`. Additions
+  are journaled (`TypeMutation::GadtInstance`) and undone on backtrack, as
+  OCaml trails `set_typeset`. The equation records the pattern's newtype
+  level as its expansion level (`env.ml:1805-1810`;
+  `add_gadt_equation`, `ctype.rs:1839`); `check_trace_gadt_instances`
+  forgets the memorized expansions (`ctype.ml:182`); the expansion test is
+  `try_expand_head_traced`, which wraps trunk's `try_expand_head_with_mode`
+  (since `cbaf8d70d`) and, while tracing, tests an equation before the
+  expansion, which it does not affect; the traced head expansion
+  (`expand_head_traced`) adds the chain; the unifier's expansions
+  (`unify2`, `ctype.ml:2289-2292`) propagate the refusal
+  (`expand_heads_unif`, `expand_head_in_unify`);
+  `update_level_pass` (`ctype.rs:2999`) makes the level test. Without OCaml's arm of `unify`
+  for two nullary locally abstract types (`ctype.ml:2255-2268`: expand
+  only the later one, lower nothing first), p11 became refused. A trace
+  with the arm disabled shows `unify_types` lowering the copy of `b`
+  (level 2008) and `a` to the outer level 1005 before expanding, and the
+  expansion of the copy of `b` then refused (1005 below the instance
+  level 1008); OCaml's arm expands that copy at its own level.
+  `unify_newtypes` (`ctype.rs:610`) is that arm. The level test costs one load (`has_gadt_instances`) and one
+  branch per level update in a unit where no type has joined a set.
+- `22a53a612`. OCaml's `copy ?env` (`ctype.ml:770-774`), reached through
+  `instance env` and `instance_list env` (`ctype.ml:877-894`), adds the
+  copy of an instance to its set under local constraints. A function
+  generalized inside a case (q01) gave Rust copies that were no instances.
+  `instance_in` and `instance_list_in` (`ctype.rs:12451`) take the
+  environment and, only under local constraints with an instance scope,
+  walk the finished copy's table once (`add_copied_gadt_instances`,
+  `ctype.rs:12503`); the typecore sites of OCaml's `instance env` use them.
+- `de5bef189` makes the copy sites of `typecore.rs` OCaml's in both
+  directions. Six had been converted where OCaml copies without an
+  environment and adds nothing: the declaration parameters of a type
+  constructor (typetexp's `instance_list`, `Ctype.instance_list Env.empty`,
+  `typetexp.ml:61`, `373`), the constructor result under local constraints
+  (`typecore.ml:4739` `instance_def ty_res`), and the label result and
+  argument of a record field and of a field assignment (`typecore.ml:4315`,
+  `4319` `instance_def`). They are `instance` / `instance_list` again.
+  Where OCaml passes the environment and Rust did not: `rue`
+  (`typecore.ml:2607` `instance env ty_expected`; `rue_unify` and
+  `finish_expected` now take the environment), `object_field_use_type`
+  (`typecore.ml:2553` `instance env ty`), and the copies of the expected
+  type of a record (`typecore.ml:3044`, `3148`) and of a coercion's `rue`
+  (`instance_if_generic_in`). The tuple's copy (`instance_if_generic`) has
+  no OCaml counterpart: `typecore.ml:2940` unifies `ty_expected` itself.
+  `66dfd8330` gives the second copy of a record's `with` base trunk's
+  `instance`: OCaml has no copy there (`typecore.ml:3165` stores the copy
+  of `3153`). `5f8d821f9` copies the expected type of `assert(false)` with
+  the environment (`typecore.ml:3780`), where Rust used it uncopied. Of the
+  84 copy sites of `typecore.rs`, 61 copy with the environment as OCaml's
+  `instance env` / `instance_list env` (and typetexp's `instance env`), 19
+  without it as OCaml's `instance_def` and typetexp's `instance_list`, and
+  4 have no OCaml counterpart and keep trunk's call. Three OCaml sites have
+  no Rust copy: `is_ignore` and the `ignore` case of `type_application`
+  (`typecore.ml:2498`, `4496`: Rust tests the primitive by name and copies
+  nothing), and the `let` with locally abstract types
+  (`typecore.ml:5092`), where Rust types the rewritten expression, whose
+  `rue` copies the expected type in the same environment.
+- `752db1e00` keeps these tests off the default path (see "Cost" below);
+  `b46a3af77` adds nothing where an environment has an equation but no
+  instance scope at its level, a state OCaml asserts against
+  (`env.ml:1326-1328`), which the type checker does not build and the
+  checker tests on trunk do.
+- Fixtures: super_errors `gadt_instance_ambiguous_*` (the 30 programs
+  refused by OCaml that Rust accepted: p01, p02, p05, p07-p10, p12-p15,
+  p19-p22, p27, p28, q01, q02, q04, q05, q07, q10, q12, q13, q15, q16, r07,
+  r09, r10), and `tests/tests/src/gadt_instance_ambiguous_accepted.res`
+  (31 accepted programs, the JavaScript of each compared by the
+  JavaScript parity suite).
+
+The member sets keep duplicates: a type expanded again after the memo is
+cleared is pushed again, where OCaml's set holds it once, so a lookup is
+linear in additions, not in distinct members.
+
+The arm for two locally abstract types (`unify_newtypes`) runs under
+local constraints whatever the member flag, as OCaml's does.
+
+Set additions are journaled (`TypeMutation::GadtInstance`) and undone on
+backtrack, as OCaml's `set_typeset` logs them (`btype.ml:80`, `706`,
+`749`).
+
+#### Open
+
+A difference without a program: Rust adds no scope where OCaml's
+`type_cases` adds one for a `switch` without a generalized constructor
+that gets an exhaustiveness check (`typecore.ml:4913-4914`, `if do_init &&
+not has_gadts then init_env ()`); Rust's `type_match` and
+`finish_non_gadt_type_cases` raise the level there but call no
+`add_gadt_instance_level`. It cannot be seen: a member is only ever added
+at the expansion level of an equation, or at the level of a set that
+already holds the type. The patterns of that `switch` have no
+generalized constructor and add no equation, so OCaml's inner set stays
+empty and its lookups go on to the outer sets, as Rust's do. The
+exhaustiveness check types counterexample patterns in that environment,
+which can add an equation at that level; there the refusal test still
+compares with the equation's expansion level in Rust, only the member is
+not recorded, and the check's typing is undone afterwards in both. Three
+programs with a generalized type under `_` (a tuple with an `int`, an
+`option<t<a>>` with a guard, `t<int>`) give the same warnings in both
+compilers.
+
+No program of the 64 shows a difference at these OCaml sites, which are
+not ported: the chain of `unify2` after expansion (`ctype.ml:2293-2298`:
+r01-r04, r12-r16 were written for it and agree), the level test of
+`unify_fields` (`ctype.ml:2490`: q03, r05, r06), of `unify_row`'s row
+variable (`ctype.ml:2609-2611`: q05, q06, r07, r08), the tracing wrappers
+of `unify_var` (`ctype.ml:2759-2766`), `expand_head_trace`
+(`ctype.ml:2782-2784`), the application's `lower_args`
+(`typecore.ml:2828`: q09, q10, r09, r10) and `local_non_recursive_abbrev`
+(`ctype.ml:1533-1534`: q11, r11), and `copy ?env ~partial` through
+`instance ~partial env` (Rust's `instance_partial`). The level updates
+that Rust makes without an environment (`update_level`, for the same
+nullary constructor, universal variables, object and row variables) make
+no level test; no program here reaches one with an instance. The port
+was stopped at the sites a program shows, as the size limit of the task
+asks. The chain of `try_expand_head` (`ctype.ml:1273-1275`) is added
+whenever the environment at hand has an instance scope
+(`expand_head_traced`, since `c3cd63b5d`), as OCaml adds it whatever the
+tracing flag, for example while the result of a `switch` is lowered in
+the outer environment after its cases. Five programs aimed at that moment
+(an abbreviation whose expansion is the instance: a local module's
+`type u = a`, `type box<'a> = 'a` returned from the case, compared, and
+bound in a `let` used after the `switch`, with and without a result
+annotation) are accepted by OCaml and by Rust.
+
+Two programs aimed at the guard (see "Cost" below) agree. In the first,
+the unit's first `switch` (on an `option<int>`) has no generalized
+constructor and its second, `switch x { | Int => if true { y } else { 0 } }`
+with `x: t<a>` and `y: a`, refuses the instance: OCaml and Rust both
+print "This instance of int is ambiguous" at `9:33`. In the second, a
+first function adds the instance (`[y, 0]` under `Int`) and two later
+functions with no generalized constructor lower types through a `switch`
+(`Some(n) => [n, f(Int, n)]`, and a `ref([])` assigned in a case): both
+compilers accept it with the same JavaScript.
+
+Twenty-one programs aimed at these sites (two of them `assert(false)`,
+in a branch and as a field of a generalized record) agree with OCaml on the head
+before `de5bef189` and after it; none is a witness, so none is a fixture.
+The sites were corrected because the copy must do what OCaml's does.
+(a) For `rue` and the other `instance env` sites, inside a case with
+`Int: t<int>`: a function `(z: a) => z + 1` generalized in the case and
+passed through a constructor `Box(g)`, a record field `{fn: g}`, a
+coercion `(g :> a => int)`, an object field read and written
+(`o["fn"]`, `o["v"]`), a tuple `(g, 1)`, `Some(g)` against
+`Some((z: int) => z)`, a polymorphic field `{fn: g, n: y}`, a pattern
+`let Box(h) = b`, a constructor with two arguments `Box(y, 0)`, nested
+constructors `Box(Box(g))`, and the labels `{p: y, q: 0}`, returned and
+behind an `if`. (b) For the label sites: a record declared in a local
+module inside the case, `module M = { type r = {v: a} }`, built with `0`
+or `y`, its mutable field assigned `m.v = 0`, read after the case, behind
+an `if` against `1` or `2`, with a second field `w: int` built from `y`,
+and with a type parameter beside `v: a`. OCaml and Rust refuse the same
+eight with "This instance of int is ambiguous" at the same place (`Some`
+behind `if`, the object field read, `Box(y, 0)`, both label programs, and
+three of the local records), and accept the other thirteen with the
+same JavaScript.
+
+Cost: accepted at the figures below. Every read of an instance set answers nothing while every set
+is empty, and a set gets its first member only from the test of
+`expand_abbrev_gen` (`ctype.ml:1217-1227`) while tracing. So the type
+context's flag is "a type has been added to an instance set in this
+unit" (`has_gadt_instances`, set in `push_gadt_instance`, since
+`82e309f01`), kept in one byte with the tracing flag. Copies and level
+updates test it, then the environment's scope handle; the expansion sites
+test the byte (`expands_gadt_instances`: tracing or a member), so the
+test that adds the first member still runs. Scopes are created as before:
+434 of the 788 units of `tests/tests` add one, 2,169 in all. Rust adds a
+scope in two places: `type_function_nary`'s `init_env`, for a function
+whose parameters contain a generalized constructor (`has_gadts`) and for
+one with a parameter that is not a plain variable, such as `()`, whose
+patterns get an exhaustiveness check (`do_init && !has_gadts`,
+`typecore.ml:4196-4197`); and `type_match`, for a `switch` with a
+generalized constructor only (`typecore.ml:4819-4828`). Most of the 434
+are the second kind of function. 7 of the 788 units add an instance.
+
+The CI `Instruction count` check on a clean `tests/tests` build:
++12,960,104 (+0.313%) for `7d08707fd`, +11,397,960 (+0.276%) for
+`c0daf094f`, +7,466,613 (+0.181%) for `4679c1d94`, +5,138,728
+(+0.124%) for `fe245f217` (base 4,134,734,897, head 4,139,873,625). The
+last, split into the guard sites (one load and one branch each), (a) the
+rest of what a unit pays that adds no instance, and (b) the work while
+tracing or after a member:
+
+| | function | change |
+| --- | --- | ---: |
+| site | the unifier's pairs (`expand_heads_unif`) | +497,792 |
+| site | `instance_in` / `instance_list_in` at typecore's sites: `type_application_parts` +398,277, `type_identifier` +130,678, `type_function_nary` +96,633, `instance_in` +65,613, `instance_list_in` +44,386 | +735,587 |
+| site | `update_level_checked_above` | +140,409 |
+| site | `expand_head_with_mode`'s guard, inlined into `moregen` at its two `expand_head` calls | +129,160 |
+| site | `try_expand_head` | +56,221 |
+| a | `unify`: the newtype arm (`unify_newtypes`, `is_newtype`, `find_newtype_level`) is inlined into it since `82e309f01`, its frame grows from 0x1e8 to 0x238 bytes and every call spills more | +1,130,695 |
+| a | `expand_head_plain` +12,100,981 against `expand_head_with_mode` -12,250,409 | -149,428 |
+| a | scope creation: `Env::data_mut` +190,067, `Env::add_gadt_instance_level` +89,597, `make_mut` +76,159 and +46,401 | +402,224 |
+| a | `restore_type_state` (the journal's new entry) | +97,242 |
+| a | `unify_types` -166,879, `lower_plain_levels::lower` -54,768 | -221,647 |
+| b | `gadt_instance_level` +679,023, `repr_chain` +642,364 | +1,321,387 |
+| b | `try_expand_head_traced` +242,590, `expand_head_traced::<true>` +108,040, `::<false>` +64,273, `Env::find_local_constraint` +46,958 | +461,861 |
+| b | `update_level_pass` +89,441, `instance_with_gadt_instances` +45,419 | +134,860 |
+
+The sites come to +1,559,169, (a) to +1,259,086 (+0.0305%, 18,666 above
++0.03%) and (b) to +1,918,108. The remaining +402,365 is
+`IdTbl::find_by_ident` (-501,294) and the allocator, which move by as
+much between runs.
+
+Two `#[inline(never)]` remain, on `instance_with_gadt_instances` and
+`instance_list_with_gadt_instances`, from the copy-path attempt
+`ae16a975d`, which measured +9,118,887 against +11,678,261 before it.
+Measured locally (fat LTO, one codegen unit, five runs a side; trunk
+459b87ca5 as base): `bcc2a4ef4` +4,401,645, the flag `82e309f01`
++6,529,629 (not lower, kept because the flag defines (a)), one
+instantiation of the expansion `cbaf8d70d` +5,694,179, trunk's calls at
+the unifier's sites `fe245f217` +5,213,073. `#[inline(never)]` on
+`unify_newtypes` (`89b7ae1e8`) measured +4,521,654 but raised `unify`
+from +1,130,695 to +1,914,955 (its frame grows to 0x258 bytes; the drop
+was `IdTbl::find_by_ident` and the path iterator), and was reverted
+(`8cd9bdec6`). CI on `8cd9bdec6`, whose checker code is `fe245f217`'s:
+base 4,135,460,618, head 4,141,213,244, +5,752,626 (+0.139%), every
+function of the table above unchanged and `IdTbl::find_by_ident` at
++706,988.
+
 ## Fourth round: modules, aliases and usage marks
 
 ### Scope, commands and calibration

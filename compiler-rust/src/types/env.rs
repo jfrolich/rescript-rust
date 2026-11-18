@@ -1561,6 +1561,10 @@ struct EnvData {
     /// Local constraints (for GADTs).
     local_constraints: PersistentHashMap<Path, Arc<TypeDeclaration>>,
 
+    /// The innermost GADT instance scope (OCaml `gadt_instances`,
+    /// compiler/ml/env.ml:368); its sets live in the [`TypeContext`].
+    gadt_instances: super::context::GadtScopeRef,
+
     /// The label array `store_type` described with each local record type
     /// (compiler/ml/env.ml:1561-1569 stores `(decl, (constructors, labels))`
     /// in `env.types`): what `find_type_descrs (Pident id)` returns.
@@ -1657,6 +1661,7 @@ impl Env {
                 scope_caches: std::rc::Rc::default(),
                 implicit_open_roots: PersistentHashSet::default(),
                 local_constraints: PersistentHashMap::default(),
+                gadt_instances: super::context::GadtScopeRef::NONE,
                 type_label_families: PersistentHashMap::default(),
                 flags: EnvFlags::default(),
             }),
@@ -2797,11 +2802,21 @@ impl Env {
             .map(|(p, d)| (p, d.as_ref()))
     }
 
-    /// `Env.add_gadt_instance_level` (env.ml) returns a fresh Env record.
-    /// Rust does not track GADT instances, so only the fresh scope identity
-    /// that the scope-keyed caches observe is kept.
-    pub fn add_gadt_instance_level(&mut self) {
+    /// OCaml `Env.add_gadt_instance_level lv` (compiler/ml/env.ml:1307-1308):
+    /// enter a new, empty GADT instance set at `level`. The set lives in
+    /// `ctx`; the environment keeps its handle, so clones share it as OCaml's
+    /// share the `ref`. O(1) amortized, plus the copy of the shared bindings
+    /// record if another environment holds it.
+    pub fn add_gadt_instance_level(&mut self, ctx: &TypeContext, level: i32) {
         self.bump_scope();
+        let parent = self.data.gadt_instances;
+        self.data_mut().gadt_instances = ctx.new_gadt_instance_scope(level, parent);
+    }
+
+    /// The innermost GADT instance scope, `NONE` outside every one. O(1).
+    #[inline]
+    pub fn gadt_instance_scope(&self) -> super::context::GadtScopeRef {
+        self.data.gadt_instances
     }
 
     // ========================================================================
@@ -3481,7 +3496,7 @@ mod tests {
             env,
             env.add_local_constraint(Path::pident(id), declaration.clone())
         );
-        extends!(env, env.add_gadt_instance_level());
+        extends!(env, env.add_gadt_instance_level(&ctx, 1));
         extends!(env, env.mark_implicit_open_root("Stdlib"));
         let coerced = retained.implicit_coercion();
         assert_ne!(coerced.id(), original_id);

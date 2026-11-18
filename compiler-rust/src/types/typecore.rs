@@ -3188,9 +3188,9 @@ fn transl_type_inner(
             let ty = if let Some((_, existing)) =
                 tctx.univars.iter().find(|(name, _)| name == &name_str)
             {
-                crate::types::instance(ctx, *existing)
+                crate::types::ctype::instance_in(ctx, env, *existing)
             } else if let Some(&existing) = tctx.used_variables.get(&name_str) {
-                crate::types::instance(ctx, existing)
+                crate::types::ctype::instance_in(ctx, env, existing)
             } else {
                 let v = ctx.new_var(Some(crate::name::Name::new(&name_str)));
                 tctx.used_variables.insert(name_str.clone(), v);
@@ -3324,6 +3324,8 @@ fn transl_type_inner(
                     ctx.get_level(manifest) == crate::types::type_expr::GENERIC_LEVEL
                 }
             };
+            // typetexp.ml:373 `instance_list decl.type_params`, typetexp's
+            // `Ctype.instance_list Env.empty` (typetexp.ml:61): no instance set.
             let params = crate::types::ctype::instance_list(ctx, &decl.type_params);
             for ((param_ty, arg_ty), arg) in
                 params.iter().zip(arg_refs.iter()).zip(parsed_args.iter())
@@ -3402,7 +3404,7 @@ fn transl_type_inner(
                     })?;
                 (inner_ctyp, inner_ty)
             } else if let Some(existing_alias) = existing_alias {
-                let alias_ty = crate::types::instance(ctx, existing_alias);
+                let alias_ty = crate::types::ctype::instance_in(ctx, env, existing_alias);
                 let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
                 crate::types::ctype::unify_var(ctx, &mut tctx.unify_state, alias_ty, inner_ty)
                     .map_err(|err| TypeCoreError::AliasTypeMismatch {
@@ -3440,7 +3442,7 @@ fn transl_type_inner(
                             trace: alias_type_mismatch_trace(err, inner_ty, alias_ty),
                         })?;
 
-                    let instantiated = crate::types::instance(ctx, alias_ty);
+                    let instantiated = crate::types::ctype::instance_in(ctx, env, alias_ty);
                     let proxy = crate::types::btype::proxy(ctx, instantiated);
                     let rename_desc = {
                         let proxy_desc = ctx.get_desc(proxy);
@@ -7535,8 +7537,8 @@ fn type_pattern_constraint(
     let var_level = ctx.current_level();
     crate::types::generalize_structure(ctx, var_level, ctype_ty);
 
-    let constraint_ty = crate::types::instance(ctx, ctype_ty);
-    let inner_expected_ty = crate::types::instance(ctx, ctype_ty);
+    let constraint_ty = crate::types::ctype::instance_in(ctx, env, ctype_ty);
+    let inner_expected_ty = crate::types::ctype::instance_in(ctx, env, ctype_ty);
 
     unify_pattern_types(tctx, loc, constraint_ty, expected_ty)?;
 
@@ -8362,7 +8364,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         let constant = convert_constant(cst, loc, tctx.arena)?;
         let ty = type_constant(ctx, env, &constant);
         match expected_ty {
-            Expected::Known(expected) => rue_unify(tctx, loc, ty, expected, context)?,
+            Expected::Known(expected) => rue_unify(tctx, env, loc, ty, expected, context)?,
             Expected::Infer { level, .. } => {
                 // type_constant instances a nullary predefined constructor at
                 // current_level. No scope or universal variable can escape, and
@@ -8394,7 +8396,14 @@ fn type_expect_with_recarg_unscoped<'a>(
             &expr.pexp_attributes,
         )?;
         // OCaml: rue { ... exp_type = ty_arg; ... }
-        finish_expected(tctx, expr, typed_field.exp_type, &mut expected_ty, context)?;
+        finish_expected(
+            tctx,
+            env,
+            expr,
+            typed_field.exp_type,
+            &mut expected_ty,
+            context,
+        )?;
         return Ok(typed_field);
     }
     if let ED::Pexp_apply(inner) = &expr.pexp_desc {
@@ -8402,7 +8411,14 @@ fn type_expect_with_recarg_unscoped<'a>(
             type_application(tctx, env, expr, inner, &mut expected_ty, context)?;
         // The two rue checks share one expected type, including when an Infer
         // request must be materialised by the first check or a lowered apply.
-        finish_expected(tctx, expr, typed_apply.exp_type, &mut expected_ty, context)?;
+        finish_expected(
+            tctx,
+            env,
+            expr,
+            typed_apply.exp_type,
+            &mut expected_ty,
+            context,
+        )?;
         return Ok(typed_apply);
     }
     if let ED::Pexp_await(operand) = &expr.pexp_desc {
@@ -8441,7 +8457,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             }
             let unit_ty = env.type_unit(ctx);
             // `rue`: `unify env unit (instance ty_expected)` (typecore.ml:3051-3074).
-            rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
+            rue_unify(tctx, env, loc, unit_ty, expected_ty, context)?;
             Ok({
                 let typed_node =
                     Expression::new(ExpressionDesc::Texp_break, loc, unit_ty, exp_env_ref);
@@ -8460,7 +8476,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             }
             let unit_ty = env.type_unit(ctx);
             // `rue`: `unify env unit (instance ty_expected)` (typecore.ml:3051-3074).
-            rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
+            rue_unify(tctx, env, loc, unit_ty, expected_ty, context)?;
             Ok({
                 let typed_node =
                     Expression::new(ExpressionDesc::Texp_continue, loc, unit_ty, exp_env_ref);
@@ -8483,6 +8499,8 @@ fn type_expect_with_recarg_unscoped<'a>(
 
             // Create tuple type and unify (instance generic expected_ty to avoid corruption)
             let tuple_ty = ctx.new_tuple(elem_types.clone());
+            // No OCaml counterpart: typecore.ml:2940 unifies `ty_expected`
+            // itself, so this copy adds to no instance set.
             let eff_expected = instance_if_generic(ctx, expected_ty);
             // OCaml typecore.ml:2670: `unify_exp_types ~context:None`.
             unify_expression_types(tctx, loc, tuple_ty, eff_expected, None)?;
@@ -8688,7 +8706,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // OCaml typecore.ml:3082-3090: `rue { ... exp_type = instance_def
             // Predef.type_unit }`, i.e. `unify env unit (instance ty_expected)`.
             let result_unit_ty = env.type_unit(ctx);
-            rue_unify(tctx, loc, result_unit_ty, expected_ty, context)?;
+            rue_unify(tctx, env, loc, result_unit_ty, expected_ty, context)?;
 
             Ok({
                 let typed_node = Expression::new(
@@ -8720,12 +8738,15 @@ fn type_expect_with_recarg_unscoped<'a>(
 
             // assert(false) has the expected type (polymorphic), others have type unit
             let exp_type = match &typed_e.exp_desc {
-                ExpressionDesc::Texp_construct(_, cd, _) if cd.cstr_name == "false" => expected_ty,
+                // typecore.ml:3780 `instance env ty_expected`.
+                ExpressionDesc::Texp_construct(_, cd, _) if cd.cstr_name == "false" => {
+                    crate::types::ctype::instance_in(ctx, env, expected_ty)
+                }
                 _ => {
                     // OCaml typecore.ml:3401-3414: `rue` unifies
                     // `instance_def Predef.type_unit` with `instance env ty_expected`.
                     let unit_ty = env.type_unit(ctx);
-                    rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
+                    rue_unify(tctx, env, loc, unit_ty, expected_ty, context)?;
                     unit_ty
                 }
             };
@@ -8768,7 +8789,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // `Predef.type_array ty` with `ty_expected`, types elements with
             // `ty`, then stores `exp_type = instance env ty_expected` rather
             // than the temporary array node.
-            let exp_type = crate::types::instance(ctx, expected_ty);
+            let exp_type = crate::types::ctype::instance_in(ctx, env, expected_ty);
             Ok({
                 let typed_node = Expression::new(
                     ExpressionDesc::Texp_array(tctx.typed.push_exprs(typed_exprs)),
@@ -8811,7 +8832,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                     }
                 });
             }
-            let exp_type = crate::types::instance(ctx, expected_ty);
+            let exp_type = crate::types::ctype::instance_in(ctx, env, expected_ty);
             let node = Expression::new(
                 ExpressionDesc::Texp_dict(tctx.typed.push_dict_entries(typed_entries)),
                 loc,
@@ -8856,7 +8877,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                     None,
                 )?);
             }
-            let exp_type = crate::types::instance(ctx, expected_ty);
+            let exp_type = crate::types::ctype::instance_in(ctx, env, expected_ty);
             let node = Expression::new(
                 ExpressionDesc::Texp_spread(kind, tctx.typed.push_exprs(parts)),
                 loc,
@@ -8893,7 +8914,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             }
             ctx.end_def();
             let exp_type = crate::types::instance(ctx, env.type_string(ctx));
-            rue_unify(tctx, loc, exp_type, expected_ty, context)?;
+            rue_unify(tctx, env, loc, exp_type, expected_ty, context)?;
             Ok({
                 let typed_node = Expression::new(
                     ExpressionDesc::Texp_template {
@@ -8927,7 +8948,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             if crate::types::ctype::unify(
                 ctx,
                 &mut tctx.unify_state,
-                crate::types::instance(ctx, tag.exp_type),
+                crate::types::ctype::instance_in(ctx, env, tag.exp_type),
                 tag_ty,
             )
             .is_err()
@@ -8949,7 +8970,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             }
             unify_expression_types(tctx, loc, ctx.new_var(None), tag.exp_type, None)?;
             ctx.end_def();
-            rue_unify(tctx, loc, output_ty, expected_ty, context)?;
+            rue_unify(tctx, env, loc, output_ty, expected_ty, context)?;
             let raw_sources = template
                 .raw_sources
                 .iter()
@@ -9351,8 +9372,8 @@ fn type_identifier(
     note_value_ident_use(tctx, env, longident, lid.loc, &path, &desc, deprecated_function_call)?;
     check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
 
-    let ty = crate::types::instance(ctx, desc.val_type);
-    finish_expected_at(tctx, expr, loc, ty, expected_ty, context)?;
+    let ty = crate::types::ctype::instance_in(ctx, env, desc.val_type);
+    finish_expected_at(tctx, env, expr, loc, ty, expected_ty, context)?;
 
     Ok({
         let typed_node = Expression::new(
@@ -9371,19 +9392,20 @@ fn type_identifier(
 /// representative choice, level updates and error traces in those cases.
 fn finish_expected(
     tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
     expr: &ParsedExpression,
     ty: TypeExprRef,
     expected: &mut Expected,
     context: Option<ClashSite>,
 ) -> TypeCoreResult<()> {
-    finish_expected_at(tctx, expr, expr.pexp_loc, ty, expected, context)
+    finish_expected_at(tctx, env, expr, expr.pexp_loc, ty, expected, context)
 }
 
 /// Finish an expected type at the construct's semantic location.
 /// Cost: the existing expected-variable check and, when needed, unification;
 /// no location allocation, traversal or additional type lookup.
 fn finish_expected_at(
-    tctx: &mut TypeCheckContext<'_>, expr: &ParsedExpression, loc: LocIdx,
+    tctx: &mut TypeCheckContext<'_>, env: &Env, expr: &ParsedExpression, loc: LocIdx,
     ty: TypeExprRef, expected: &mut Expected, context: Option<ClashSite>,
 ) -> TypeCoreResult<()> {
     if let Expected::Infer { level, .. } = *expected
@@ -9392,7 +9414,7 @@ fn finish_expected_at(
         return Ok(());
     }
     let expected = materialize_expected(tctx, expr, expected);
-    rue_unify(tctx, loc, ty, expected, context)
+    rue_unify(tctx, env, loc, ty, expected, context)
 }
 
 fn materialize_expected(
@@ -9468,6 +9490,19 @@ fn instance_if_generic(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     }
 }
 
+/// [`instance_if_generic`] for a site that stands for OCaml's
+/// `instance env ty_expected`: OCaml's copy returns a node that is not
+/// generic as it is and adds nothing for it (ctype.ml:750), so the copy is
+/// made only for a generic type, through [`crate::types::ctype::instance_in`].
+/// Cost: one load and one branch, then `instance_in`'s.
+fn instance_if_generic_in(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+    if ctx.get_level(ctx.repr(ty)) == crate::types::type_expr::GENERIC_LEVEL {
+        crate::types::ctype::instance_in(ctx, env, ty)
+    } else {
+        ty
+    }
+}
+
 /// OCaml's `rue` mechanism: always instance the expected type before unifying.
 /// This matters even for monomorphic expected types, because OCaml still copies
 /// the top-level node and preserves distinct physical identities in the typed tree.
@@ -9484,14 +9519,18 @@ fn proper_exp_loc(ta: &TypedArena, exp: &Expression) -> LocIdx {
         .unwrap_or(exp.exp_loc)
 }
 
+/// OCaml `rue` (typecore.ml:2606-2608): `unify_exp` of the expression's
+/// type with `instance env ty_expected`, whose copy adds to an instance set
+/// under local constraints.
 fn rue_unify(
     tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
     loc: LocIdx,
     exp_ty: TypeExprRef,
     expected_ty: TypeExprRef,
     context: Option<ClashSite>,
 ) -> TypeCoreResult<()> {
-    let inst = crate::types::instance(tctx.type_ctx, expected_ty);
+    let inst = crate::types::ctype::instance_in(tctx.type_ctx, env, expected_ty);
     unify_expression_types(tctx, loc, exp_ty, inst, context)
 }
 
@@ -9716,7 +9755,7 @@ fn translate_unified_ops(
             };
 
             // OCaml: rue { ... exp_type = ty_res; ... } (unified ops are Pexp_apply)
-            if let Err(e) = finish_expected(tctx, sexp, result_ty, expected_ty, context) {
+            if let Err(e) = finish_expected(tctx, env, sexp, result_ty, expected_ty, context) {
                 return Some(Err(e));
             }
 
@@ -9772,7 +9811,7 @@ fn translate_unified_ops(
             };
 
             // OCaml: rue { ... exp_type = ty_res; ... } (unified ops are Pexp_apply)
-            if let Err(e) = finish_expected(tctx, sexp, result_ty, expected_ty, context) {
+            if let Err(e) = finish_expected(tctx, env, sexp, result_ty, expected_ty, context) {
                 return Some(Err(e));
             }
 
@@ -10288,7 +10327,7 @@ fn type_application_parts(
             filter_arrow_for_lowered_apply(tctx, env, typed_funct.exp_type, args.len())
         {
             let expected = materialize_expected(tctx, sexp, expected_ty);
-            let expected_inst = crate::types::instance(ctx, expected);
+            let expected_inst = crate::types::ctype::instance_in(ctx, env, expected);
             unify_expression_types(tctx, loc, ty_res, expected_inst, None)?;
         }
     }
@@ -10298,7 +10337,7 @@ fn type_application_parts(
         function_argument_type_clash_context(typed_funct_value_path.as_ref())
     };
 
-    let lowered_ty = crate::types::instance(ctx, typed_funct.exp_type);
+    let lowered_ty = crate::types::ctype::instance_in(ctx, env, typed_funct.exp_type);
     ctx.end_def();
     // OCaml compiler/ml/typecore.ml:2579-2582 instances the function type and
     // immediately runs `lower_args` (typecore.ml:2335-2342).
@@ -10373,7 +10412,7 @@ fn type_application_parts(
     let expanded_inst_ty = crate::types::ctype::expand_head(
         ctx,
         env,
-        crate::types::instance(ctx, typed_funct.exp_type),
+        crate::types::ctype::instance_in(ctx, env, typed_funct.exp_type),
     );
     let (inst_params, inst_ret) = match &*ctx.borrow_desc(expanded_inst_ty) {
         TypeDesc::Tarrow { args, ret } if args.len() == declared_params.len() => {
@@ -10486,7 +10525,7 @@ fn type_application_parts(
             ignored.push(OmittedArrow { param });
             argument_thunks.push(ApplyArgThunk::SynthOptionalNone {
                 label: param.label().to_arg_label(),
-                option_ty: crate::types::instance(ctx, param.typ),
+                option_ty: crate::types::ctype::instance_in(ctx, env, param.typ),
             });
         } else {
             omitted.push(OmittedArrow { param });
@@ -10690,7 +10729,7 @@ fn type_application_parts(
     unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
 
     // OCaml: rue { ... exp_type = ty_res; ... }
-    finish_expected_at(tctx, sexp, loc, result_ty, expected_ty, context)?;
+    finish_expected_at(tctx, env, sexp, loc, result_ty, expected_ty, context)?;
 
     Ok({
         let typed_node = Expression::new(
@@ -10787,7 +10826,7 @@ fn finish_non_gadt_type_cases(
         unify_expression_types(
             tctx,
             loc,
-            crate::types::instance(ctx, ty_res),
+            crate::types::ctype::instance_in(ctx, env, ty_res),
             ctx.new_var(None),
             None,
         )?;
@@ -11027,7 +11066,7 @@ fn run_unused_check(
 ) {
     tctx.drain_open_slot_uses();
     let saved = std::mem::replace(&mut tctx.warning_config, warning_config);
-    let expected_ty = crate::types::instance(tctx.type_ctx, ty_arg_check);
+    let expected_ty = crate::types::ctype::instance_in(tctx.type_ctx, env, ty_arg_check);
     // The checker retypes counter-examples through `tctx` while it reads the
     // case patterns; see [`PatCase`].
     let mut ta = std::mem::take(&mut tctx.typed);
@@ -11556,9 +11595,9 @@ fn type_match_cases_batch_non_gadt<'a>(
             let case_scrutinee_ty = if erase_either {
                 instance_for_erase_either_patterns(ctx, ty_arg)
             } else if propagate {
-                crate::types::instance(ctx, generic_scrutinee_ty)
+                crate::types::ctype::instance_in(ctx, env, generic_scrutinee_ty)
             } else {
-                crate::types::instance(ctx, ty_arg)
+                crate::types::ctype::instance_in(ctx, env, ty_arg)
             };
             let mut state = PatternState::new();
             state.reset(true);
@@ -11646,9 +11685,9 @@ fn type_match_cases_batch_non_gadt<'a>(
 
         if propagate || erase_either {
             let propagated_ty = if erase_either {
-                crate::types::instance(ctx, ty_arg)
+                crate::types::ctype::instance_in(ctx, env, ty_arg)
             } else {
-                crate::types::instance(ctx, generic_scrutinee_ty)
+                crate::types::ctype::instance_in(ctx, env, generic_scrutinee_ty)
             };
             let propagate_result = (|| -> TypeCoreResult<()> {
                 for pending in &pending_cases {
@@ -11737,7 +11776,7 @@ fn type_match_cases_batch_non_gadt<'a>(
             )?;
             // Match OCaml type_cases: `exp_type = instance env ty_res'` where
             // `ty_res'` is corrected per-case when the pattern contains GADTs.
-            let case_exp_ty = crate::types::instance(ctx, case_body_ty);
+            let case_exp_ty = crate::types::ctype::instance_in(ctx, env, case_body_ty);
             let typed_body = Expression {
                 exp_type: case_exp_ty,
                 ..typed_body
@@ -11832,7 +11871,7 @@ fn type_conditional(
             let typed_then =
                 type_expect(tctx, env, then_branch, ctx.predef_unit(), return_context)?;
             let then_exp_type = typed_then.exp_type;
-            rue_unify(tctx, loc, then_exp_type, expected_ty, context)?;
+            rue_unify(tctx, env, loc, then_exp_type, expected_ty, context)?;
 
             Ok({
                 let typed_node = Expression::new(
@@ -11973,7 +12012,7 @@ fn type_match(
         gadt_lev = ctx.current_stamp();
         ctx.init_def(gadt_lev + 1000);
         let mut scoped_env = val_case_env.clone();
-        scoped_env.add_gadt_instance_level();
+        scoped_env.add_gadt_instance_level(ctx, gadt_lev);
         gadt_match_env = scoped_env;
         &gadt_match_env
     } else {
@@ -12034,7 +12073,7 @@ fn type_match(
     //     List.iter (fun c -> unify_exp ~context:None env c.c_rhs ty_res') cases
     // This links per-case body result copies back through one shared node.
     if has_generalized_value_patterns {
-        let shared_case_body_ty = crate::types::instance(ctx, expected_ty);
+        let shared_case_body_ty = crate::types::ctype::instance_in(ctx, env, expected_ty);
         for case in &typed_val_cases {
             let rhs = tctx.expr(case.c_rhs);
             let (rhs_loc, rhs_type) = (rhs.exp_loc, rhs.exp_type);
@@ -12070,7 +12109,7 @@ fn type_match(
         unify_expression_types(
             tctx,
             loc,
-            crate::types::instance(ctx, ty_res),
+            crate::types::ctype::instance_in(ctx, env, ty_res),
             ctx.new_var(None),
             None,
         )?;
@@ -12102,7 +12141,7 @@ fn type_match(
         unify_expression_types(
             tctx,
             loc,
-            crate::types::instance(ctx, ty_res),
+            crate::types::ctype::instance_in(ctx, env, ty_res),
             ctx.new_var(None),
             None,
         )?;
@@ -12168,7 +12207,7 @@ fn type_match(
     };
 
     // Keep sharing: match OCaml's `exp_type = instance env ty_expected`
-    let result_ty = crate::types::instance(ctx, expected_ty);
+    let result_ty = crate::types::ctype::instance_in(ctx, env, expected_ty);
     Ok({
         let typed_node = Expression::new(
             ExpressionDesc::Texp_match(
@@ -12940,7 +12979,7 @@ fn type_case_pattern_impl<'a>(
     let case_scrutinee_ty = if erase_either {
         instance_for_erase_either_patterns(tctx.type_ctx, scrutinee_ty)
     } else {
-        crate::types::instance(tctx.type_ctx, generic_scrutinee_ty)
+        crate::types::ctype::instance_in(tctx.type_ctx, env, generic_scrutinee_ty)
     };
     // OCaml compiler/ml/typecore.ml:4420-4434: `type_pattern ~lev`, where
     // `lev` is the `init_env` level (typecore.ml:4387-4395), not the raised
@@ -13059,7 +13098,7 @@ fn type_pending_case_body(
         &pending.unpacks,
         body_context,
     )?;
-    let case_exp_ty = crate::types::instance(tctx.type_ctx, case_body_ty);
+    let case_exp_ty = crate::types::ctype::instance_in(tctx.type_ctx, env, case_body_ty);
     let typed_body = Expression {
         exp_type: case_exp_ty,
         ..typed_body
@@ -13469,7 +13508,7 @@ fn type_function_nary_with_newtypes(
         is_async,
         attributes,
     )?;
-    rue_unify(tctx, loc, typed.exp_type, expected_ty, None)?;
+    rue_unify(tctx, env, loc, typed.exp_type, expected_ty, None)?;
     Ok(typed)
 }
 
@@ -13554,7 +13593,7 @@ fn type_function_nary(
     if separate {
         ctx.begin_def();
     }
-    let inst = crate::types::instance(ctx, fun_ty);
+    let inst = crate::types::ctype::instance_in(ctx, env, fun_ty);
     let expanded = crate::types::ctype::expand_head_unif(ctx, env, inst);
     let (mut parameter_types, result_type) = {
         let desc = ctx.get_desc(expanded);
@@ -13622,7 +13661,7 @@ fn type_function_nary(
         let lev = ctx.current_stamp();
         ctx.init_def(lev + 1000);
         let mut env = env.clone();
-        env.add_gadt_instance_level();
+        env.add_gadt_instance_level(ctx, lev);
         (lev, env)
     }
     let gadt_env;
@@ -13668,7 +13707,7 @@ fn type_function_nary(
         let ty_arg_i = if erase_either {
             instance_for_erase_either_patterns(ctx, ty_arg_c)
         } else {
-            crate::types::instance(ctx, ty_arg_c)
+            crate::types::ctype::instance_in(ctx, env, ty_arg_c)
         };
         // `type_pattern ~lev env spat ty_arg_i` returns the pattern's
         // environment with the GADT equations it introduced; Rust's GADT
@@ -13752,7 +13791,7 @@ fn type_function_nary(
             run_globalize_forces(tctx, state.take_globalize_forces())?;
             if propagate || erase_either {
                 tctx.set_unify_env(&body_env);
-                let parameter_instance = crate::types::instance(ctx, ty_arg_c);
+                let parameter_instance = crate::types::ctype::instance_in(ctx, env, ty_arg_c);
                 unify_pattern_types(tctx, typed.pat_loc, typed.pat_type, parameter_instance)?;
             }
             Ok(())
@@ -13862,12 +13901,12 @@ fn type_function_nary(
         body_result_type, &unpacks, None, async_body,
     )?;
     let mut typed_body = Expression {
-        exp_type: crate::types::instance(ctx, body_result_type),
+        exp_type: crate::types::ctype::instance_in(ctx, env, body_result_type),
         ..typed_body
     };
     if has_gadts {
         // typecore.ml:4136-4138.
-        let shared_result = crate::types::instance(ctx, result_type);
+        let shared_result = crate::types::ctype::instance_in(ctx, env, result_type);
         tctx.set_unify_env(env);
         unify_expression_types(
             tctx,
@@ -13969,13 +14008,14 @@ fn type_function_nary(
     if do_init {
         // Ensure that existential types do not escape (typecore.ml:4195-4198).
         ctx.end_def();
-        let result_instance = crate::types::instance(ctx, result_type);
+        let result_instance = crate::types::ctype::instance_in(ctx, env, result_type);
         tctx.set_unify_env(env);
         unify_expression_types(tctx, loc, result_instance, ctx.new_var(None), None)?;
     }
 
-    let exp_type = crate::types::instance(
+    let exp_type = crate::types::ctype::instance_in(
         ctx,
+        env,
         ctx.new_generic_type(TypeDesc::Tarrow {
             args: ctx.new_type_args_from(
                 labels
@@ -14117,7 +14157,7 @@ fn type_for(
     // OCaml typecore.ml:3117-3126: `rue { ... exp_type = instance_def
     // Predef.type_unit }`, i.e. `unify env unit (instance ty_expected)`.
     let result_unit_ty = env.type_unit(ctx);
-    rue_unify(tctx, loc, result_unit_ty, expected_ty, context)?;
+    rue_unify(tctx, env, loc, result_unit_ty, expected_ty, context)?;
 
     Ok({
         let typed_node = Expression::new(
@@ -14334,7 +14374,7 @@ fn type_for_of(
     // OCaml `rue { ... exp_type = instance_def Predef.type_unit }`, i.e.
     // `unify env unit (instance ty_expected)`.
     let result_unit_ty = env.type_unit(ctx);
-    rue_unify(tctx, loc, result_unit_ty, expected_ty, context)?;
+    rue_unify(tctx, env, loc, result_unit_ty, expected_ty, context)?;
 
     let pat_box = Box::new(pat.clone());
     let desc = if await_kw {
@@ -14584,8 +14624,9 @@ fn type_construct(
         ctx.end_def();
         let var_level = ctx.current_level();
         crate::types::generalize_structure(ctx, var_level, result_ty);
+        // typecore.ml:4739 `instance_def ty_res`.
         let result_ty_inst = crate::types::ctype::instance(ctx, result_ty);
-        let expected_inst = crate::types::ctype::instance(ctx, expected_ty);
+        let expected_inst = crate::types::ctype::instance_in(ctx, env, expected_ty);
         unify_expression_types(tctx, loc, result_ty_inst, expected_inst, None)?;
         ctx.end_def();
 
@@ -14599,12 +14640,12 @@ fn type_construct(
     let mut inst_list = Vec::with_capacity(1 + arg_types_for_expect.len());
     inst_list.push(result_ty);
     inst_list.extend(arg_types_for_expect.iter().copied());
-    let mut instanced = crate::types::ctype::instance_list(ctx, &inst_list);
+    let mut instanced = crate::types::ctype::instance_list_in(ctx, env, &inst_list);
     result_ty = instanced.remove(0);
     let arg_types_for_unify = instanced;
 
     if !separate {
-        let expected_inst = crate::types::ctype::instance(ctx, expected_ty);
+        let expected_inst = crate::types::ctype::instance_in(ctx, env, expected_ty);
         unify_expression_types(tctx, loc, result_ty, expected_inst, None)?;
     }
 
@@ -14684,7 +14725,7 @@ fn type_variant(
         // OCaml fast path: when expected type is already a variant row with
         // this label carrying payload, type the payload against that row slot
         // and keep `exp_type = instance expected_ty`.
-        let expected_inst = crate::types::ctype::instance(ctx, expected_ty);
+        let expected_inst = crate::types::ctype::instance_in(ctx, env, expected_ty);
         let expanded_expected = crate::types::ctype::expand_head(ctx, env, expected_ty);
         let expanded_expected_inst = crate::types::ctype::expand_head(ctx, env, expected_inst);
 
@@ -14751,7 +14792,7 @@ fn type_variant(
             row_name: None,
         });
         // OCaml: rue { ... exp_type = variant_row; ... }
-        rue_unify(tctx, loc, variant_ty, expected_ty, context)?;
+        rue_unify(tctx, env, loc, variant_ty, expected_ty, context)?;
         return Ok({
             let typed_node = Expression::new(
                 ExpressionDesc::Texp_variant(label.to_string(), Some(tctx.push_expr(typed_arg))),
@@ -14777,7 +14818,7 @@ fn type_variant(
         row_name: None,
     });
     // OCaml: rue { ... exp_type = variant_row; ... }
-    rue_unify(tctx, loc, variant_ty, expected_ty, context)?;
+    rue_unify(tctx, env, loc, variant_ty, expected_ty, context)?;
 
     Ok({
         let typed_node = Expression::new(
@@ -15342,8 +15383,10 @@ fn type_record(
     // checked against the expected type and, with a spread, its type.
     let first_lid = fields.first().map(|field| field.lid.txt);
     check_no_record_syntax_on_dict(tctx, env, loc, expected_ty, first_lid)?;
-    // Protect a generic expected type from record typing side effects.
-    let expected_ty = instance_if_generic(ctx, expected_ty);
+    // Protect a generic expected type from record typing side effects. This
+    // is the copy of OCaml's `instance env ty_expected` (typecore.ml:3044,
+    // 3148): the later `instance_in` of the copy, not generic, is the node.
+    let expected_ty = instance_if_generic_in(ctx, env, expected_ty);
 
     // Type check base expression if present.
     // Match OCaml: type the base with type_exp (no expected type constraint),
@@ -15400,7 +15443,7 @@ fn type_record(
                 ctx.begin_def();
                 let ty = ctx.new_constr(
                     path,
-                    crate::types::ctype::instance_list(ctx, &decl.type_params),
+                    crate::types::ctype::instance_list_in(ctx, env, &decl.type_params),
                 );
                 ctx.end_def();
                 crate::types::generalize_structure(ctx, ctx.current_level(), ty);
@@ -15829,7 +15872,7 @@ fn type_record(
                         //   unify env (instance_def ty_res) (instance env ty_expected)
                         //   let ty_arg = instance_def ty_arg
                         let ty_res = crate::types::ctype::instance(ctx, ty_res0);
-                        let expected_record_ty = crate::types::ctype::instance(ctx, record_ty);
+                        let expected_record_ty = crate::types::ctype::instance_in(ctx, env, record_ty);
                         if let Err(err) = crate::types::unify(
                             ctx,
                             &mut tctx.unify_state,
@@ -15941,7 +15984,7 @@ fn type_record(
             )?;
             // OCaml `type_argument`: after typing against `ty_expected'`, unify with
             // a fresh `instance` of that type to preserve sharing behavior.
-            let field_input_ty_inst = crate::types::ctype::instance(ctx, field_input_ty);
+            let field_input_ty_inst = crate::types::ctype::instance_in(ctx, env, field_input_ty);
             unify_expression_types(
                 tctx,
                 loc,
@@ -15994,7 +16037,7 @@ fn type_record(
         // (compiler/ml/typecore.ml:1185-1198). That is a shallow record update;
         // mutate the owned Rust expression instead of deep-cloning its desc.
         let mut final_expr = final_expr;
-        final_expr.exp_type = crate::types::ctype::instance(ctx, final_expr.exp_type);
+        final_expr.exp_type = crate::types::ctype::instance_in(ctx, env, final_expr.exp_type);
 
         explicit_entries.push((std::sync::Arc::new(label_desc), field.lid, tctx.push_expr(final_expr)));
     }
@@ -16012,7 +16055,7 @@ fn type_record(
     });
 
     // OCaml: unify_exp_types ty_record (instance env ty_expected)
-    let expected_inst_for_record = crate::types::instance(ctx, expected_ty);
+    let expected_inst_for_record = crate::types::ctype::instance_in(ctx, env, expected_ty);
     unify_expression_types(tctx, loc, record_ty, expected_inst_for_record, None)?;
     // OCaml `check_duplicates` (compiler/ml/typecore.ml:2232-2245) runs after
     // every field is typed and the record type is unified with the expected
@@ -16084,7 +16127,7 @@ fn type_record(
 
     if let Some(ref mut typed_base_expr) = typed_base {
         // OCaml: let ty_exp = instance env exp.exp_type
-        let mut ty_exp = crate::types::instance(ctx, typed_base_expr.exp_type);
+        let mut ty_exp = crate::types::ctype::instance_in(ctx, env, typed_base_expr.exp_type);
         // Keep OCaml's identity split for persistent constructor heads only.
         // Local constructor families (e.g. mario_game viewport) should keep
         // sharing to avoid over-allocation and id drift.
@@ -16125,7 +16168,7 @@ fn type_record(
                 let (_poly2, ty_arg2, ty_res2) =
                     crate::types::ctype::instance_label(ctx, false, env_label);
                 unify_expression_types(tctx, loc, ty_arg1, ty_arg2, None)?;
-                let expected_inst = crate::types::instance(ctx, expected_ty);
+                let expected_inst = crate::types::ctype::instance_in(ctx, env, expected_ty);
                 unify_expression_types(tctx, loc, expected_inst, ty_res2, None)?;
             }
         }
@@ -16146,7 +16189,9 @@ fn type_record(
     // type and the `with` base expression type for persistent constructor
     // families only.
     if let Some(base_expr) = typed_base.as_mut() {
-        let mut output_ty = crate::types::instance(ctx, base_expr.exp_type);
+        // No OCaml counterpart: typecore.ml:3165 stores the copy of 3153
+        // (`ty_exp`), so this copy adds to no instance set.
+        let mut output_ty = crate::types::ctype::instance(ctx, base_expr.exp_type);
         if ctx.repr(output_ty) == ctx.repr(record_ty) {
             let repr = ctx.repr(output_ty);
             let desc = ctx.get_desc(repr);
@@ -16170,7 +16215,7 @@ fn type_record(
     // typecore.ml:2983-2990. Keep this as a fresh post-unify instance rather
     // than the original expected node so later application unification observes
     // the same typedtree sharing and force order.
-    let record_exp_ty = crate::types::instance(ctx, expected_ty);
+    let record_exp_ty = crate::types::ctype::instance_in(ctx, env, expected_ty);
 
     // `record_fields lbl_exp_list` (typecore.ml:393-402): only the written
     // fields, already in `lbl_pos` order.
@@ -16839,8 +16884,9 @@ fn type_setfield(
                 // label result with the expected record type (raising
                 // `Label_mismatch` at the label), then instances the field
                 // argument before typing the assigned value.
+                // typecore.ml:4315 `instance_def ty_res`, `instance env ty_expected`.
                 let ty_res = crate::types::ctype::instance(ctx, ty_res0);
-                let expected_record_ty = crate::types::ctype::instance(ctx, ty_record);
+                let expected_record_ty = crate::types::ctype::instance_in(ctx, env, ty_record);
                 let label_result_unify =
                     crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_record_ty)
                         .map_err(|err| TypeCoreError::LabelMismatch {
@@ -16852,6 +16898,7 @@ fn type_setfield(
                             },
                             env: Some(tctx.type_ctx.store_typed_env(env)),
                         });
+                // typecore.ml:4319 `instance_def ty_arg`.
                 let field_ty = crate::types::ctype::instance(ctx, ty_arg0);
 
                 if separate {
@@ -16906,7 +16953,7 @@ fn type_setfield(
             let typed_value = type_expect(tctx, env, new_value, field_ty, field_context)?;
             // OCaml compiler/ml/typecore.ml:3740-3743 uses `type_argument`, which
             // types against `ty_arg` and then unifies with `instance env ty_arg`.
-            let field_ty_inst = crate::types::ctype::instance(ctx, field_ty);
+            let field_ty_inst = crate::types::ctype::instance_in(ctx, env, field_ty);
             unify_expression_types(tctx, loc, typed_value.exp_type, field_ty_inst, None)?;
 
             Ok((label_desc, field_ty, poly_field, typed_value))
@@ -16930,7 +16977,7 @@ fn type_setfield(
     };
     // OCaml compiler/ml/typecore.ml:3779 returns `{arg with exp_type =
     // instance env arg.exp_type}` from `type_label_exp`.
-    typed_value.exp_type = crate::types::ctype::instance(ctx, typed_value.exp_type);
+    typed_value.exp_type = crate::types::ctype::instance_in(ctx, env, typed_value.exp_type);
     // OCaml typecore.ml:2953: `unify_exp env record ty_record`.
     unify_expression_types(
         tctx,
@@ -16965,7 +17012,7 @@ fn type_setfield(
 
     // OCaml typecore.ml:2961-2969: `rue { ... exp_type = instance_def
     // Predef.type_unit }`, i.e. `unify_exp env exp (instance env ty_expected)`.
-    rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
+    rue_unify(tctx, env, loc, unit_ty, expected_ty, context)?;
 
     Ok({
         let typed_node = Expression::new(
@@ -17018,8 +17065,8 @@ fn type_constraint(
     //
     // Both instances are created BEFORE type_expect runs, so they see the
     // GENERIC ctype_ty before any handler can consume it via unification.
-    let result_ty = crate::types::instance(ctx, ctype_ty);
-    let arg_unify_ty = crate::types::instance(ctx, ctype_ty);
+    let result_ty = crate::types::ctype::instance_in(ctx, env, ctype_ty);
+    let arg_unify_ty = crate::types::ctype::instance_in(ctx, env, ctype_ty);
 
     // Pass the GENERIC constraint type to type_expect (matches OCaml).
     // Rue handlers create per-expression instances via rue_unify.
@@ -17028,7 +17075,7 @@ fn type_constraint(
     let typed_inner = type_expect(tctx, env, inner_expr, ctype_ty, None)?;
     unify_expression_types(tctx, loc, typed_inner.exp_type, arg_unify_ty, None)?;
 
-    rue_unify(tctx, loc, result_ty, expected_ty, context)?;
+    rue_unify(tctx, env, loc, result_ty, expected_ty, context)?;
 
     let mut result = typed_inner;
     result.exp_type = result_ty;
@@ -17135,7 +17182,7 @@ fn type_coerce(
     // OCaml `rue { exp_type = ty'; ... }` (typecore.ml:3295-3305, 2369-2371)
     // after the coercion check: `unify_exp` at the coercion's location
     // (`proper_exp_loc`) of `ty'` with `instance env ty_expected`.
-    let inst_expected = instance_if_generic(ctx, expected_ty);
+    let inst_expected = instance_if_generic_in(ctx, env, expected_ty);
     unify_expression_types(tctx, loc, to_ty, inst_expected, None)?;
 
     // Return the inner expression with the coercion as exp_extra
@@ -17415,7 +17462,7 @@ fn type_newtype(
         );
 
         // OCaml: rue { ... exp_type = ety; ... }
-        rue_unify(tctx, loc, rewritten_ty, expected_ty, None)?;
+        rue_unify(tctx, env, loc, rewritten_ty, expected_ty, None)?;
 
         Ok(Expression {
             exp_loc: loc,
@@ -17441,7 +17488,7 @@ fn type_promise_application(
     let result = type_application_parts(tctx, env, source, primitive.loc, &[],
         ApplicationCallee::Promise(primitive), &[(ArgLabel::Nolabel, operand)],
         false, false, expected, context)?;
-    finish_expected_at(tctx, source, primitive.loc, result.exp_type, expected, context)?;
+    finish_expected_at(tctx, env, source, primitive.loc, result.exp_type, expected, context)?;
     Ok(result)
 }
 
@@ -17482,14 +17529,16 @@ fn method_name_is_plain_ident(name: &str) -> bool {
 /// be a variable; constrain it to the ordinary, empty-binder form.
 fn object_field_use_type(
     tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
     typ: TypeExprRef,
 ) -> Result<TypeExprRef, TypeError> {
     let ctx = tctx.type_ctx;
     let typ = ctx.repr(typ);
     let desc = *ctx.get_desc(typ);
     match desc {
+        // typecore.ml:2553 `instance env ty`.
         TypeDesc::Tpoly { body, vars } if vars.is_empty() => {
-            Ok(crate::types::ctype::instance(ctx, body))
+            Ok(crate::types::ctype::instance_in(ctx, env, body))
         }
         TypeDesc::Tpoly { body, vars } => {
             Ok(crate::types::ctype::instance_poly(ctx, false, false, ctx.type_list(vars), body).1)
@@ -17538,7 +17587,7 @@ fn type_object_get(
     // Lookup constrains an open object row to contain the field, without
     // requiring or adding write capability.
     let field_ty = crate::types::ctype::filter_method(ctx, env, &field.txt, typed_obj.exp_type)
-        .and_then(|typ| object_field_use_type(tctx, typ));
+        .and_then(|typ| object_field_use_type(tctx, env, typ));
     let field_ty = match field_ty {
         Ok(ty) => ty,
         Err(_) => {
@@ -17551,7 +17600,7 @@ fn type_object_get(
         }
     };
 
-    rue_unify(tctx, loc, field_ty, expected_ty, context)?;
+    rue_unify(tctx, env, loc, field_ty, expected_ty, context)?;
 
     Ok({
         let typed_node = Expression::new(
@@ -17619,7 +17668,7 @@ fn type_object_set(
     };
     let value = type_object_field_value(tctx, env, svalue, typ)?;
     let unit_ty = env.type_unit(ctx);
-    rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
+    rue_unify(tctx, env, loc, unit_ty, expected_ty, context)?;
     Ok({
         let typed_node = Expression::new(
             ExpressionDesc::Texp_object_set(
@@ -17664,12 +17713,12 @@ fn type_object_field_value(
             ctx.end_def();
             let mut value = value?;
             check_univars_or_less_general(tctx, env, true, "field value", &value, typ, &vars)?;
-            value.exp_type = crate::types::ctype::instance(ctx, value.exp_type);
+            value.exp_type = crate::types::ctype::instance_in(ctx, env, value.exp_type);
             Ok(value)
         }
         None => {
-            let typ =
-                object_field_use_type(tctx, typ).map_err(|err| TypeCoreError::ExprTypeClash {
+            let typ = object_field_use_type(tctx, env, typ).map_err(|err| {
+                TypeCoreError::ExprTypeClash {
                     loc: svalue.pexp_loc,
                     trace: match err {
                         TypeError::Unify(trace) => trace,
@@ -17677,7 +17726,8 @@ fn type_object_field_value(
                     },
                     context: None,
                     env: Some(tctx.type_ctx.store_typed_env(env)),
-                })?;
+                }
+            })?;
             type_expect(tctx, env, svalue, typ, None)
         }
     }
@@ -17736,7 +17786,7 @@ fn type_object_literal(
         });
     }
     let exp_type = ctx.new_type(TypeDesc::Tobject { fields: row });
-    rue_unify(tctx, loc, exp_type, expected_ty, context)?;
+    rue_unify(tctx, env, loc, exp_type, expected_ty, context)?;
     Ok({
         let typed_node = Expression::new(
             ExpressionDesc::Texp_object_literal(fields),
@@ -18675,7 +18725,7 @@ fn type_pack(
     // instance the expected type, expand it to a package, then call
     // Typemod.type_package for the module expression and package arguments.
     let ctx = tctx.type_ctx;
-    let expected_inst = crate::types::ctype::instance(ctx, expected_ty);
+    let expected_inst = crate::types::ctype::instance_in(ctx, env, expected_ty);
     let expanded = crate::types::ctype::expand_head(ctx, env, expected_inst);
     let (pack_path, pack_lids, expected_pack_args) = {
         let desc = ctx.get_desc(ctx.repr(expanded));
@@ -18961,7 +19011,7 @@ fn type_pack(
         .env()
         .cloned();
     tctx.unify_state.set_env(&package_env);
-    let rue_result = rue_unify(tctx, loc, packed_type, expected_ty, context);
+    let rue_result = rue_unify(tctx, env, loc, packed_type, expected_ty, context);
     if let Some(saved_env) = saved_unify_env {
         tctx.unify_state.set_env(&saved_env);
     }
@@ -19130,7 +19180,7 @@ fn type_body_with_module_unpacks(
 
     // OCaml's wrap_unpacks types the unpack as Pexp_ident through type_expect,
     // which calls instance() on the looked-up type. Match that by instancing here.
-    let unpack_inst_ty = crate::types::instance(tctx.type_ctx, unpack.ty);
+    let unpack_inst_ty = crate::types::ctype::instance_in(tctx.type_ctx, env, unpack.ty);
     let unpack_expr = Expression::new(
         ExpressionDesc::Texp_ident(Path::pident(unpack.id), located_lid, Arc::new(value_desc)),
         unpack.loc_idx,
@@ -21226,7 +21276,7 @@ fn type_let_bindings(
                             &inst_vars,
                         )?;
                         // OCaml: {exp with exp_type = instance env exp.exp_type}
-                        let new_exp_type = crate::types::ctype::instance(ctx, exp.exp_type);
+                        let new_exp_type = crate::types::ctype::instance_in(ctx, env, exp.exp_type);
                         Ok(Expression {
                             exp_type: new_exp_type,
                             ..exp
@@ -30748,13 +30798,13 @@ mod tests {
         ctx.set_current_level(11);
         let result = ctx.new_var(None);
         let mut expected = Expected::Infer { level: 10, site: InferenceSite::Expression };
-        finish_expected(&mut tctx, &expr, result, &mut expected, None).unwrap();
+        finish_expected(&mut tctx, &env, &expr, result, &mut expected, None).unwrap();
         let Expected::Known(materialized) = expected else {
             panic!("variable roots retain ordinary unification");
         };
         assert_eq!(ctx.repr(result), materialized);
         assert_eq!(ctx.get_level(materialized), 10);
-        finish_expected(&mut tctx, &expr, result, &mut expected, None).unwrap();
+        finish_expected(&mut tctx, &env, &expr, result, &mut expected, None).unwrap();
         assert!(matches!(expected, Expected::Known(ty) if ty == materialized));
         assert_eq!(ctx.repr(result), materialized);
     }
