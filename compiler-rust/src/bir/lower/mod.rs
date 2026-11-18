@@ -773,11 +773,15 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// K0: append_output drops the tail of finished output. Release its J
     /// ownership as well as truncating its statement run. O(s + released nodes)
     /// for a discarded suffix; O(1) otherwise. No temporary statement vector.
+    ///
+    /// `value` is the value of the appended output: `None`, or the value
+    /// the caller moved out of `second`. Its owner is this function: when
+    /// `first` finished it is released with what `second` still holds, so
+    /// a node is released once whichever of the two has it.
     fn append_outputs(&mut self, first: Out<B>, mut second: Out<B>, mut value: Option<B::E>) -> Out<B> {
         if first.finished == Finished::True {
             for statement in self.statements.take_run(second.stmts) { self.js.release_stmt(&mut self.arena, statement); }
             if let Some(value) = second.value.take() { self.arena.release(B::node(value)); }
-            // The callers move the second output's value out to give it here.
             if let Some(value) = value.take() { self.arena.release(B::node(value)); }
         }
         self.statements.append(first, second, value)
@@ -1133,7 +1137,8 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
     }
     /// K4/K2: C:2411 compile_let_binding_output / C:4603 compile_effect_output.
     /// Cost: that of `expression_child`: O(1) a call, plus the child
-    /// function it dispatches to and the `realize` of the child.
+    /// function it dispatches to, the `realize` of the child and J-M14
+    /// over a dropped `debugger` value.
     fn child(&mut self, cx: Cx, resume: &Self::Resume, index: usize, output: Probed<B>) -> Probed<B> {
         self.expression_child(cx, resume, index, output)
     }
