@@ -255,7 +255,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let result = (|| {
         if let Some(frame) = call.tail { return self.finish_self_call(frame, statements, &values); }
         if call.inline {
-            return self.primitive_result(cx, statements, values[0]);
+            return self.primitive_result(cx, statements, B::from_node(values[0]));
         }
         let value = if let Some((module, member, arity)) = call.external {
             let mut callee = self.js.qualified(&mut self.arena, module, Some(member));

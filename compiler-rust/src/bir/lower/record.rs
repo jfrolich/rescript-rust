@@ -149,7 +149,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 start: start.expect("record initializer"),
                 len: 0,
             }),
-            B::node(value),
+            value,
         )
     }
 
