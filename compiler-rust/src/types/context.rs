@@ -5759,18 +5759,22 @@ impl TypeContext {
 
     /// The scope at `level` from `scope` outwards: OCaml's
     /// `List.assoc lv env.gadt_instances` (env.ml:1326-1328, 1333-1335).
-    /// One step per scope visited.
-    fn gadt_instance_scope_at(&self, scope: GadtScopeRef, level: i32) -> GadtScopeRef {
+    /// One step per scope visited. `None` where OCaml asserts: an
+    /// environment with an equation but no instance scope at its level,
+    /// which the type checker does not make (both of its callers of
+    /// [`Env::add_gadt_instance_level`] add the scope before the patterns
+    /// that add equations) and the checker tests build directly.
+    fn gadt_instance_scope_at(&self, scope: GadtScopeRef, level: i32) -> Option<GadtScopeRef> {
         let scopes = self.gadt_instance_scopes.borrow();
         let mut current = scope;
         while !current.is_none() {
             let entry = &scopes[current.index()];
             if entry.level == level {
-                return current;
+                return Some(current);
             }
             current = entry.parent;
         }
-        panic!("Env.add_gadt_instances: no instance scope at level {level}")
+        None
     }
 
     /// Append `ty` to the set of `scope`, journaled. O(1) amortized. A
@@ -5794,7 +5798,9 @@ impl TypeContext {
         level: i32,
         types: &[TypeExprRef],
     ) {
-        let scope = self.gadt_instance_scope_at(scope, level);
+        let Some(scope) = self.gadt_instance_scope_at(scope, level) else {
+            return;
+        };
         for &ty in types {
             self.push_gadt_instance(scope, ty);
         }
@@ -5807,7 +5813,9 @@ impl TypeContext {
     /// plus, per type of the chain, one step per member and one walk of the
     /// constructor's memo chain.
     pub(crate) fn add_gadt_instance_chain(&self, scope: GadtScopeRef, level: i32, ty: TypeExprRef) {
-        let scope = self.gadt_instance_scope_at(scope, level);
+        let Some(scope) = self.gadt_instance_scope_at(scope, level) else {
+            return;
+        };
         let mut current = Some(ty);
         while let Some(ty) = current {
             let ty = self.repr(ty);
