@@ -5587,3 +5587,41 @@ fn matching_the_fields_of_a_fixed_copy_at_ten_thousand_is_linear() {
         assert!(large <= 11 * small, "{generic}: {small} {large}");
     }
 }
+
+/// The occurrence test of a variable in pattern mode over a type nested
+/// n deep that holds it: `t(0) = ('v, int)`, `t(i + 1) = k2<t(i),
+/// t(i)>` for the abstract `k2` (not contractive), n + 1 nodes and 2^n
+/// paths. The binding walk finds `'v`, so `occur_pattern` runs
+/// (compiler/ml/ctype.ml:1384-1408, `allow_recursive`): it enters each
+/// `k2` node once, decides it free once its arguments are (a tuple is
+/// not entered), and the variable is bound to the type that holds it.
+/// Steps of the whole unification linear between 1,000 and 10,000; at a
+/// depth of 100,000 on a 2 MB stack.
+///
+/// Reaches: R3h.
+#[test]
+fn the_occurrence_test_of_pattern_mode_at_ten_thousand_is_linear() {
+    fn run(n: u32) -> u64 {
+        let (mut c, _) = pattern_checker(Mode::Success);
+        let v = var_at(&mut c, 1);
+        let int = constr(&mut c, INT, &[]);
+        let mut ty = tuple(&mut c, &[v, int]);
+        for _ in 0..n {
+            ty = constr(&mut c, K2, &[ty, ty]);
+        }
+        let mut result = Err(super::unify::Clash);
+        let count = steps::scope(|| result = c.unify_pattern(2, true, true, v, ty));
+        assert!(result.is_ok());
+        assert_pattern_left(&c);
+        assert_eq!(c.g.repr(v), c.g.repr(ty));
+        count
+    }
+    let (small, large) = (run(1_000), run(10_000));
+    assert!(large <= 11 * small, "{small} {large}");
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| run(100_000))
+        .unwrap()
+        .join()
+        .unwrap();
+}

@@ -7,7 +7,9 @@
 //! it. Recursion is an explicit stack of [`Frame`]s, popped in the order the
 //! recursive calls would run.
 
-use super::expand::{ABBREV, ALIAS, ExpandMode, INHERITS, Memo, TypeTable, link_node};
+use super::expand::{
+    ABBREV, ALIAS, DATATYPE, ExpandMode, INHERITS, LOCAL, Memo, NEWTYPE, PRIVATE, TypeTable, link_node,
+};
 use super::graph::{
     ARROW, CONSTR, Change, GENERIC, Graph, LINK, Mode, NONE, Node, Speculation, TUPLE, Ty, VAR,
 };
@@ -407,29 +409,33 @@ impl Checker {
             let route = target.tag() == CONSTR;
             return self.bind_routed(var, ty, route.then_some([left, right]));
         }
-        // Two locally abstract types under equations (ctype.ml:2258-2269)
-        // are `Checker::unify_newtypes`, called after the arm below for a
-        // pair of two constructors without arguments when `equations` is
-        // not empty: R3h (8.9, decision 65).
-        //
         // `has_cached_expansion p1 !a1` reads the node's own memo
         // (ctype.ml:2251), which `proper_abbrevs` never writes for a
         // nullary constructor: its expansion goes to `simple_abbrevs`
         // (ctype.ml:200-202). Slot 0 of a nullary node stays empty here too
         // (expand.rs), so the test is always false. With GADT instance
         // tracing the node's own memo is used (R3h).
-        if l.tag() == CONSTR && r.tag() == CONSTR && l.a == r.a && l.arity() == 0 && r.arity() == 0
-        {
-            // `update_level !env t1.level t2; link_type t1 t2`. `right` is a
-            // representative and `r` its descriptor: the outer test of
-            // `update_level` (`if ty.level > level`, ctype.ml:635) reads `r`
-            // with no second `repr`. Nothing is above the generic level, so
-            // a generic `l` never lowers.
-            if r.level > l.level {
-                self.lower(right, l.level)?;
+        if l.tag() == CONSTR && r.tag() == CONSTR && l.arity() == 0 && r.arity() == 0 {
+            if l.a == r.a {
+                // `update_level !env t1.level t2; link_type t1 t2`. `right`
+                // is a representative and `r` its descriptor: the outer test
+                // of `update_level` (`if ty.level > level`, ctype.ml:635)
+                // reads `r` with no second `repr`. Nothing is above the
+                // generic level, so a generic `l` never lowers.
+                if r.level > l.level {
+                    self.lower(right, l.level)?;
+                }
+                self.g.link(left, right);
+                return Ok(());
             }
-            self.g.link(left, right);
-            return Ok(());
+            // Two locally abstract types under equations (ctype.ml:
+            // 2258-2269; 8.9, decision 65): for two nullary constructors of
+            // different types, one load; nothing for any other pair.
+            if !self.equations.is_empty()
+                && let Some(result) = self.unify_newtypes([left, right], l, r)
+            {
+                return result;
+            }
         }
         // `Tunivar _, Tunivar _` (ctype.ml:2244-2247). Both heads are in
         // registers: one `and` and one untaken branch for any other pair,
@@ -852,7 +858,87 @@ impl Checker {
     #[cold]
     #[inline(never)]
     fn occur_pattern(&mut self, node: Ty, ty: Ty) -> Result<(), Clash> {
-        todo!("R3h")
+        let marks = [self.fresh_marks(), self.fresh_marks(), self.fresh_marks()];
+        let [free, holds, _] = marks;
+        let base = self.frames.len();
+        let mut result = self.occur_pattern_visit(node, ty, marks);
+        while self.frames.len() > base {
+            let top = self.frames.len() - 1;
+            let frame = self.frames[top];
+            let parent = frame.left;
+            match result.take() {
+                // The expansion of `parent` decided it.
+                Some(holds_node) if frame.right.0 != NONE => {
+                    result = Some(self.occur_finish(parent, holds_node, [free, holds]));
+                }
+                Some(false) => {}
+                Some(true) => {
+                    let expansion = match self.expand_head(parent, ExpandMode::Unif) {
+                        Ok(expansion) => self.g.repr(expansion),
+                        Err(Clash) => {
+                            self.frames.truncate(base);
+                            return Err(Clash);
+                        }
+                    };
+                    if expansion == parent {
+                        // `Cannot_expand`: the constructor holds it.
+                        result = Some(self.occur_finish(parent, true, [free, holds]));
+                    } else {
+                        self.frames[top].right = expansion;
+                        result = self.occur_pattern_visit(node, expansion, marks);
+                    }
+                }
+                None => {
+                    let descriptor = self.g.nodes[parent.0 as usize];
+                    if frame.extra < descriptor.arity() {
+                        self.frames[top].extra += 1;
+                        let argument = self.g.lists[(descriptor.b + 1 + frame.extra) as usize];
+                        result = self.occur_pattern_visit(node, argument, marks);
+                    } else {
+                        result = Some(self.occur_finish(parent, false, [free, holds]));
+                    }
+                }
+            }
+        }
+        if result == Some(true) { Err(Clash) } else { Ok(()) }
+    }
+
+    /// O(1): one node of [`Checker::occur_pattern`]: decided at once
+    /// (`node` itself; a node that is not a constructor, or of a
+    /// contractive type, which is not entered; a constructor decided
+    /// before; one without arguments), or pushed as a frame whose `extra`
+    /// is the next argument and whose `right` is the expansion it waits
+    /// for. A constructor met again on the way (`Type_set.mem ty
+    /// visited`, compiler/ml/ctype.ml:1393) holds `node` in its own frame,
+    /// pushed with no argument left, so that it is expanded and its
+    /// expansion tested in its place. One step; the marks grow, amortized,
+    /// to nodes an expansion made.
+    fn occur_pattern_visit(&mut self, node: Ty, ty: Ty, [free, holds, busy]: [u32; 3]) -> Option<bool> {
+        #[cfg(test)]
+        super::steps::tick();
+        let ty = self.g.repr(ty);
+        if ty == node {
+            return Some(true);
+        }
+        let descriptor = self.g.nodes[ty.0 as usize];
+        if descriptor.tag() != CONSTR || TypeTable::contractive(self.types.info(descriptor.a)) {
+            return Some(false);
+        }
+        if ty.0 as usize >= self.marks.len() {
+            self.marks.resize(self.g.nodes.len(), 0);
+        }
+        let mark = self.marks[ty.0 as usize];
+        if mark == free || mark == holds {
+            return Some(mark == holds);
+        }
+        let extra = if mark == busy { descriptor.arity() } else { 0 };
+        if extra == 0 && descriptor.arity() == 0 {
+            self.marks[ty.0 as usize] = free;
+            return Some(false);
+        }
+        self.marks[ty.0 as usize] = busy;
+        self.frames.push(Frame { left: ty, right: Ty(NONE), kind: FrameKind::Pair, extra });
+        if mark == busy { Some(true) } else { None }
     }
 
 
@@ -1281,7 +1367,10 @@ impl Checker {
     /// child first: arrows with equal parameter counts and compatible labels
     /// (compiler/ml/ctype.ml:2335-2347), tuples of equal length, constructors
     /// of one type (ctype.ml:2348-2351, expression mode). Anything else is a
-    /// clash or belongs to R3e-R3h. O(children). (R3a)
+    /// clash or belongs to R3e-R3h. O(children). Always inline: its two
+    /// callers are unify3 and the pattern arm, and out of line it costs
+    /// expression mode a call a structure pair. (R3a)
+    #[inline(always)]
     pub fn push_children(&mut self, left: Node, right: Node) -> Result<(), Clash> {
         if (left.head | right.head) & EXTENDED != 0 {
             // An extended descriptor against another kind of node
@@ -1450,7 +1539,19 @@ impl Checker {
         left: Ty,
         right: Ty,
     ) -> Result<(), Clash> {
-        todo!("R3h")
+        debug_assert!(self.scopes.is_empty(), "no scope of universal variables is open");
+        let before = (self.umode, self.generate_equations, self.assume_injective);
+        self.umode = UnifyMode::Pattern;
+        self.generate_equations = generate;
+        self.assume_injective = injective;
+        self.newtype_level = newtype_level;
+        let result = self.unify(left, right);
+        (self.umode, self.generate_equations, self.assume_injective) = before;
+        self.newtype_level = 0;
+        if !self.pairs.keys.is_empty() {
+            self.pairs.keys.clear();
+        }
+        result
     }
 
     /// Cut the equations back to the first `len` (a length of
@@ -1508,7 +1609,32 @@ impl Checker {
         l: Node,
         r: Node,
     ) -> Option<Result<(), Clash>> {
-        todo!("R3h")
+        let newtype = |c: &Checker, ty: u32| c.types.info(ty).flags & (NEWTYPE | DATATYPE | PRIVATE) == NEWTYPE;
+        if !newtype(self, l.a) || !newtype(self, r.a) {
+            return None;
+        }
+        // `unify_eq t1 t2` comes first (ctype.ml:2233): in pattern mode
+        // the table of assumed pairs.
+        if self.umode == UnifyMode::Pattern && self.assumed_equal(left, right) {
+            return Some(Ok(()));
+        }
+        let older = self.find_newtype_level(l.a) < self.find_newtype_level(r.a);
+        let expansion = match self.expand_once(if older { right } else { left }, ExpandMode::Unif) {
+            Ok(expansion) => expansion,
+            Err(clash) => return Some(Err(clash)),
+        };
+        if expansion.0 == NONE {
+            return None;
+        }
+        if self.g.mode == Mode::Explain {
+            self.frames.push(Frame { left, right, kind: FrameKind::Assumed, extra: 0 });
+        }
+        if older {
+            self.push_pair(left, expansion);
+        } else {
+            self.push_pair(expansion, right);
+        }
+        Some(Ok(()))
     }
 
     /// unify3 in pattern mode, after its first arms (a variable on either
@@ -1542,7 +1668,111 @@ impl Checker {
         swapped: bool,
         create_recursion: bool,
     ) -> Result<(), Clash> {
-        todo!("R3h")
+        let (d1, d2) = (self.g.nodes[t1x.0 as usize], self.g.nodes[t2x.0 as usize]);
+        self.pairs.keys.insert(PairSet::key(t1x, t2x));
+        let (frames, mark) = (self.frames.len(), self.trace.len());
+        if self.g.mode == Mode::Explain {
+            let [left, right] = pair;
+            let extra = if swapped { SWAPPED } else { 0 };
+            self.frames.push(Frame { left, right, kind: FrameKind::Assumed, extra });
+        }
+        if create_recursion {
+            self.frames.push(Frame { left: t2, right: t2x, kind: FrameKind::Recursion, extra: 0 });
+        }
+        let result = self.pattern_arm([t1x, t2x], d1, d2);
+        if result.is_err() {
+            self.frames.truncate(frames);
+            if swapped {
+                for entry in &mut self.trace[mark..] {
+                    entry.swap(0, 1);
+                }
+            }
+        }
+        result
+    }
+
+    /// The arm of [`Checker::unify3_pattern`] for the two expanded heads
+    /// `[t1x, t2x]` with descriptors `d1` and `d2`: the table of
+    /// CHECKER_REWRITE 8.9, decision 64, first row that applies
+    /// (compiler/ml/ctype.ml:2333-2425). It pushes nothing when it
+    /// clashes. O(1) plus a push per child, or one of the callees.
+    fn pattern_arm(&mut self, [t1x, t2x]: [Ty; 2], d1: Node, d2: Node) -> Result<(), Clash> {
+        let plain = (d1.head | d2.head) & EXTENDED == 0;
+        let generate = self.generate_equations;
+        match (d1.tag(), d2.tag()) {
+            (ARROW, ARROW) | (TUPLE, TUPLE) if plain => return self.push_children(d1, d2),
+            (CONSTR, CONSTR) if d1.a == d2.a => {
+                let arity = d1.arity();
+                if arity != d2.arity() {
+                    return Err(Clash);
+                }
+                if generate && self.assume_injective {
+                    // `set_mode_pattern ~generate:true ~injective:false`
+                    // (ctype.ml:2352-2354), undone by the frame.
+                    let extra = 1 | 2;
+                    self.frames.push(Frame { left: Ty(NONE), right: Ty(NONE), kind: FrameKind::Flags, extra });
+                    self.assume_injective = false;
+                } else if generate && self.types.info(d1.a).flags & (LOCAL | DATATYPE) == 0 {
+                    // Per argument by injectivity, falling back (ctype.ml:
+                    // 2358-2375; 8.9, decision 68).
+                    todo!("R3r")
+                }
+                self.push_lists(d1.b + 1, d2.b + 1, arity);
+                return Ok(());
+            }
+            _ => {}
+        }
+        let instantiable = |c: &Checker, d: Node| d.tag() == CONSTR && d.arity() == 0 && c.types.instantiable(d.a);
+        let (left, right) = (instantiable(self, d1), instantiable(self, d2));
+        if generate && left && right {
+            // The newer type gets the equation (ctype.ml:2376-2387).
+            if self.find_newtype_level(d1.a) > self.find_newtype_level(d2.a) {
+                return self.add_gadt_equation(d1.a, t2x);
+            }
+            return self.add_gadt_equation(d2.a, t1x);
+        }
+        if generate && left {
+            self.reify(t2x)?;
+            return self.add_gadt_equation(d1.a, t2x);
+        }
+        if generate && right {
+            self.reify(t1x)?;
+            return self.add_gadt_equation(d2.a, t1x);
+        }
+        if d1.tag() == CONSTR || d2.tag() == CONSTR {
+            self.reify(t1x)?;
+            self.reify(t2x)?;
+            return if generate { self.mcomp(t1x, t2x) } else { Ok(()) };
+        }
+        if d1.head & d2.head & EXTENDED == 0 {
+            return Err(Clash);
+        }
+        let (l, r) = (self.extras.descriptors[d1.a as usize], self.extras.descriptors[d2.a as usize]);
+        match (l, r) {
+            (ExtraDescriptor::Object, ExtraDescriptor::Object) => {
+                let (fields1, fields2) = (self.g.lists[d1.b as usize], self.g.lists[d2.b as usize]);
+                self.unify_fields(fields1, fields2)
+            }
+            // A snapshot, `unify_row`, and on a clash `reify` and `mcomp`
+            // (ctype.ml:2402-2411; 8.9, decision 68).
+            (ExtraDescriptor::Variant(_), ExtraDescriptor::Variant(_)) => todo!("R3r"),
+            (ExtraDescriptor::Nil, ExtraDescriptor::Nil) => Ok(()),
+            (ExtraDescriptor::Poly, ExtraDescriptor::Poly) if d1.arity() == 1 && d2.arity() == 1 => {
+                let (body1, body2) = (self.g.lists[d1.b as usize], self.g.lists[d2.b as usize]);
+                self.push_pair(body1, body2);
+                Ok(())
+            }
+            (ExtraDescriptor::Poly, ExtraDescriptor::Poly) => self.enter_poly(d1, d2),
+            (ExtraDescriptor::Package(_), ExtraDescriptor::Package(_)) => {
+                match self.unify_package([t1x, t2x], d1, d2) {
+                    Ok(()) => Ok(()),
+                    // `Not_found`: the lists reified (ctype.ml:2416-2424;
+                    // 8.9, decision 63).
+                    Err(Clash) => todo!("R3r"),
+                }
+            }
+            _ => Err(Clash),
+        }
     }
 
 
