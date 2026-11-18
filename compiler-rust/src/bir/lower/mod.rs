@@ -747,6 +747,8 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// H13: A:28 delay_safe; K1: C:1529 compile_expr. The supported literal,
     /// variable, module and function expressions are strictly pure by construction.
     /// Delay safety reads child flags or the variable's final ASSIGNED/JS_GLOBAL facts.
+    /// For the tests: the lowering makes its leaves through the interface.
+    #[cfg(test)]
     fn pure_expression(&mut self, view: View<'_>, aux: u16) -> NodeId {
         super::j::pure_expression(&mut self.arena, view, aux)
     }
