@@ -8708,7 +8708,7 @@ reads one.
   `Env::add_gadt_instance_level` took no level and tracked nothing. Now
   the sets are in the type context (`TypeContext::new_gadt_instance_scope`,
   `gadt_instance_level`, `add_gadt_instances`, `add_gadt_instance_chain`,
-  `compiler-rust/src/types/context.rs:5725-5830`), each scope holding its
+  `compiler-rust/src/types/context.rs:5725-5845`), each scope holding its
   enclosing one's handle, and the environment holds the innermost handle
   (`compiler-rust/src/types/env.rs:2810`). Both callers of
   `add_gadt_instance_level` (`typecore.rs:11976`, `13625`) build the case
@@ -8718,14 +8718,15 @@ reads one.
   are journaled (`TypeMutation::GadtInstance`) and undone on backtrack, as
   OCaml trails `set_typeset`. The equation records the pattern's newtype
   level as its expansion level (`env.ml:1805-1810`;
-  `add_gadt_equation`, `ctype.rs:1845`); `check_trace_gadt_instances`
+  `add_gadt_equation`, `ctype.rs:1839`); `check_trace_gadt_instances`
   forgets the memorized expansions (`ctype.ml:182`); the expansion test is
-  `try_expand_head_traced` (`ctype.rs:4764`), made before the
-  substitution, which it does not affect; `expand_head_traced`
-  (`ctype.rs:7368`) adds the chain; the unifier's expansions
-  (`unify2`, `ctype.ml:2289-2292`) propagate the refusal
-  (`expand_head_unif_traced`, `ctype.rs:7350`); `update_level_pass`
-  (`ctype.rs:3005`) makes the level test. Without OCaml's arm of `unify`
+  `subst_gadt_instance` (`ctype.rs:5129`), reached from
+  `try_expand_head_with_mode` (`ctype.rs:4749`) only while tracing and
+  made before the substitution, which it does not affect; the head
+  expansion loop (`expand_head_loop`, `ctype.rs:7375`) adds the chain;
+  the unifier's expansions (`unify2`, `ctype.ml:2289-2292`) propagate the
+  refusal (`expand_head_unif_traced`, `ctype.rs:7349`);
+  `update_level_pass` (`ctype.rs:2999`) makes the level test. Without OCaml's arm of `unify`
   for two nullary locally abstract types (`ctype.ml:2255-2268`: expand
   only the later one, lower nothing first), p11 became refused. A trace
   with the arm disabled shows `unify_types` lowering the copy of `b`
@@ -8739,10 +8740,15 @@ reads one.
   `instance env` and `instance_list env` (`ctype.ml:877-894`), adds the
   copy of an instance to its set under local constraints. A function
   generalized inside a case (q01) gave Rust copies that were no instances.
-  `instance_in` and `instance_list_in` (`ctype.rs:12438`) take the
+  `instance_in` and `instance_list_in` (`ctype.rs:12451`) take the
   environment and, only under local constraints with an instance scope,
   walk the finished copy's table once (`add_copied_gadt_instances`,
-  `ctype.rs:12485`); the typecore sites of OCaml's `instance env` use them.
+  `ctype.rs:12503`); the typecore sites of OCaml's `instance env` use them.
+- `752db1e00` keeps these tests off the default path (see "Cost" below);
+  `b46a3af77` adds nothing where an environment has an equation but no
+  instance scope at its level, a state OCaml asserts against
+  (`env.ml:1326-1328`), which the type checker does not build and the
+  checker tests on trunk do.
 - Fixtures: super_errors `gadt_instance_ambiguous_*` (the 30 programs
   refused by OCaml that Rust accepted: p01, p02, p05, p07-p10, p12-p15,
   p19-p22, p27, p28, q01, q02, q04, q05, q07, q10, q12, q13, q15, q16, r07,
@@ -8766,7 +8772,25 @@ that Rust makes without an environment (`update_level`, for the same
 nullary constructor, universal variables, object and row variables) make
 no level test; no program here reaches one with an instance. The port
 was stopped at the sites a program shows, as the size limit of the task
-asks.
+asks. The chain of `try_expand_head` (`ctype.ml:1273-1275`) is added only
+while tracing (`expand_head_loop`), where OCaml adds it after every
+expansion; no program of the 64 shows the difference.
+
+Cost: open. The `Instruction count` check on a clean `tests/tests` build
+measured +12,960,104 instructions (+0.313%) for `92862d207`..`7d08707fd`
+and +11,397,960 (+0.276%) for `c0daf094f` (base 4,134,894,291, head
+4,146,292,251), against the limit of +0.03%. Of the second:
+`find_abbrev_expansion` +8.2M against `try_expand_head_with_mode`
+-4.7M (the second caller, the chain, keeps it from being inlined),
+`instance_in` +7.1M against `instance` -6.0M and `instance_list_in`
++1.4M against `instance_list` -1.3M (the flag test after a copy and the
+environment argument), `expand_head_unif_traced` +2.4M and
+`expand_head_with_mode` +1.0M (the out-slot and the chain test of the
+loop), and about 2.5M of work that OCaml does too in units with an
+instance scope (`add_copied_gadt_instances` 0.5M, `gadt_instance_level`
+0.5M, the general level update instead of the plain one 0.5M,
+`repr_chain` 0.4M, `unify` 0.3M, allocation). That last part alone is
+above the limit.
 
 ## Fourth round: modules, aliases and usage marks
 
