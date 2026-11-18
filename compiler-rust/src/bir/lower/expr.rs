@@ -249,7 +249,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             self.js.release(&mut self.arena, B::from_node(head));
                             return Probed::Free(tail);
                         }
-                        return Probed::Free(self.free.push(Free::Seq { first: head, second: tail }));
+                        return Probed::Free(self.free.push(Free::Seq { first: B::from_node(head), second: tail }));
                     }
                     (_, tail) => tail,
                 };
