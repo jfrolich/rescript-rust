@@ -2178,7 +2178,7 @@ it stops and reports a reproduction.
 | R3n | The references of a copied variant row: shared when the row variable is, new otherwise (8.6, decision 34) | `rows.rs`, `expand.rs` | R3e, R3f | R3g | 150 |
 | R3g | Universal variables and polymorphic types with variables: the scopes, `unify_univar`, `enter_poly`, the escape test, `occur_univar`, PR#6744 in `unify_row_field` (8.6, decisions 49 to 51; 8.8) | `rows.rs` | R3e, R3f, R3n | R3p | 600 |
 | R3p | Packages: the merge of two name lists, completed through `PackageDecls` (8.6, decision 52; 8.8) | `rows.rs` | R3e | R3g | 150 |
-| R3h | Pattern mode: state, equations, `reify`, the binding walk of pattern mode, the arms without a backtrack, the fixed-row rule of `copy_refs` (8.9). Designed; its twelve tests passed against a prototype in the seventh turn; not built | `rows.rs`, `unify.rs`, `expand.rs` | R3n, R3g | R3i, R3j, R3q | 450 |
+| R3h | Pattern mode: state, equations, `reify`, the binding walk of pattern mode, the arms without a backtrack, the fixed-row rule of `copy_refs` (8.9). Designed; its twelve tests passed against a prototype in the seventh turn; not built | `rows.rs`, `unify.rs`, `expand.rs` | R3n, R3g | R3i, R3j, R3q | 700 |
 | R3r | Pattern mode: `mcomp`, the two arms that try and fall back, the package fallback (8.9). Designed; its seven tests passed against a prototype; not built | `rows.rs`, `unify.rs` | R3h | R3i, R3j, R3q | 450 |
 | R3q | `instance_poly` and `instance_label`: the copy that goes through free universal variables without sharing (`copy_sep`), and the fixed-row rule of `copy_row` only it reaches (8.6, decision 47; 8.10). Designed as text in the seventh turn; no skeleton, no test | `rows.rs`, `expand.rs` | R3n, R3g | R3h, R3i, R3j | 300 |
 | R3s | The ambiguity of GADT instances: tracing, the instance sets and the three places of the kernel that read them; a nullary constructor's own memo while tracing (8.6, decision 72; 8.11). Designed as text in the seventh turn; no skeleton, no test | `unify.rs`, `expand.rs` | R3r | R3i, R3j, R3q | 300 |
@@ -3076,10 +3076,14 @@ Checker::subst.
 
 A prototype of this slice was written in the design turn and every
 test of the slice passed against it. It is not in the repository (it
-was over the size set for committing it): you write the bodies from
-the doc comments and section 8.9.
+was over the size set for committing it); it is the first comment of
+pull request 354 and you may read it. It is a reference, not the
+answer: you write the bodies from the doc comments and section 8.9.
+Its occur_pattern recurses, which counts as failure below: the walk on
+Checker::frames has never been run. Where the prototype and a doc
+comment differ the doc comment stands, and you report the difference.
 
-On your first commit this prints rows.rs:8 and unify.rs:5, and the
+Before your first commit this prints rows.rs:8 and unify.rs:5, and the
 second prints r3_tests.rs:12:
   grep -c 'todo!("R3h")' compiler-rust/src/tc/*.rs | grep -v ':0$'
   grep -c '#\[ignore = "R3h build"\]' compiler-rust/src/tc/*.rs | grep -v ':0$'
@@ -3092,7 +3096,10 @@ each commit run them with `-- --ignored` and say in the commit message
 which pass):
 1. Checker::match_unmatched in rows.rs (decision 47, last paragraph),
    with the hand-built row of that decision as a running test in
-   src/tc/r3_tests.rs.
+   src/tc/r3_tests.rs; a second running test whose row is not fixed by
+   its flag and has a constructor as its `more` (ctype.ml:826-830:
+   copy_refs sends it to match_fixed_fields too); and a step test of
+   match_unmatched over a copy with n unmatched fields.
 2. Checker::{find_newtype_level, non_recursive_abbrev, duplicate,
    add_gadt_equation} in rows.rs, Checker::cut_equations in unify.rs,
    and the equation arm at the top of Checker::subst in expand.rs
@@ -3101,7 +3108,8 @@ which pass):
    (section 8.9, "reify").
 4. Checker::{unify_pattern, unify_newtypes, occur_pattern,
    unify3_pattern} in unify.rs and the call of unify_newtypes in
-   unify_pair (decisions 64, 65, 69). In unify3_pattern the three arms
+   unify_pair (decisions 64, 65, 69), with a step test of
+   occur_pattern over a type nested n deep. In unify3_pattern the three arms
    marked 2 in the table of decision 64 are `todo!("R3r")`, and the
    call of mcomp in the arm "a constructor on either side" is the
    existing Checker::mcomp, whose body is R3r's.
@@ -3115,7 +3123,16 @@ their `todo!("R3r")` and the tests ignored for "R3r build" as they are.
 
 Steps: one `#[cfg(test)] super::steps::tick()` per node `reify`,
 `non_recursive_abbrev`, `occur_pattern` and `duplicate` visit, and per
-entry `cut_equations` pops; unify_pair's own tick counts the pairs.
+entry `cut_equations` pops; one per field `match_unmatched` reads;
+unify_pair's own tick counts the pairs.
+
+The two step tests you add (commits 1 and 4) are relations: the steps
+at 10,000 are at most eleven times the steps at 1,000. Each must be
+seen to fail with its structure broken (a second pass over the fields;
+a walk that revisits a node), and the commit message says how you
+broke it. The occur_pattern test also runs at a depth of 100,000
+without overflowing the stack; if that case fails for a reason outside
+occur_pattern, leave it out and report the reason.
 
 Relations to hold: every tc:: test that passed before passes
 unchanged; pattern_mode_at_ten_thousand and
@@ -3131,7 +3148,10 @@ method"). No target is set (decision 46).
 Report what Graph::generalize writes when `duplicate` calls it under
 its speculation (decision 76): every kind of write, and whether
 Graph::restore puts it back. If it writes anything but levels through
-the trail, stop and report it: do not add a second copy.
+the trail, stop and report it: do not add a second copy. Report also
+whether a node of the destination at or below the graph's current
+level stays as it is (Graph::generalize skips such a node) and is then
+shared by the copy: if one can be, stop and report it with the node.
 
 The hand-built tests are the judge. If a test of yours fails where
 your code does what the ctype.ml lines say, stop and report the test
@@ -3148,7 +3168,8 @@ or on a failed unification; a body of an equation that shares a node
 with its destination; writing a TypeTable row of an equation anywhere
 but add_gadt_equation and cut_equations; a logged write of a node the
 copy of `duplicate` made; a change in graph.rs, level.rs or
-template.rs, or under src/types. At most 450 lines.
+template.rs, or under src/types. At most 700 lines (the prototype's
+part of this slice was about 630).
 ```
 
 ```text
@@ -5495,11 +5516,17 @@ from `unify_pair` BEFORE the arm for a universal variable and after the
 arm for two nullary constructors of one type; the test that guards the
 call is `l.head == CONSTR && r.head == CONSTR &&
 !self.equations.is_empty()`: two heads in registers, then the one load.
-OCaml's guard is `Env.has_local_constraints !env`; "an equation exists"
-is the same thing while equations are the only local constraints the
-kernel holds. The types `reify` makes are not local constraints
-(`Env.add_local_type`), so a pattern that only reified does not take
-the arm, as in OCaml. Observed on the prototype
+OCaml's guard is `Env.has_local_constraints !env`, which is also true
+when the environment holds only a type `reify` made or an existential
+type: `Env.add_local_type` fills the map that `has_local_constraints`
+tests (env.ml:1047, 1802-1803; ctype.ml:970, 1823). (Corrected in the
+review of the seventh turn: this paragraph said those types are not
+local constraints and that OCaml does not take the arm for them. OCaml
+does take it.) The kernel's guard is narrower and gives the same
+result: without an equation no locally abstract type has a manifest,
+so `try_expand_once` raises `Cannot_expand` for either side and the
+pair goes to `unify2` as it is (ctype.ml:2266-2269), which is what not
+taking the arm does. Observed on the prototype
 (`the_newer_of_two_locally_abstract_types_is_expanded_once`): with `n1
 := n0` then `n0 := int`, `n1` against `n0` expands `n1` once, and the
 memo of the `n1` node is the `n0` node.
@@ -5812,15 +5839,27 @@ checked here against the skeleton as it stands.
 
 Reads added to expression mode, per place:
 
-- `unify_expanded` and unify3: none (the load of `umode` moved from
-  one to the other; `pattern` is a register);
+- `unify_expanded`: one load of `umode` at its top, per call, and two
+  branches on the register it is in; unify3: one branch on that
+  register. (Corrected in the review of the seventh turn: this line
+  said "none". In the sixth turn's code the load was in unify3, after
+  the arms for a variable, a universal variable and a pair of fields;
+  a pair that ends in one of those arms, or before unify3, now pays
+  one byte load it did not pay. `assumed_equal` is out of line and
+  `#[cold]`, which keeps expression mode's code as it was and costs
+  pattern mode a call a pair. Both are measured at R5c with the other
+  reads of this decision.)
+- the `PackageEnd` frame, on its failure path: one load of `umode` in
+  `package_fallback`;
 - `unify_pair`: one load of `equations.len()` for a pair of two heads
   that are both plain constructors (`l.head == CONSTR && r.head ==
   CONSTR`: nullary, not extended) of different types; nothing for any
   other pair;
 - `occur_expanding`: one load of `umode` when a binding walk found the
   variable (decision 69);
-- `subst`: one test of the `NEWTYPE` bit of the row it has loaded;
+- `subst`: one test of the `NEWTYPE` bit of the row it has loaded
+  (R3h builds it, with the call of `unify_newtypes` in `unify_pair`:
+  neither is in the skeleton);
 - `unify_distinct`: on the failure path, one load of `tries.len()`;
   nothing on the success path, and nothing in the loop of
   `run_frames`;
@@ -5830,7 +5869,10 @@ Reads added to expression mode, per place:
   for a row 1 that has a name with arguments and no `last1`, one load
   of the left node's head;
 - `copy_refs`: for a copied row that is fixed, one pass over its
-  fields (`match_fixed_fields`); for one that is not, one compare;
+  fields (`match_fixed_fields`); for one that is not, one compare; and
+  for every copied row one load of the node of `more` and a test of
+  its tag (a row over a constructor is copied as a fixed one, PR#6163,
+  ctype.ml:826-830; added in the review);
 - `lower_scoped` (a unit with a scoped type only): decision 75.
 
 Memory. The hasher of both sets is `fast_hash::FastState`, a zero-sized
@@ -5929,6 +5971,71 @@ decision 71, the cost paragraph of `unify_row`, and the two prompts in
 
 R3q (`instance_poly`, `instance_label`) is section 8.10; the ambiguity
 of GADT instances (R3s) is section 8.11.
+
+**Corrections after the review of the seventh turn.** Made in place by
+the reviewer: 1 to 4. Owed by the next design turn, which makes the
+skeletons of R3q and R3s: 5 to 10.
+
+1. Decision 65 said the types `reify` makes are not local constraints.
+   They are. The arm's guard is right for another reason, now given
+   there.
+2. Decision 71 said `unify_expanded` and unify3 pay nothing new. They
+   pay one byte load a call; the list also lacked the load of
+   `package_fallback` and the tag test of `more` in `copy_refs`.
+3. The size of R3h was set at 450 lines on paper. By the markers of the
+   prototype its part is about 630 (the bodies 455, the pattern arm of
+   unify3 123, the occurrence walk 35, the arm of `subst` 10, the call
+   in `unify_pair` 5); the limit is 700. R3r's part is about 410 and
+   its 450 stands.
+4. The prompt of R3h said nothing of three things, and now does: the
+   builder may read the prototype; the prototype's `occur_pattern`
+   recurses, so the walk on `Checker::frames` the prompt asks for was
+   never run; `match_unmatched` and `occur_pattern` had no step test,
+   and the builder adds them.
+5. `copy_refs` treats a row over a constructor as a fixed one (PR#6163,
+   ctype.ml:826-830). That is OCaml's rule and it is built code, but it
+   widens what reaches `match_unmatched` beyond the argument of
+   decision 47, and the scanner of
+   `no_generated_case_has_a_fixed_row_with_an_unmatched_field` reads
+   the printed `fixed` only: it does not watch such a row. Nothing that
+   runs reaches it. R3h builds the body with a test of such a row; the
+   scanner is widened or the decision says why it need not be.
+6. Step tests are missing for three loops that are built:
+   `lower_row_name`, `unname_row` and `match_fixed_fields`. For
+   `lower_row_name` the cost line is also short of the truth: a chain
+   of n variant nodes whose name does not escape is walked to its end
+   from each of its nodes that `lower_scoped` visits, n squared over
+   two loads the first time the chain is lowered. `update_level` does
+   not visit the inner nodes of a chain (`iter_row` walks a `more` that
+   is a variant in line, btype.ml:229-241). Decide with a step test at
+   1,000 and 10,000: skip the inner nodes, or bound the chain.
+7. Section 8.11 turns tracing on when `equations` is not empty. OCaml
+   turns it on when the environment has a local constraint
+   (`check_trace_gadt_instances`, ctype.ml:178-184), and the types of
+   `reify` and the existential types are local constraints (item 1).
+   The narrower test needs its own argument (only an equation has an
+   expansion level, ctype.ml:1220-1227; what `cleanup_abbrev` and a
+   nullary constructor's own memo, 200-202, can show without one), or
+   OCaml's test is taken. 8.11 also leaves out: that a set gets its
+   first member only from an expansion under tracing; that
+   `try_expand_head` adds the chain whatever the tracing flag when the
+   environment has an instance scope (1271-1276); the wrapper
+   `expand_head_trace` (2781-2784); an equation whose level has no
+   instance scope.
+8. Decision 69 does not mention the `type_changed` loop of
+   `occur_full` (ctype.ml:1470-1476): say why the kernel needs none,
+   or build it.
+9. Decisions 64 and 70 were not compared with OCaml arm by arm in
+   either review. Their evidence is the hand-built tests and the run
+   of the prototype; the builders stop and report where a test and the
+   cited lines disagree.
+10. Citations: `link_type rm ty` is ctype.ml:2619, not 2616 (decision
+    60 and the comment in `unify_row`); `has_cached_expansion` is 2254,
+    not 2251 (8.11); the ranges of `mcomp_fields` and `mcomp_row` in
+    decision 70 are two lines off. Decision 80 (b) holds for every plan
+    without `SCOPED`, not only under `PATTERN` (for a plan without
+    scoped types `Checker::lower` is `Graph::lower`, so nothing
+    changed there).
 
 ### 8.10 `instance_poly` and `instance_label` (R3q)
 
