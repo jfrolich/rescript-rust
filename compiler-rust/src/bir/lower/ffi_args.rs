@@ -54,8 +54,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         attr: &Attr,
         arg: &mut Out<B>,
     ) {
-        let value = B::node(arg.value.take().expect("external argument value"));
-        let r = B::at(value);
+        let r = B::of(arg.value.as_ref().expect("external argument value"));
         let wrapped =
             label == LabelNoname::ArgOptional && self.js.kind(&self.arena, r) == Kind::Optional;
         let target = if wrapped { self.js.operand(&self.arena, r, 0) } else { r };
@@ -73,11 +72,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
         };
         if !hold {
-            arg.value = Some(B::from_node(value));
             return;
         }
+        let value = arg.value.take().expect("external argument value");
         let held = if wrapped {
-            let mut shell = B::from_node(value);
+            let mut shell = value;
             self.js.take_operands(&mut self.arena, &mut shell);
             let target = self.js.pop();
             let replacement = self.hold_in_variable(arg, target);
@@ -87,7 +86,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.js.assume_strict(&mut self.arena, &mut wrapper);
             wrapper
         } else {
-            self.hold_in_variable(arg, B::from_node(value))
+            self.hold_in_variable(arg, value)
         };
         arg.value = Some(held);
     }
