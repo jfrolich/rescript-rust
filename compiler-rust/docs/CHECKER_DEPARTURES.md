@@ -8791,7 +8791,7 @@ functions with no generalized constructor lower types through a `switch`
 (`Some(n) => [n, f(Int, n)]`, and a `ref([])` assigned in a case): both
 compilers accept it with the same JavaScript.
 
-Cost: open. Every read of an instance set answers nothing while every set
+Cost: accepted at the figures below. Every read of an instance set answers nothing while every set
 is empty, and a set gets its first member only from the test of
 `expand_abbrev_gen` (`ctype.ml:1217-1227`) while tracing. So the type
 context's flag is "a type has been added to an instance set in this
@@ -8839,7 +8839,14 @@ Measured locally (fat LTO, one codegen unit, five runs a side; trunk
 459b87ca5 as base): `bcc2a4ef4` +4,401,645, the flag `82e309f01`
 +6,529,629 (not lower, kept because the flag defines (a)), one
 instantiation of the expansion `cbaf8d70d` +5,694,179, trunk's calls at
-the unifier's sites `fe245f217` +5,213,073.
+the unifier's sites `fe245f217` +5,213,073. `#[inline(never)]` on
+`unify_newtypes` (`89b7ae1e8`) measured +4,521,654 but raised `unify`
+from +1,130,695 to +1,914,955 (its frame grows to 0x258 bytes; the drop
+was `IdTbl::find_by_ident` and the path iterator), and was reverted
+(`8cd9bdec6`). CI on `8cd9bdec6`, whose checker code is `fe245f217`'s:
+base 4,135,460,618, head 4,141,213,244, +5,752,626 (+0.139%), every
+function of the table above unchanged and `IdTbl::find_by_ident` at
++706,988.
 
 ## Fourth round: modules, aliases and usage marks
 
