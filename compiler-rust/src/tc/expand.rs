@@ -904,10 +904,22 @@ impl Checker {
     /// body of its manifest is a node of the graph, so the entry is
     /// memorized with the handle the copy is about to get (the next
     /// node) and then the body is copied at the node's level with
-    /// [`Checker::copy`]. Not built: no row has both [`NEWTYPE`] and a
-    /// manifest until `add_gadt_equation` writes one.
+    /// [`Checker::copy`]. No row has both [`NEWTYPE`] and a manifest
+    /// until `add_gadt_equation` writes one. O(nodes of the
+    /// body), the cost of [`Checker::copy`].
     fn subst(&mut self, ty: Ty, node: Node, info: TypeInfo, mode: ExpandMode) -> Result<Ty, Clash> {
         let manifest = self.types.manifests[info.manifest as usize];
+        if info.flags & NEWTYPE != 0 {
+            // `memorize_abbrev` before the copy of the body (ctype.ml:1124):
+            // a node of the type itself in the body links to `ty`.
+            let body = Ty(self.g.nodes.len() as u32);
+            self.memorize(ty, body, matches!(mode, ExpandMode::Opt | ExpandMode::Rigid));
+            let level = std::mem::replace(&mut self.g.level, node.level);
+            let copy = self.copy(manifest.body);
+            self.g.level = level;
+            debug_assert_eq!(copy, body, "the body of an equation is generic");
+            return Ok(self.g.repr(copy));
+        }
         let base = self.g.nodes.len() as u32;
         let relocate = |reference: Ty| {
             if reference.0 & RELATIVE != 0 {

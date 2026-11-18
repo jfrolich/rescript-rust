@@ -1463,7 +1463,16 @@ impl Checker {
     /// popped), one step each, plus the cleanup. (R3h; CHECKER_REWRITE
     /// 8.9, decision 67)
     pub fn cut_equations(&mut self, len: usize) {
-        todo!("R3h")
+        if self.equations.len() <= len {
+            return;
+        }
+        while self.equations.len() > len {
+            #[cfg(test)]
+            super::steps::tick();
+            let equation = self.equations.pop().expect("an equation above the length");
+            self.types.rows[equation.type_index as usize] = equation.previous;
+        }
+        self.cleanup_abbrev();
     }
 
     /// The arm of `unify` for two locally abstract types under local

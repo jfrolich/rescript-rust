@@ -11,6 +11,7 @@
 
 use std::cmp::Ordering;
 
+use super::expand::{ABBREV, ExpandMode, Manifest, NEWTYPE, Newtype, TypeInfo, TypeTable};
 use super::graph::{ARROW, CONSTR, GENERIC, Graph, LINK, Mode, NONE, Node, TUPLE, Ty, VAR};
 use super::segment::{
     EXTENDED, ExtraDescriptor, PackageRow, Range, RowFieldKind, RowFieldRow, Segment, VariantRow,
@@ -3811,7 +3812,26 @@ impl Checker {
     /// over `destination`, and 28 + 8 + 20 bytes of rows. (R3h;
     /// CHECKER_REWRITE 8.9, decision 67)
     pub fn add_gadt_equation(&mut self, source: u32, destination: Ty) -> Result<(), Clash> {
-        todo!("R3h")
+        if !self.non_recursive_abbrev(source, destination)? {
+            return Ok(());
+        }
+        self.cleanup_abbrev();
+        let body = self.duplicate(destination);
+        let previous = self.types.rows[source as usize];
+        let (level, _) = self.find_newtype_level(source);
+        let manifest = self.types.manifests.len() as u32;
+        // A zero-node template naming the body: never instantiated, the
+        // equation arm of `subst` copies `body` (template.rs, `Template`).
+        let template = Template { nodes: body.0, node_len: 0, pools: 0, list_len: 0 };
+        let params = self.types.roots.len() as u32;
+        self.types.manifests.push(Manifest { template, params, body });
+        let newtype = self.types.newtypes.len() as u32;
+        let expansion_level = self.newtype_level;
+        self.types.newtypes.push(Newtype { level, expansion_level });
+        self.equations.push(Equation { type_index: source, previous });
+        let flags = previous.flags | ABBREV | NEWTYPE;
+        self.types.rows[source as usize] = TypeInfo { manifest, newtype, flags, ..previous };
+        Ok(())
     }
 
     /// `local_non_recursive_abbrev env p ty` (compiler/ml/ctype.ml:
@@ -3855,7 +3875,80 @@ impl Checker {
     /// a constructor, one [`Checker::expand_head`] a constructor that is
     /// entered. (R3h; CHECKER_REWRITE 8.9, decision 67)
     pub fn non_recursive_abbrev(&mut self, source: u32, ty: Ty) -> Result<bool, Clash> {
-        todo!("R3h")
+        let lax = self.fresh_marks();
+        let strictly = self.fresh_marks();
+        let base = self.frames.len();
+        self.push_visit(ty, false);
+        while self.frames.len() > base {
+            let frame = self.frames.pop().expect("an entry above the base");
+            let strict = frame.extra != 0;
+            let t = self.g.repr(frame.left);
+            // An expansion of the walk adds nodes past the marks.
+            if t.0 as usize >= self.marks.len() {
+                self.marks.resize(self.g.nodes.len(), 0);
+            }
+            let mark = self.marks[t.0 as usize];
+            if mark == strictly || (mark == lax && !strict) {
+                continue;
+            }
+            self.marks[t.0 as usize] = if strict { strictly } else { lax };
+            #[cfg(test)]
+            super::steps::tick();
+            let node = self.g.nodes[t.0 as usize];
+            if node.tag() != CONSTR {
+                // `| _ -> if strict then ... iter_type_expr` (1525-1529).
+                if strict {
+                    let count = match node.tag() {
+                        ARROW => node.arity() + 1,
+                        TUPLE => node.arity(),
+                        _ => 0,
+                    };
+                    for index in (0..count).rev() {
+                        let child = self.child(node, index).expect("a child below the count");
+                        self.push_visit(child, true);
+                    }
+                }
+                continue;
+            }
+            if node.a == source {
+                self.frames.truncate(base);
+                return Ok(false);
+            }
+            if !strict && TypeTable::contractive(self.types.info(node.a)) {
+                continue;
+            }
+            let head = match self.expand_head(t, ExpandMode::Unif) {
+                Ok(head) => self.g.repr(head),
+                Err(clash) => {
+                    self.frames.truncate(base);
+                    return Err(clash);
+                }
+            };
+            if head != t {
+                self.push_visit(head, strict);
+                continue;
+            }
+            // `Cannot_expand`: the arguments, by the declared parameters
+            // (`with Not_found -> args` for a type without a row).
+            let declared = (node.a as usize) < self.types.rows.len();
+            for index in (0..node.arity()).rev() {
+                let argument = self.g.lists[(node.b + 1 + index) as usize];
+                let constrained = if declared {
+                    self.types.constrained(node.a, index)
+                } else {
+                    let argument = self.g.repr(argument);
+                    self.g.nodes[argument.0 as usize].tag() != VAR
+                };
+                self.push_visit(argument, strict || constrained);
+            }
+        }
+        Ok(true)
+    }
+
+    /// O(1) amortized: one entry of [`Checker::non_recursive_abbrev`]'s
+    /// walk on [`Checker::frames`], `extra` its strictness.
+    fn push_visit(&mut self, ty: Ty, strict: bool) {
+        self.frames.push(Frame { left: ty, right: Ty(NONE), kind: FrameKind::Pair, extra: u32::from(strict) });
     }
 
     /// `duplicate_type` for an equation (`Subst.type_expr Subst.identity`,
@@ -3880,7 +3973,14 @@ impl Checker {
     /// one trail entry (20 bytes) a node generalized, one step a node
     /// copied, one step a level restored. (R3h)
     pub fn duplicate(&mut self, ty: Ty) -> Ty {
-        todo!("R3h")
+        let token = self.g.speculate();
+        let level = std::mem::replace(&mut self.g.level, 0);
+        self.g.generalize(ty);
+        self.g.level = GENERIC;
+        let copy = self.copy(ty);
+        self.g.level = level;
+        self.g.restore(token);
+        copy
     }
 
     /// `find_newtype_level env path` (compiler/ml/ctype.ml:2084-2091):
@@ -3889,7 +3989,13 @@ impl Checker {
     /// Compared as pairs. A type without a row: `(0, 0)`. O(1): one row
     /// load and at most one `Newtype` load. (R3h)
     pub fn find_newtype_level(&self, type_index: u32) -> (u32, u32) {
-        todo!("R3h")
+        let row = self.types.info(type_index);
+        if row.flags & NEWTYPE != 0 && row.newtype != NONE {
+            let newtype = self.types.newtypes[row.newtype as usize];
+            (newtype.level, newtype.expansion_level)
+        } else {
+            (row.scope, row.scope)
+        }
     }
 
     /// `mcomp` (compiler/ml/ctype.ml:1905-2080): whether two types can
