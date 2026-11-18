@@ -4038,6 +4038,23 @@ impl TypeContext {
         })
     }
 
+    /// Whether the chain `memo` memorizes an expansion of `path` that
+    /// `find_expans private_flag` finds (compiler/ml/btype.ml:612-618): the
+    /// test of the traced expansion, a scan of its own so that
+    /// [`Self::find_abbrev_expansion`] keeps its one caller. One step per
+    /// chain cell.
+    pub(crate) fn has_memorized_expansion(
+        &self,
+        memo: AbbrevMemoRef,
+        private_flag: PrivateFlag,
+        path: &Path,
+    ) -> bool {
+        self.scan_abbrev_chain(memo, |cached_private, cached_path, _, expansion| {
+            (private_flag <= cached_private && path.same(cached_path)).then_some(expansion)
+        })
+        .is_some()
+    }
+
     /// Find the original type (abbrev field) for a path in a memo chain.
     /// This is OCaml's `find_repr` — returns the ORIGINAL type node that was
     /// memoized, creating Tlink sharing in copy_type_cached.

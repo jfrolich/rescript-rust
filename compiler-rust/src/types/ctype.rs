@@ -629,15 +629,8 @@ fn unify_newtypes(
     }
     let expand_first = find_newtype_level(ctx, env, &p1) >= find_newtype_level(ctx, env, &p2);
     let expanded = if expand_first { t1 } else { t2 };
-    let mut ambiguous = None;
-    match try_expand_head_with_mode::<true>(
-        ctx,
-        env,
-        expanded,
-        ExpandHeadMode::Unify,
-        &mut ambiguous,
-    ) {
-        Some(expansion) => {
+    match try_expand_head_traced(ctx, env, expanded, ExpandHeadMode::Unify) {
+        Ok(Some(expansion)) => {
             let expansion = ctx.repr(expansion);
             Some(if expand_first {
                 unify(ctx, state, expansion, t2)
@@ -645,7 +638,8 @@ fn unify_newtypes(
                 unify(ctx, state, t1, expansion)
             })
         }
-        None => ambiguous.map(|ambiguous| Err(ambiguous_instance(ctx, ambiguous))),
+        Ok(None) => None,
+        Err(ambiguous) => Some(Err(ambiguous_instance(ctx, ambiguous))),
     }
 }
 
@@ -4745,21 +4739,11 @@ enum ExpandHeadMode {
     Optimize,
 }
 
-/// OCaml `expand_abbrev_gen` (compiler/ml/ctype.ml:1190-1229) of one head.
-/// While GADT instances are traced, an expansion of `ty` known only at an
-/// instance level above `ty`'s level is OCaml's `Unify [(ty, newvar2
-/// level)]` (ctype.ml:1225): it returns `None` with `ty` in `ambiguous`,
-/// having changed nothing. A caller that expands safely
-/// (`try_expand_safe`, ctype.ml:1260-1265) takes that as a type that cannot
-/// be expanded. Only the `TRACED` instantiation, called in an environment
-/// with an instance scope, makes the test; without one the test cannot
-/// fail, and the other instantiation is trunk's expansion.
-fn try_expand_head_with_mode<const TRACED: bool>(
+fn try_expand_head_with_mode(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     mode: ExpandHeadMode,
-    ambiguous: &mut Option<TypeExprRef>,
 ) -> Option<TypeExprRef> {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
@@ -4802,14 +4786,8 @@ fn try_expand_head_with_mode<const TRACED: bool>(
                 return Some(ctx.repr(cached));
             }
 
-            // `expansion_level` is the declaration's expansion level
-            // (`Env.find_type_expansion`'s `lv`, env.ml:902), set for a GADT
-            // equation.
-            let mut expand_with_subst = |params: &[TypeExprRef],
-                                         manifest: TypeExprRef,
-                                         expansion_level: Option<i32>|
-             -> Option<TypeExprRef> {
-                let subst = || {
+            let expand_with_subst =
+                |params: &[TypeExprRef], manifest: TypeExprRef| -> TypeExprRef {
                     subst_with_memo(
                         ctx,
                         env,
@@ -4823,11 +4801,6 @@ fn try_expand_head_with_mode<const TRACED: bool>(
                         ctx.type_list(args),
                     )
                 };
-                if TRACED && ctx.trace_gadt_instances() {
-                    return subst_gadt_instance(ctx, env, ty, expansion_level, ambiguous, subst);
-                }
-                Some(subst())
-            };
 
             let can_expand_decl_manifest =
                 |decl: &super::decl::TypeDeclaration, manifest: TypeExprRef| {
@@ -4847,9 +4820,8 @@ fn try_expand_head_with_mode<const TRACED: bool>(
                 if let Some(manifest) = constraint_decl.type_manifest {
                     let params = &constraint_decl.type_params;
                     if params.len() == args.len() {
-                        let expansion_level =
-                            constraint_decl.type_newtype_level.map(|(_, level)| level);
-                        return expand_with_subst(params, manifest, expansion_level);
+                        let expanded = expand_with_subst(params, manifest);
+                        return Some(expanded);
                     }
                 }
             }
@@ -4895,10 +4867,8 @@ fn try_expand_head_with_mode<const TRACED: bool>(
                     }
                 };
                 return match expansion {
-                    // A declaration reached through a module has no newtype
-                    // level, hence no expansion level.
                     PdotExpansion::Expand { params, manifest } => {
-                        expand_with_subst(&params, manifest, None)
+                        Some(expand_with_subst(&params, manifest))
                     }
                     PdotExpansion::Rewrite(target) => {
                         let level = ctx.get_level(ty);
@@ -4989,9 +4959,8 @@ fn try_expand_head_with_mode<const TRACED: bool>(
                         if can_expand_decl_manifest(env_decl, manifest) {
                             let params = &env_decl.type_params;
                             if params.len() == args.len() {
-                                let expansion_level =
-                                    env_decl.type_newtype_level.map(|(_, level)| level);
-                                return expand_with_subst(params, manifest, expansion_level);
+                                let expanded = expand_with_subst(params, manifest);
+                                return Some(expanded);
                             } else {
                                 forbid_fallback_manifest_expansion = true;
                             }
@@ -5083,8 +5052,8 @@ fn try_expand_head_with_mode<const TRACED: bool>(
                     if can_expand_decl_manifest(&decl, manifest) {
                         let params = &decl.type_params;
                         if params.len() == args.len() {
-                            let expansion_level = decl.type_newtype_level.map(|(_, level)| level);
-                            return expand_with_subst(params, manifest, expansion_level);
+                            let expanded = expand_with_subst(params, manifest);
+                            return Some(expanded);
                         } else {
                             forbid_fallback_manifest_expansion = true;
                         }
@@ -5126,39 +5095,78 @@ fn try_expand_head_with_mode<const TRACED: bool>(
     }
 }
 
-/// The traced end of `expand_abbrev_gen` (compiler/ml/ctype.ml:1215-1227):
-/// the highest of the declaration's expansion level and the level of an
-/// instance set holding `ty`; below it, `ty` is ambiguous and is not
-/// expanded; otherwise `ty` and its expansion join that set. The test is
-/// made before `subst`, which leaves `ty` as it is. Cost: one
-/// [`gadt_instance_level`] and the substitution.
-fn subst_gadt_instance(
+/// OCaml `expand_abbrev_gen` (compiler/ml/ctype.ml:1190-1229) of one head
+/// with its GADT instance test (ctype.ml:1215-1227), around trunk's
+/// expansion. While instances are traced and the expansion is not a
+/// memorized one (OCaml tests only when it substitutes), the level of the
+/// equation (`Env.find_type_expansion`'s `lv`) or of an instance set
+/// holding `ty`, whichever is higher, is compared with `ty`'s: below it,
+/// `ty` is ambiguous (`Err(ty)`, OCaml's `Unify [(ty, newvar2 level)]`);
+/// otherwise `ty` and its expansion join that set. For an equation the
+/// test is made before the expansion, which leaves `ty` as it is. For a
+/// type that is an instance through another route it is made after, and a
+/// refused expansion is forgotten from `ty`'s memo, as OCaml's
+/// `try_expand_safe` backtracks it. Cost: one scan of `ty`'s memo, one
+/// local-constraint lookup and one [`gadt_instance_level`] beside trunk's
+/// expansion.
+fn try_expand_head_traced(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
-    expansion_level: Option<i32>,
-    ambiguous: &mut Option<TypeExprRef>,
-    subst: impl FnOnce() -> TypeExprRef,
-) -> Option<TypeExprRef> {
-    let instance_level = expansion_level.max(gadt_instance_level(ctx, env, ty));
-    if let Some(instance_level) = instance_level
-        && ctx.get_level(ty) < instance_level
-    {
-        *ambiguous = Some(ty);
-        return None;
+    mode: ExpandHeadMode,
+) -> Result<Option<TypeExprRef>, TypeExprRef> {
+    if !ctx.trace_gadt_instances() {
+        return Ok(try_expand_head_with_mode(ctx, env, ty, mode));
     }
-    let expanded = subst();
-    if let Some(instance_level) = instance_level {
+    let ty = ctx.repr(ty);
+    let (path, arity, abbrev) = match &*ctx.borrow_desc(ty) {
+        TypeDesc::Tconstr { path, args, abbrev } => (*path, args.len(), *abbrev),
+        _ => return Ok(try_expand_head_with_mode(ctx, env, ty, mode)),
+    };
+    // While tracing, `proper_abbrevs` gives the constructor's own memo.
+    let private_flag = match mode {
+        ExpandHeadMode::Optimize => PrivateFlag::Private,
+        ExpandHeadMode::General | ExpandHeadMode::Unify => PrivateFlag::Public,
+    };
+    if ctx.has_memorized_expansion(abbrev, private_flag, &path) {
+        return Ok(try_expand_head_with_mode(ctx, env, ty, mode));
+    }
+    let level = ctx.get_level(ty);
+    let set_level = gadt_instance_level(ctx, env, ty);
+    // The expansion's first route after the memo: an equation of the same
+    // arity, whose expansion level is its newtype level's second part.
+    let equation = env
+        .find_local_constraint(&path)
+        .filter(|decl| decl.type_manifest.is_some() && decl.type_params.len() == arity)
+        .map(|decl| decl.type_newtype_level.map(|(_, level)| level));
+    let instance_level = match equation {
+        Some(expansion_level) => {
+            let instance_level = expansion_level.max(set_level);
+            if instance_level.is_some_and(|instance_level| level < instance_level) {
+                return Err(ty);
+            }
+            instance_level
+        }
+        None => set_level,
+    };
+    let expanded = try_expand_head_with_mode(ctx, env, ty, mode);
+    if let (Some(instance_level), Some(expanded)) = (instance_level, expanded) {
+        if equation.is_none() && level < instance_level {
+            if abbrev != AbbrevMemoRef::nil() {
+                ctx.forget_abbrev(abbrev, &path);
+            }
+            return Err(ty);
+        }
         ctx.add_gadt_instances(env.gadt_instance_scope(), instance_level, &[ty, expanded]);
     }
-    Some(expanded)
+    Ok(expanded)
 }
 
 fn try_expand_head(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
     if expands_gadt_instances(ctx, env) {
-        try_expand_head_with_mode::<true>(ctx, env, ty, ExpandHeadMode::General, &mut None)
+        try_expand_head_traced(ctx, env, ty, ExpandHeadMode::General).unwrap_or(None)
     } else {
-        try_expand_head_with_mode::<false>(ctx, env, ty, ExpandHeadMode::General, &mut None)
+        try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General)
     }
 }
 
@@ -5178,7 +5186,7 @@ pub(crate) fn expand_abbrev_opt_once(
     // OCaml compiler/ml/ctype.ml:4165 calls `expand_abbrev_opt` from
     // `cyclic_abbrev`; ctype.ml:1464-1478 defines that as the Private
     // expansion path through `Env.find_type_expansion_opt`.
-    try_expand_head_with_mode::<false>(ctx, env, ty, ExpandHeadMode::Optimize, &mut None)
+    try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Optimize)
         .map(|expanded| ctx.repr(expanded))
 }
 
@@ -6402,13 +6410,7 @@ fn subtype_rec(
             Ok(())
         }
         (TypeDesc::Tconstr { path: p1, .. }, _) if generic_private_abbrev(ctx, env, p1) => {
-            match try_expand_head_with_mode::<false>(
-                ctx,
-                env,
-                t1,
-                ExpandHeadMode::Optimize,
-                &mut None,
-            ) {
+            match try_expand_head_with_mode(ctx, env, t1, ExpandHeadMode::Optimize) {
                 Some(expanded) => subtype_rec(ctx, env, subtypes, trace, expanded, t2, cstrs),
                 None => {
                     push_subtype_cstr(cstrs, trace, t1, t2, None);
@@ -7381,7 +7383,7 @@ fn expand_head_plain(
         }
         seen[seen_len] = current;
         let seen_len = seen_len + 1;
-        match try_expand_head_with_mode::<false>(ctx, env, current, mode, &mut None) {
+        match try_expand_head_with_mode(ctx, env, current, mode) {
             Some(expanded) => {
                 let expanded = ctx.repr(expanded);
                 if expanded == current {
@@ -7437,7 +7439,6 @@ fn expand_head_traced<const PROPAGATE: bool>(
 ) -> Result<TypeExprRef, TypeExprRef> {
     let start = ctx.repr(ty);
     let mut current = start;
-    let mut ambiguous = None;
     let mut seen = [TypeExprRef(0); 20];
     for seen_len in 0..seen.len() {
         if seen[..seen_len].contains(&current) {
@@ -7445,8 +7446,8 @@ fn expand_head_traced<const PROPAGATE: bool>(
         }
         seen[seen_len] = current;
         let seen_len = seen_len + 1;
-        match try_expand_head_with_mode::<true>(ctx, env, current, mode, &mut ambiguous) {
-            Some(expanded) => {
+        match try_expand_head_traced(ctx, env, current, mode) {
+            Ok(Some(expanded)) => {
                 let expanded = ctx.repr(expanded);
                 if expanded == current {
                     break;
@@ -7456,8 +7457,9 @@ fn expand_head_traced<const PROPAGATE: bool>(
                 }
                 current = expanded;
             }
-            None => {
-                if PROPAGATE && let Some(ambiguous) = ambiguous {
+            Ok(None) => break,
+            Err(ambiguous) => {
+                if PROPAGATE {
                     return Err(ambiguous);
                 }
                 break;
