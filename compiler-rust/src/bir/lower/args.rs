@@ -29,8 +29,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// A:90 runs_no_code: inspect each owned member spine without recursion.
     /// Cost: one step per member of the chain of field reads, to its base.
-    fn runs_no_code(&self, value: NodeId) -> bool {
-        self.js.runs_no_code(&self.arena, B::at(value))
+    fn runs_no_code(&self, value: &B::E) -> bool {
+        self.js.runs_no_code(&self.arena, B::of(value))
     }
 
     /// Whether `statement` declares a variable whose value, if it has one,
@@ -183,15 +183,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         assert!(values.is_empty(), "argument value scratch must be empty");
         for (i, arg) in args.iter_mut().enumerate().rev() {
             self.sequence_steps += 1;
-            let value = B::node(arg.value.take().expect("argument value"));
+            let value = arg.value.take().expect("argument value");
             let (held, value) =
-                if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(value)) {
-                    (Span::default(), value)
+                if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(&value)) {
+                    (Span::default(), B::node(value))
                 } else if method_callee
                     && i == 0
-                    && self.js.kind(&self.arena, B::at(value)) == Kind::Dot
+                    && self.js.kind(&self.arena, B::of(&value)) == Kind::Dot
                 {
-                    let mut shell = B::from_node(value);
+                    let mut shell = value;
                     self.js.take_operands(&mut self.arena, &mut shell);
                     let object = self.js.pop();
                     let (held, object) = self.evaluate_now(B::node(object));
@@ -200,7 +200,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     let value = self.js.refill(&mut self.arena, shell, mark);
                     (held, B::node(value))
                 } else {
-                    self.evaluate_now(value)
+                    self.evaluate_now(B::node(value))
                 };
             has_code |= self.statements.has_statements(arg.stmts) || held.len != 0;
             later_defines_pure &= self.defines_pure_values(&self.evaluation.statements[held.start as usize..(held.start + held.len) as usize])
