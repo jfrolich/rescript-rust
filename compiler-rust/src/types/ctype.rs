@@ -12528,8 +12528,9 @@ pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 }
 
 /// OCaml `instance env sch` (compiler/ml/ctype.ml:879-887): [`instance`],
-/// and in an environment with an instance scope, [`instance_with_gadt_instances`].
-/// The test is one load and one branch in a unit without an instance scope.
+/// and, once a type has joined an instance set in this unit and `env` has an
+/// instance scope, `instance_with_gadt_instances`.
+/// The test is one load and one branch while no type has joined a set.
 pub fn instance_in(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     if has_gadt_instance_scope(ctx, env) {
         instance_with_gadt_instances(ctx, env, ty)
