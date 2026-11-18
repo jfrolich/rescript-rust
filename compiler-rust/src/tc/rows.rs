@@ -2742,7 +2742,12 @@ impl Checker {
     ///   its source): it is copied as [`Checker::copy_refs`] copies a
     ///   shared chain node (one node, the same slots in a new list, the
     ///   slot that named it pointed at the copy, a holder of the
-    ///   reference when it has types), with [`RES_MATCHED`].
+    ///   reference when it has types), with [`RES_MATCHED`]. When the
+    ///   node before it is not the session's either, the chain is copied
+    ///   so from the first node that is not, so that no slot of the
+    ///   source's chain is written (`copy_row` makes the copy's field a
+    ///   new value, btype.ml:373-377). A holder of a reference the
+    ///   session made is a plain store ([`Checker::hold_in_copy`]).
     ///
     /// The source's field keeps its `m`: the two share the reference
     /// (`e`), not the flags (`Reither (c, tl, m, e)` is a new value,
@@ -2752,7 +2757,93 @@ impl Checker {
     #[cold]
     #[inline(never)]
     fn match_unmatched(&mut self, copy: Ty, first: u32) {
-        todo!("R3h")
+        let node = self.open_fresh(copy);
+        let ExtraDescriptor::Variant(row) = self.extras.descriptors[node.a as usize] else {
+            unreachable!("a variant node");
+        };
+        let row = self.extras.variants[row as usize];
+        for index in row.fields.start..row.fields.start + row.fields.len {
+            #[cfg(test)]
+            super::steps::tick();
+            let field = self.extras.row_fields[index as usize];
+            let now = field_repr(&self.g, node.b, node.arity(), field);
+            let RowFieldKind::Either { constant, matched: false } = now.kind else {
+                continue;
+            };
+            // Every node of the chain before its end is a `RES_EITHER`
+            // node (`field_repr` read `Either`): the last one names the
+            // end. `shared` is the slot that names the first node that is
+            // not the session's; every node after it is reached through
+            // it and is not the session's either.
+            let (end, link) = (now.end, node.b + field.link);
+            let (mut slot, mut last, mut shared) = (link, None, None);
+            while let at = self.g.lists[slot as usize]
+                && at != end
+            {
+                if shared.is_none() && at.0 < first {
+                    shared = Some(slot);
+                }
+                last = Some(at);
+                let chain = self.g.nodes[at.0 as usize];
+                slot = chain.b + chain.arity() - 1;
+            }
+            match (last, shared) {
+                // A field without types: a matched node of its own.
+                (None, _) => {
+                    let b = self.g.lists.len() as u32;
+                    self.g.lists.push(end);
+                    let own = self.g.push(Node {
+                        head: TUPLE | 1 << 8,
+                        level: node.level,
+                        a: either_flags(constant, true),
+                        b,
+                    });
+                    self.g.lists[link as usize] = own;
+                }
+                (Some(at), None) => self.g.nodes[at.0 as usize].a |= RES_MATCHED,
+                // The source's part of the chain is copied, node by node,
+                // the last one matched; the source's field keeps its `m`.
+                (Some(last), Some(mut slot)) => loop {
+                    let at = self.g.lists[slot as usize];
+                    let mut chain = self.g.nodes[at.0 as usize];
+                    let start = self.g.lists.len() as u32;
+                    self.g
+                        .lists
+                        .extend_from_within(chain.b as usize..(chain.b + chain.arity()) as usize);
+                    chain.b = start;
+                    if at == last {
+                        chain.a |= RES_MATCHED;
+                    }
+                    let own = self.g.push(chain);
+                    self.g.lists[slot as usize] = own;
+                    if slot == link {
+                        let types = node.b + field.types.start;
+                        self.g.lists[types as usize..(types + field.types.len) as usize].fill(own);
+                    }
+                    if chain.arity() > 1 {
+                        self.hold_in_copy(own, end, first);
+                    }
+                    if at == last {
+                        break;
+                    }
+                    slot = chain.b + chain.arity() - 1;
+                },
+            }
+        }
+    }
+
+    /// O(1): [`Checker::hold`] for a chain node of a copy whose session
+    /// starts at `first`: a reference the session made is fresh and
+    /// written with a plain store, so that the restore of
+    /// [`Checker::duplicate`] leaves the copy as it is; an older one is
+    /// logged as `hold` logs it.
+    fn hold_in_copy(&mut self, chain: Ty, reference: Ty, first: u32) {
+        if reference.0 < first {
+            return self.hold(chain, reference);
+        }
+        let holders = &mut self.g.nodes[reference.0 as usize].b;
+        self.extras.holders.push(Holder { node: chain, next: *holders });
+        *holders = self.extras.holders.len() as u32 - 1;
     }
 
     /// O(1): make chain node `chain` a holder of the unresolved reference

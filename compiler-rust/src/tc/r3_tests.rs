@@ -5451,3 +5451,139 @@ fn a_named_row_on_the_left_loses_its_arguments_in_pattern_mode() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The fixed-row rule of a copy (R3h; CHECKER_REWRITE 8.6, decision 47)
+// ---------------------------------------------------------------------------
+
+/// [`variant_at`] whose row is fixed (`row_fixed`), as `reify` leaves the
+/// row it fixes: its `Reither` fields keep their `m`.
+fn fixed_variant_at(c: &mut Checker, level: u32, tags: &[(&str, Tag)], more: Ty, closed: bool) -> Ty {
+    let ty = variant_at(c, level, tags, more, closed, NONE);
+    let ExtraDescriptor::Variant(row) = c.extras.descriptors[c.g.nodes[ty.0 as usize].a as usize] else {
+        unreachable!("a variant node");
+    };
+    c.extras.variants[row as usize].fixed = true;
+    ty
+}
+
+/// The unresolved reference of each field of `ty`, in order (`NONE` for
+/// an unopened node).
+fn references(c: &mut Checker, ty: Ty) -> Vec<Ty> {
+    read_row(c, ty).0.iter().map(|(_, field)| field.end).collect()
+}
+
+/// The hand-built row of decision 47 (`old_checker_matches_the_fields_
+/// of_a_fixed_row_it_copies`): `[closed fixed #A?('x) #B?c | more]`
+/// with both fields unmatched, copied. `copy_row` with `fixed = true`
+/// (`Ctype.copy`, compiler/ml/ctype.ml:868):
+///
+/// ```text
+/// | Reither (c, tl, m, e) ->
+///   let e = if keep then e else ref None in
+///   let m = if row.row_fixed then fixed else m in
+/// ...
+/// row_fixed = row.row_fixed && fixed;
+/// ```
+///
+/// (compiler/ml/btype.ml:372-377, 389). The copy's fields read matched,
+/// `?m` and `?cm`, and the copy stays fixed; the source's keep `?` and
+/// `?c`. With a generic row variable the copy has references of its own
+/// (`ref None`); with one that is not generic it shares the source's
+/// (`keep`, ctype.ml:813), as the old checker prints them (`^0`, `^1`
+/// on both sides).
+///
+/// Reaches: R3h.
+#[test]
+fn a_copy_of_a_fixed_row_matches_its_fields() {
+    for generic in [true, false] {
+        let mut c = checker(Mode::Success);
+        let more = if generic { var_at(&mut c, GENERIC) } else { var(&mut c) };
+        let x = var_at(&mut c, GENERIC);
+        let tags = [("A", Tag::Either(false, Some(x), false)), ("B", Tag::Either(true, None, false))];
+        let source = fixed_variant_at(&mut c, GENERIC, &tags, more, true);
+        let copy = c.copy(source);
+        assert_eq!(shape(&mut c, source), "[closed fixed A?1 B?c0 | ']", "{generic}");
+        assert_eq!(shape(&mut c, copy), "[closed fixed A?m1 B?cm0 | ']", "{generic}");
+        let (own, theirs) = (references(&mut c, copy), references(&mut c, source));
+        assert!(own.iter().all(|end| end.0 != NONE), "{generic}");
+        if generic {
+            assert_eq!(theirs, [Ty(NONE), Ty(NONE)]);
+            assert_ne!(own[0], own[1]);
+        } else {
+            assert_eq!(own, theirs);
+        }
+        // The copy's type is its own, below the matched node.
+        let (fields, _, _) = read_row(&mut c, copy);
+        assert_ne!(fields[0].1.first, x);
+    }
+}
+
+/// A row that is not fixed by its flag and whose `more` is a constructor
+/// is copied as a fixed one (PR#6163, compiler/ml/ctype.ml:826-830):
+///
+/// ```text
+/// | {desc = Tconstr _} when not row.row_fixed ->
+///   {row with row_fixed = true}
+/// ```
+///
+/// so `copy_row` matches its `Reither` fields too: `[#A?('x) #B?c | t]`
+/// copies to `[#A?m('x) #B?cm | t]`, the source keeps its fields, with a
+/// generic constructor (copied) and with one that is not (shared, `keep`).
+///
+/// Reaches: R3h.
+#[test]
+fn a_copy_of_a_row_over_a_constructor_matches_its_fields() {
+    for generic in [true, false] {
+        let mut c = checker(Mode::Success);
+        let level = if generic { GENERIC } else { c.g.level };
+        let more = constr_at(&mut c, level, T, &[]);
+        let x = var_at(&mut c, GENERIC);
+        let tags = [("A", Tag::Either(false, Some(x), false)), ("B", Tag::Either(true, None, false))];
+        let source = variant_at(&mut c, GENERIC, &tags, more, false, NONE);
+        let copy = c.copy(source);
+        assert_eq!(shape(&mut c, source), "[A?1 B?c0 | t]", "{generic}");
+        assert_eq!(shape(&mut c, copy), "[A?m1 B?cm0 | t]", "{generic}");
+        let (own, theirs) = (references(&mut c, copy), references(&mut c, source));
+        if generic {
+            assert_eq!(theirs, [Ty(NONE), Ty(NONE)]);
+        } else {
+            assert_eq!(own, theirs);
+        }
+    }
+}
+
+/// A copy of a fixed row of n `Reither` fields, none matched: one step a
+/// field read by `match_unmatched`, besides the copy's own steps. Linear
+/// between 1,000 and 10,000, for a generic row variable (the copy opened
+/// onto references of its own) and for one that is not (the source
+/// opened, the copy sharing its references); every field of the copy
+/// reads matched.
+///
+/// Reaches: R3h.
+#[test]
+fn matching_the_fields_of_a_fixed_copy_at_ten_thousand_is_linear() {
+    let run = |n: u32, generic: bool| {
+        let mut c = checker(Mode::Success);
+        let more = if generic { var_at(&mut c, GENERIC) } else { var(&mut c) };
+        let x = var_at(&mut c, GENERIC);
+        let labels: Vec<String> = (0..n).map(|at| format!("t{at:05}")).collect();
+        let tags: Vec<(&str, Tag)> =
+            labels.iter().map(|label| (label.as_str(), Tag::Either(false, Some(x), false))).collect();
+        let source = fixed_variant_at(&mut c, GENERIC, &tags, more, false);
+        let mut copy = source;
+        let count = steps::scope(|| copy = c.copy(source));
+        let (fields, _, _) = read_row(&mut c, copy);
+        assert_eq!(fields.len(), n as usize);
+        assert!(
+            fields
+                .iter()
+                .all(|(_, field)| matches!(field.kind, RowFieldKind::Either { matched: true, .. }))
+        );
+        count
+    };
+    for generic in [true, false] {
+        let (small, large) = (run(1_000, generic), run(10_000, generic));
+        assert!(large <= 11 * small, "{generic}: {small} {large}");
+    }
+}
