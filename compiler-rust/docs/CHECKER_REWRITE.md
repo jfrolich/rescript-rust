@@ -3188,35 +3188,61 @@ A prototype of this slice was written in the design turn and every
 test of the slice passed against it. It is not in the repository: you
 write the bodies from the doc comments and section 8.9.
 
-Before R3h this prints rows.rs:3 and unify.rs:5 (four bodies and the
-doc comment of unify3_pattern); R3h adds its `todo!("R3r")` in
-unify3_pattern, so count yours on your base and say the number. The
-second prints differential.rs:1 and r3_tests.rs:6:
+Before your first commit this prints rows.rs:3 and unify.rs:8 (in
+unify.rs: four bodies, the three arms R3h left in Checker::pattern_arm
+and one line of the doc comment of unify3_pattern). The second prints
+differential.rs:1 and r3_tests.rs:6:
   grep -c 'todo!("R3r")' compiler-rust/src/tc/*.rs | grep -v ':0$'
   grep -c '#\[ignore = "R3r build"\]' compiler-rust/src/tc/*.rs | grep -v ':0$'
 When you end, both print nothing (reword the doc comment of
 unify3_pattern that names the marker).
 
 Commits, in this order, each pushed with the tc:: tests seen to pass
-(the tests of this slice are ignored until commit 3; after each commit
+(the tests of this slice are ignored until commit 4; after each commit
 run them with `-- --ignored` and say which pass):
-1. Checker::{mcomp, push_compatible, package_fallback} in rows.rs
+1. Checker::duplicate in rows.rs made total (section 8.9, "Corrections
+   after the review of R3h", item 1): the pass that makes the nodes of
+   the destination generic goes THROUGH a node that is generic already,
+   where Graph::generalize stops at one. Write that pass in rows.rs: a
+   walk on g.work with one new generation of marks
+   (Checker::fresh_marks), each node visited once, its level written
+   generic with Graph::write when it is not (so the restore puts it
+   back), its children pushed with Graph::children as
+   Graph::generalize pushes them; one tick a node visited. Then the
+   copy and the restore as they are. Reword the doc comment of
+   `duplicate` for it (this once you edit a doc comment of the
+   skeleton: the sentences on Graph::generalize, and the cost, which
+   stays three passes over the destination). With it a running test in
+   src/tc/r3_tests.rs: a destination that is a tuple, not generic,
+   over a tuple that IS generic, over a constructor without arguments
+   that is not generic; after `duplicate` the graph has grown by
+   exactly the three nodes, every node of the copy is generic, and the
+   levels of the three nodes of the destination are what they were.
+   See it fail on your base before you change the body, and say so in
+   the commit message.
+   an_equation_over_ten_thousand_shared_nodes_is_linear passes as
+   written.
+2. Checker::{mcomp, push_compatible, package_fallback} in rows.rs
    (decisions 70 and 63).
-2. Checker::{try_frame, recover, recover_frames, resume_frames} in
+3. Checker::{try_frame, recover, recover_frames, resume_frames} in
    unify.rs and the three arms R3h left `todo!("R3r")` in
-   unify3_pattern (decision 68; decision 64, the rows marked 2). They
-   are one commit: an arm that pushes a Try frame cannot run without
-   try_frame, and try_frame has no caller without the arms.
-3. The `#[ignore = "R3r build"]` lines of src/tc/r3_tests.rs and
+   Checker::pattern_arm (decision 68; decision 64, the rows marked 2):
+   the arguments of one type by injectivity, two variants, and the
+   package arm, which calls Checker::package_fallback where
+   unify_package clashes (the doc comment of package_fallback names
+   that caller). They are one commit: an arm that pushes a Try frame
+   cannot run without try_frame, and try_frame has no caller without
+   the arms.
+4. The `#[ignore = "R3r build"]` lines of src/tc/r3_tests.rs and
    src/tc/differential.rs removed, nothing else in those tests changed.
-End your turn after the third commit is pushed.
+End your turn after the fourth commit is pushed.
 
-Not yours: everything R3h built (Checker::{unify_pattern,
+Not yours: everything else R3h built (Checker::{unify_pattern,
 cut_equations, unify_newtypes, occur_pattern, reify,
-add_gadt_equation, non_recursive_abbrev, duplicate,
-find_newtype_level, match_unmatched} and the arms of unify3_pattern
-marked 1). If one of them is wrong for a test of yours, stop and
-report it; do not edit it.
+add_gadt_equation, non_recursive_abbrev, find_newtype_level,
+match_unmatched} and the arms of Checker::pattern_arm marked 1). If
+one of them is wrong for a test of yours, stop and report it; do not
+edit it.
 
 Steps: one tick per pair `mcomp` takes off its stack, and one per
 record `recover` takes off.
@@ -3255,9 +3281,10 @@ pairs for unification (the table of mcomp is `compatible`, the table
 of unification `pairs`); `g.work` as the stack of mcomp; comparing
 declarations in the kernel (LocalDecls::compare is the only reader of
 a declaration); answering compatible for two data types without a
-supplier; calling leave_scopes from mcomp or recover; a change in
-graph.rs, level.rs, template.rs or expand.rs, or under src/types. At
-most 450 lines.
+supplier; calling leave_scopes from mcomp or recover; a second copy
+of the destination in `duplicate`, or a hash set in its walk; a change
+in graph.rs, level.rs, template.rs or expand.rs, or under src/types.
+At most 500 lines.
 ```
 
 The prompt of K2 is in section 8.7. The last prompt below is superseded by
@@ -5691,8 +5718,11 @@ yet marked:
 - a variant: unless the row is static, for a fixed row the walk goes
   on into `more`; otherwise `more` is a variable (anything else is an
   invariant failure) and becomes, through `g.link`, a variant node at
-  its level over a new `VariantRow` without tags, `fixed`, not closed,
-  whose `more` is the fresh constructor made as above; then
+  its level over a new `VariantRow` without tags, `fixed`, with the
+  `closed` and the name of the row it replaces (`{r with row_fields =
+  []; row_fixed = true; row_more = t}`, ctype.ml:1848-1850; corrected
+  in the review of R3h: this said "not closed"), whose `more` is the
+  fresh constructor made as above; then
   the write of `drop_name_children` without its frame
   (`forget_name_children`: the link stays when the unification fails,
   so nothing is to be put back) and the same level test. Then the
@@ -5854,7 +5884,14 @@ Reads added to expression mode, per place:
 - `unify_pair`: one load of `equations.len()` for a pair of two heads
   that are both plain constructors (`l.head == CONSTR && r.head ==
   CONSTR`: nullary, not extended) of different types; nothing for any
-  other pair;
+  other pair. (As built by R3h: the arm tests the two tags, the two
+  arities and then the type, where it tested the type before the
+  arities; the registers and the loads are the same, the order of the
+  compares is not.) Under an equation, in the body of a case, two
+  locally abstract types of different names pay one byte load of
+  `umode` more in `unify_newtypes`, for the table of assumed pairs
+  that OCaml's `unify_eq` reads first (ctype.ml:2233); a unit without
+  an equation never reaches it;
 - `occur_expanding`: one load of `umode` when a binding walk found the
   variable (decision 69);
 - `subst`: one test of the `NEWTYPE` bit of the row it has loaded
@@ -6036,6 +6073,56 @@ skeletons of R3q and R3s: 5 to 10.
     without `SCOPED`, not only under `PATTERN` (for a plan without
     scoped types `Checker::lower` is `Graph::lower`, so nothing
     changed there).
+
+**Corrections after the review of R3h** (pull request 356). Item 1 is
+decided here and built by R3r; 2 to 4 are owed by the next design
+turn; 5 records what the builder changed in the skeleton's words.
+
+1. `duplicate` is total. As built it is `Graph::generalize` at level 0
+   and a copy, and `Graph::generalize` stops at a node that is generic
+   already without looking below it: a destination with a generic node
+   above one that is not gives a body that shares the lower node with
+   its destination. OCaml's `duplicate_type` copies every node
+   whatever its level (`Subst.typexp`: `| _ ->` makes a stub with
+   `newgenvar` and copies, compiler/ml/subst.ml:144-158). The operands
+   typing gives a pattern unification are instances, which have no
+   generic node, so no program is known to reach it; the differential
+   plans can (a generalized operand given to `Op::Gadt`). Decided: the
+   pass that makes the destination generic goes through generic nodes
+   (a walk in `rows.rs` with marks; the cost stays three passes over
+   the destination). It is the first commit of R3r, with a hand-built
+   destination that fails without it.
+2. `occur_pattern` remembers what it decided for a constructor across
+   the paths of one walk, where OCaml's `visited` is the set of the
+   path (ctype.ml:1393-1394). On a graph without a cycle the two agree.
+   A cycle is made only below a structure or a contractive constructor,
+   which the walk does not enter, or through a constructor whose
+   expansion drops the argument; for that one the on-path visit tests
+   the expansion at once and the off-path visit tests the arguments
+   and then the expansion, and what an expansion reaches of an
+   argument it reaches through the argument whole. Write that argument
+   out with a hand-built cyclic case, or keep the set per path. The
+   `type_changed` loop (item 8 above) needs nothing: its flag is set
+   only at the top of `unify` (ctype.ml:2238), which the walk does not
+   call.
+3. `local_non_recursive_abbrev` runs under `wrap_trace_gadt_instances`
+   (ctype.ml:1534). `non_recursive_abbrev` does not trace: R3s (item 7
+   above names the wrappers 8.11 leaves out; this is the fourth).
+4. Decision 65 writes the guard of the arm as `l.head == CONSTR &&
+   r.head == CONSTR`; the arm as built tests tags and arities
+   (decision 71, corrected above). One of the two texts is made the
+   other's at R5c, when the arm is measured.
+5. Doc comments of the skeleton the builder changed, each read and
+   accepted: `match_unmatched` (a shared chain longer than one node is
+   copied from its first shared node, so that no slot of the source's
+   chain is written: the prototype wrote one); `reify` (a row over a
+   constructor is read as a fixed one, as `copy_refs` reads it: OCaml's
+   copy has set the flag on such a row, and where no copy made it OCaml
+   stops at `assert false`, ctype.ml:1854); `subst` (a cost sentence
+   for the arm of an equation: the cost of the copy of the body);
+   `push_children` (`#[inline(always)]`, kept by measurement: out of
+   line it cost `unify_ground3` and `unify_datatype2` 28 instructions
+   an operation).
 
 ### 8.10 `instance_poly` and `instance_label` (R3q)
 
