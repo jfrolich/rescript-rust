@@ -8867,8 +8867,8 @@ an `if` against `1` or `2`, with a second field `w: int` built from `y`,
 and with a type parameter beside `v: a`. OCaml and Rust refuse the same
 eight with "This instance of int is ambiguous" at the same place (`Some`
 behind `if`, the object field read, `Box(y, 0)`, both label programs, and
-three of the local records), and accept the other eleven with the same
-JavaScript.
+three of the local records), and accept the other thirteen with the
+same JavaScript.
 
 Cost: accepted at the figures below. Every read of an instance set answers nothing while every set
 is empty, and a set gets its first member only from the test of
