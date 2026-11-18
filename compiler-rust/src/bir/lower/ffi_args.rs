@@ -289,8 +289,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 .expect("clause pool capacity"),
             len: keys.len,
         };
-        let mut actions = std::mem::take(&mut self.scratch);
-        let start = actions.len();
+        let mark = self.statements.mark();
         for (key, item) in cases {
             self.primitive_steps += 1;
             let text = self.arena.intern_text(key);
@@ -302,7 +301,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let ret = self.js.return_(&mut self.arena, value);
             let body = self.js.list(&mut self.arena, 1, std::iter::once(ret));
             let action = self.js.block_of(&mut self.arena, body);
-            actions.push(B::stmt_node(action));
+            self.statements.push(action);
             self.arena
                 .pools
                 .switch_clauses
@@ -324,13 +323,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             blocks_full: false,
             dispatch: crate::lambda::SwitchDispatch::Direct,
         });
-        let count = u32::try_from(actions.len() - start).expect("switch capacity");
-        let actions_list = self.js.list(
-            &mut self.arena,
-            count,
-            actions.drain(start..).map(B::stmt_from_node),
-        );
-        self.scratch = actions;
+        let actions_list = self.statements.take_actions(&mut self.js, &mut self.arena, self.statements.since(mark));
         let switch = self.js.switch(&mut self.arena, B::from_node(arg), actions_list, header, true);
         let body = self.js.list(&mut self.arena, 1, std::iter::once(switch));
         let header = self.arena.function_header(
