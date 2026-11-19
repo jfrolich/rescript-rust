@@ -19,7 +19,7 @@ let error = JsError.make("error")
 Console.log(error->JsError.stack) // Logs `stack` if it exists on `someError`
 ```
 */
-@get
+@get @pure
 external stack: t => option<string> = "stack"
 
 /**
@@ -33,7 +33,7 @@ let error = JsError.SyntaxError.make("Some message here")
 error->JsError.message == "Some message here"
 ```
 */
-@get
+@get @pure
 external message: t => string = "message"
 
 /**
@@ -47,7 +47,7 @@ let error = JsError.SyntaxError.make("Some message here")
 error->JsError.name == "SyntaxError"
 ```
 */
-@get
+@get @pure
 external name: t => string = "name"
 
 /**
@@ -55,7 +55,7 @@ external name: t => string = "name"
 
 See [`Error.prototype.fileName`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/fileName) on MDN.
 */
-@get
+@get @pure
 external fileName: t => option<string> = "fileName"
 
 /**
@@ -70,7 +70,7 @@ error->JsError.message == "Some message here"
 error->JsError.name == "Error"
 ```
 */
-@new
+@new @pure
 external make: string => t = "Error"
 
 module EvalError: {
@@ -79,7 +79,7 @@ module EvalError: {
 
   See [`EvalError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/EvalError) on MDN.
   */
-  @new
+  @new @pure
   external make: string => t = "EvalError"
 
   /**
@@ -89,6 +89,7 @@ module EvalError: {
 
   See [`EvalError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/EvalError) on MDN.
   */
+  @pure
   let throwWithMessage: string => 'a
 }
 
@@ -98,7 +99,7 @@ module RangeError: {
 
   See [`RangeError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RangeError) on MDN.
   */
-  @new
+  @new @pure
   external make: string => t = "RangeError"
 
   /**
@@ -108,6 +109,7 @@ module RangeError: {
 
   See [`RangeError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RangeError) on MDN.
   */
+  @pure
   let throwWithMessage: string => 'a
 }
 
@@ -117,7 +119,7 @@ module ReferenceError: {
 
   See [`ReferenceError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/ReferenceError) on MDN.
   */
-  @new
+  @new @pure
   external make: string => t = "ReferenceError"
 
   /**
@@ -127,6 +129,7 @@ module ReferenceError: {
 
   See [`ReferenceError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/ReferenceError) on MDN.
   */
+  @pure
   let throwWithMessage: string => 'a
 }
 
@@ -136,7 +139,7 @@ module SyntaxError: {
 
   See [`SyntaxError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SyntaxError) on MDN.
   */
-  @new
+  @new @pure
   external make: string => t = "SyntaxError"
 
   /**
@@ -146,6 +149,7 @@ module SyntaxError: {
   
   See [`SyntaxError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SyntaxError) on MDN.
   */
+  @pure
   let throwWithMessage: string => 'a
 }
 
@@ -155,7 +159,7 @@ module TypeError: {
 
   See [`TypeError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypeError) on MDN.
   */
-  @new
+  @new @pure
   external make: string => t = "TypeError"
 
   /**
@@ -165,6 +169,7 @@ module TypeError: {
 
   See [`TypeError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypeError) on MDN.
   */
+  @pure
   let throwWithMessage: string => 'a
 }
 
@@ -174,7 +179,7 @@ module URIError: {
 
   See [`URIError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/URIError) on MDN.
   */
-  @new
+  @new @pure
   external make: string => t = "URIError"
 
   /**
@@ -184,6 +189,7 @@ module URIError: {
 
   See [`URIError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/URIError) on MDN.
   */
+  @pure
   let throwWithMessage: string => 'a
 }
 
@@ -202,6 +208,7 @@ if 5 > 10 {
 }
 ```
 */
+@pure
 external throw: t => 'a = "%raise"
 
 /**
@@ -209,6 +216,7 @@ Creates a new `Error` with the provided `message` and throws it.
 
 `JsError.throwWithMessage("message")` is equivalent to `JsError.make("message")->JsError.throw`.
 */
+@pure
 let throwWithMessage: string => 'a
 
 /**
@@ -233,6 +241,7 @@ try {
 }
 ```
 */
+@pure
 let panic: string => 'a
 
 /**
@@ -240,6 +249,7 @@ Casts a `JsError.t` to a `JsExn.t`.
 
 This is useful when you want to compare a JS exception and a JS error.
 */
+@pure
 external toJsExn: t => Stdlib_JsExn.t = "%identity"
 
 /**
@@ -248,4 +258,5 @@ external toJsExn: t => Stdlib_JsExn.t = "%identity"
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: t => unit = "%ignore"

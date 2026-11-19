@@ -1,5 +1,6 @@
 type t = [#undefined | #object | #boolean | #number | #bigint | #string | #symbol | #function]
 
+@pure
 external typeof: 'a => t = "#typeof"
 
 module Classify = {
@@ -17,13 +18,27 @@ module Classify = {
     | Symbol(Stdlib_Symbol.t)
     | BigInt(bigint)
 
-  @val external _internalClass: 'a => string = "Object.prototype.toString.call"
+  @pure @val external _internalClass: 'a => string = "Object.prototype.toString.call"
+
+  @pure
   external _asBool: 'a => bool = "%identity"
+
+  @pure
   external _asString: 'a => string = "%identity"
+
+  @pure
   external _asFloat: 'a => float = "%identity"
+
+  @pure
   external _asObject: 'a => object = "%identity"
+
+  @pure
   external _asFunction: 'a => function = "%identity"
+
+  @pure
   external _asSymbol: 'a => Stdlib_Symbol.t = "%identity"
+
+  @pure
   external _asBigInt: 'a => bigint = "%identity"
 
   let classify = value => {
@@ -44,4 +59,5 @@ module Classify = {
   }
 }
 
+@pure
 external ignore: t => unit = "%ignore"

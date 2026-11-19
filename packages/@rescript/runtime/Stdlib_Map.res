@@ -1,27 +1,28 @@
 @instanceOf("Map")
 type t<'k, 'v>
 
+@pure
 external asIterable: t<'k, 'v> => Stdlib_Iterable.t<('k, 'v)> = "%identity"
 
-@new external make: unit => t<'k, 'v> = "Map"
-@new external fromArray: array<('k, 'v)> => t<'k, 'v> = "Map"
+@pure @new external make: unit => t<'k, 'v> = "Map"
+@pure @new external fromArray: array<('k, 'v)> => t<'k, 'v> = "Map"
 
-@new
+@new @pure
 external fromIterable: Stdlib_Iterable.t<('k, 'v)> => t<'k, 'v> = "Map"
 
-@get external size: t<'k, 'v> => int = "size"
+@pure @get external size: t<'k, 'v> => int = "size"
 
 let isEmpty = map => map->size === 0
 
-@send external clear: t<'k, 'v> => unit = "clear"
+@mutates @send external clear: t<'k, 'v> => unit = "clear"
 
-@send external forEach: (t<'k, 'v>, 'v => unit) => unit = "forEach"
-@send external forEachWithKey: (t<'k, 'v>, ('v, 'k) => unit) => unit = "forEach"
+@pure @send external forEach: (t<'k, 'v>, 'v => unit) => unit = "forEach"
+@pure @send external forEachWithKey: (t<'k, 'v>, ('v, 'k) => unit) => unit = "forEach"
 
-@send external get: (t<'k, 'v>, 'k) => option<'v> = "get"
-@send external has: (t<'k, 'v>, 'k) => bool = "has"
-@send external set: (t<'k, 'v>, 'k, 'v) => unit = "set"
-@send external delete: (t<'k, 'v>, 'k) => bool = "delete"
+@pure @send external get: (t<'k, 'v>, 'k) => option<'v> = "get"
+@pure @send external has: (t<'k, 'v>, 'k) => bool = "has"
+@mutates @send external set: (t<'k, 'v>, 'k, 'v) => unit = "set"
+@mutates @send external delete: (t<'k, 'v>, 'k) => bool = "delete"
 
 @send external keys: t<'k, 'v> => Stdlib_IteratorObject.t<'k, unit, unknown> = "keys"
 @send external values: t<'k, 'v> => Stdlib_IteratorObject.t<'v, unit, unknown> = "values"
@@ -29,4 +30,5 @@ let isEmpty = map => map->size === 0
 @send
 external entries: t<'k, 'v> => Stdlib_IteratorObject.t<('k, 'v), unit, unknown> = "entries"
 
+@pure
 external ignore: t<'k, 'v> => unit = "%ignore"
