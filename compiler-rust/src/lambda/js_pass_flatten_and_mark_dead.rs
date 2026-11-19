@@ -943,12 +943,15 @@ impl Mapper for Flatten {
                             self.statement(j, s)
                         })
                         .collect();
-                    let ret = S::return_(last, j);
-                    block.push(self.statement(j, ret));
-                    // OCaml wraps the flattened return sequence with
-                    // `S.block` before applying `super.statement`
-                    // (compiler/core/js_pass_flatten.ml:88-96).
-                    S::block(&block, j)
+                    block.push(S::return_(last, j));
+                    // OCaml passes the flattened block through
+                    // `super.statement` (compiler/core/js_pass_flatten.ml:88-96),
+                    // which maps every statement once more. That second visit
+                    // walks into the predicate of an `If` the first visit
+                    // built from `Exp (Cond ...)`, so closures there are
+                    // flattened too.
+                    let block = S::block(&block, j);
+                    map_statement_children(self, j, block)
                 }
                 _ => {
                     let e = self.expression(j, expr);
