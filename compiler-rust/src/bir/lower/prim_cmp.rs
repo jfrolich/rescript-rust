@@ -23,8 +23,8 @@ pub(super) fn comparison_op(cmp: Comparison, float: bool) -> BinOp {
 }
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(1): read a boolean leaf tag, for the two readers in `prim.rs`.
-    pub(super) fn primitive_bool(&self, node: NodeId) -> Option<bool> {
-        self.bool_of(B::at(node))
+    pub(super) fn primitive_bool(&self, value: &B::E) -> Option<bool> {
+        self.bool_of(B::of(value))
     }
     /// O(1): the value of a boolean literal: its kind and its `aux`.
     fn bool_of(&self, r: B::Ref<'_>) -> Option<bool> {
