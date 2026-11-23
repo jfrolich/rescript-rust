@@ -1,0 +1,1 @@
+- Checker rewrite R3, eighth skeleton: `instance_poly` (R3q) and the ambiguity of GADT instances (R3s) of the new kernel get skeletons, acceptance tests and build prompts; corrections of pattern mode owed by its reviews (the recursion test of an equation and the occurrence test on a type that reaches itself, lowering a chain of variant rows).
