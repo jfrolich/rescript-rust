@@ -5127,7 +5127,6 @@ fn duplicate_copies_below_a_generic_node() {
 ///
 /// Reaches: R3h, R3r.
 #[test]
-#[ignore = "R3r build"]
 fn an_argument_that_is_not_injective_is_tried_and_then_reified() {
     for mode in [Mode::Success, Mode::Explain] {
         let (mut c, _) = pattern_checker(mode);
@@ -5194,7 +5193,6 @@ fn an_argument_that_is_not_injective_is_tried_and_then_reified() {
 ///
 /// Reaches: R3f, R3h, R3r.
 #[test]
-#[ignore = "R3r build"]
 fn rows_that_clash_are_reified_and_compared() {
     for mode in [Mode::Success, Mode::Explain] {
         let (mut c, _) = pattern_checker(mode);
@@ -5261,7 +5259,6 @@ fn rows_that_clash_are_reified_and_compared() {
 ///
 /// Reaches: R3r.
 #[test]
-#[ignore = "R3r build"]
 fn mcomp_answers_by_the_declarations() {
     let (mut c, _) = pattern_checker(Mode::Success);
     let int = |c: &mut Checker| constr(c, INT, &[]);
@@ -5348,7 +5345,6 @@ fn mcomp_answers_by_the_declarations() {
 ///
 /// Reaches: R3r.
 #[test]
-#[ignore = "R3r build"]
 fn mcomp_at_ten_thousand() {
     let run = |n: u32| {
         let (mut c, _) = pattern_checker(Mode::Success);
@@ -5389,7 +5385,6 @@ fn mcomp_at_ten_thousand() {
 ///
 /// Reaches: R3h, R3r.
 #[test]
-#[ignore = "R3r build"]
 fn recovering_ten_thousand_attempts_is_linear() {
     let run = |n: u32| {
         let (mut c, _) = pattern_checker(Mode::Success);
@@ -5438,7 +5433,6 @@ fn recovering_ten_thousand_attempts_is_linear() {
 ///
 /// Reaches: R3f, R3h, R3r.
 #[test]
-#[ignore = "R3r build"]
 fn a_named_row_on_the_left_loses_its_arguments_in_pattern_mode() {
     for mode in [Mode::Success, Mode::Explain] {
         for pattern in [true, false] {
