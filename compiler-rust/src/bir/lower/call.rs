@@ -253,9 +253,22 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         outputs.clear();
         self.argument_outputs = outputs;
         let result = (|| {
-        if let Some(frame) = call.tail { return self.finish_self_call(frame, statements, &values); }
         if call.inline {
-            return self.primitive_result(cx, statements, B::from_node(values[0]));
+            let value = values.drain(..).next().expect("inlined value");
+            return self.primitive_result(cx, statements, value);
+        }
+        // `finish_self_call` (tail.rs), `call_node` and `apply_with_arity`
+        // take rows until T6x-d: the values are turned back into the
+        // reused vector `scratch`.
+        let mut rows = std::mem::take(&mut self.scratch);
+        debug_assert!(rows.is_empty());
+        rows.extend(values.drain(..).map(B::node));
+        let values = &rows;
+        if let Some(frame) = call.tail {
+            let result = self.finish_self_call(frame, statements, values);
+            rows.clear();
+            self.scratch = rows;
+            return result;
         }
         let value = if let Some((module, member, arity)) = call.external {
             let mut callee = self.js.qualified(&mut self.arena, module, Some(member));
@@ -264,14 +277,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             match call.status {
                 ApplyStatus::InferFull | ApplyStatus::Uncurry => self.call_node(
                     callee,
-                    &values,
+                    values,
                     Self::call_info_of_apply_status(call.status),
                 ),
                 ApplyStatus::Na => {
                     if let Some(arity) = arity {
-                        self.apply_with_arity(callee, arity, &values)
+                        self.apply_with_arity(callee, arity, values)
                     } else {
-                        self.call_node(callee, &values, crate::js_ir::CallInfo::default())
+                        self.call_node(callee, values, crate::js_ir::CallInfo::default())
                     }
                 }
             }
@@ -282,6 +295,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 Self::call_info_of_apply_status(call.status),
             )
         };
+        rows.clear();
+        self.scratch = rows;
         // `call_node` and `apply_with_arity` give rows until T6x-d.
         let mut value = B::from_node(value);
         // C:1129 compile_apply_call: attach only a real, non-ghost location.

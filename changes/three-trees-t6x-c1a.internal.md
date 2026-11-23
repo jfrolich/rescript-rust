@@ -1,0 +1,1 @@
+- Backend lowering: the values of a primitive and of an application are sequenced and consumed as expression handles of the lowering interface (`State::argument_values`, `sequence_arguments`, `prim.rs`).

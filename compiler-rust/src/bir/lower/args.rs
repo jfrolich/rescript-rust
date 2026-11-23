@@ -165,7 +165,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         method_callee: bool,
         args: &mut [Out<B>],
-        values: &mut Vec<NodeId>,
+        values: &mut Vec<B::E>,
     ) -> Span {
         let start = args.first().map_or_else(
             || self.statements.mark(),
@@ -186,7 +186,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let value = arg.value.take().expect("argument value");
             let (held, value) =
                 if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(&value)) {
-                    (Span::default(), B::node(value))
+                    (Span::default(), value)
                 } else if method_callee
                     && i == 0
                     && self.js.kind(&self.arena, B::of(&value)) == Kind::Dot
@@ -198,9 +198,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     let mark = self.js.mark();
                     self.js.push(B::from_node(object));
                     let value = self.js.refill(&mut self.arena, shell, mark);
-                    (held, B::node(value))
+                    (held, value)
                 } else {
-                    self.evaluate_now(B::node(value))
+                    let (held, value) = self.evaluate_now(B::node(value));
+                    (held, B::from_node(value))
                 };
             has_code |= self.statements.has_statements(arg.stmts) || held.len != 0;
             later_defines_pure &= self.defines_pure_values(&self.evaluation.statements[held.start as usize..(held.start + held.len) as usize])
@@ -463,6 +464,7 @@ mod tests {
             expected_args.push((vec![statement], value));
             let mut values = Vec::new();
             let span = state.sequence_arguments(method, &mut args, &mut values);
+            let values: Vec<NodeId> = values.into_iter().map(crate::bir::lower::out::row).collect();
             if method || shape != 0 {
                 assert!(state.arena.node(values[0]).flags().contains(NodeFlags::JS_LOC_PRESENT));
             }

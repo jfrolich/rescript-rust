@@ -775,6 +775,7 @@ mod tests {
         let mut held = outputs;
         let mut args = Vec::new();
         let stmts = state.sequence_arguments(false, &mut held, &mut args);
+        let args: Vec<_> = args.into_iter().map(crate::bir::lower::out::row).collect();
         let args = state.arena.lists.push(&args);
         let (args, effect) = state.assemble_external_args_no_splice(Cx::value(), specs, args);
         let args = state.arena.lists.get(args).to_vec();
