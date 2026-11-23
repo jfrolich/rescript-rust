@@ -6163,7 +6163,7 @@ fn a_polymorphic_type_inside_gets_new_universal_variables() {
 }
 
 /// A node on the way that is met again after a binder was entered
-/// (compiler/ml/ctype.ml:1044-1047 and 874-876):
+/// (compiler/ml/ctype.ml:1044-1047 and 1023-1025):
 ///
 /// ```text
 /// let t, bound_t = List.assq ty visited in

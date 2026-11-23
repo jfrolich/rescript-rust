@@ -410,7 +410,7 @@ pub struct PolySlot {
 }
 
 /// One edge of the inverse graph of `Checker::mark_holders`
-/// (`inv_parents`, compiler/ml/ctype.ml:676-679): 8 bytes. `next` is the
+/// (`inv_parents`, compiler/ml/ctype.ml:678-681): 8 bytes. `next` is the
 /// next edge of the same child or `NONE`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
@@ -430,7 +430,7 @@ pub struct PolyCopy {
     /// The polymorphic types with bound variables below the body, in
     /// the order the first walk met them.
     pub binders: Vec<Ty>,
-    /// `delayed_copy` (compiler/ml/ctype.ml:878): a stub and the generic
+    /// `delayed_copy` (compiler/ml/ctype.ml:1027-1028): a stub and the generic
     /// node, without a universal variable, whose copy it becomes a link
     /// to.
     pub delayed: Vec<[Ty; 2]>,
@@ -4715,7 +4715,7 @@ impl Checker {
     /// whether a universal variable is FREE below it (one that is not
     /// bound by a polymorphic type on the way from the node to it:
     /// `| Tpoly (_ty, tl) when List.memq univ (List.map repr tl) -> ()`,
-    /// 698). `poly` is the descriptor of the node whose body `body` is.
+    /// 699). `poly` is the descriptor of the node whose body `body` is.
     /// The answer is [`PolySlot::stamp`] `== 2 * call + 1`.
     ///
     /// Two steps, as OCaml's:
@@ -4794,7 +4794,7 @@ impl Checker {
         todo!("R3q")
     }
 
-    /// `conflicts univars dl` (compiler/ml/ctype.ml:1046, 874-876) for
+    /// `conflicts univars dl` (compiler/ml/ctype.ml:1046, 1023-1025) for
     /// `c`, a node on the way that is met again after a binder was
     /// entered: whether a variable bound SINCE `c` was entered is free in
     /// `c`. The binders entered since are the [`FrameKind::LeavePoly`]
