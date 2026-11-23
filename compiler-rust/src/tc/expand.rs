@@ -1238,7 +1238,9 @@ impl Checker {
         }
         // The chain of the expansions (ctype.ml:1271-1276): a compare of
         // two registers, and one load of `gadt` when the head expanded.
-        if head != original && self.gadt & super::unify::GADT_MEMBER != 0 {
+        // Not in `Opt`: `try_expand_head_opt` has no such step
+        // (ctype.ml:1319-1321).
+        if head != original && mode != ExpandMode::Opt && self.gadt & super::unify::GADT_MEMBER != 0 {
             self.expanded_instance(original, head);
         }
         Ok(head)

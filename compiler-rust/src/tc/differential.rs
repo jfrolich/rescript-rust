@@ -5182,17 +5182,19 @@ mod tests {
     }
 
     /// AFTER R3s (run against its prototype; CHECKER_REWRITE 8.6,
-    /// decision 110): `EXPLAINED_UNTIL_R3S` is empty and
-    /// `EXPLAINED_OLD_DIFFERS` is `[4_000_045, 8_000_098, 11_000_046,
-    /// 20_000_132]`. Seeds 4,000,045 and 20,000,132 are one difference
-    /// of the old checker, which this list was wrong about for the
-    /// second: after a unification that FAILED in the explaining mode
-    /// the old side expands the types of the trace
-    /// (`ctype::record_trace_expansions`) with tracing off, so the
-    /// expansion of `n1` is in the memo all `n1` nodes share and a later
-    /// instance links to the expanded node; OCaml's `unify` expands no
-    /// trace (compiler/ml/ctype.ml:2779) and its traced expansion is in
-    /// the node's own memo (200-202), so the instance is a new node.
+    /// decision 110 as corrected in its review): `EXPLAINED_UNTIL_R3S`
+    /// is empty, `EXPLAINED_OLD_DIFFERS` stays as it is, and
+    /// `EXPLAINED_NEW_DIFFERS` is `[4_000_045, 20_000_132]`. On those
+    /// two seeds it is the NEW side that differs from OCaml. After a
+    /// unification that failed, OCaml's `unify` expands the types of
+    /// the trace with tracing off (`raise (Unify (expand_trace !env
+    /// trace))`, compiler/ml/ctype.ml:2732-2737; `expand_trace`,
+    /// 1697-1701), so the expansion of `n1` is in the memo all `n1`
+    /// nodes share (200-202) and a later instance links to the node.
+    /// The old side does the same (`ctype::record_trace_expansions`).
+    /// The new side expands no trace yet: once it traces, its expansion
+    /// is in the node's own memo only and the instance is a new node.
+    /// Owed by the design turn after R3s.
     ///
     /// The seeds of the explained pattern plan (20 programs of 100 cases)
     /// that differ. The first five wait for R3s as [`UNTIL_R3S`] does (a
@@ -5216,6 +5218,10 @@ mod tests {
     const EXPLAINED_UNTIL_R3S: [u64; 5] =
         [10_000_129, 11_000_054, 17_000_100, 18_000_066, 20_000_132];
     const EXPLAINED_OLD_DIFFERS: [u64; 2] = [8_000_098, 11_000_046];
+    /// The seeds of the explained pattern plan on which the NEW side
+    /// differs from OCaml and the old checker is right (see above):
+    /// none until R3s is built.
+    const EXPLAINED_NEW_DIFFERS: [u64; 0] = [];
 
     /// The seeds of the pattern plan on which the new side differs from
     /// OCaml (and from the old checker, which is right here) until slice
@@ -5309,7 +5315,8 @@ mod tests {
         assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
         let (explained, differing) =
             run_plan(Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN), 1, 20, 100);
-        let mut known = [&EXPLAINED_UNTIL_R3S[..], &EXPLAINED_OLD_DIFFERS[..]].concat();
+        let mut known =
+            [&EXPLAINED_UNTIL_R3S[..], &EXPLAINED_OLD_DIFFERS[..], &EXPLAINED_NEW_DIFFERS[..]].concat();
         known.sort_unstable();
         let seeds: Vec<u64> = differing.iter().map(|(seed, _)| *seed).collect();
         let unknown = differing.iter().find(|(seed, _)| !known.contains(seed));
@@ -5380,21 +5387,19 @@ mod tests {
     }
 
     /// The seeds of the explained plan of GADT instances (20 programs of
-    /// 100 cases) on which today's checker differs from OCaml; the new
-    /// side was read against the lines for each class:
+    /// 100 cases) on which the two sides differ, with the side that
+    /// differs from OCaml for each class, read against the lines:
     ///
     /// - 8,000,098 and 11,000,046: `EXPLAINED_OLD_DIFFERS` (decisions
     ///   77 and 78);
-    /// - 17,000,064 and 20,000,132: after a unification that FAILED in
-    ///   the explaining mode the old side expands the types of the trace
-    ///   (`ctype::record_trace_expansions`, types/ctype.rs), with
-    ///   tracing off, so the expansion of `n1` is in the memo all `n1`
-    ///   nodes share and a later instance links to the expanded node.
-    ///   OCaml's `unify` expands no trace (`let unify env ty1 ty2 =
-    ///   unify_pairs (ref env) ty1 ty2 []`, compiler/ml/ctype.ml:2779);
-    ///   the expansion it made inside the unification was traced and is
-    ///   in the node's own memo (ctype.ml:200-202), so the instance is a
-    ///   new node, as on the new side;
+    /// - 17,000,064 and 20,000,132: the NEW side differs. After a
+    ///   unification that failed, OCaml's `unify` expands the types of
+    ///   the trace with tracing off (compiler/ml/ctype.ml:2732-2737,
+    ///   1697-1701), so the expansion of `n1` is in the memo all `n1`
+    ///   nodes share (200-202) and a later instance links to the node,
+    ///   as on the old side (`ctype::record_trace_expansions`,
+    ///   types/ctype.rs). The new side expands no trace yet; owed by
+    ///   the design turn after R3s;
     /// - 4,000,069: `a3` (a nullary abbreviation whose head, through
     ///   `t0 := k<int>`, is a member) against a function type at a lower
     ///   level. unify2 expands `a3` first, and `try_expand_head` adds
@@ -5402,7 +5407,7 @@ mod tests {
     ///   `update_level` then refuses `a3` itself (587-589): the pair is
     ///   `a3` and a variable, and `a3` keeps its level, as on the new
     ///   side. The old side lowers `a3` and reports a node below it.
-    const EXPLAINED_INSTANCES_OLD_DIFFERS: [u64; 5] =
+    const EXPLAINED_INSTANCES_DIFFER: [u64; 5] =
         [4_000_069, 8_000_098, 11_000_046, 17_000_064, 20_000_132];
 
     /// The acceptance test of R3s on generated cases (section 8.11;
@@ -5436,9 +5441,9 @@ mod tests {
         assert!(coverage.failures * 4 > coverage.cases, "{coverage:?}");
         let (explained, differing) = run_plan(Plan::new(Tier::Full, INSTANCE_PLAN | EXPLAIN), 1, 20, 100);
         let seeds: Vec<u64> = differing.iter().map(|(seed, _)| *seed).collect();
-        let unknown = differing.iter().find(|(seed, _)| !EXPLAINED_INSTANCES_OLD_DIFFERS.contains(seed));
+        let unknown = differing.iter().find(|(seed, _)| !EXPLAINED_INSTANCES_DIFFER.contains(seed));
         assert!(
-            seeds == EXPLAINED_INSTANCES_OLD_DIFFERS,
+            seeds == EXPLAINED_INSTANCES_DIFFER,
             "{seeds:?}\n{}",
             unknown.map_or("", |(_, report)| report.as_str())
         );

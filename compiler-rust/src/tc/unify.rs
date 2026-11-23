@@ -423,7 +423,8 @@ impl Checker {
     /// frames are run by [`Checker::late_pair`] and
     /// [`Checker::resume_frames`], which look at each pair for a local
     /// constraint added since; without, by `run_frames`. Always inline:
-    /// `late` is a constant at both call sites.
+    /// `late` is a constant at the call of `unify_distinct`, the hot one;
+    /// `unify_distinct_gadt`, out of line, gives it a value.
     #[inline(always)]
     fn unify_distinct_from(&mut self, left: Ty, right: Ty, late: bool) -> Result<(), Clash> {
         let top = self.depth == 0;

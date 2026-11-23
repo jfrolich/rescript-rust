@@ -3438,10 +3438,10 @@ prototype was run in (every test of the slice passed, and the whole
 R3s. R3h, R3r and R3q are merged. Read section 8.11 (the part "As
 built in the ninth turn" first: it replaces the older table and
 contract below it) and section 8.6, decisions 85 to 88 and 97 to 112;
-compiler/ml/ctype.ml 176-203, 584-640, 744-800, 1163-1167, 1187-1279,
-1503-1536, 2227-2303, 2739-2785; compiler/ml/btype.ml 606-650, 749-804;
-compiler/ml/env.ml 1045-1048, 1305-1345; compiler/ml/typecore.ml
-2824-2829; in src/tc/unify.rs the doc comments of GADT_LOCAL to
+compiler/ml/ctype.ml 176-203, 584-640, 744-800, 1113-1135, 1163-1167,
+1187-1279, 1319-1336, 1503-1536, 1697-1701, 2227-2303, 2732-2785;
+compiler/ml/btype.ml 606-650, 749-804; compiler/ml/env.ml 1045-1048,
+1305-1345, 1802-1811; compiler/ml/typecore.ml 2824-2829; in src/tc/unify.rs the doc comments of GADT_LOCAL to
 CaseMark, of FrameKind::Untrace and Try, and the doc comments AND
 bodies of Checker::{unify_distinct, unify_distinct_from, unify_pair,
 unify_expanded, unify_var, unify_pattern, try_frame, recover,
@@ -3458,9 +3458,15 @@ A prototype of this slice was written in the design turn and every
 test of the slice passed against it. It is not in the repository; it
 is a comment on the pull request of the ninth skeleton turn (one
 fenced diff against the skeleton as that pull request committed it,
-each body under a line `// R3S-PROTOTYPE`). You MAY read it. It meets the doc comments;
-nothing it does is forbidden by this prompt. Where your code differs
-from it, the doc comment decides.
+each body under a line `// R3S-PROTOTYPE`). You MAY read it. Its 25
+bodies meet the doc comments. Three things it does are NOT yours to
+copy: it deletes four size assertions (`InstanceScope`,
+`InstanceMember`, `CaseMark` in unify.rs, `OwnMemo` in expand.rs),
+which stay; it keeps the test of resume_frames that (c) deletes; and
+its three lists of seeds are not the ones (d) gives. It was written
+before `expand_head` stopped adding the chain in `ExpandMode::Opt`:
+that line is built code and not yours. Where your code differs from
+it, the doc comment decides.
 
 Yours: the 25 bodies that are `todo!("R3s")`: in unify.rs
 Checker::{unify_distinct_gadt, trace_on, late_pair, has_own_expansion,
@@ -3493,20 +3499,28 @@ Commits, in this order, each pushed:
        and put back to what it was beside the line that puts `umode`
        back;
    (c) in resume_frames, the test `if self.gadt & GADT_PATTERN == 0`
-       with its `return` and its comment deleted: `late_pair` always;
+       with its `return` and its comment deleted: `late_pair` always
+       (the prototype ran with the test in place; with (b) it is never
+       true where resume_frames is reached; if a test fails once it is
+       deleted, stop and report it);
    (d) in differential.rs, exactly these three constants and their
        types: `UNTIL_R3S` is `[u64; 0] = []`, `EXPLAINED_UNTIL_R3S` is
-       `[u64; 0] = []`, `EXPLAINED_OLD_DIFFERS` is `[u64; 4] =
-       [4_000_045, 8_000_098, 11_000_046, 20_000_132]` (decision 110
-       says why; the doc comment above them already does). Nothing
+       `[u64; 0] = []`, `EXPLAINED_NEW_DIFFERS` is `[u64; 2] =
+       [4_000_045, 20_000_132]`. `EXPLAINED_OLD_DIFFERS` and
+       `EXPLAINED_INSTANCES_DIFFER` stay as they are (decision 110
+       says why; the doc comments above them already do). Nothing
        else of the harness changes.
    Run `cargo test --manifest-path compiler-rust/Cargo.toml --lib
-   tc:: -- --include-ignored`: every test passes, the thirteen of this
-   slice included.
+   tc:: -- --include-ignored` in the background with its output in a
+   file (it takes up to twenty minutes; poll it): every test passes,
+   the thirteen of this slice included, and the last line reads 338
+   passed, 0 failed, 0 ignored (the 325 that pass before your first
+   edit and the thirteen). Never report a count you did not see.
 2. The thirteen `#[ignore = "R3s build"]` lines removed, the 25
    `#[allow(unused_variables, dead_code)]` lines, and the
    `#[allow(dead_code)]` of NO_OWN with the sentence about it;
-   nothing else in the tests changed.
+   nothing else in the tests changed. The same command without
+   `-- --include-ignored` then reads 338 passed, 0 failed, 0 ignored.
 End your turn after the second commit is pushed.
 
 Steps (`#[cfg(test)] super::steps::tick()`): one a scope and one a
@@ -3525,8 +3539,9 @@ none of your bodies.
 The hand-built tests are the judge, each with the OCaml lines it
 follows. If a test fails where your code does what the cited lines
 say, stop and report the test with the lines: do not change the test.
-The old checker is not the judge at the seeds listed in
-EXPLAINED_INSTANCES_OLD_DIFFERS and EXPLAINED_OLD_DIFFERS; a seed that
+A seed listed in EXPLAINED_INSTANCES_DIFFER, EXPLAINED_OLD_DIFFERS or
+EXPLAINED_NEW_DIFFERS differs for the reason its doc comment gives,
+and you act on none of them; a seed that
 is not listed and differs is read against the lines of 8.11 and
 reported: you pin none.
 
@@ -3561,8 +3576,10 @@ without `repr`; an own memo read by find_expansion outside tracing,
 or written in the memo all nodes of a type share while tracing; a
 cleanup of the own memos by forget_simple_memo; a recursion in
 add_instance_chain or own_ancestor; a `Vec`, a hash map or a `Box`
-made in a call; the lowerings of unify_fields and set_more (decision
-112: not in this slice); a change of `Checker::copy`, `instance`,
+made in a call; the lowerings of unify_fields and set_more, a memo
+chain through a parent with arguments, a copy with `partial`, an
+expansion of the types of a failed trace (decision 112 and the
+corrections after the review of the ninth turn: not in this slice); a change of `Checker::copy`, `instance`,
 `Graph::lower` or `bind_leaf`; a new FrameKind; a change under
 src/types. At most 350 lines of code added outside comments (the
 prototype's part is about 270).
@@ -5766,6 +5783,13 @@ rows of `instance`, `copy` and `expand_head`, by 107 and 111), 100
      memos and nothing else, so the kernel makes no node: a cleanup,
      and `Ok(NONE)` or the clash. Run: `a_node_below_its_equation_is_
      not_expanded_under_tracing`, which fails without the level test.
+     Not exact (review of this turn): `Btype.backtrack` cleans the
+     memos only when a change was logged since the snapshot
+     (btype.ml:773-784), and `subst` writes its memo without a log
+     entry (ctype.ml:1122-1124, btype.ml:629-632). Where the
+     expansion touched no older node OCaml keeps the memo, and a
+     second `Safe` expansion of that node finds it and expands,
+     where the kernel refuses again (item 8 of the corrections).
 109. **The own memo of a nullary constructor is a row of 16 bytes
      with the node it continues with** (decision 100 changed: it said
      8). The first prototype had the expansion only, and the pattern
@@ -5808,11 +5832,16 @@ rows of `instance`, `copy` and `expand_head`, by 107 and 111), 100
      Against the prototype: 10,000 of 10,000 cases of the plan agree
      in the success mode (3,473 with a failure); of 2,000 explained
      ones 1,995 agree and five are listed
-     (`EXPLAINED_INSTANCES_OLD_DIFFERS`), each read against OCaml: two
+     (`EXPLAINED_INSTANCES_DIFFER`), each read against OCaml: two
      are decisions 77 and 78; two (17,000,064, 20,000,132) are the
-     old side expanding the types of a failed trace with tracing off
-     (`ctype::record_trace_expansions`), which puts an expansion in
-     the shared memo where OCaml's traced one is in the node's own;
+     expansion of a failed trace, and there it is the NEW side that
+     differs (corrected in the review of this turn; the turn read it
+     the other way): after a failure OCaml's `unify` expands the
+     types of the trace with tracing off (ctype.ml:2732-2737,
+     1697-1701), which puts the expansion in the shared memo, as the
+     old side does (`ctype::record_trace_expansions`); the new side
+     expands no trace yet (item 5 of "Corrections after the review of
+     the ninth turn", at the end of 8.11);
      one (4,000,069) is the chain of `try_expand_head`, which makes
      the unexpanded abbreviation a member before unify2 lowers it
      (ctype.ml:1271-1276 then 587-589): the new side refuses the
@@ -5822,8 +5851,10 @@ rows of `instance`, `copy` and `expand_head`, by 107 and 111), 100
      20,000,132 does NOT: decision 79 took it for the memo of R3s,
      and it is the trace expansion above, as is 4,000,045, which
      differs only once the new side traces. So after the build
-     `EXPLAINED_UNTIL_R3S` is empty and `EXPLAINED_OLD_DIFFERS` is
-     `[4_000_045, 8_000_098, 11_000_046, 20_000_132]`.
+     `EXPLAINED_UNTIL_R3S` is empty, `EXPLAINED_OLD_DIFFERS` stays
+     `[8_000_098, 11_000_046]`, and the two seeds are
+     `EXPLAINED_NEW_DIFFERS`, the new side's until it expands a
+     failed trace.
 111. **The cost for a unit without a member, measured, and the
      placements tried** (decision 104, first point). Instructions an
      operation, cachegrind, 100,000 iterations, each unification
@@ -5876,7 +5907,10 @@ rows of `instance`, `copy` and `expand_head`, by 107 and 111), 100
      `fresh_abstract`, `GADT_PATTERN` in `unify_pattern`), the guard
      of `resume_frames` deleted, the three seed lists as decision 110
      says; then a commit that removes the `ignore` and `allow` lines.
-     That is the state the prototype was run in. Seen to fail with
+     The prototype was run with the test of `resume_frames` still in
+     place (its diff keeps it); with `GADT_PATTERN` set by
+     `unify_pattern` that test is never true where `resume_frames` is
+     reached, so the build deletes it. Seen to fail with
      its structure broken: the four shapes of
      `instance_sets_at_ten_thousand` (decisions 106 and 107; shape 3
      with an addition that writes its head twice: the count is no
@@ -7319,7 +7353,7 @@ pays and what runs behind the read:
 | `find_expansion` of a constructor without arguments that the shared memo does not hold | 200-202, 1191-1192 | `memo.own_live`, one load | `find_own_expansion` (under tracing only) |
 | `cleanup_abbrev`, `forget_abbrev` | btype.ml:623-627, 646-650 | `memo.own_live`, one load | a new generation of the own memos; one entry forgotten |
 | `unify_pair`, two constructors without arguments of one type | 2254 | `memo.own_live`, one load on that arm | `has_own_expansion`: the pair goes to unify2 |
-| `expand_head` (not `Unif`), after a head expanded | 1271-1276 | a compare of two registers; `gadt & MEMBER` when the head expanded | `expanded_instance`: one lookup, the chain |
+| `expand_head` (not `Unif`; not `Opt`, whose `try_expand_head_opt`, 1319-1321, has no chain), after a head expanded | 1271-1276 | a compare of two registers; `gadt & MEMBER` when the head expanded | `expanded_instance`: one lookup, the chain |
 | `unify_expanded`, inside `if !unexpanded` | 1271-1276 at 2278-2281 | `gadt & MEMBER`, one load a pair of which a head expanded | `expanded_instances` |
 | `unify_expanded`, before unify3 | 2289-2298 | `gadt & TRACING`, one load a call that comes there | `join_instance_levels` (nothing without a member) |
 | `lower_scoped_loop` | 587-589 | none for a unit without a scoped type (`types.scoped == 0` is `Graph::lower`, as before); otherwise `gadt & MEMBER` once a call and once after each expansion, and a register test a node | `instance_escapes`: one lookup a node above the level |
@@ -7792,6 +7826,115 @@ turn that makes the skeleton of R3s (5 to 11); accepted as they are
     before and after); `PolyCopy` without a size test (one a checker,
     not one a node).
     State: accepted; nothing owed.
+
+**Corrections after the review of the ninth turn.** Made in place by
+the reviewer (items 1 to 4), owed (5 to 12), answered (13) or accepted
+(14). Each owed item names the direction in which the kernel as
+designed differs from OCaml, where one is known.
+
+1. Made, decision 110 and the doc comments of the seed lists. They
+   said OCaml's `unify` expands no trace (citing ctype.ml:2779, which
+   is the wrapper). The `unify` that wrapper reaches is 2732-2737:
+   after a failure it runs `expand_trace` (1697-1701), a `full_expand`
+   of every type of the trace, with tracing already put back, so a
+   nullary expansion goes to the shared memo (200-202). The old side
+   does the same. Seeds 4,000,045 and 20,000,132 of the explained
+   pattern plan and 17,000,064 and 20,000,132 of the plan with scopes
+   are therefore the NEW side's difference: `EXPLAINED_NEW_DIFFERS`
+   (added, empty until the build) and `EXPLAINED_INSTANCES_DIFFER`
+   (renamed) say so. Decision 79's reading of 20,000,132 was nearer
+   than decision 110's.
+2. Made, built code: `expand_head` added the chain of instances in
+   every mode but `Unif`. `expand_head_opt` has no chain step
+   (`try_expand_head_opt`, ctype.ml:1319-1321), and `mcomp` expands in
+   `Opt`. The guard now leaves `Opt` out: one compare of a register
+   where a head expanded. No test runs it (item 11).
+3. Made, the build prompt of R3s in 8.4: the count the builder must
+   see (338); the test run in the background; the ranges 1113-1135,
+   1319-1336, 1697-1701, 2732-2737 and env.ml 1802-1811; what of the
+   prototype is not the builder's to copy (it deletes four size
+   assertions and keeps the test of `resume_frames`); the three lists
+   of seeds; what is not in the slice.
+4. Made, text: decision 108 (what a backtrack keeps), decision 112
+   (the prototype ran with the test of `resume_frames` in place), the
+   row of `expand_head` in the table of sites, the doc comment of
+   `unify_distinct_from` (`late` is a value at its second call).
+5. OWED, the expansion of a failed trace (item 1). The kernel has no
+   counterpart of `expand_trace`: after a unification that fails under
+   tracing, OCaml's shared memo holds the expansion of each nullary
+   abbreviation of the trace and a later copy of that abbreviation is
+   a link to the node (`find_repr`, ctype.ml:778-782); the kernel
+   makes a new node. A hand-built test, then the expansion, then the
+   two lists emptied of those seeds. "Not observable in a
+   compilation" is not shown: typecore.ml goes on after a caught
+   `Unify` in several places (2496-2499 is one).
+6. OWED, three places where the kernel as designed ACCEPTS where
+   OCaml refuses, each with a hand-built case and then its build:
+   the lowerings under tracing (`unify_fields`, ctype.ml:2490;
+   `set_more`, 2610-2611); a member whose representative is a
+   variable, which `bind_leaf` lowers without the test (reachable:
+   the expansion of an abbreviation to its parameter joins a set at
+   1227, and unify2 reached from the `deep_occur` arm, 2240, can add
+   the chain of a variable at 2297-2298); the copy with `partial`
+   (ctype.ml:752-766, typecore.ml:4065), which copies the nodes that
+   are not generic too, each copied member joining. None may be open
+   when the new checker is first allowed to accept a unit with a
+   local constraint (the gate of R5c).
+7. OWED, decision 109, the chain through a parent with arguments:
+   the kernel makes a node where OCaml links, and `has_own_expansion`
+   reads false where `has_cached_expansion` reads through `Mlink`
+   (btype.ml:618), so the kernel links at once (ctype.ml:2248-2257)
+   where OCaml goes to unify2. A case, or the reason the answers are
+   the same.
+8. OWED, decision 108: a second `Safe` or `Opt` expansion of a node
+   refused once under tracing, where the first touched no older node:
+   OCaml expands (the memo stayed), the kernel refuses again. A case
+   through `expand_head`, or the reason the node is never asked twice.
+9. OWED, decision 107: `copy_in` adds a copy to the scope in which it
+   found the member; OCaml adds it to the first scope of that level
+   (`List.assoc lv` in `add_gadt_instances`, env.ml:1324-1329). They differ when two visible
+   scopes have one level and the member is in the outer one: the
+   lookup answers the same level, but OCaml's addition leaves with
+   the inner environment. A case with two scopes at one level.
+10. OWED, `unify_pair`: the new test `l.a != r.a` keeps two nodes of
+    ONE locally abstract type, one with an expansion of its own, out
+    of the arm of ctype.ml:2258-2269, which OCaml takes for them (it
+    expands the first once and unifies again). The kernel sends the
+    pair to unify2. A case that shows the same answer, or the arm.
+11. OWED, tests: step tests of the loops no shape of
+    `instance_sets_at_ten_thousand` runs wide (the parents of
+    `own_ancestor`, the nodes of `inherit_own` and their product, the
+    scopes of `instance_scope_at`, the additions of `copy_in`, one
+    scope of 10,000 members asked by a lowering of 10,000 nodes); an
+    `Opt` expansion that adds no member (item 2); the arms the turn
+    lists as reached by no hand-built test (`subst_traced` in `Opt`;
+    a clash inside a traced pair of a late pattern unification and
+    `recover` putting tracing back; `own_ancestor` past its first row
+    and through a row a cleanup emptied; `inherit_own` on a private
+    entry; `copy_in` with one source in two scopes; `leave_case`
+    after a failed pattern unification). And
+    `the_newer_of_two_locally_abstract_types_is_expanded_once` reads
+    either memo since this turn: once R3s is built it says which.
+12. OWED, for the design of R3i: `ExpandMode::Rigid` expands private
+    abbreviations (`matches!(mode, Opt | Rigid)` in expand.rs, since
+    R3b), but `expand_head_rigid` is `expand_head` with rigid
+    variants (ctype.ml:3184-3189): public, and with the chain. No
+    caller yet.
+13. The turn's five questions. (1) The two lowerings are not built
+    in R3s; they are item 6. (2) One commit of bodies and one that
+    removes the `ignore` and `allow` lines: yes. (3) A scheme
+    generalized in a unit with a member, as nodes or with members
+    recorded by the capture: decided by R5b's design, which holds the
+    schemes. (4) `bind_leaf` and a member that is a variable: item 6;
+    a program is looked for first, in today's checker too. (5) The
+    explained seeds are NOT left as differences of today's checker:
+    items 1 and 5.
+14. Accepted: the one test of built code that changed; `#[inline
+    (always)]` on `subst_plain` and `unify_distinct_from`, `#[cold]`
+    on the new out-of-line bodies; the figures of decision 111 taken
+    on the prototype and not on the skeleton (the builder reports
+    both columns); the eighth turn's items 5 to 10 untouched, each
+    still owed.
 
 ## 9. R4 as designed
 
