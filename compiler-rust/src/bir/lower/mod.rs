@@ -140,29 +140,6 @@ impl Cx {
     }
 }
 
-/// K1/K2/K6: deferred, already-lowered operands, not a second L tree.
-/// The caller has lowered expression operands exactly once before probing.
-pub enum ProbeInput<B: js::Js> {
-    /// An already-lowered expression or statement result.
-    Output(Out<B>),
-    /// A retained effect value followed by a probed child.
-    Seq {
-        /// Already-lowered effect value.
-        first: B::E,
-        /// Result of probing the tail.
-        second: Probed<B>,
-    },
-    /// An already-lowered condition and its probed branches.
-    Cond {
-        /// Already-lowered test value.
-        test: B::E,
-        /// Probed true branch.
-        then_: Probed<B>,
-        /// Probed false branch.
-        else_: Probed<B>,
-    },
-}
-
 /// K2/K6: C:4715 append_effect_output and C:5144 compile_if_return_output.
 /// Construction policy is supplied by J constructors, not by the output algebra.
 pub trait Realizer<B: js::Js> {
@@ -766,7 +743,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     }
     /// K2/K6: C:4715 append_effect_output / C:5144 compile_if_return_output.
     /// Cost: that of `FreePool::realize`; the pool is moved out and back,
-    /// two moves of its 88 bytes, no allocation.
+    /// two moves of its 80 bytes, no allocation.
     fn realize(&mut self, cx: Cx, probed: Probed<B>) -> Out<B> {
         let mut free = std::mem::take(&mut self.free);
         let out = free.realize(cx, probed, self);

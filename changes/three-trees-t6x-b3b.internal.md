@@ -1,0 +1,1 @@
+- Backend lowering: the close of a statement list and the unit's finish go through the lowering's JavaScript interface; the export block's identifiers are copied from its shared payload, and the unused `FreePool::probe` is removed.
