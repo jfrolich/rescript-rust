@@ -4283,12 +4283,12 @@ is not a call: `Out` is passed by value in 37 constructions and read at
 | T6x-a3 | The stack's reads give references, `take(slot)`, the stack implements `Runs` and `if_in_place` calls `JsStmt::if_head`; `place`, `if_statement`, `unnest`, `single_assignment`, `assignment_statement` change with all their callers | `out.rs`, `cond.rs`, `location.rs`, `export.rs`, `mod.rs`, `exit.rs`, `loops.rs`, `switch.rs`, `untagged.rs`, `variant.rs` | about 475 measured | T6x-a2 | none |
 | T6x-a4 | The reserved pool list of a switch's actions becomes a run of the stack taken with `take_actions`; `switch_output_nodes` and `ActionState::cached` hold handles | `exit.rs`, `switch.rs`, `ffi_args.rs`, `untagged.rs`, `mod.rs`, `out.rs` | about 210 measured | T6x-a3 | none |
 | T6x-b | `Out<B>`, `Probed`, `Free`, `RealizeWork` and the five types that change with them: an output's value is a `B::E`. Built in four parts ("T6x-b: an output's value, as built"). On trunk: **b1** (pull request 355) `Free`, `RealizeWork`, `FreePool`, `ProbeInput` and `Realizer` hold `B::E`; **b2** (357) `Out::value` is `Option<B::E>`, one whole in 27 files; **b3a** (358) the turn-backs b1 and b2 left are removed in ten files. To build: **b3b**, the close of a list and the unit's finish. `close::decide` takes the implementation and a list in flight and reads each statement where it is (`JsStmt::with_stmt_at`); `StatementStack::close` takes `B::L` and `take_list` loses the last `B::list_id`; the `return` arm names the returned value by its id for `scope::return_sites` (T6r). `extract_exports` takes the value as a handle and copies the export identifiers out of the block's shared payload, so `complete_unit` no longer walks the comma spine, copies the payload or writes it (`Node::set_block_info` is deleted). `finish` takes `B::L`, makes the root with `block_of` and reads it by its id until T6s. `FreePool::probe`, `ProbeInput` and the counter `probes` are deleted (`FreePool<Rows>` 88 to 80 bytes) and their two tests become tests of `FreePool::realize` | b3b: `close.rs`, `out.rs`, `mod.rs`, `export.rs` (`extract_exports` only), `bir/node.rs` (the deletion) | b3b: 117 lines added and 188 removed, measured in the design turn's check; transition calls 437 to 433 | T6x-a4; b3b after this design turn | none |
-| T6x-c1 | Bodies and private functions: the primitives. `values` becomes a vector of handles from `sequence_arguments` on; `constant_children` goes; the functions of the cluster that only the cluster calls take and return handles | `prim.rs`, `prim_cmp.rs`, `prim_block.rs`, `konst.rs`, `record.rs`, `import.rs`, `args.rs`, `call.rs` | 139 + 7 + 15 + 7 + 8 + 22 + 10 calls: about 300 | T6x-b | c2, c3, c4 |
-| T6x-c2 | The same for the externals; the operand lists in the pool become operands pushed as they are converted, and `push_list` loses its five calls; the three chain walks read `var_of` first | `external.rs`, `ffi_args.rs`, `jsx.rs` (not `printed_form`, `jsx_tag`) | 40 + 64 + 19 calls and the list assembly: about 300 | T6x-b | c1, c3, c4 |
-| T6x-c3 | The same for conditionals and switches | `cond.rs`, `expr.rs`, `switch.rs`, `variant.rs`, `untagged.rs`, `location.rs` | after T6x-a the files have 55 + 11 + 6 + 18 + 22 + 0 transition calls, none of a statement outside two test helpers: about 200 (estimate) | T6x-b | c1, c2, c4 |
-| T6x-c4 | The same for loops, exits and recursion; `recursive_dummy` gives a handle to its two callers in `rec.rs` | `loops.rs`, `try_.rs`, `exit.rs`, `rec.rs`, `tail.rs`, `assign.rs`, `label.rs` | after T6x-a the files have 5 + 2 + 4 + 7 + 4 + 2 transition calls: about 60 (estimate) | T6x-b | c1, c2, c3 |
-| T6x-d | The functions that cross clusters, each with all its callers in one slice: the 31 rows of the callers' table that are left after T6x-a (`drop_pure_effect`, `primitive_runtime`, `static_member`, `number`, `string`, `constant`, `add_external_effect`, `compile_js_call`, `compile_jsx`, `sequence_arguments`, ..., and `if_statement`, `assignment_statement` and `merge_assignments` for the expression each still takes or returns). `place`, `unnest`, `single_assignment`, `loop_function_body` and `locate_switch_run` are no longer rows: T6x-a changed the first four, and the last names a source node only. No turn-back is left between two files | every file of a row | 31 signatures and 95 calls in other files: about 260 (estimate) | c1 to c4 | none |
-| T6x-e | `export.rs`: its tables hold handles or ids the interface gives (`Js::id`), and its three edits are interface calls (the replacement in place, a row taken out of its block, the final list) | `export.rs` | to be counted after T6q | T6x-d, T6q | none |
+| T6x-c1 | Bodies and private functions: the primitives. `values` becomes a vector of handles from `sequence_arguments` on; `constant_children` goes; the functions of the cluster that only the cluster calls take and return handles | `prim.rs`, `prim_cmp.rs`, `prim_block.rs`, `konst.rs`, `record.rs`, `import.rs`, `args.rs`, `call.rs` | 198 transition calls after T6x-b ("T6x-b: an output's value, as built" (i)); its size is its probe's to measure | T6x-b | c2, c3, c4 |
+| T6x-c2 | The same for the externals; the operand lists in the pool become operands pushed as they are converted, and `push_list` loses its five calls; the three chain walks read `var_of` first | `external.rs`, `ffi_args.rs`, `jsx.rs` (not `printed_form`, `jsx_tag`) | 105 transition calls after T6x-b and the list assembly ("T6x-b: an output's value, as built" (i)): about 300 (estimate) | T6x-b | c1, c3, c4 |
+| T6x-c3 | The same for conditionals and switches | `cond.rs`, `expr.rs`, `switch.rs`, `variant.rs`, `untagged.rs`, `location.rs` | 75 transition calls after T6x-b ("T6x-b: an output's value, as built" (i)), none of a statement outside two test helpers: about 150 (estimate) | T6x-b | c1, c2, c4 |
+| T6x-c4 | The same for loops, exits and recursion; `recursive_dummy` gives a handle to its two callers in `rec.rs` | `loops.rs`, `try_.rs`, `exit.rs`, `rec.rs`, `tail.rs`, `assign.rs`, `label.rs` | 17 transition calls after T6x-b ("T6x-b: an output's value, as built" (i)): about 50 (estimate) | T6x-b | c1, c2, c3 |
+| T6x-d | The functions that cross clusters, each with all its callers in one slice: the 31 rows of the callers' table that are left after T6x-a (`drop_pure_effect`, `primitive_runtime`, `static_member`, `number`, `string`, `constant`, `add_external_effect`, `compile_js_call`, `compile_jsx`, `sequence_arguments`, ..., and `if_statement`, `assignment_statement` and `merge_assignments` for the expression each still takes or returns). `place`, `unnest`, `single_assignment`, `loop_function_body` and `locate_switch_run` are no longer rows: T6x-a changed the first four, and the last names a source node only. No turn-back is left between two files | every file of a row | about 30 signatures and 97 calls in other files after T6x-b ("T6x-b: an output's value, as built" (i)): about 260 (estimate) | c1 to c4 | none |
+| T6x-e | `export.rs`: its tables hold handles or ids the interface gives (`Js::id`), and its three edits are interface calls (the replacement in place, a row taken out of its block, the final list) | `export.rs` | 37 transition calls after T6x-b, 36 after b3b ("T6x-b: an output's value, as built" (i)) | T6x-d, T6q | none |
 | T6x-f | The transition functions leave the two traits and `Rows`: `from_node`, `node`, `at`, `stmt_from_node`, `stmt_node`, `list_from`, `list_id`, `push_list` (`function_of_block` left in T6x-a2); `rg 'B::(from_node\|node\|at\|stmt_)' src/bir/lower` is empty. `norm::jm14_push_effect_expression`, which only tests call since T6q, gets `#[cfg(test)]` | `js.rs`, `js_stmt.rs`, `rows.rs`, `rows_stmt.rs`, `norm.rs`, the interface tests | about 150 (estimate) | T6x-e, T6r | none |
 
 Order: a1, a2, a3, a4, b, then c1 to c4 at once, then d, e, f. The
@@ -4392,10 +4392,10 @@ The functions of `StatementStack<B>` after T6x-a4 (`js: &mut B`, `a:
 | `statement_refs(run) -> impl Iterator<Item = &B::S>` | one step per slot of the run and per held statement |
 | `first(run) -> Option<&B::S>`, `first_slot(run) -> Option<u32>`, `first_single_slot(run) -> Option<(u32, &B::S)>` | the holes and dead ranges before the first statement, counted in `scanned` |
 | `only(run) -> Option<(u32, &B::S)>` | as `first`, twice |
-| `last(run) -> Option<&B::S>`, `last_slot(run) -> Option<u32>` | O(1) on a trimmed run, else one step per trailing hole or dead slot, counted |
+| `last(run) -> Option<&B::S>`, `last_slot(run) -> Option<u32>` | O(1) on a trimmed run, else one step per trailing hole or dead range, counted ("T6x-b: an output's value, as built" (h)) |
 | `at(slot) -> &B::S`, `head(slot) -> &B::S`, `head_mut(slot) -> &mut B::S` | O(1) |
 | `take(slot) -> B::S` | O(1): one write, the slot is dead |
-| `take_run(run)`, `take_run_rev(run) -> impl Iterator<Item = B::S>` | one step per slot of the run and per held statement; the caller kills the run |
+| `take_run(run)`, `take_run_rev(run) -> impl Iterator<Item = B::S>` | one step per slot of the run and per held statement, a dead range crossed in one; the caller kills the run |
 | `trim(floor)`, `kill(run)`, `has_statements(run)`, `remove_empty(run)`, `append(first, second, value)` | as today |
 | `note_empty_block(slot, id: u32)` | a binary search and an insertion among the unit's empty blocks; `id` is the block's `stmt_id` |
 | `drop_empty_blocks(js, a, run)` | two binary searches, then one step per empty block of the run |
@@ -4766,7 +4766,9 @@ its prompt, from the probe's `close.rs` and its hunks of `mod.rs`
 After each of the four commits: `--lib bir::lower` 569 passed (trunk's
 568 and this turn's interface test), `--lib bir::j` 58, `--lib
 emit::builder` 28 (trunk's 26 and this turn's two), none ignored, no
-compiler warning. On the last: `cargo clippy --all-targets -- -D
+compiler warning. The four were then put on this turn's final head,
+which has three more tests of the lowering: 572, 58 and 28. On the
+last: `cargo clippy --all-targets -- -D
 warnings` clean; `cargo doc` with warnings denied clean;
 `check_lowering_cost_docs.py --base` prints `changed/new=8;
 missing/generic=0; removed=0`; the four allocation counts hold at 86,
@@ -4887,6 +4889,36 @@ Every other transition call on trunk (433 after b3b) is inside the
 cluster of a c slice or `export.rs`, without a comment: the counts by
 file are in the table of T6x and in the probe prompt of T6x-c1.
 
+**(i) What the probes of T6x-c1 to f start from.** Counted on this
+turn's head (`python3 ../scripts/count_lowering_ids.py` from
+`compiler-rust`; 437 transition calls, 433 after b3b). These counts
+replace the ones in the rows of the table of T6x, which were taken
+before T6x-a or after it.
+
+| Row | Files and their transition calls | What T6x-b changed in the row |
+| --- | --- | --- |
+| T6x-c1 | `prim.rs` 133 (123 `from_node`), `prim_cmp.rs` 7, `prim_block.rs` 0, `konst.rs` 15, `record.rs` 7, `import.rs` 8, `args.rs` 18, `call.rs` 10: 198 | A value arrives as a handle: `sequence_arguments` takes `&mut [Out<B>]` and moves each value out, and turns it back where it pushes into `values: &mut Vec<NodeId>` (`args.rs`, three arms); `primitive_result` takes `B::E` and `call.rs` wraps `values[0]` for it. So the row starts at the push into `values`, not at the output. `probe_leaf` takes a handle, which removed five turn-backs at its callers |
+| T6x-c2 | `external.rs` 33, `ffi_args.rs` 53, `jsx.rs` 19: 105, and 5 `push_list` | `hold_external_receiver`, `hold_external_arg` and `hold_external_obj_args` read an output's value in place and take it only where they hold it; what they hand on is still a row (`external_values`, the argument lists). `ffi_args.rs` fell from 64 to 53 and `external.rs` from 40 to 33 |
+| T6x-c3 | `cond.rs` 35, `expr.rs` 2, `switch.rs` 5, `variant.rs` 13, `untagged.rs` 20, `location.rs` 0: 75 | `cond.rs` fell from 55 to 35 and `expr.rs` from 11 to 2: `finish_if`, `short_circuit`, `free_value`, `free_effect`, `push_s_if_empty`, `output` and `hold_effect` take or give handles. What is left in `cond.rs` is the rows of 3.6 (`effect_conditional`, `return_conditional`, `assigning_conditional`, behind the one `B::node(test)` of `finish_if`) and `Conditional`'s three fields; in `variant.rs`, `Plan::value` |
+| T6x-c4 | `loops.rs` 4, `try_.rs` 1, `exit.rs` 2, `rec.rs` 6, `tail.rs` 4, `assign.rs` 0, `label.rs` 0: 17 | `recursive_block` takes a handle and `assign.rs` has nothing left. The plan fields `loops::Plan::values` hold rows |
+| T6x-d | 33 rows in the callers' table of the script, 97 calls in other files. Three are not rows of this slice: `enter` (matched by name against `names.rs`), `locate_switch_run` (a source node only) and `extract_exports` (b3b) | `realize_conditional`, `append_outputs`, `leaf`, `probe_leaf` and `primitive_result` left the table. `drop_pure_effect` lost its caller in `mod.rs` (`Realizer::effect` calls `JsStmt::effect`) and has one written on `Rows` by name in `unit.rs`, which the script does not count ((g)) |
+| T6x-e | `export.rs` 37 (10 `from_node`, 7 `node`, 15 `at`, 4 `stmt_from_node`, 1 `stmt_node`), 36 after b3b; and ten `NodeId(self.js.id(..))` in `export.rs` and `jsx.rs` | After b3b `extract_exports` takes the unit's value as a handle; `Tables::values` still holds rows (it turns each back with `B::node(self.js.pop())`). `coerced_list` gives a pool list that `complete_unit` wraps ((g)) |
+| T6x-f | The seven transition functions of the two traits, `push_list`, and what calls them when e is merged | After b3b nothing in `close.rs` or `out.rs` calls one; `mod.rs` has two, both another slice's ((g)). `finish` reads the root by its id and needs none |
+
+Read off the code for the design of c1, not probed: the vector the
+values of an application or a primitive are sequenced into is one field
+of `State`, `argument_values`, and it is taken and given back in files
+of three rows (`call.rs`, `prim.rs`, `konst.rs`, `import.rs`,
+`prim_block.rs`: c1; `external.rs`, `ffi_args.rs`, `jsx.rs`: c2;
+`tail.rs`: c4). "The four c slices share no file" holds; "they edit no
+function of another cluster" does not follow for a field every cluster
+reads. Whether c1 can change its type alone, with a wrap at each use in
+the other clusters, or whether the field is a slice of its own before
+c1 to c4 (as T6x-a1 was for the statement stack) is the first question
+of c1's probe. `finish_self_call` (`tail.rs`, c4) takes `values:
+&[NodeId]` from `call.rs` (c1): a row of T6x-d that carries the same
+vector.
+
 **(h) Changes to earlier sections of this document**, each with its
 reason:
 
@@ -4907,9 +4939,30 @@ reason:
   are b3b's.
 - T6r gains one thing ((c)): the descent of a returned value. T6s
   gains the root's row in `finish` ((b)).
-- No test's expected value changes on trunk in this turn. In b3b one
-  pinned size moves by a deletion (`FreePool<Rows>`, 88 to 80) and two
-  tests of a deleted function are replaced ((f)).
+- "T6x-a: the statement stack, after the probe" (a), the table of the
+  stack: `last`, `last_slot`, `take_run_rev` and `trim` cross a dead
+  range from its end in one step, where they took one per slot. `kill`
+  marks the last slot of a range of more than one slot with the
+  range's length (`Slot::DeadEnd`); a slot stays 12 bytes on rows. The
+  read from the end that (c) there describes for the actions of a
+  switch crosses one step per run of the last switch, not one per
+  slot.
+- One expected value of a test of the lowering changes on trunk in
+  this turn, by that change: `out.rs`,
+  `the_actions_of_ten_thousand_switches_leave_only_the_slots_of_their_runs`
+  counted 8 slots crossed (four dead ranges of two slots) and counts
+  4. In b3b one pinned size moves by a deletion (`FreePool<Rows>`, 88
+  to 80) and two tests of a deleted function are replaced ((f)).
+- Tests added in this turn, each seen to fail without what it is there
+  for: rule 6 of `if_head` for a run that ends in `continue` (the
+  comparison with `js3_simplify_if` runs the same head on both sides
+  and passed with `continue` removed from the rule); a hold of 10,000
+  statements read through `statement_refs` and `take_run_rev`; a dead
+  range of 10,000 slots crossed from its end; the number of merged
+  guards at each size of the guard-chain test of `tail.rs`.
+- `scripts/count_lowering_ids.py` stops with an error where it finds
+  no file (from the repository root it printed zeros) and has a
+  `--self-test`.
 
 ### 11.5 Worker prompt for T4b
 
@@ -7177,10 +7230,10 @@ ocaml-to-rust-rewrite.
 Precondition, check it first and stop with a report if it fails: `rg -n
 'fn with_stmt_at' compiler-rust/src/bir/lower/js_stmt.rs` shows one
 line (the design turn of T6x-b is merged); `cargo test --manifest-path
-compiler-rust/Cargo.toml --lib bir::lower` reads 569 passed, `--lib
+compiler-rust/Cargo.toml --lib bir::lower` reads 572 passed, `--lib
 bir::j` 58, `--lib emit::builder` 28, none ignored; from compiler-rust,
 `python3 ../scripts/count_lowering_ids.py | grep '^| total' | head -1`
-prints `| total | 15807 | 174 | 87 | 437 | 241 | 126 | 57 | 5 | 3 | 2 |
+prints `| total | 15834 | 174 | 87 | 437 | 241 | 126 | 57 | 5 | 3 | 2 |
 3 | 0 | 5 | 162 |` (the first number may differ by lines trunk added;
 the fourth must be 437).
 
@@ -7397,7 +7450,7 @@ imports of the test of close.rs, the import line of the tests of
 out.rs, one line of a test of export.rs, the size of `FreePool<Rows>`,
 and the two replaced tests. No other expected value changes; the
 replaced tests keep every assertion that does not name the deleted
-counter. `--lib bir::lower` reads 569 passed after every commit (two
+counter. `--lib bir::lower` reads 572 passed after every commit (two
 tests replaced by two), `--lib bir::j` 58, `--lib emit::builder` 28.
 The tests that guard commit 2 exist and you do not edit them:
 unit.rs `export_consumption_does_not_empty_shared_block_metadata`,
@@ -7453,7 +7506,7 @@ prints, "then" what you must print:
 
     python3 ../scripts/count_lowering_ids.py | grep '^| total' | head -1
 
-  The design turn's build read `| total | 15748 | 169 | 86 | 433 | 240
+  The design turn's build read `| total | 15775 | 169 | 86 | 433 | 240
   | 126 | 57 | 4 | 3 | 3 | 0 | 0 | 5 | 148 |`: `from_node` 241 to 240
   (export.rs), `stmt_from_node` 5 to 4 and `list_id` 3 to 0 (mod.rs
   and out.rs), `list_from` 2 to 3 (mod.rs, until T6x-e). Paste yours
@@ -7481,8 +7534,9 @@ allocation counts; CI `Instruction count` at most +0.02%, one rerun
 allowed, both figures reported.
 
 Run by the design turn, in a copy that was not pushed: these four
-commits one after the other; after each, the three filters at 569, 58
-and 28; on the last, clippy and `cargo doc` clean, the cost-note check
+commits one after the other; after each, the three filters passed; on
+the last, rebased on the design turn's final head, they read 572, 58
+and 28, with clippy and `cargo doc` clean, the cost-note check
 at zero, the allocation counts and the close test unchanged; 117 lines
 added and 188 removed in five files. Not run: `Backend bridge
 coverage`, the parity suites, `Instruction count`, check mode.
@@ -7500,6 +7554,98 @@ the root turned back with `B::stmt_node`; `FreePool::probe` or
 `coerced_list`, of `coerce_exports` or of any function of export.rs
 other than `extract_exports`; an edit of js.rs, js_stmt.rs, rows.rs,
 rows_stmt.rs or src/emit.
+```
+
+
+Probe of T6x-c1 (a throw-away conversion; issued verbatim, with the
+common block of phase C; no build prompt for T6x-c1 to f exists until
+each has its probe and its design turn):
+
+```text
+Task: probe row T6x-c1 of the cut of T6x (compiler-rust/docs/
+THREE_TREES.md 11.4, "T6x: the cut" and "T6x-b: an output's value, as
+built" (i)). This is a measurement, not a slice: its pull request is a
+draft that is never merged, and its body is the report.
+
+Start from trunk with T6x-b3b merged (`rg -n 'fn decide<B: JsStmt>'
+compiler-rust/src/bir/lower/close.rs` shows one line). Branch from it;
+open the draft pull request against ocaml-to-rust-rewrite after the
+first push, titled "Probe: T6x-c1 (not for merge)".
+
+Convert the row: in prim.rs, prim_cmp.rs, prim_block.rs, konst.rs,
+record.rs, import.rs, args.rs and call.rs a value is a `B::E` from the
+place it is made to the place it is consumed. `values` holds handles
+from `sequence_arguments` on. A function of these files that only
+these files call takes and returns handles. A function another file
+calls keeps its signature (it is T6x-d's) and you wrap at the call,
+unless keeping it forces a turn-back and a wrap of the same value in
+one function: then change it, with its callers, and list it in (3).
+
+Rules of a probe:
+- You add nothing to the traits `Js` and `JsStmt` and nothing to
+  src/bir/j or src/emit. Where the conversion needs something the
+  interface does not give, write the turn-back that works today under
+  a comment `// PROBE-GAP n: <what is needed, in one line>` and go on.
+  Number the gaps in order of appearance.
+- No cost notes, no changelog discipline beyond one fragment, no `allow`
+  attribute. A test is edited only so that it compiles; no expected
+  value changes. If one would, leave the test failing and report it.
+- One commit per step below, pushed when made. After each: `cargo
+  check --all-targets --manifest-path compiler-rust/Cargo.toml`, and
+  `cargo test --manifest-path compiler-rust/Cargo.toml --lib
+  bir::lower` and `--lib bir::j` (never the whole suite). A step that
+  does not compile alone is merged with the next and the report says
+  so.
+- Do not run `Instruction count`, check mode or the parity suites, and
+  do not wait for CI.
+
+Steps:
+1. The storage: `State::argument_values` and the `values` parameter of
+   `sequence_arguments` and of `finish_primitive_values` hold `B::E`
+   (`Vec<Option<B::E>>` if a value is moved out of the middle, `Vec<
+   B::E>` if not: say which and why). Every file that takes the field
+   compiles, by a wrap where the file is not of this row (external.rs,
+   ffi_args.rs, jsx.rs, tail.rs): count those wraps by file.
+2. prim.rs: the reads `B::from_node(values[i])` become moves or reads
+   in place; `push_values`, `bin_of`, `first_value`.
+3. konst.rs (`constant_children`, `constant_values`), record.rs,
+   import.rs, prim_cmp.rs, prim_block.rs.
+4. args.rs (`Evaluation::values`, `evaluate_now`) and call.rs
+   (`call_reversed`, `eta_arguments`, the wrap of `values[0]`).
+
+The report (the body of the draft pull request), with these sections:
+(1) Size: `git diff --stat` against trunk; changed lines per commit,
+    production and test apart; whether the row is under 600 lines and,
+    if not, the cut the commits give, each part compiling and passing
+    at its place.
+(2) PROBE-GAPs: for each, the file, function and line, what is needed,
+    what you wrote instead, and the signature you would propose with
+    its cost on rows and on a builder that owns its nodes.
+(3) Signatures: every function whose signature changed, before and
+    after, with its callers in other files; which changes the row
+    could not avoid and which you made to remove a turn-back.
+(4) `values`: what its element type became and why; every place a
+    value is read from it more than once (an index read twice, a value
+    read and then moved, a slice passed on while an element is used),
+    with the line on trunk and what you did there. This is the table
+    of "one value, two consumers" for this row.
+(5) The shared field: for `argument_values`, `external_values`,
+    `constant_values` and `scratch`, the files that use each and
+    whether step 1 could change the type without editing a function of
+    a file that is not of this row. Say plainly whether c1 can be
+    built beside c2 to c4, or what must come before them.
+(6) Counts: `python3 ../scripts/count_lowering_ids.py | grep '^|
+    total' | head -1` from compiler-rust before and after, and the row
+    of each file of this row before and after; the marks
+    `assume_strict` after `Js::var` in args.rs, call.rs and import.rs
+    that you deleted (they write a flag the node has).
+(7) Tests: the counts of the two filters on trunk and after each
+    commit; every test edited to compile, with what changed; the four
+    allocation counts of unit.rs and every `size_of` assertion, held
+    or not.
+(8) What surprised you: anything the row's description or this prompt
+    says that the code contradicts.
+(9) What you did not run.
 ```
 
 
