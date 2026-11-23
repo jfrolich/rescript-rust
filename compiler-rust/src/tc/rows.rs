@@ -5148,7 +5148,150 @@ impl Checker {
     /// `keep`, per `Reither` field with types one node, its slots and 8
     /// bytes of holder.
     fn copy_sep_row(&mut self, fixed: bool, c: Ty, node: Node) -> Node {
-        todo!("R3q")
+        let level = self.g.level;
+        let row_of = |c: &Checker, node: Node| {
+            let ExtraDescriptor::Variant(row) = c.extras.descriptors[node.a as usize] else {
+                unreachable!("a variant node");
+            };
+            c.extras.variants[row as usize]
+        };
+        let is_variant = |c: &Checker, node: Node| {
+            node.head & EXTENDED != 0 && matches!(c.extras.descriptors[node.a as usize], ExtraDescriptor::Variant(_))
+        };
+        // The last row of the chain and its `more`.
+        let (mut last, mut last_node) = (row_of(self, node), node);
+        let more = loop {
+            let more = self.g.repr(self.g.lists[(last_node.b + last.more) as usize]);
+            let next = self.g.nodes[more.0 as usize];
+            if !is_variant(self, next) {
+                break more;
+            }
+            (last, last_node) = (row_of(self, next), next);
+        };
+        let more_node = self.g.nodes[more.0 as usize];
+        let keep = more_node.tag() == VAR && more_node.level != GENERIC;
+        let copied_more = self.sep_child(more);
+        let fixed = fixed && self.g.nodes[copied_more.0 as usize].tag() == VAR;
+        let b = self.g.lists.len() as u32;
+        self.g.lists.push(copied_more);
+        let arguments = if last.name == NONE { Range::default() } else { last.name_arguments };
+        for index in 0..arguments.len {
+            let argument = self.g.lists[(last_node.b + arguments.start + index) as usize];
+            let argument = self.sep_child(argument);
+            self.g.lists.push(argument);
+        }
+        // The fields, home by home.
+        let start = self.extras.row_fields.len() as u32;
+        let shared = self.extras.row_scratch.len();
+        let scratch = self.extras.poly.types.len();
+        let (mut home, mut home_node) = (c, node);
+        loop {
+            let row = row_of(self, home_node);
+            for at in row.fields.start..row.fields.start + row.fields.len {
+                #[cfg(test)]
+                super::steps::tick();
+                let field = self.extras.row_fields[at as usize];
+                let now = field_repr(&self.g, home_node.b, home_node.arity(), field);
+                let mut copy = RowFieldRow { name: field.name, types: Range::default(), link: NONE, kind: now.kind };
+                match now.kind {
+                    RowFieldKind::Present if now.types != 0 => {
+                        let ty = self.sep_child(now.first);
+                        copy.types = Range { start: self.g.lists.len() as u32 - b, len: 1 };
+                        self.g.lists.push(ty);
+                    }
+                    RowFieldKind::Either { constant, matched } => {
+                        let types = &mut self.extras.poly.types;
+                        each_field_types(&self.g, home_node.b, home_node.arity(), field, |own| {
+                            types.extend_from_slice(own)
+                        });
+                        copy.types =
+                            Range { start: self.g.lists.len() as u32 - b, len: (types.len() - scratch) as u32 };
+                        for index in scratch..self.extras.poly.types.len() {
+                            let ty = self.sep_child(self.extras.poly.types[index]);
+                            self.g.lists.push(ty);
+                        }
+                        self.extras.poly.types.truncate(scratch);
+                        copy.kind =
+                            RowFieldKind::Either { constant, matched: if last.fixed { fixed } else { matched } };
+                        if keep {
+                            let name = self.extras.row_fields.len() as u32;
+                            self.extras.row_scratch.push(FieldRef { name, at, ty: home });
+                        }
+                    }
+                    _ => {}
+                }
+                self.extras.row_fields.push(copy);
+            }
+            let next = self.g.repr(self.g.lists[(home_node.b + row.more) as usize]);
+            let next_node = self.g.nodes[next.0 as usize];
+            if !is_variant(self, next_node) {
+                break;
+            }
+            (home, home_node) = (next, next_node);
+        }
+        let published = self.g.lists.len() as u32 - b;
+        let mut references = 0;
+        for field in &mut self.extras.row_fields[start as usize..] {
+            if matches!(field.kind, RowFieldKind::Either { .. }) {
+                field.link = published + references;
+                references += 1;
+            }
+        }
+        let row = self.extras.variants.len() as u32;
+        self.extras.variants.push(VariantRow {
+            fields: Range { start, len: self.extras.row_fields.len() as u32 - start },
+            more: 0,
+            name: last.name,
+            name_arguments: Range { start: 1, len: arguments.len },
+            closed: last.closed,
+            fixed: last.fixed && fixed,
+        });
+        let a = self.extras.descriptors.len() as u32;
+        self.extras.descriptors.push(ExtraDescriptor::Variant(row));
+        let mut arity = published;
+        if self.extras.row_scratch.len() > shared {
+            // `keep`: the copy is opened onto the references of its source.
+            arity += references;
+            self.g.lists.resize((b + arity) as usize, Ty(NONE));
+            let (mut opened_home, mut fresh) = (Ty(NONE), false);
+            for index in shared..self.extras.row_scratch.len() {
+                let FieldRef { name, at, ty: home } = self.extras.row_scratch[index];
+                let source = self.extras.row_fields[at as usize];
+                if home != opened_home {
+                    fresh = self.g.nodes[home.0 as usize].arity() <= source.link;
+                    opened_home = home;
+                }
+                let home_node = self.open_row(home);
+                let end = field_repr(&self.g, home_node.b, home_node.arity(), source).end;
+                if fresh {
+                    self.g.nodes[end.0 as usize].level = more_node.level;
+                }
+                let field = self.extras.row_fields[name as usize];
+                let RowFieldKind::Either { constant, matched } = field.kind else {
+                    unreachable!("a shared field is a `Reither`");
+                };
+                let slot = if field.types.len == 0 {
+                    end
+                } else {
+                    let own = (b + field.types.start) as usize..(b + field.types.start + field.types.len) as usize;
+                    let list = self.g.lists.len() as u32;
+                    self.g.lists.extend_from_within(own.clone());
+                    self.g.lists.push(end);
+                    let chain = self.g.push(Node {
+                        head: TUPLE | (field.types.len + 1) << 8,
+                        level,
+                        a: either_flags(constant, matched),
+                        b: list,
+                    });
+                    self.hold(chain, end);
+                    self.g.lists[own].fill(chain);
+                    chain
+                };
+                self.g.lists[(b + field.link) as usize] = slot;
+            }
+            self.extras.row_scratch.truncate(shared);
+        }
+        Node { head: TUPLE | EXTENDED | arity << 8, level, a, b }
     }
 
     /// The copy session of [`Checker::instance_poly`] and
