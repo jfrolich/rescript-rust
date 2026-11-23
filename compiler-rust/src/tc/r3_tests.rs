@@ -5881,3 +5881,741 @@ fn the_occurrence_test_of_pattern_mode_at_ten_thousand_is_linear() {
         .join()
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// `instance_poly` and `instance_label` (R3q; CHECKER_REWRITE 8.10)
+// ---------------------------------------------------------------------------
+
+/// [`pattern_checker`] with the current level 3: the sources of the R3q
+/// tests are built at level 1 or generic, so a copy is told by its level.
+fn poly_checker() -> Checker {
+    let (mut c, _) = pattern_checker(Mode::Success);
+    c.g.level = 3;
+    c
+}
+
+/// The representative of slot `index` of the node `ty` resolves to (for
+/// a constructor, of its argument `index`).
+fn slot_of(c: &mut Checker, ty: Ty, index: u32) -> Ty {
+    let ty = c.g.repr(ty);
+    let node = c.g.nodes[ty.0 as usize];
+    let memo = u32::from(node.tag() == CONSTR);
+    let slot = c.g.lists[(node.b + memo + index) as usize];
+    c.g.repr(slot)
+}
+
+/// The tag, the arity and the level of the node `ty` resolves to.
+fn head_of(c: &mut Checker, ty: Ty) -> (u32, u32, u32) {
+    let ty = c.g.repr(ty);
+    let node = c.g.nodes[ty.0 as usize];
+    (node.tag(), node.arity(), node.level)
+}
+
+/// What every call of `instance_poly` leaves: no frame, no node on the
+/// way, no pair of a bound variable.
+fn assert_poly_left(c: &Checker) {
+    assert!(c.frames.is_empty());
+    assert!(c.extras.poly.slots.iter().all(|slot| slot.copy.0 == NONE));
+    assert_eq!(c.extras.poly.depth, 0);
+}
+
+/// `copy_sep` copies a node below which a universal variable is free
+/// whatever its level, and leaves the rest to `copy`
+/// (compiler/ml/ctype.ml:1033-1041):
+///
+/// ```text
+/// let rec copy_sep fixed free bound visited ty =
+///   let ty = repr ty in
+///   let univars = free ty in
+///   if Type_set.is_empty univars then (
+///     if ty.level <> generic_level then ty
+///     else
+///       let t = newvar () in
+///       delayed_copy () := lazy (t.desc <- Tlink (copy ty)) :: !(delayed_copy ());
+///       t)
+/// ```
+///
+/// Witness: `'u. ('u, (int), (int), box<'u>)` with the body, the first
+/// `(int)` and `box<'u>` at level 1 and the second `(int)` generic. The
+/// instance at level 3: a new tuple; its first element the new variable;
+/// the second the SAME node `(int)` (not generic, no universal variable);
+/// the third a new `(int)` at level 3 (generic: the delayed copy); the
+/// fourth a new `box` of the new variable at level 3 (not generic, but it
+/// holds `'u`). The scheme is as it was.
+///
+/// Reaches: R3q. Bodies and arms: `instance_poly`; `mark_holders`, the
+/// class of the bound variables; the three arms of `sep_child` without a
+/// node on the way; `sep_fill` for a tuple and a constructor;
+/// `poly_session` with one delayed copy.
+#[test]
+#[ignore = "R3q build"]
+fn a_node_that_holds_a_universal_variable_is_copied_whatever_its_level() {
+    let mut c = poly_checker();
+    let u = univar_at(&mut c, 1);
+    let int = constr_at(&mut c, 1, INT, &[]);
+    let kept = tuple_at(&mut c, 1, &[int]);
+    let generic_int = constr_at(&mut c, GENERIC, INT, &[]);
+    let generic = tuple_at(&mut c, GENERIC, &[generic_int]);
+    let holder = constr_at(&mut c, 1, BOX, &[u]);
+    let body = tuple_at(&mut c, 1, &[u, kept, generic, holder]);
+    let poly = poly_of(&mut c, 1, body, &[u]);
+    let before = c.g.nodes.clone();
+    let mut vars = Vec::new();
+    let instance = c.instance_poly(false, false, poly, &mut vars);
+    assert_eq!(vars.len(), 1);
+    let v = vars[0];
+    let node = c.g.nodes[v.0 as usize];
+    assert_eq!((node.tag(), node.level, node.a), (VAR, 3, NONE));
+    assert_ne!(c.g.repr(instance), body);
+    assert_eq!(head_of(&mut c, instance), (TUPLE, 4, 3));
+    assert_eq!(slot_of(&mut c, instance, 0), v);
+    assert_eq!(slot_of(&mut c, instance, 1), kept);
+    let third = slot_of(&mut c, instance, 2);
+    assert_ne!(third, generic);
+    assert_eq!(head_of(&mut c, third), (TUPLE, 1, 3));
+    let third_int = slot_of(&mut c, third, 0);
+    assert_ne!(third_int, generic_int);
+    assert_eq!(head_of(&mut c, third_int), (CONSTR, 0, 3));
+    let fourth = slot_of(&mut c, instance, 3);
+    assert_ne!(fourth, holder);
+    assert_eq!(head_of(&mut c, fourth), (CONSTR, 1, 3));
+    assert_eq!(c.g.nodes[fourth.0 as usize].a, BOX);
+    assert_eq!(c.g.lists[c.g.nodes[fourth.0 as usize].b as usize].0, NONE, "a new memo slot");
+    assert_eq!(slot_of(&mut c, fourth, 0), v);
+    assert_eq!(&c.g.nodes[..before.len()], &before[..]);
+    assert_poly_left(&c);
+}
+
+/// `copy_sep` does not share: its `visited` is an argument, so what one
+/// child adds its sibling does not see (compiler/ml/ctype.ml:1043-1058),
+/// while the nodes without a universal variable are copied by `copy` in
+/// one session and keep their sharing (1039-1041, 1093):
+///
+/// ```text
+///   else
+///     try
+///       let t, bound_t = List.assq ty visited in
+///       let dl = if is_Tunivar ty then [] else diff_list bound bound_t in
+///       if dl <> [] && conflicts univars dl then raise Not_found;
+///       t
+///     with Not_found ->
+///       let t = newvar () in
+///       (* Stub *)
+///       let visited =
+///         match ty.desc with
+///         | Tarrow _ | Ttuple _ | Tvariant _ | Tconstr _ | Tobject _ | Tpackage _
+///           ->
+///           (ty, (t, bound)) :: visited
+///         | _ -> visited
+///       in
+///       let copy_rec = copy_sep fixed free bound visited in
+/// ```
+///
+/// Witness: `'a. (h, h, g, g)`, all generic, with `h = box<'a>` ONE node
+/// and `g = box<int>` ONE node. The instance has two different `box`
+/// nodes of the new variable, and one `box<int>` node in both places.
+/// With `keep_names` the new variable has the name of the universal
+/// variable (`Tunivar name -> if keep_names then newty (Tvar name) else
+/// newvar ()`, 1085-1086); without, none.
+///
+/// Reaches: R3q. Bodies and arms: `sep_child`, a holder met twice off
+/// the way (two stubs) and a generic node met twice (two stubs, one
+/// copy); `poly_session` with two delayed copies of one source; the name
+/// in `instance_poly`.
+#[test]
+#[ignore = "R3q build"]
+fn two_places_of_a_holder_are_two_copies_and_of_a_generic_node_one() {
+    for keep_names in [false, true] {
+        let mut c = poly_checker();
+        let name = name_index(&mut c, "a");
+        let u = univar_at(&mut c, GENERIC);
+        c.extras.descriptors[c.g.nodes[u.0 as usize].a as usize] = ExtraDescriptor::Univar(name);
+        let holder = constr_at(&mut c, GENERIC, BOX, &[u]);
+        let int = constr_at(&mut c, GENERIC, INT, &[]);
+        let generic = constr_at(&mut c, GENERIC, BOX, &[int]);
+        let body = tuple_at(&mut c, GENERIC, &[holder, holder, generic, generic]);
+        let poly = poly_of(&mut c, GENERIC, body, &[u]);
+        let mut vars = Vec::new();
+        let instance = c.instance_poly(false, keep_names, poly, &mut vars);
+        assert_eq!(c.g.nodes[vars[0].0 as usize].a, if keep_names { name } else { NONE });
+        let slots: Vec<Ty> = (0..4).map(|index| slot_of(&mut c, instance, index)).collect();
+        assert_ne!(slots[0], slots[1], "a holder is copied once a place");
+        for copy in [slots[0], slots[1]] {
+            assert_ne!(copy, holder);
+            assert_eq!(head_of(&mut c, copy), (CONSTR, 1, 3));
+            assert_eq!(slot_of(&mut c, copy, 0), vars[0]);
+        }
+        assert_eq!(slots[2], slots[3], "a generic node without a universal variable is copied once");
+        assert_ne!(slots[2], generic);
+        assert_eq!(head_of(&mut c, slots[2]), (CONSTR, 1, 3));
+        assert_poly_left(&c);
+    }
+}
+
+/// A node on the way is its own copy when it is met again (`List.assq ty
+/// visited`, compiler/ml/ctype.ml:1044, pasted in the test above).
+/// Witness: `'a. n` with `n = ('a, n)`, a tuple of level 1 that is its
+/// own second element. The instance is ONE new tuple whose first element
+/// is the new variable and whose second is itself.
+///
+/// Reaches: R3q. Bodies and arms: `sep_fill`, the frame that puts a node
+/// on the way; `sep_child`, a node on the way with no binder entered
+/// since; `copy_sep`, the `Linked` frame.
+#[test]
+#[ignore = "R3q build"]
+fn a_type_that_reaches_itself_is_copied_once() {
+    let mut c = poly_checker();
+    let u = univar_at(&mut c, 1);
+    let hole = var_at(&mut c, 1);
+    let n = tuple_at(&mut c, 1, &[u, hole]);
+    c.g.link(hole, n);
+    let poly = poly_of(&mut c, 1, n, &[u]);
+    let mut vars = Vec::new();
+    let instance = c.instance_poly(false, false, poly, &mut vars);
+    let instance = c.g.repr(instance);
+    assert_ne!(instance, n);
+    assert_eq!(head_of(&mut c, instance), (TUPLE, 2, 3));
+    assert_eq!(slot_of(&mut c, instance, 0), vars[0]);
+    assert_eq!(slot_of(&mut c, instance, 1), instance);
+    assert_poly_left(&c);
+}
+
+/// A polymorphic type inside the body (compiler/ml/ctype.ml:1070-1077)
+/// gets new universal variables, and whether a universal variable is
+/// FREE below a node stops at its binder (`compute_univars`, ctype.ml:
+/// 696-699):
+///
+/// ```text
+/// | Tpoly (t1, tl) ->
+///   let tl = List.map repr tl in
+///   let tl' = List.map (fun t -> newty t.desc) tl in
+///   let bound = tl @ bound in
+///   let visited =
+///     List.map2 (fun ty t -> (ty, (t, bound))) tl tl' @ visited
+///   in
+///   Tpoly (copy_sep fixed free bound visited t1, tl')
+/// ...
+///   let rec add_univar univ inv =
+///     match inv.inv_type.desc with
+///     | Tpoly (_ty, tl) when List.memq univ (List.map repr tl) -> ()
+/// ```
+///
+/// Witness: `'a. ('a, p, q, q, r)`, the tuple at level 1, with
+/// - `p = 'b. ('a, 'b) => 'b` at level 1: `'a` is free in it, so it is
+///   copied: a new polymorphic type whose bound variable is a NEW
+///   universal variable at level 3, the parameters the new variable of
+///   `'a` and that universal variable, the result that universal
+///   variable;
+/// - `q = 'c. 'c => 'c`, generic: no variable is free in it (its own is
+///   bound), so `copy` copies it in the session, once for its two
+///   places, with a new universal variable;
+/// - `r = 'd. 'd => 'd` at level 1: not generic and nothing free: the
+///   SAME node.
+///
+/// Reaches: R3q. Bodies and arms: `mark_holders`, the class of a binder
+/// below the body and the stop at the binder; `sep_fill`, the arm of a
+/// polymorphic type and of an arrow; `copy_sep`, the `LeavePoly` frame
+/// and the `Linked` frame of a bound variable.
+#[test]
+#[ignore = "R3q build"]
+fn a_polymorphic_type_inside_gets_new_universal_variables() {
+    let mut c = poly_checker();
+    let a = univar_at(&mut c, 1);
+    let b = univar_at(&mut c, 1);
+    let p_body = arrow_at(&mut c, 1, &[a, b], b);
+    let p = poly_of(&mut c, 1, p_body, &[b]);
+    let generic = univar_at(&mut c, GENERIC);
+    let q_body = arrow_at(&mut c, GENERIC, &[generic], generic);
+    let q = poly_of(&mut c, GENERIC, q_body, &[generic]);
+    let d = univar_at(&mut c, 1);
+    let r_body = arrow_at(&mut c, 1, &[d], d);
+    let r = poly_of(&mut c, 1, r_body, &[d]);
+    let body = tuple_at(&mut c, 1, &[a, p, q, q, r]);
+    let poly = poly_of(&mut c, 1, body, &[a]);
+    let mut vars = Vec::new();
+    let instance = c.instance_poly(false, false, poly, &mut vars);
+    let v = vars[0];
+    assert_eq!(slot_of(&mut c, instance, 0), v);
+    // `p`: a new polymorphic type with a new universal variable.
+    let p_copy = slot_of(&mut c, instance, 1);
+    assert_ne!(p_copy, p);
+    assert_eq!(head_of(&mut c, p_copy), (TUPLE, 2, 3));
+    let b_copy = slot_of(&mut c, p_copy, 1);
+    assert_ne!(b_copy, b);
+    assert!(c.is_univar(b_copy));
+    assert_eq!(c.g.nodes[b_copy.0 as usize].level, 3);
+    let arrow = slot_of(&mut c, p_copy, 0);
+    let arrow_node = c.g.nodes[arrow.0 as usize];
+    assert_eq!((arrow_node.tag(), arrow_node.arity(), arrow_node.level), (ARROW, 2, 3));
+    let params: Vec<Ty> = (0..2).map(|index| c.g.params[(arrow_node.b + index) as usize].ty).collect();
+    assert_eq!((c.g.repr(params[0]), c.g.repr(params[1])), (v, b_copy));
+    assert_eq!(c.g.repr(Ty(arrow_node.a)), b_copy);
+    // `q`: one copy for its two places, its variable new.
+    let (q1, q2) = (slot_of(&mut c, instance, 2), slot_of(&mut c, instance, 3));
+    assert_eq!(q1, q2);
+    assert_ne!(q1, q);
+    let q_var = slot_of(&mut c, q1, 1);
+    assert_ne!(q_var, generic);
+    assert!(c.is_univar(q_var));
+    // `r`: the same node.
+    assert_eq!(slot_of(&mut c, instance, 4), r);
+    assert_poly_left(&c);
+}
+
+/// A node on the way that is met again after a binder was entered
+/// (compiler/ml/ctype.ml:1044-1047 and 874-876):
+///
+/// ```text
+/// let t, bound_t = List.assq ty visited in
+/// let dl = if is_Tunivar ty then [] else diff_list bound bound_t in
+/// if dl <> [] && conflicts univars dl then raise Not_found;
+/// t
+/// ...
+/// let conflicts free bound =
+///   let bound = List.map repr bound in
+///   Type_set.exists (fun t -> List.memq (repr t) bound) free
+/// ```
+///
+/// Two witnesses, hand-built (a polymorphic type cannot be named in a
+/// source program, so neither can be written as one), each followed
+/// through the lines above:
+///
+/// 1. `'a. o` with `o = k2<p, 'a>` and `p = 'u. ('u, o)`. `o` is on the
+///    way when it is met again below `p`; `'u` was bound since, and it
+///    is not free in `o` (every way from `o` to it goes through `p`): no
+///    conflict, the copy of `o` is used: `o1 = k2<p1, v>`, `p1 = 'u1.
+///    ('u1, o1)`.
+/// 2. `'a. p` with `p = 'u. n`, `n = ('u, m)`, `m = k2<p, 'a>`. Below
+///    `m` the type `p` is entered a second time (a polymorphic type is
+///    not in `visited`) and binds `'u` again; then `n` is met on the
+///    way, and `'u` IS free in `n`: a conflict, `n` is copied again with
+///    the new binding. Below that copy `m` is met on the way; `'u` is
+///    not free in `m`: its copy is used. So: `p1 = 'u1. n1`, `n1 = ('u1,
+///    m1)`, `m1 = k2<p2, v>`, `p2 = 'u2. n2`, `n2 = ('u2, m1)`: two
+///    copies of `n`, one of `m`.
+///
+/// Reaches: R3q. Bodies and arms: `sep_child`, a node on the way with a
+/// binder entered since, both answers; `sep_conflicts`, both answers and
+/// the scan past a binder that does not conflict.
+#[test]
+#[ignore = "R3q build"]
+fn a_node_on_the_way_is_copied_again_when_a_new_binding_is_free_in_it() {
+    // 1: no conflict.
+    let mut c = poly_checker();
+    let (a, u) = (univar_at(&mut c, 1), univar_at(&mut c, 1));
+    let hole = var_at(&mut c, 1);
+    let pair = tuple_at(&mut c, 1, &[u, hole]);
+    let p = poly_of(&mut c, 1, pair, &[u]);
+    let o = constr_at(&mut c, 1, K2, &[p, a]);
+    c.g.link(hole, o);
+    let poly = poly_of(&mut c, 1, o, &[a]);
+    let mut vars = Vec::new();
+    let o1 = c.instance_poly(false, false, poly, &mut vars);
+    let o1 = c.g.repr(o1);
+    assert_ne!(o1, o);
+    assert_eq!(slot_of(&mut c, o1, 1), vars[0]);
+    let p1 = slot_of(&mut c, o1, 0);
+    let u1 = slot_of(&mut c, p1, 1);
+    assert!(c.is_univar(u1) && u1 != u);
+    let pair1 = slot_of(&mut c, p1, 0);
+    assert_eq!(slot_of(&mut c, pair1, 0), u1);
+    assert_eq!(slot_of(&mut c, pair1, 1), o1, "the copy of `o` is used below the binder");
+    assert_poly_left(&c);
+
+    // 2: a conflict.
+    let mut c = poly_checker();
+    let (a, u) = (univar_at(&mut c, 1), univar_at(&mut c, 1));
+    let hole = var_at(&mut c, 1);
+    let m = constr_at(&mut c, 1, K2, &[hole, a]);
+    let n = tuple_at(&mut c, 1, &[u, m]);
+    let p = poly_of(&mut c, 1, n, &[u]);
+    c.g.link(hole, p);
+    let poly = poly_of(&mut c, 1, p, &[a]);
+    let mut vars = Vec::new();
+    let p1 = c.instance_poly(false, false, poly, &mut vars);
+    let p1 = c.g.repr(p1);
+    let (n1, u1) = (slot_of(&mut c, p1, 0), slot_of(&mut c, p1, 1));
+    assert_eq!(slot_of(&mut c, n1, 0), u1);
+    let m1 = slot_of(&mut c, n1, 1);
+    assert_eq!(slot_of(&mut c, m1, 1), vars[0]);
+    let p2 = slot_of(&mut c, m1, 0);
+    assert_ne!(p2, p1);
+    let (n2, u2) = (slot_of(&mut c, p2, 0), slot_of(&mut c, p2, 1));
+    assert!(c.is_univar(u2) && u2 != u1 && u2 != u);
+    assert_ne!(n2, n1, "`n` is copied again: the new binding is free in it");
+    assert_eq!(slot_of(&mut c, n2, 0), u2);
+    assert_eq!(slot_of(&mut c, n2, 1), m1, "`m` is not: its copy is used");
+    assert_poly_left(&c);
+}
+
+/// The fixed-row rule only `copy_sep` reaches (compiler/ml/ctype.ml:
+/// 1061-1069; `copy_row`, compiler/ml/btype.ml:375 and 389):
+///
+/// ```text
+/// | Tvariant row0 ->
+///   let row = row_repr row0 in
+///   let more = repr row.row_more in
+///   (* We shall really check the level on the row variable *)
+///   let keep = is_Tvar more && more.level <> generic_level in
+///   let more' = copy_rec more in
+///   let fixed' = fixed && is_Tvar (repr more') in
+///   let row = copy_row copy_rec fixed' row keep more' in
+///   Tvariant row
+/// ...
+///         let e = if keep then e else ref None in
+///         let m = if row.row_fixed then fixed else m in
+/// ...
+///     row_fixed = row.row_fixed && fixed;
+/// ```
+///
+/// Witnesses, each a fixed row with two matched `Reither` tags, `[<
+/// #A(int) | #B]`:
+/// - its row variable is the bound variable `'a` (`'a. [< #A(int) | #B]
+///   as 'a`, generic): with `fixed` the copy is fixed and its tags
+///   matched; without, it is not fixed and its tags read unmatched. Its
+///   row variable is the new variable, and the copy is unopened: each
+///   tag has a reference of its own (`keep` is false: `'a` is no
+///   variable).
+/// - its row variable is a universal variable of a polymorphic type
+///   INSIDE the body (`'a. ('a, 'b. [< #A(int) | #B] as 'b)`): its copy
+///   is a universal variable, so `fixed'` is false even with `fixed`:
+///   not fixed, unmatched.
+/// - a row that is not fixed keeps its `m` whatever `fixed` is.
+///
+/// Reaches: R3q, R3f. Bodies and arms: `copy_sep_row` without `keep`,
+/// the three values of `m` and of the flag.
+#[test]
+#[ignore = "R3q build"]
+fn a_row_copied_without_fixed_loses_its_matched_tags_and_the_flag() {
+    let row = |c: &mut Checker, more: Ty, fixed: bool, matched: bool| {
+        let int = constr_at(c, GENERIC, INT, &[]);
+        let tags = [("A", Tag::Either(false, Some(int), matched)), ("B", Tag::Either(true, None, matched))];
+        let ty = variant_at(c, GENERIC, &tags, more, true, NONE);
+        c.extras.variants.last_mut().unwrap().fixed = fixed;
+        ty
+    };
+    for fixed in [true, false] {
+        // The row variable is the bound variable.
+        let mut c = poly_checker();
+        let a = univar_at(&mut c, GENERIC);
+        let source = row(&mut c, a, true, true);
+        let poly = poly_of(&mut c, GENERIC, source, &[a]);
+        let mut vars = Vec::new();
+        let instance = c.instance_poly(fixed, false, poly, &mut vars);
+        let instance = c.g.repr(instance);
+        assert_ne!(instance, source);
+        let (tags, copied, more) = read_row(&mut c, instance);
+        assert_eq!(more, vars[0]);
+        assert_eq!((copied.fixed, copied.closed), (fixed, true));
+        assert_eq!(tags.len(), 2);
+        for (label, field) in &tags {
+            let constant = label == "B";
+            assert_eq!(field.kind, RowFieldKind::Either { constant, matched: fixed }, "{label}");
+            assert_eq!(field.end.0, NONE, "unopened: a reference of its own");
+        }
+        let argument = c.g.repr(tags[0].1.first);
+        assert_eq!(head_of(&mut c, argument), (CONSTR, 0, 3));
+        // The source is as it was.
+        let (tags, row_now, _) = read_row(&mut c, source);
+        assert!(row_now.fixed);
+        assert!(tags.iter().all(|(_, field)| matches!(field.kind, RowFieldKind::Either { matched: true, .. })));
+        assert_poly_left(&c);
+
+        // The row variable is bound inside the body.
+        let mut c = poly_checker();
+        let (a, b) = (univar_at(&mut c, GENERIC), univar_at(&mut c, GENERIC));
+        let inner_row = row(&mut c, b, true, true);
+        let inner = poly_of(&mut c, GENERIC, inner_row, &[b]);
+        let body = tuple_at(&mut c, GENERIC, &[a, inner]);
+        // `'a` must be free in the inner type for `copy_sep` to enter it.
+        let with_a = tuple_at(&mut c, GENERIC, &[a, inner_row]);
+        let inner_holder = poly_of(&mut c, GENERIC, with_a, &[b]);
+        let body_holder = tuple_at(&mut c, GENERIC, &[a, inner_holder]);
+        let _ = body;
+        let poly = poly_of(&mut c, GENERIC, body_holder, &[a]);
+        let mut vars = Vec::new();
+        let instance = c.instance_poly(fixed, false, poly, &mut vars);
+        let inner_copy = slot_of(&mut c, instance, 1);
+        let pair = slot_of(&mut c, inner_copy, 0);
+        let row_copy = slot_of(&mut c, pair, 1);
+        let (tags, copied, more) = read_row(&mut c, row_copy);
+        assert!(c.is_univar(more));
+        assert_eq!(more, slot_of(&mut c, inner_copy, 1));
+        assert!(!copied.fixed, "`fixed'` is false: the copy of `more` is no variable");
+        assert!(tags.iter().all(|(_, field)| matches!(field.kind, RowFieldKind::Either { matched: false, .. })));
+        assert_poly_left(&c);
+
+        // A row that is not fixed keeps its `m`.
+        for matched in [true, false] {
+            let mut c = poly_checker();
+            let a = univar_at(&mut c, GENERIC);
+            let source = row(&mut c, a, false, matched);
+            let poly = poly_of(&mut c, GENERIC, source, &[a]);
+            let mut vars = Vec::new();
+            let instance = c.instance_poly(fixed, false, poly, &mut vars);
+            let (tags, copied, _) = read_row(&mut c, instance);
+            assert!(!copied.fixed);
+            assert!(tags.iter().all(|(_, field)| matches!(field.kind, RowFieldKind::Either { matched: m, .. } if m == matched)));
+        }
+    }
+}
+
+/// A row whose row variable is a variable that is not generic shares its
+/// references with its copy, and a chain of rows is copied as one row
+/// (`keep`, compiler/ml/ctype.ml:1065; `let e = if keep then e else ref
+/// None`, compiler/ml/btype.ml:374; `row_repr`, btype.ml:126-135; all
+/// pasted in the test above).
+///
+/// Witness: `'a. [< #A('a) | #B > ...]` built as a chain of two variant
+/// nodes at level 1: `[< #A('a) ]` whose row variable is linked to `[<
+/// #B ]` over a variable `r` of level 1, both tags `Reither` and not
+/// matched. The copy is ONE variant node of the two tags over the same
+/// `r`; the type of `#A` is the new variable; the reference each tag
+/// ends in is the reference of the source's tag (the homes are opened:
+/// the source's tags end in a reference now, at the level of `r`), and
+/// the copy's node of `#A` is a holder of it beside the source's.
+///
+/// Reaches: R3q, R3f. Bodies and arms: `copy_sep_row` with `keep`, a
+/// home that was not opened, a field with types and one without; the
+/// chain.
+#[test]
+#[ignore = "R3q build"]
+fn a_row_over_a_variable_that_is_not_generic_shares_its_references() {
+    let mut c = poly_checker();
+    let a = univar_at(&mut c, 1);
+    let r = var_at(&mut c, 1);
+    let inner = variant_at(&mut c, 1, &[("B", Tag::Either(true, None, false))], r, false, NONE);
+    let link = var_at(&mut c, 1);
+    let outer = variant_at(&mut c, 1, &[("A", Tag::Either(false, Some(a), false))], link, false, NONE);
+    c.g.link(link, inner);
+    let poly = poly_of(&mut c, 1, outer, &[a]);
+    let mut vars = Vec::new();
+    let instance = c.instance_poly(true, false, poly, &mut vars);
+    let instance = c.g.repr(instance);
+    assert_ne!(instance, outer);
+    let (tags, _, more) = read_row(&mut c, instance);
+    assert_eq!(more, r);
+    let node = c.g.nodes[instance.0 as usize];
+    let ExtraDescriptor::Variant(index) = c.extras.descriptors[node.a as usize] else {
+        panic!("not a variant");
+    };
+    assert_eq!(c.extras.variants[index as usize].fields.len, 2, "one row of the two tags");
+    let (source_tags, _, _) = read_row(&mut c, outer);
+    assert_eq!(tags.len(), 2);
+    for (copy, source) in tags.iter().zip(&source_tags) {
+        assert_eq!(copy.0, source.0);
+        assert_ne!(source.1.end.0, NONE, "the home is opened");
+        assert_eq!(copy.1.end, source.1.end, "{}", copy.0);
+        assert_eq!(c.g.nodes[copy.1.end.0 as usize].level, 1);
+        assert!(matches!(copy.1.kind, RowFieldKind::Either { matched: false, .. }));
+    }
+    assert_eq!(c.g.repr(tags[0].1.first), vars[0]);
+    let mut holders = 0;
+    let mut at = c.g.nodes[tags[0].1.end.0 as usize].b;
+    while at != NONE {
+        holders += 1;
+        at = c.extras.holders[at as usize].next;
+    }
+    assert_eq!(holders, 2, "the source's node of `#A` and the copy's");
+    assert_poly_left(&c);
+}
+
+/// `instance_label` copies the argument and the record type in one
+/// session (compiler/ml/ctype.ml:1097-1105):
+///
+/// ```text
+/// let instance_label fixed lbl =
+///   with_copy_session (fun () ->
+///       let ty_res = copy lbl.lbl_res in
+///       let vars, ty_arg =
+///         match repr lbl.lbl_arg with
+///         | {desc = Tpoly (ty, tl)} -> instance_poly ~fixed tl ty
+///         | _ -> ([], copy lbl.lbl_arg)
+///       in
+///       (vars, ty_arg, ty_res))
+/// ```
+///
+/// Witnesses, for `type box<'a> = {value: ...}` with the generic
+/// parameter `'a`:
+/// - `value: 'b. 'b => 'a`: the instance of the argument is an arrow
+///   from the new variable of `'b` to the SAME node as the argument of
+///   the instance of `box<'a>` (the delayed copy of `'a` is made in the
+///   session that copied the record type);
+/// - `value: ('a, int)`, no polymorphic type: the two instances share
+///   the copy of `'a`, `vars` gets nothing, and exactly four nodes are
+///   made (`box`, the variable, the tuple, `int`): no stub.
+///
+/// Reaches: R3q. Bodies and arms: both arms of `instance_label`;
+/// `poly_session` with a result.
+#[test]
+#[ignore = "R3q build"]
+fn a_label_shares_its_record_parameters_with_its_argument() {
+    let mut c = poly_checker();
+    let parameter = var_at(&mut c, GENERIC);
+    let record = constr_at(&mut c, GENERIC, BOX, &[parameter]);
+    let b = univar_at(&mut c, GENERIC);
+    let arrow = arrow_at(&mut c, GENERIC, &[b], parameter);
+    let argument = poly_of(&mut c, GENERIC, arrow, &[b]);
+    let mut vars = Vec::new();
+    let (argument, result) = c.instance_label(false, argument, record, &mut vars);
+    assert_eq!(vars.len(), 1);
+    assert_eq!(head_of(&mut c, result), (CONSTR, 1, 3));
+    let shared = slot_of(&mut c, result, 0);
+    assert_ne!(shared, parameter);
+    let argument = c.g.repr(argument);
+    let node = c.g.nodes[argument.0 as usize];
+    assert_eq!((node.tag(), node.arity(), node.level), (ARROW, 1, 3));
+    assert_eq!(c.g.repr(c.g.params[node.b as usize].ty), vars[0]);
+    assert_eq!(c.g.repr(Ty(node.a)), shared);
+    assert_poly_left(&c);
+
+    let mut c = poly_checker();
+    let parameter = var_at(&mut c, GENERIC);
+    let record = constr_at(&mut c, GENERIC, BOX, &[parameter]);
+    let int = constr_at(&mut c, GENERIC, INT, &[]);
+    let argument = tuple_at(&mut c, GENERIC, &[parameter, int]);
+    let nodes = c.g.nodes.len();
+    let mut vars = Vec::new();
+    let (argument, result) = c.instance_label(false, argument, record, &mut vars);
+    assert!(vars.is_empty());
+    assert_eq!(c.g.nodes.len(), nodes + 4);
+    assert_eq!(slot_of(&mut c, argument, 0), slot_of(&mut c, result, 0));
+    assert_ne!(slot_of(&mut c, result, 0), parameter);
+}
+
+/// The cell of a copied field (`copy_type_desc` for `Tfield`,
+/// compiler/ml/btype.ml:516-532):
+///
+/// ```text
+/// let mutability =
+///   if fresh_mutability || row_terminator_generic f_.rest then
+///     dup_mutability f_.mutability
+///   else mutability_ref_repr f_.mutability
+/// in
+/// Tfield {f_ with mutability; typ = f f_.typ; rest = f f_.rest}
+/// ```
+///
+/// Witness: `'a. {"x": 'a, ..r}`: the field holds `'a`, so `copy_sep`
+/// copies it. With `r` a generic variable the field's cell is a NEW cell
+/// with the same value (the row ends in a generic variable); with `r` a
+/// variable of level 1 the copy has the cell of its source.
+///
+/// Reaches: R3q, R3e. Bodies and arms: `sep_fill` for an object and a
+/// field; `poly_pass`, the fields of the walk, both answers of
+/// `dup_cell`.
+#[test]
+#[ignore = "R3q build"]
+fn a_field_that_holds_a_universal_variable_gets_its_cell_by_its_row() {
+    for generic in [true, false] {
+        let mut c = poly_checker();
+        let level = if generic { GENERIC } else { 1 };
+        c.g.level = level;
+        let a = univar_at(&mut c, level);
+        let rest = var_at(&mut c, level);
+        let (object, fields) = obj(&mut c, &[("x", true, a)], rest);
+        let poly = poly_of(&mut c, level, object, &[a]);
+        c.g.level = 3;
+        let cell_of = |c: &Checker, field: Ty| {
+            let ExtraDescriptor::Field { mutability, .. } = c.extras.descriptors[c.g.nodes[field.0 as usize].a as usize] else {
+                panic!("not a field");
+            };
+            cell_repr(&c.g, Ty(mutability))
+        };
+        let source_cell = cell_of(&c, fields[0]);
+        let mut vars = Vec::new();
+        let instance = c.instance_poly(false, false, poly, &mut vars);
+        let instance = c.g.repr(instance);
+        assert_ne!(instance, object);
+        let field = slot_of(&mut c, instance, 0);
+        assert_ne!(field, fields[0]);
+        let typ = slot_of(&mut c, field, 0);
+        assert_eq!(slot_of(&mut c, typ, 0), vars[0]);
+        let copied_cell = cell_of(&c, field);
+        assert_eq!(copied_cell != source_cell, generic, "generic row: {generic}");
+        assert!(cell_mutable(&c.g, copied_cell));
+        assert_eq!(cell_of(&c, fields[0]), source_cell, "the session is over: the source has its cell");
+        assert_poly_left(&c);
+    }
+}
+
+/// The loops of `instance_poly`, as relations between 1,000 and 10,000.
+/// Witnesses, each `'a. body`:
+/// - *a chain of holders*: `t(0) = 'a`, `t(i + 1) = (t(i), int)` at
+///   level 1: n nodes that each hold `'a`. One step a node for the
+///   inverse graph, one for the propagation, one for the copy. Whether
+///   a child is on the way is ONE load of its [`PolySlot`], where
+///   OCaml's `List.assq ty visited` reads the way (ctype.ml:1044).
+/// - *a shared body without a universal variable*: `(s(n), 'a) => 'a`
+///   with `s(0) = int`, `s(i + 1) = (s(i), s(i))`, all generic: n + 1
+///   nodes and 2^n paths. The first walk meets each node once (its
+///   stamp), nothing is propagated into it, and one delayed copy copies
+///   it with its sharing.
+/// - *n polymorphic types inside each other*: `p(0) = int`, `p(i + 1) =
+///   'b. ('b, p(i), 'a)`: each class is propagated from its variable to
+///   its own binder, two nodes; the class of `'a` goes to the top.
+/// - *a row of n tags that each hold `'a`*, over the bound variable.
+///
+/// Each linear. Seen to fail with its structure broken: the first with
+/// a `sep_child` that looks for the node among the frames (one step a
+/// frame); the third with a propagation that does not stop at the
+/// binder; the second has no relation to fail (without the stamp the
+/// walk takes 2^n steps and does not end at 1,000): observed at n = 10
+/// and 20 instead: 38 and 68 steps with the stamp, 2,075 and 2,097,199
+/// without. The first relation broken: 504,502 against 50,045,002
+/// steps; the third: 1,009,005 against 100,090,005.
+///
+/// Reaches: R3q, R3f.
+#[test]
+#[ignore = "R3q build"]
+fn instance_poly_at_ten_thousand() {
+    let run = |shape: u32, n: u32| {
+        let mut c = poly_checker();
+        let a = univar_at(&mut c, GENERIC);
+        let body = match shape {
+            0 => {
+                let mut ty = a;
+                for _ in 0..n {
+                    let int = constr_at(&mut c, 1, INT, &[]);
+                    ty = tuple_at(&mut c, 1, &[ty, int]);
+                }
+                ty
+            }
+            1 => {
+                let mut ty = constr_at(&mut c, GENERIC, INT, &[]);
+                for _ in 0..n {
+                    ty = tuple_at(&mut c, GENERIC, &[ty, ty]);
+                }
+                arrow_at(&mut c, GENERIC, &[ty, a], a)
+            }
+            2 => {
+                let mut ty = constr_at(&mut c, GENERIC, INT, &[]);
+                for _ in 0..n {
+                    let b = univar_at(&mut c, GENERIC);
+                    let tuple = tuple_at(&mut c, GENERIC, &[b, ty, a]);
+                    ty = poly_of(&mut c, GENERIC, tuple, &[b]);
+                }
+                ty
+            }
+            _ => {
+                let labels: Vec<String> = (0..n).map(|k| format!("f{k:05}")).collect();
+                let tags: Vec<(&str, Tag)> = labels.iter().map(|label| (label.as_str(), Tag::Present(Some(a)))).collect();
+                variant_at(&mut c, GENERIC, &tags, a, false, NONE)
+            }
+        };
+        let poly = poly_of(&mut c, GENERIC, body, &[a]);
+        let nodes = c.g.nodes.len();
+        let mut vars = Vec::new();
+        let mut instance = body;
+        let count = steps::scope(|| instance = c.instance_poly(false, false, poly, &mut vars));
+        assert_ne!(c.g.repr(instance), body);
+        assert_poly_left(&c);
+        // The copy has the size of the body, not of its paths.
+        assert!(c.g.nodes.len() - nodes <= 4 * n as usize + 8, "{shape}: {}", c.g.nodes.len() - nodes);
+        assert!(count >= u64::from(n), "{shape}: {count}");
+        count
+    };
+    for shape in 0..4 {
+        let (small, large) = (run(shape, 1_000), run(shape, 10_000));
+        assert!(large <= 11 * small, "shape {shape}: {small} {large}");
+    }
+}

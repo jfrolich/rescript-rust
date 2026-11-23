@@ -68,6 +68,8 @@ pub struct Extras {
     /// this one read. Kept by [`Extras::from_segment`] and
     /// [`Extras::univar`], the only two makers of such a row. (R3g)
     pub univars: u32,
+    /// The tables of `Checker::instance_poly`. (R3q)
+    pub poly: PolyCopy,
 }
 
 /// Names as text: one buffer and a span per name index. For a graph made
@@ -386,6 +388,63 @@ pub fn ref_node(level: u32, holders: u32) -> Node {
     }
 }
 
+/// One row a node of the graph, for the walk of
+/// [`Checker::instance_poly`] (R3q; CHECKER_REWRITE 8.10): 16 bytes. The
+/// table is [`PolyCopy::slots`], indexed by the node's handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct PolySlot {
+    /// `2 * call` when `Checker::mark_holders` of the call met the
+    /// node, `2 * call + 1` when a universal variable is free below it;
+    /// anything else is a row of an earlier call.
+    pub stamp: u32,
+    /// The first [`PolyEdge`] of its parents, or `NONE`. Read only while
+    /// the stamp is the call's.
+    pub parents: u32,
+    /// Its copy while it is on the way of `Checker::copy_sep`, and for
+    /// a universal variable while a binder on the way binds it; `NONE`
+    /// otherwise, and always between two calls.
+    pub copy: Ty,
+    /// [`PolyCopy::depth`] when `copy` was set.
+    pub depth: u32,
+}
+
+/// One edge of the inverse graph of `Checker::mark_holders`
+/// (`inv_parents`, compiler/ml/ctype.ml:676-679): 8 bytes. `next` is the
+/// next edge of the same child or `NONE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct PolyEdge {
+    pub parent: Ty,
+    pub next: u32,
+}
+
+/// The tables and pools of [`Checker::instance_poly`], kept between
+/// calls for their capacity and empty for a unit that never calls it.
+#[derive(Default)]
+pub struct PolyCopy {
+    /// One row a node of the graph.
+    pub slots: Vec<PolySlot>,
+    /// The inverse graph of the call.
+    pub edges: Vec<PolyEdge>,
+    /// The polymorphic types with bound variables below the body, in
+    /// the order the first walk met them.
+    pub binders: Vec<Ty>,
+    /// `delayed_copy` (compiler/ml/ctype.ml:878): a stub and the generic
+    /// node, without a universal variable, whose copy it becomes a link
+    /// to.
+    pub delayed: Vec<[Ty; 2]>,
+    /// The field nodes the walk made, for their cells.
+    pub fields: Vec<Ty>,
+    /// The types of one `Reither` field while a row is copied.
+    pub types: Vec<Ty>,
+    /// The number of the call; a stamp is `2 * call` or `2 * call + 1`.
+    pub call: u32,
+    /// How many binders are entered on the way (`List.length bound`,
+    /// counted in binders and not in variables).
+    pub depth: u32,
+}
+
 /// What a field is after its reference is followed (`row_field_repr`,
 /// compiler/ml/btype.ml:112-121): 16 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -556,6 +615,7 @@ impl Extras {
             rigid_variants: false,
             open_polys: Vec::new(),
             univars,
+            poly: PolyCopy::default(),
         }
     }
 
@@ -4573,6 +4633,319 @@ impl Checker {
 
 }
 
+// -----------------------------------------------------------------
+// `instance_poly` and `instance_label` (R3q; CHECKER_REWRITE 8.10)
+// -----------------------------------------------------------------
+// R3q removes this `allow` with its last `todo!`.
+#[allow(unused_variables, dead_code)]
+impl Checker {
+    /// `instance_poly ?keep_names ~fixed univars sch`
+    /// (compiler/ml/ctype.ml:1081-1095) for the polymorphic type node
+    /// `poly` (`Tpoly (sch, univars)`: slot 0 the body, slots 1.. the
+    /// bound variables; every caller of OCaml's passes the two parts of
+    /// one `Tpoly`): the instance of the body, and one new variable for
+    /// each bound variable pushed on `vars` in order (named as the
+    /// universal variable when `keep_names`, ctype.ml:1085-1086; at the
+    /// current level).
+    ///
+    /// Three parts, in this order:
+    /// 1. `Checker::mark_holders` (`compute_univars sch`);
+    /// 2. the new variables, each the copy of its universal variable in
+    ///    [`PolySlot::copy`] (`pairs`, ctype.ml:1090), then
+    ///    `Checker::copy_sep` of the body; the pairs are taken out
+    ///    again;
+    /// 3. `Checker::poly_session` with no result: the delayed copies
+    ///    (`List.iter Lazy.force !delayed_copy`, ctype.ml:1093).
+    ///
+    /// Cost: the three parts. Linear in the nodes below the body for a
+    /// body in which no node that holds a universal variable is reached
+    /// by two paths; such a node is copied once per path, as in OCaml
+    /// ("Copy without sharing until there are no free univars left",
+    /// ctype.ml:1030). A unit that never calls it pays nothing: the
+    /// tables of [`PolyCopy`] are empty until the first call.
+    pub fn instance_poly(&mut self, fixed: bool, keep_names: bool, poly: Ty, vars: &mut Vec<Ty>) -> Ty {
+        todo!("R3q")
+    }
+
+    /// `instance_label fixed lbl` (compiler/ml/ctype.ml:1097-1105): the
+    /// instances of a label's argument type and of its record type, made
+    /// in ONE copy session, so that a generic node both reach is one node
+    /// in both instances (the record's parameters). Returns `(argument,
+    /// result)`; when the argument is a polymorphic type its new
+    /// variables are pushed on `vars` (`instance_poly ~fixed tl ty`,
+    /// 1102), otherwise nothing is.
+    ///
+    /// - The argument is not a polymorphic type (its representative is
+    ///   not a `Poly` node): [`Graph::copy_begin`], `copy_ref(result)`,
+    ///   `copy_ref(argument)` (OCaml copies the result first, 1099),
+    ///   [`Graph::copy_drain`], then the pass of
+    ///   `Checker::poly_session` over the nodes made. No table of
+    ///   [`PolyCopy`] is touched and no stub is made: this is the label
+    ///   of every record field without a polymorphic type.
+    /// - It is one: parts 1 and 2 of [`Checker::instance_poly`] (with
+    ///   `keep_names` false), then `Checker::poly_session` with
+    ///   `result`, whose copy is made first in the session. The walk
+    ///   comes before the copy of the result where OCaml's comes after
+    ///   it; the two share nodes only through the session, so the order
+    ///   cannot be seen.
+    ///
+    /// Cost: one copy of the two types, plus [`Checker::instance_poly`]'s
+    /// for a polymorphic argument.
+    pub fn instance_label(&mut self, fixed: bool, argument: Ty, result: Ty, vars: &mut Vec<Ty>) -> (Ty, Ty) {
+        todo!("R3q")
+    }
+
+    /// Start a call: [`PolyCopy::slots`] grown to the graph (new rows
+    /// have no stamp and no copy), a new [`PolyCopy::call`], the pools
+    /// and the depth emptied. When the call counter would overflow the
+    /// stamps (`2 * call + 1`), every stamp is cleared once. O(1)
+    /// amortized.
+    fn poly_begin(&mut self) {
+        todo!("R3q")
+    }
+
+    /// Parts 1 and 2 of [`Checker::instance_poly`] for the `Poly` node
+    /// `poly`, after [`Checker::poly_begin`]. Its cost is theirs.
+    fn poly_walk(&mut self, fixed: bool, keep_names: bool, poly: Ty, vars: &mut Vec<Ty>) -> Ty {
+        todo!("R3q")
+    }
+
+    /// `compute_univars sch` (compiler/ml/ctype.ml:693-713), as far as
+    /// [`Checker::copy_sep`] reads it: for every node below `body`,
+    /// whether a universal variable is FREE below it (one that is not
+    /// bound by a polymorphic type on the way from the node to it:
+    /// `| Tpoly (_ty, tl) when List.memq univ (List.map repr tl) -> ()`,
+    /// 698). `poly` is the descriptor of the node whose body `body` is.
+    /// The answer is [`PolySlot::stamp`] `== 2 * call + 1`.
+    ///
+    /// Two steps, as OCaml's:
+    /// - *the inverse graph* (`inv_type`, 680-691): a walk from `body` on
+    ///   `g.work` that meets each representative once (its stamp becomes
+    ///   `2 * call`) and pushes one [`PolyEdge`] for each child slot of
+    ///   each node (`Checker::child`: every slot of an extended node, the
+    ///   bound variables of a polymorphic type included). A polymorphic
+    ///   type with bound variables is pushed on [`PolyCopy::binders`].
+    /// - *the propagation* (`add_univar`, 696-707), one CLASS at a time:
+    ///   first the bound variables of `poly` (no binder below `body`
+    ///   stops them), then those of each binder met, in the order met.
+    ///   For one class, one new generation of `marks`: from each of its
+    ///   variables that the first step met, up the edges, never through
+    ///   the class's own binder, each node once; every node reached, the
+    ///   variable included, gets the stamp `2 * call + 1`. A node that
+    ///   another class marked is NOT a place to stop: a variable of an
+    ///   outer binder is free further up than one of an inner binder.
+    ///
+    /// Cost: one step a node and one edge (8 bytes) a child slot for the
+    /// first step; for the second, one step a node for each class that
+    /// has a variable free below it: linear for a body without a
+    /// polymorphic type inside, at most nodes times the depth of nested
+    /// binders otherwise (OCaml keeps a set of variables a node: the same
+    /// bound with a set operation a step).
+    fn mark_holders(&mut self, poly: Node, body: Ty) {
+        todo!("R3q")
+    }
+
+    /// `copy_sep fixed free bound visited ty` (compiler/ml/ctype.ml:
+    /// 1033-1079) for `root`, after [`Checker::mark_holders`]: the copy.
+    /// A loop over [`Checker::frames`] above the length it finds, no
+    /// recursion:
+    /// - `root` goes to [`Checker::sep_child`], whose answer is the
+    ///   result;
+    /// - a [`FrameKind::Pair`] frame (`left` a source node, `right` the
+    ///   stub of its copy) goes to [`Checker::sep_fill`];
+    /// - a [`FrameKind::Linked`] frame puts `right` and `extra` back as
+    ///   the [`PolySlot::copy`] and [`PolySlot::depth`] of `left`: the
+    ///   node, or the bound variable, is off the way again (OCaml's
+    ///   `visited` is an argument: what a call adds is gone when it
+    ///   returns);
+    /// - a [`FrameKind::LeavePoly`] frame puts `extra` back as
+    ///   [`PolyCopy::depth`].
+    ///
+    /// A frame's children are filled after it and before the frames
+    /// below it, so the `Linked` frames on the stack are exactly the
+    /// nodes on the way to the node being filled. Cost: one step a node
+    /// filled; three frames at most a node (16 bytes each); what
+    /// [`Checker::sep_fill`] makes.
+    fn copy_sep(&mut self, fixed: bool, root: Ty) -> Ty {
+        todo!("R3q")
+    }
+
+    /// The first lines of `copy_sep` for one child (compiler/ml/ctype.ml:
+    /// 1034-1049): what stands for `child` in the copy. Per
+    /// representative `c`:
+    /// - no universal variable is free below it (its stamp is not `2 *
+    ///   call + 1`): `c` itself when it is not generic (1037); otherwise
+    ///   a new variable at the current level, pushed with `c` on
+    ///   [`PolyCopy::delayed`] (`delayed_copy`, 1039-1041:
+    ///   [`Checker::poly_session`] makes it a link to the copy);
+    /// - it has a [`PolySlot::copy`] (it is on the way, or it is a bound
+    ///   variable): that copy (`List.assq ty visited`, 1044), unless a
+    ///   binder was entered since ([`PolySlot::depth`] is below
+    ///   [`PolyCopy::depth`]), `c` is not a universal variable (`if
+    ///   is_Tunivar ty then []`, 1045) and [`Checker::sep_conflicts`]
+    ///   holds (1046): then it is copied again;
+    /// - otherwise a new variable at the current level, the stub (`let t
+    ///   = newvar ()`, 1049), and a [`FrameKind::Pair`] frame of `c` and
+    ///   the stub.
+    ///
+    /// O(1) besides `sep_conflicts`: one `repr`, one [`PolySlot`] load
+    /// and, for a node that is copied, one node and one frame.
+    fn sep_child(&mut self, child: Ty) -> Ty {
+        todo!("R3q")
+    }
+
+    /// `conflicts univars dl` (compiler/ml/ctype.ml:1046, 874-876) for
+    /// `c`, a node on the way that is met again after a binder was
+    /// entered: whether a variable bound SINCE `c` was entered is free in
+    /// `c`. The binders entered since are the [`FrameKind::LeavePoly`]
+    /// frames above the topmost [`FrameKind::Linked`] frame of `c`
+    /// (`left` of a `LeavePoly` frame is the polymorphic type). For each,
+    /// one new generation of `marks` and a walk on `g.work` above the
+    /// length it finds: from its bound variables up the edges of
+    /// [`Checker::mark_holders`], never through the binder; `c` reached
+    /// is "free". When it holds OCaml copies the node again, with the
+    /// new binding; when a node is its own way back to the binder with
+    /// nothing between, OCaml does not end, and neither does this.
+    ///
+    /// Cost: one step a frame scanned and a node walked: for each binder
+    /// entered since, the nodes its variables are free in. Reached only
+    /// by a type that reaches itself through a polymorphic type.
+    fn sep_conflicts(&mut self, c: Ty) -> bool {
+        todo!("R3q")
+    }
+
+    /// The rest of `copy_sep` for one node (compiler/ml/ctype.ml:
+    /// 1049-1079): `stub` becomes the copy of `c`, a node below which a
+    /// universal variable is free, at the current level.
+    ///
+    /// First the way (`(ty, (t, bound)) :: visited`, 1052-1056): for an
+    /// arrow, a tuple, a constructor, an object, a variant and a package
+    /// (and for no other node: a field, a polymorphic type and a
+    /// universal variable are not in `visited`), a [`FrameKind::Linked`]
+    /// frame with the [`PolySlot::copy`] and [`PolySlot::depth`] `c` had,
+    /// and then `stub` and [`PolyCopy::depth`] in their place.
+    ///
+    /// Then the descriptor, each child through [`Checker::sep_child`]:
+    /// - an arrow: the result, then the parameters, into new `Param`
+    ///   rows (label and location kept);
+    /// - a tuple, a constructor (a new empty memo slot: `ref Mnil`,
+    ///   btype.ml:514): a new list;
+    /// - a polymorphic type (1070-1077): a [`FrameKind::LeavePoly`] frame
+    ///   (`left` the node `c`, `extra` the depth) and the depth one more;
+    ///   for each bound variable a new node with the variable's
+    ///   descriptor at the current level (`newty t.desc`), a `Linked`
+    ///   frame with the slot the variable had, and the new node and the
+    ///   depth as its slot; then the body; a new list, the body in slot
+    ///   0;
+    /// - a variant: [`Checker::copy_sep_row`];
+    /// - any other extended node (an object, a field, a package, a
+    ///   universal variable no binder on the way binds): a new list, the
+    ///   descriptor row shared; a field is pushed on
+    ///   [`PolyCopy::fields`], for the cells.
+    ///
+    /// One step; one list or `Param` slot a child; no trail entry (the
+    /// stub is a node of this call).
+    fn sep_fill(&mut self, fixed: bool, c: Ty, stub: Ty) {
+        todo!("R3q")
+    }
+
+    /// The variant arm of `copy_sep` (compiler/ml/ctype.ml:1061-1069)
+    /// with `copy_row` (compiler/ml/btype.ml:366-392) for variant node
+    /// `c`, whose descriptor is `node`: the descriptor of its copy, ONE
+    /// row of every field of its chain (`row_repr`, btype.ml:126-135),
+    /// at the current level.
+    ///
+    /// ```text
+    /// | Tvariant row0 ->
+    ///   let row = row_repr row0 in
+    ///   let more = repr row.row_more in
+    ///   (* We shall really check the level on the row variable *)
+    ///   let keep = is_Tvar more && more.level <> generic_level in
+    ///   let more' = copy_rec more in
+    ///   let fixed' = fixed && is_Tvar (repr more') in
+    ///   let row = copy_row copy_rec fixed' row keep more' in
+    ///   Tvariant row
+    /// ```
+    ///
+    /// The chain is read and not opened ([`field_repr`] with each
+    /// node's own arity; `each_field_types` for the types of a `Reither`
+    /// field), twice: once to its end for the last row (its `closed`,
+    /// `fixed`, name and `more`), once for the fields.
+    /// - `keep`: the representative of the last `more` is a variable
+    ///   that is not generic.
+    /// - `more'` is [`Checker::sep_child`] of it, and `fixed'` is `fixed`
+    ///   and "`more'` is a variable node now" (a stub is one: OCaml reads
+    ///   `is_Tvar` before the delayed copy is linked).
+    /// - The slots: `more'`, the copies of the name's arguments, then
+    ///   the copies of the types of each field in order: one for
+    ///   `Rpresent (Some _)`, all of `tl` for `Reither`.
+    /// - A new `RowFieldRow` a field with what the field reads NOW:
+    ///   `Present`, `Absent`, or `Either` with its `c` and `m`, where `m`
+    ///   is `fixed'` when the source row is fixed (`let m = if
+    ///   row.row_fixed then fixed else m`, btype.ml:375). A new
+    ///   `VariantRow` with the last row's `closed` and name and `fixed =
+    ///   row.row_fixed && fixed'` (btype.ml:389), and a new descriptor
+    ///   row.
+    /// - Not `keep`: the node is UNOPENED: each `Reither` field stands
+    ///   for a reference of its own (`let e = if keep then e else ref
+    ///   None`, btype.ml:374).
+    /// - `keep`, and the row has a `Reither` field: the copy shares each
+    ///   field's reference. The home of the field is opened when it is
+    ///   not ([`Checker::open_row`], and the references that made get the
+    ///   level of the row variable, as in `Checker::copy_refs`); the copy
+    ///   is built opened: a field without types has the source's
+    ///   unresolved reference in its reference slot, one with types a
+    ///   new [`RES_EITHER`] node with its `c` and `m`, its copied types
+    ///   and that reference, in its reference slot and in each of its
+    ///   type slots, and it is a holder of the reference
+    ///   (`Checker::hold`).
+    ///
+    /// O(fields + chain + types), one step a field; [`PolyCopy::types`]
+    /// above the length it finds is the scratch of the types of one
+    /// field. Per
+    /// field one `RowFieldRow` (20 bytes) and one slot a type; with
+    /// `keep`, per `Reither` field with types one node, its slots and 8
+    /// bytes of holder.
+    fn copy_sep_row(&mut self, fixed: bool, c: Ty, node: Node) -> Node {
+        todo!("R3q")
+    }
+
+    /// The copy session of [`Checker::instance_poly`] and
+    /// [`Checker::instance_label`], after the walk
+    /// (`with_copy_session`; `List.iter Lazy.force !delayed_copy`,
+    /// compiler/ml/ctype.ml:1093): [`Graph::copy_begin`]; the copy of
+    /// `result` when it is not `NONE` (returned; `NONE` otherwise); for
+    /// each pair of [`PolyCopy::delayed`], in order, `copy_ref` of the
+    /// source and the stub written as a link to it (`t.desc <- Tlink
+    /// (copy ty)`; the stub is this call's: a plain store);
+    /// [`Graph::copy_drain`]; then [`Checker::poly_pass`] over the nodes
+    /// the session made. The session comes after the walk so that its
+    /// nodes are the last and in the order of its queue, which
+    /// `Checker::copy_refs` reads. Cost: one [`Checker::copy`] of all the
+    /// roots.
+    fn poly_session(&mut self, result: Ty) -> Ty {
+        todo!("R3q")
+    }
+
+    /// The pass of [`Checker::copy`] over the nodes a session made since
+    /// `first`, in one cell session with the fields the walk made:
+    /// nothing when no memorized expansion is live and the graph has no
+    /// descriptor row; otherwise `begin_cell_session`, `extras.copying`
+    /// set, `Checker::memorized_node` for each node of the session
+    /// (the memo of constructors without arguments, the cells of copied
+    /// fields, the references of copied rows), `extras.copying` cleared,
+    /// then [`Checker::dup_cell`] for each node of [`PolyCopy::fields`]
+    /// (`copy_type_desc` for `Tfield`, compiler/ml/btype.ml:516-532: the
+    /// cell is duplicated when the row ends in a generic variable, which
+    /// is when the copy's row ends in a variable the session made; a
+    /// class the session duplicated already is found through its
+    /// temporary link), and `end_cell_session`. Cost: one step a node of
+    /// the session and what `dup_cell` says a field.
+    fn poly_pass(&mut self, first: usize) {
+        todo!("R3q")
+    }
+}
+
 /// A field of a row as the table of `mcomp_row` reads it
 /// (compiler/ml/ctype.ml:1996-2007): `Rpresent` with or without a type,
 /// `Reither` with its `c` and whether it has a type, `Rabsent`.
@@ -4595,6 +4968,13 @@ fn mcomp_shape(field: FieldRepr) -> Shape {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_of_the_instance_of_a_polymorphic_type() {
+        // One a node of the graph, and one a child slot of a body.
+        assert_eq!(std::mem::size_of::<PolySlot>(), 16);
+        assert_eq!(std::mem::size_of::<PolyEdge>(), 8);
+    }
 
     #[test]
     fn sizes() {

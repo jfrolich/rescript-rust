@@ -3609,7 +3609,7 @@ mod tests {
     #[test]
     fn ignored_tests_name_the_slices_they_reach() {
         let before: [(&str, &[&str]); 12] = [
-            ("R3q", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
+            ("R3q", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3h", "R3r"]),
             ("R3r", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3h"]),
             ("R3p", &["R3m", "R3e"]),
             ("R3k", &[]),

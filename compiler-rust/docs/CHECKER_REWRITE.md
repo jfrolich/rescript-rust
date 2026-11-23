@@ -2302,6 +2302,11 @@ the eighth turn did is listed in 8.6 ("Decided in the eighth skeleton
 turn"); the state of R3q and R3s, and the count after, are at the end
 of that list.
 
+| Slice | Decisions | Tests | Run in this turn |
+|---|---|---|---|
+| R3q | 91 to 96; 8.10 | ten ignored in `r3_tests.rs`: nine hand-built and the step test `instance_poly_at_ten_thousand`; two that run today (`rows::tests::sizes_of_the_instance_of_a_polymorphic_type`, `template::tests::a_session_of_two_roots_shares_between_them`) | all ten passed against a prototype of the twelve bodies (429 lines), which is not in the tree; three of the four shapes of the step test were seen to fail with their structure broken. No generated case: the harness has no operation for it |
+| R3s | 8.11 | see 8.11 for its state | see 8.11 |
+
 The ignored tests are checked mechanically
 (`differential::tests::ignored_tests_name_the_slices_they_reach`): each
 names the slices it reaches, reaches its own, and reaches none that is
@@ -3296,10 +3301,114 @@ in graph.rs, level.rs, template.rs or expand.rs, or under src/types.
 At most 500 lines.
 ```
 
+The prompt of R3q, written in the eighth skeleton turn. Both searches
+and the commit order were run on the head that holds the skeleton: the
+searches print what the prompt says, and with the bodies of commit 1
+present six of the ten tests pass, with those of commit 2 nine, with
+all three ten.
+
+```text
+R3q. R3h and R3r are merged. Read section 8.10 whole and section 8.6,
+decisions 47 and 91 to 96; compiler/ml/ctype.ml 676-713, 870-878 and
+1030-1105; compiler/ml/btype.ml 126-135, 366-392 and 478-532; in
+src/tc/rows.rs the doc comments of PolySlot, PolyEdge, PolyCopy and of
+the twelve functions from Checker::instance_poly to Checker::poly_pass,
+and the doc comments and bodies of field_repr, each_field_types,
+Checker::{open_row, hold, dup_cell, copy_refs}; in src/tc/template.rs
+Graph::{copy_begin, copy_ref, copy_drain}; in src/tc/expand.rs
+Checker::{memorized_node, link_memorized, copy}; in src/tc/unify.rs
+Frame, FrameKind and Checker::child.
+
+A prototype of this slice was written in the design turn and every
+test of the slice passed against it. It is not in the repository; it
+is a comment on the pull request of the eighth skeleton turn (one
+fenced diff, each body under a marker line). You MAY read it. It meets
+the doc comments, and it is not the standard: it has no commit
+structure and its step counts were chosen for the tests. Nothing it
+does is forbidden by this prompt; where your code differs from it, the
+doc comment decides.
+
+Before your first commit the first search prints rows.rs:12 and the
+second r3_tests.rs:10:
+  grep -c 'todo!("R3q")' compiler-rust/src/tc/*.rs | grep -v ':0$'
+  grep -c '#\[ignore = "R3q build"\]' compiler-rust/src/tc/*.rs | grep -v ':0$'
+When you end, both print nothing.
+
+Commits, in this order, each pushed with the tc:: tests seen to pass
+(the tests of this slice are ignored until commit 4; after each commit
+run them with `-- --ignored tc::r3_tests` and say which pass):
+1. Checker::{instance_poly, poly_begin, poly_walk, mark_holders,
+   copy_sep, sep_child, sep_conflicts, sep_fill, poly_session,
+   poly_pass} in rows.rs. Six tests pass: the first five of the
+   section of R3q in r3_tests.rs and
+   a_field_that_holds_a_universal_variable_gets_its_cell_by_its_row.
+   The two tests of rows, the step test and the test of a label reach
+   a body of a later commit.
+2. Checker::copy_sep_row. Nine pass: also the two tests of rows and
+   instance_poly_at_ten_thousand.
+3. Checker::instance_label. All ten pass.
+4. The `#[ignore = "R3q build"]` lines of src/tc/r3_tests.rs removed
+   and the `#[allow(unused_variables, dead_code)]` above the `impl`
+   block of this slice in rows.rs with its comment; nothing else in
+   the tests changed.
+End your turn after the fourth commit is pushed.
+
+Not yours, and not to be edited: Graph::{copy, copy_begin, copy_ref,
+copy_drain}, Checker::{memorized_node, link_memorized, copy, instance,
+copy_refs, match_fixed_fields, match_unmatched, open_row, dup_cell,
+free_univar}, and everything of R3h and R3r. If one of them is wrong
+for a test of yours, stop and report it. The relations (R3i, R3j) are
+not started; the six bodies of relate.rs stay as they are.
+
+Steps: one tick a node the first walk of mark_holders takes off its
+stack and one a node a propagation takes off; one a node sep_fill
+fills; one a field copy_sep_row reads; one a frame and one a node
+sep_conflicts reads.
+
+Relations to hold: every tc:: test that passed before passes
+unchanged; instance_poly_at_ten_thousand as written; after either
+function returns `Checker::frames` has the length it had, no
+`PolySlot::copy` is set and `PolyCopy::depth` is 0 (the tests assert
+it); no node that existed before the call is written, except a source
+row that `copy_sep_row` opens for `keep` and the references and cells
+the pass of a copy writes.
+
+The hand-built tests are the judge. If a test fails where your code
+does what the ctype.ml lines say, stop and report the test with the
+lines: do not change the test. Witness 2 of
+a_node_on_the_way_is_copied_again_when_a_new_binding_is_free_in_it was
+followed through OCaml's lines by hand and has no source program: if
+you read the lines differently, stop and say how.
+
+Report, before and after, the five unification operations of tc_kernel
+(unify_vars, unify_ground1, unify_ground3, unify_datatype2,
+unify_abbrev2, each minus its build_ twin) and instance7, copy7 and
+checker_instance7. No target is set (decision 46); the slice adds no
+line to a function they run.
+
+Shortcuts that count as failure: a recursion in copy_sep, sep_fill or
+mark_holders (the stack is `frames` or `g.work`); a `Vec`, a hash map
+or a hash set made in a call (the pools are PolyCopy's; the set OCaml
+keeps a node is not kept); sharing the copy of a node that holds a
+universal variable between two places, or a memo of such copies;
+calling Graph::copy or Checker::copy once a delayed node (it is one
+session: copy_begin, a copy_ref a root, copy_drain); running the
+session before the walk has ended, or making a node between copy_begin
+and copy_drain other than through copy_ref; a parameter added to
+copy_refs or link_memorized; opening a source row when `keep` is
+false; reading `is_Tvar` of the copy of `more` after the stub is
+linked; a stub or a table of this slice touched by instance_label for
+a label whose argument is not a polymorphic type; a new FrameKind
+(the walk reads Pair, Linked and LeavePoly as its doc comments say);
+a change in graph.rs, level.rs, template.rs, expand.rs, unify.rs or
+under src/types. At most 500 lines added to rows.rs (the prototype's
+bodies are 429).
+```
+
 The prompt of K2 is in section 8.7. The last prompt below is superseded by
 decision 5 of 8.6: no builder starts a slice from it. R3e, R3f, R3n, R3g
-and R3p, R3h and R3r have their own prompts above it; R3q, R3s, R3i and
-R3j have none yet (R3q and R3s are designed as text, 8.10 and 8.11).
+and R3p, R3h, R3r and R3q have their own prompts above it; R3s, R3i and
+R3j have none (the state of R3s is in 8.11).
 
 ```text
 R3e..R3j. First commit, before any body: extend
@@ -5292,6 +5401,71 @@ then what the turn itself decided, each with what was run.
     the attempt of two variants is taken in pattern mode whatever the
     flags (2402-2411).
 
+91. **`instance_poly` takes the polymorphic type node, and its copy is
+    a tree walk on `frames` with the way in a dense table** (R3q;
+    8.10). Signatures: `instance_poly(fixed, keep_names, poly, vars)`,
+    `instance_label(fixed, argument, result, vars)`; the new variables
+    are pushed on the caller's `Vec`. The way (`visited`) is
+    `PolySlot::copy`, one load a child, set when a node is filled and
+    put back by a `Linked` frame below its children. Not chosen:
+    `Graph::copy`'s walk with a second memo (8.10 as written in the
+    seventh turn): `copy_sep` has no memo across places, so a queue
+    that fills each node once cannot be its walk; a recursion (the
+    prototype of R3h recursed and its prompt forbade it: this
+    prototype runs on `frames`, so the walk the prompt asks for was
+    run).
+92. **Whether a universal variable is free below a node is computed
+    as OCaml computes it, one class at a time.** `mark_holders`: the
+    inverse graph as a pool of 8-byte edges, then one propagation a
+    class (the bound variables of the type; then each polymorphic type
+    below the body), stopped at the class's binder, with one
+    generation of `marks` a class. A node another class marked is not
+    a place to stop: seen on `instance_poly_at_ten_thousand`, third
+    shape, and on `a_polymorphic_type_inside_gets_new_universal_
+    variables` (`r`, whose own variable must not make it a holder).
+    Not chosen: a bottom-up pass with one bit (wrong on a type that
+    reaches itself, and on two binders); OCaml's set of variables a
+    node (a hash set a node).
+93. **`conflicts` is asked by a walk, when it arises.** A node on the
+    way met again after a binder was entered is copied again when a
+    variable bound since is free in it (ctype.ml:1046). The kernel has
+    no set a node, so `sep_conflicts` walks up from the binder's
+    variables. It arises only for a type that reaches itself through a
+    polymorphic type. Both answers have a hand-built witness; the
+    second witness (`p = 'u. ('u, k2<p, 'a>)`) cannot be written as a
+    source program and was followed through OCaml's lines by hand: a
+    review should read it. Where a node is its own way back to the
+    binder with nothing between, OCaml does not end; the kernel does
+    not either, and no check is made for it.
+94. **The delayed copies are one session after the walk, from a
+    list.** `Graph::copy` is cut into `copy_begin`, `copy_ref`,
+    `copy_drain` (built in the eighth turn; `copy` is the three in a
+    row), and the loop body of `Checker::link_memorized` is
+    `Checker::memorized_node`, so that `poly_pass` runs the same pass
+    inside a cell session that also covers the fields the walk made.
+    For a label the walk comes before the copy of the record type
+    where OCaml's comes after; the two meet only through the session.
+    One difference that follows is recorded and not built around:
+    OCaml reads whether a row ends in a generic variable on the
+    SOURCE, where a variable the record type's copy already reached is
+    a `Tsubst` to a copy that is not generic (btype.ml:496-500), so a
+    field of the argument whose row ends in a variable shared with the
+    record type keeps its cell; the kernel, which has not copied the
+    record type yet, duplicates it. No program is known (an object
+    type whose row variable is a parameter of the record).
+95. **A row with a universal variable below it is copied flat by
+    `copy_sep_row`, and `copy_refs` does not change.** The row is read
+    through its chain without opening it. Without `keep` the copy is
+    an unopened node whose `RowFieldRow`s hold what each field reads
+    now, with `m` and the flag by `fixed'`; with `keep` the homes are
+    opened and the copy is built opened onto their references.
+    `fixed'` reads whether the copy of `more` is a variable node at
+    that moment, a stub included, as OCaml's `is_Tvar (repr more')`
+    runs before the delayed copy is linked.
+96. **`instance_label` of a label without a polymorphic type is a
+    session of two roots and no stub.** It is the label of every
+    record field access; it must not pay for the walk.
+
 
 ### 8.7 The hot paths of unification (K2)
 
@@ -6458,104 +6632,210 @@ words.
 
 ### 8.10 `instance_poly` and `instance_label` (R3q)
 
-Designed as text in the seventh skeleton turn. NOT done: no skeleton,
-no test, no prototype run, no build prompt. A design turn makes those
-before a builder starts; what follows is what that turn starts from,
-and nothing here was run.
+Designed as text in the seventh skeleton turn; read against the source
+and corrected in place in the eighth, which also made the skeleton
+(`src/tc/rows.rs`, twelve bodies `todo!("R3q")`), ten acceptance tests
+(`src/tc/r3_tests.rs`, `#[ignore = "R3q build"]`) and the build prompt
+(8.4), and ran every test against a prototype of the bodies (429 lines,
+posted as a comment on the pull request of the eighth turn; not in the
+tree). The decisions are 91 to 96 of 8.6. What the seventh turn's text
+had wrong is listed at the end of this section.
 
-**What OCaml does** (compiler/ml/ctype.ml:1033-1106, read at this
-trunk). `instance_poly ~fixed univars sch` makes one new variable for
-each universal variable of `univars` (named when `keep_names`) and
-copies `sch` with `copy_sep`, which differs from `copy` in three ways:
+**What OCaml does** (compiler/ml/ctype.ml:1033-1106, pasted from the
+file). `instance_poly ~fixed univars sch` makes one new variable for
+each universal variable of `univars` (named when `keep_names`), and
+copies `sch` with `copy_sep`:
 
-1. *It copies through nodes that are not generic.* `copy` returns a
-   node below the generic level as it is. `copy_sep` asks, per node,
-   which of the free universal variables of `sch` occur in it
-   (`compute_univars`, a table from node to the set of universal
-   variables free below it). A node with none is `copy`'s business: it
-   is returned as it is when it is not generic, and otherwise copied
-   LATER, after the walk, by `copy` in the same copy session
-   (`delayed_copy`, 1040, 1093), so that the generic parts keep their
-   sharing among themselves. A node with a free universal variable is
-   copied whatever its level.
-2. *It does not share where sharing would capture.* `visited` pairs a
-   node with its copy and the list of bound variables at the time
-   (1044-1047). A node met again reuses its copy unless a universal
-   variable bound since then (`diff_list bound bound_t`) is one of the
-   node's free ones (`conflicts`); then it is copied again. A universal
-   variable itself is always its pair's copy.
-3. *A polymorphic type* (1070-1077) gets new universal variables for
-   its own (`newty t.desc`), which are pushed on `bound` and on
-   `visited`.
+```text
+let rec copy_sep fixed free bound visited ty =
+  let ty = repr ty in
+  let univars = free ty in
+  if Type_set.is_empty univars then (
+    if ty.level <> generic_level then ty
+    else
+      let t = newvar () in
+      delayed_copy () := lazy (t.desc <- Tlink (copy ty)) :: !(delayed_copy ());
+      t)
+  else
+    try
+      let t, bound_t = List.assq ty visited in
+      let dl = if is_Tunivar ty then [] else diff_list bound bound_t in
+      if dl <> [] && conflicts univars dl then raise Not_found;
+      t
+    with Not_found ->
+      let t = newvar () in
+      (* Stub *)
+      let visited =
+        match ty.desc with
+        | Tarrow _ | Ttuple _ | Tvariant _ | Tconstr _ | Tobject _ | Tpackage _
+          ->
+          (ty, (t, bound)) :: visited
+        | _ -> visited
+      in
+      let copy_rec = copy_sep fixed free bound visited in
+      t.desc <-
+        (match ty.desc with
+        | Tvariant row0 ->
+          let row = row_repr row0 in
+          let more = repr row.row_more in
+          (* We shall really check the level on the row variable *)
+          let keep = is_Tvar more && more.level <> generic_level in
+          let more' = copy_rec more in
+          let fixed' = fixed && is_Tvar (repr more') in
+          let row = copy_row copy_rec fixed' row keep more' in
+          Tvariant row
+        | Tpoly (t1, tl) ->
+          let tl = List.map repr tl in
+          let tl' = List.map (fun t -> newty t.desc) tl in
+          let bound = tl @ bound in
+          let visited =
+            List.map2 (fun ty t -> (ty, (t, bound))) tl tl' @ visited
+          in
+          Tpoly (copy_sep fixed free bound visited t1, tl')
+        | _ -> copy_type_desc copy_rec ty.desc);
+      t
+```
 
-A variant (1061-1069) is copied by `copy_row` with `fixed' = fixed &&
-is_Tvar (repr more')`: the second line of decision 47's table, the
-fixed-row rule only this slice reaches. `instance_label fixed lbl`
-(1097-1105) is one copy session over the label's result (`copy`) and
-its argument: `instance_poly ~fixed tl ty` when the argument is a
-polymorphic type, else `copy`.
+1. *`free ty`* (`compute_univars sch`, 693-713) is the set of universal
+   variables FREE below `ty`: the propagation up the inverse graph
+   stops at the polymorphic type that binds the variable (698). A node
+   with none is `copy`'s business: it is returned as it is when it is
+   not generic, and otherwise a new variable stands for it that is
+   made a link to its copy AFTER the walk (`delayed_copy`, 1040, 1093),
+   all in one copy session, so the parts without a universal variable
+   keep their sharing among themselves.
+2. *A node with a free universal variable is copied whatever its
+   level, and it is NOT shared between two places.* `visited` is an
+   argument of the function: what the walk of one child adds, its
+   sibling does not see. It holds the nodes ON THE WAY from the root
+   (and the bound variables with their copies), so it only closes a
+   type that reaches itself. A node reached by two paths is copied
+   twice ("Copy without sharing until there are no free univars left",
+   1030).
+3. *A node on the way that is met again* is its copy, unless a
+   variable bound since it was entered is free in it (`conflicts`,
+   874-876): then it is copied again with the new binding. A universal
+   variable is always its pair's copy.
+4. *A polymorphic type* gets new universal variables for its own
+   (`newty t.desc`), which are bound for its body. It is not put in
+   `visited`, and neither is a field.
+5. *A variant* is copied as ONE row (`row_repr`), by `copy_row` with
+   `fixed' = fixed && is_Tvar (repr more')` and `keep = is_Tvar more &&
+   more.level <> generic_level`: the fixed-row rule only this slice
+   reaches (btype.ml:375, 389; decision 47).
 
-**The kernel's form.** One function, `Checker::instance_poly(fixed,
-keep_names, univars: &[Ty], scheme: Ty) -> Ty` (the new variables are
-written to `g.work` or returned through a caller's `Vec`; the design
-turn chooses), and `Checker::instance_label(fixed, argument, result)
--> (Ty, Ty)`.
+`instance_label fixed lbl` (1097-1105) is one copy session over the
+label's record type (`copy`, first) and its argument: `instance_poly
+~fixed tl ty` when the argument is a polymorphic type, else `copy`.
+Every caller of `instance_poly` passes the two parts of one `Tpoly`
+(typecore.ml 1430, 2554, 4289, 4986, 5098; typedecl.ml 819, 1049).
 
-- *The free-variable question* is `Checker::free_univar`'s (R3g): it
-  answers, for one node and one set of universal variables, whether
-  one is free below it, with marks per context (decision 56).
-  `copy_sep` asks it of EVERY node of the scheme, so it needs the
-  answer per node, computed once: one bottom-up pass over the scheme
-  that gives each node a bit "a universal variable of `univars`, or of
-  an enclosing polymorphic type of this scheme, is free below" in a
-  mark generation, and a second generation for "none". With the
-  kernel's one-context-per-polymorphic-type rule (decision 59) the
-  pass is linear in the scheme for a scheme without nested polymorphic
-  types that share nodes, and as OCaml's otherwise (decision 74).
-- *The copy* is `Graph::copy`'s walk with two changes behind one
-  parameter: a node whose bit is set is copied whatever its level, and
-  the memo of copies is keyed by (node, the length of `bound` when it
-  was copied); a hit is used unless a variable bound since is free
-  below the node. For the common scheme (no polymorphic type inside
-  the body) `bound` never grows and the memo is `Graph::copy`'s own
-  slot. The rule of step 2 costs a second table only for a scheme with
-  a polymorphic type inside; that table is a `Vec` on `Checker`,
-  truncated after the call.
-- *The delayed copies* are the nodes without the bit that are generic:
-  they are copied in the same session by the ordinary arm, which is
-  what the kernel's copy does already when it reaches them; no list is
-  needed, because the kernel's copy session shares by slot, not by
-  call order. This is the one place the design is NOT OCaml's
-  mechanism, and it must be shown equal on generated cases before it
-  is built.
-- *The fixed-row rule*: `copy_refs` gets `fixed: bool` from the caller
-  (true for `copy` and `instance`, the caller's `fixed && the copied
-  `more` is a variable` for this slice): with false, every `Reither`
-  field of the copy reads unmatched and the copy's row is not fixed
-  (btype.ml:375, 389). `match_fixed_fields` (built in the seventh
-  turn) is the place.
+**The kernel's form** (decisions 91 to 96; the doc comments in
+`rows.rs` are the specification, this is the map).
 
-**Cost to state and prove in the design turn:** nothing for `instance`
-and `copy` (the parameter is a constant in their callers, and
-`copy_refs` reads one more register); `instance_poly` linear in the
-scheme for a scheme without a nested polymorphic type; a step test at
-1,000 and 10,000 of a field `'a. (t, 'a) => 'a` over a body of n
-nodes, and one of n nested polymorphic types.
+- `Checker::instance_poly(fixed, keep_names, poly, vars) -> Ty` takes
+  the polymorphic type node; `Checker::instance_label(fixed, argument,
+  result, vars) -> (Ty, Ty)`. A label whose argument is not a
+  polymorphic type is a plain copy session of two roots and touches no
+  table of this slice.
+- *Whether a universal variable is free below a node*
+  (`Checker::mark_holders`) is OCaml's algorithm with dense tables: one
+  walk that builds the inverse graph as a pool of edges, then a
+  propagation one class of variables at a time (the bound variables of
+  the type, then those of each polymorphic type inside), each stopped
+  at its own binder. The answer is one stamp in a 16-byte row a node
+  (`PolySlot`). OCaml keeps the SET a node; the kernel keeps "not
+  empty", which is all the copy reads, and asks the one question that
+  needs the set (`conflicts`) by a walk of its own when it arises.
+- *The copy* (`Checker::copy_sep`, `sep_child`, `sep_fill`) is a walk
+  on `Checker::frames`: a child that holds no universal variable is
+  shared or gets a stub that is listed for the session; a child that
+  holds one gets a stub and a frame, and is filled when the frame is
+  taken off. A node being filled puts its copy in its `PolySlot` and a
+  frame below its children takes it off again: the slot is OCaml's
+  `visited`, read with one load where OCaml reads a list.
+- *The delayed copies* (`Checker::poly_session`) are ONE session after
+  the walk: `Graph::copy_begin`, a `copy_ref` a root, `Graph::copy_
+  drain`, then the pass every copy runs (`Checker::memorized_node` a
+  node). The stubs become links, as in OCaml.
+- *A row* (`Checker::copy_sep_row`) is copied flat, read through its
+  chain without opening it; without `keep` the copy is an unopened
+  node, with `keep` it is built opened onto the references of its
+  source.
+- *The cells of copied fields* are duplicated by `Checker::dup_cell`
+  after the session's pass and inside its cell session.
 
-**The old side** (the judge, and where it is known to differ: pull
-requests 302 and 304 changed its `instance_poly`; their bodies were
-not read in this turn, which is the first thing the design turn does).
-The harness needs an operation `Op::InstancePoly(operand, fixed)` on a
-polymorphic type of a value's type, on the `UNIVARS` plan.
+**Cost.** Nothing for a unit that never calls either. `instance` and
+`copy` are not changed (`Graph::copy` is `copy_begin`, `copy_ref`,
+`copy_drain`, the same code in three functions; the pass of
+`link_memorized` calls `memorized_node`, its own loop body). The five
+unification operations and the copy and instance operations of
+`tc_kernel` were measured before and after the refactor: see the pull
+request. `instance_poly`: linear in the nodes below the body when no
+node that holds a universal variable is reached by two paths (as
+OCaml, a node that is is copied once a path), plus, with polymorphic
+types inside each other, one step a node for each class free below it.
 
-**Tests the design turn writes** (`#[ignore = "R3q build"]`): the copy
-of a node that is not generic but holds a universal variable is a new
-node, and a sibling without one is the same node; two occurrences of
-one node under different binders are two copies when the binder's
-variable is free in it and one otherwise; a row copied with `fixed`
-false loses `m` and the flag, with `fixed` true keeps both;
-`instance_label` shares between argument and result; the two step
-tests; the generated cases.
+**The old side** (types/ctype.rs, `instance_poly`, `instance_label`,
+`copy_sep_inner`, `compute_univars_per_node`) is a line-by-line port of
+the OCaml above, with `visited` a slice and the univars a hash map a
+node; pull request 302 made `instance_label` one copy session for the
+label's type and its record type. It is a judge of this slice. The
+harness has NO operation for it yet (8.10 of the seventh turn asked
+for `Op::InstancePoly`): the generated cases have polymorphic types
+only as the type of an object's field (the `UNIVARS` plan), and an
+operation needs a way to name that node on both sides. Not done in the
+eighth turn; the hand-built tests alone judge R3q, and open question 1
+of the pull request asks whether the operation is made before the
+slice is issued.
+
+**Tests** (`r3_tests.rs`, all ten passed against the prototype):
+`a_node_that_holds_a_universal_variable_is_copied_whatever_its_level`,
+`two_places_of_a_holder_are_two_copies_and_of_a_generic_node_one`,
+`a_type_that_reaches_itself_is_copied_once`,
+`a_polymorphic_type_inside_gets_new_universal_variables`,
+`a_node_on_the_way_is_copied_again_when_a_new_binding_is_free_in_it`,
+`a_row_copied_without_fixed_loses_its_matched_tags_and_the_flag`,
+`a_row_over_a_variable_that_is_not_generic_shares_its_references`,
+`a_label_shares_its_record_parameters_with_its_argument`,
+`a_field_that_holds_a_universal_variable_gets_its_cell_by_its_row`,
+and the step test `instance_poly_at_ten_thousand` (four shapes; three
+seen to fail with their structure broken, the numbers in its doc
+comment). No source program was run through the two compilers for
+them: what they pin is the identity of nodes after a copy, which no
+program shows directly; each expectation is followed through the
+pasted lines in its doc comment.
+
+**Arms no hand-built test reaches**: a package and an arrow parameter
+with a label in `sep_fill` (the arrow arm is reached, labels are not
+checked); a universal variable that no binder on the way binds
+(ill-scoped; `sep_fill`'s last arm copies its node); `copy_sep_row`
+with `keep` on a home that is opened already, on a row with a name
+that has arguments, and with a field whose reference is resolved;
+`poly_begin`'s clearing of the stamps; `instance_label` with a live
+memo of constructors without arguments; a row whose `more` is a
+generic constructor or `nil` (the stub is a variable when `fixed'` is
+computed, as in OCaml; the test of `fixed` reads rows over universal
+variables only).
+
+**What the seventh turn's text had wrong**, each read from the lines
+above:
+- "the memo of copies is keyed by (node, the length of `bound`)":
+  there is no memo. `visited` is the way, and a holder met in two
+  places is two copies.
+- "no list is needed [for the delayed copies]": one is. `Checker::
+  copy_refs` reads the source of a copied row as `g.work[copy -
+  first]`, so the nodes of a session must be contiguous and in the
+  order of its queue; the walk makes nodes of its own, so the session
+  runs after it, from a list, as OCaml's does.
+- "`copy_refs` gets `fixed: bool` from the caller": it does not change.
+  A session copy is always `copy_row copy true` (ctype.ml:868); the
+  rows of the walk are built by `copy_sep_row`, which holds the lines
+  of `copy_row` only this slice reaches.
+- "one bottom-up pass ... a bit in a mark generation": a bottom-up
+  pass is wrong for a type that reaches itself; it is OCaml's inverse
+  graph and propagation, and one bit is not enough to stop a class at
+  a node another class marked (decision 92).
 
 ### 8.11 The ambiguity of GADT instances (R3s)
 
