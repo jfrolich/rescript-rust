@@ -316,21 +316,13 @@ impl LambdaCompiler {
         }
     }
 
-    fn untagged_if(
-        &mut self,
-        mode: UntaggedMode<'_>,
-        cond: Expr,
-        then_: Block,
-        else_: Block,
-    ) -> Block {
-        match mode {
-            UntaggedMode::Return | UntaggedMode::TailLoopReturn => {
-                self.normalized_if_block(cond, then_, else_)
-            }
-            UntaggedMode::Assign(_) | UntaggedMode::Effect => {
-                vec![JS::if_(cond, &then_, &else_, &mut self.j)]
-            }
-        }
+    /// One `S.if_` statement whatever the continuation, as OCaml's
+    /// `compile_untagged_plan` emits it (lam_compile.ml `[S.if_ ...]`). When
+    /// `S.if_` turns it into a guard and a sequence, that `Block` stays
+    /// wrapped, so an enclosing `S.if_` does not see its trailing `return`
+    /// and keeps its `else`.
+    fn untagged_if(&mut self, cond: Expr, then_: Block, else_: Block) -> Block {
+        vec![JS::if_(cond, &then_, &else_, &mut self.j)]
     }
 
     fn emit_untagged_tree(
@@ -349,7 +341,7 @@ impl LambdaCompiler {
                 let then_ = self.emit_untagged_tree(a, emit, tail_loop, *then_);
                 let else_ = self.emit_untagged_tree(a, emit, tail_loop, *else_);
                 let cond = self.untagged_test_expr(plan, emit.scrut, *test);
-                self.untagged_if(emit.mode, cond, then_, else_)
+                self.untagged_if(cond, then_, else_)
             }
             Tree::Block(inner) => {
                 let block = self.emit_untagged_tree(a, emit, tail_loop, *inner);
@@ -376,7 +368,7 @@ impl LambdaCompiler {
                 let clause = self.emit_untagged_clause(a, emit, tail_loop, clause);
                 let default = self.emit_untagged_tree(a, emit, tail_loop, *default);
                 let cond = self.untagged_typeof_expr(emit.scrut, kind);
-                self.untagged_if(emit.mode, cond, self.j.block_vec(clause.body), default)
+                self.untagged_if(cond, self.j.block_vec(clause.body), default)
             }
             Tree::SwitchTypeof(clauses, default) => self.with_switch_depth(|this| {
                 let default = this.emit_untagged_tree(a, emit, tail_loop, *default);
@@ -1127,14 +1119,6 @@ impl LambdaCompiler {
             vec![JS::if_(cond, &then_block, &[], &mut self.j)]
         } else {
             vec![JS::if_(cond, &then_block, &else_block, &mut self.j)]
-        }
-    }
-
-    fn normalized_if_block(&mut self, cond: Expr, then_block: Block, else_block: Block) -> Block {
-        let stmt = JS::if_(cond, &then_block, &else_block, &mut self.j);
-        match self.j.sk(stmt) {
-            StmtKind::Block(block) => self.j.block_vec(block),
-            kind => vec![JS::new(kind, &mut self.j)],
         }
     }
 
