@@ -155,27 +155,27 @@ fn leaf(arena: &crate::bir::Bir, id: ConstId, text: &mut String) -> Leaf {
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// H12: K:60 compile_constant, numeric leaf with preserved spelling.
     /// Cost: O(1) amortized: one constant interned, one leaf built.
-    fn number(&mut self, value: Constant) -> NodeId {
+    fn number(&mut self, value: Constant) -> B::E {
         let value = self.arena.intern_const(value);
         let number = self.js.number(&mut self.arena, value);
-        B::node(self.strict(number))
+        self.strict(number)
     }
     /// H12: K:60 compile_constant, float payload has already been validated by import.
     /// Cost: O(spelling bytes): the spelling is parsed and interned; one leaf built.
-    fn float(&mut self, spelling: &str) -> NodeId {
+    fn float(&mut self, spelling: &str) -> B::E {
         let value = self
             .arena
             .intern_float(spelling)
             .expect("valid imported float");
         let number = self.js.number(&mut self.arena, value);
-        B::node(self.strict(number))
+        self.strict(number)
     }
     /// H12: K:60 compile_constant, decoded string bytes are not re-escaped here.
     /// Cost: O(text bytes): the text is interned; one leaf built.
-    fn string(&mut self, text: &str) -> NodeId {
+    fn string(&mut self, text: &str) -> B::E {
         let text = self.arena.intern_text(text);
         let string = self.js.str(&mut self.arena, text);
-        B::node(self.strict(string))
+        self.strict(string)
     }
     /// H13: A:28 delay_safe. A constant is strictly pure by construction:
     /// `e` with the fact asserted. O(1).
@@ -191,7 +191,6 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn constant(&mut self, root: ConstId) -> NodeId {
         let mut work = std::mem::take(&mut self.constant_work);
         let mut values = std::mem::take(&mut self.constant_values);
-        let mut children = std::mem::take(&mut self.constant_children);
         let mut text = std::mem::take(&mut self.constant_text);
         let mut encoding = std::mem::take(&mut self.constant_encoding);
         work.push(Work::Enter(root));
@@ -221,18 +220,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             let number = self.js.number(&mut self.arena, value);
                             self.strict(number)
                         }
-                        LeafValue::Int(n) => B::from_node(self.number(Constant::Int(n))),
+                        LeafValue::Int(n) => self.number(Constant::Int(n)),
                         LeafValue::FloatInt(n) => {
                             use std::fmt::Write;
                             write!(&mut encoding, "{n}").unwrap();
-                            B::from_node(self.float(&encoding))
+                            self.float(&encoding)
                         }
-                        LeafValue::String(s) => B::from_node(self.string(s.get(&text))),
+                        LeafValue::String(s) => self.string(s.get(&text)),
                         LeafValue::InternedString(text) => {
                             let string = self.js.str(&mut self.arena, text);
                             self.strict(string)
                         }
-                        LeafValue::Float(s) => B::from_node(self.float(s.get(&text))),
+                        LeafValue::Float(s) => self.float(s.get(&text)),
                         LeafValue::BigInt(s, normalize) => {
                             if normalize {
                                 let positive = crate::types::typecore::parse_bigint_literal_into(
@@ -245,7 +244,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                                 encoding.push_str(s.get(&text));
                             }
                             let text = self.arena.intern_text(&encoding);
-                            B::from_node(self.number(Constant::BigInt(text)))
+                            self.number(Constant::BigInt(text))
                         }
                         LeafValue::Bool(b) => {
                             let value = self.js.boolean(&mut self.arena, b);
@@ -267,30 +266,29 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     }
                     text.clear();
                     encoding.clear();
-                    values.push((B::node(value), none));
+                    values.push((value, none));
                 }
                 Work::Block(source, count) => {
                     let start = values.len() - count as usize;
-                    children.extend(values.drain(start..).map(|(node, _)| node));
                     let mark = self.js.mark();
-                    for node in children.drain(..) {
-                        self.js.push(B::from_node(node));
+                    for (value, _) in values.drain(start..) {
+                        self.js.push(value);
                     }
                     let info = self.arena.js_info(JsPayload::ConstantBlock(source));
                     let block = self.js.block(&mut self.arena, mark, info, 2);
-                    values.push((B::node(self.strict(block)), false));
+                    values.push((self.strict(block), false));
                 }
                 Work::Some => {
                     let (value, none) = values.pop().expect("constant option child");
-                    let value = if none && self.js.kind(&self.arena, B::at(value)) == Kind::Undefined {
-                        self.js.release(&mut self.arena, B::from_node(value));
+                    let value = if none && self.js.kind(&self.arena, B::of(&value)) == Kind::Undefined {
+                        self.js.release(&mut self.arena, value);
                         let undefined = self.js.undefined(&mut self.arena, false);
                         self.strict(undefined)
                     } else {
-                        B::from_node(value)
+                        value
                     };
                     let optional = self.js.optional(&mut self.arena, value, !none);
-                    values.push((B::node(self.strict(optional)), none));
+                    values.push((self.strict(optional), none));
                 }
             }
         }
@@ -298,10 +296,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let result = values.pop().expect("constant result").0;
         self.constant_work = work;
         self.constant_values = values;
-        self.constant_children = children;
         self.constant_text = text;
         self.constant_encoding = encoding;
-        result
+        // T6x-d: `constant` gives a row to `mod.rs` and `switch.rs`.
+        B::node(result)
     }
 }
 
@@ -566,7 +564,6 @@ mod allocation_tests {
                     s.arena.pools.block_key_scratch.capacity(),
                     s.constant_work.capacity(),
                     s.constant_values.capacity(),
-                    s.constant_children.capacity(),
                     s.argument_outputs.capacity(),
                     s.argument_values.capacity(),
                     s.traversal.work.capacity(),
@@ -596,7 +593,6 @@ mod allocation_tests {
             assert!(
                 state.constant_work.is_empty()
                     && state.constant_values.is_empty()
-                    && state.constant_children.is_empty()
             );
             let (expected_source, expected_constants, expected_primitives) = [
                 (1, 20_001, 0),
