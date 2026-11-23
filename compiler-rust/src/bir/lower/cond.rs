@@ -429,7 +429,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// B:1575 simplify_if as one statement. Each run is copied into the
     /// arena once; all rules receive pool handles, never branch vectors.
     /// Cost: O(yes + no) statements copied, plus J-S3's.
-    pub(super) fn if_statement(&mut self, test: NodeId, yes: Span, no: Span) -> B::S {
+    pub(super) fn if_statement(&mut self, test: B::E, yes: Span, no: Span) -> B::S {
         self.statements.drop_empty_blocks(&mut self.js, &mut self.arena, yes);
         self.statements.drop_empty_blocks(&mut self.js, &mut self.arena, no);
         let (yes, no) = if yes.start >= no.start {
@@ -439,7 +439,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let no = self.statements.take_list(&mut self.js, &mut self.arena, no);
             (self.statements.take_list(&mut self.js, &mut self.arena, yes), no)
         };
-        self.js.if_(&mut self.arena, B::from_node(test), yes, no)
+        self.js.if_(&mut self.arena, test, yes, no)
     }
 
     /// J-S3 rules 0..6 through `JsStmt::if_head` over two runs of the
@@ -455,7 +455,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.place(head, statement);
             }
         } else {
-            let statement = self.if_statement(B::node(condition), yes, no);
+            let statement = self.if_statement(condition, yes, no);
             self.place(head, statement);
         }
     }
@@ -532,7 +532,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     ) -> Probed<B> {
         if let Cont::Value(_) = cont {
             // R1, C:1812 compile_expr: `let tmp`, `if_(c, T, E)`, value `tmp`.
-            let statement = self.if_statement(B::node(test), yes, no);
+            let statement = self.if_statement(test, yes, no);
             self.place(parts.head, statement);
             let declaration = self.js.declare(&mut self.arena, LetKind::Strict, target, None);
             self.statements.fill(parts.head - 1, declaration);
@@ -548,7 +548,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.statements.trim(Self::from(parts.head));
             }
             (Cont::Declare(kind, _), Err((test, yes, no))) => {
-                let statement = self.if_statement(B::node(test), yes, no);
+                let statement = self.if_statement(test, yes, no);
                 self.place(parts.head, statement);
                 let declaration = self.js.declare(&mut self.arena, kind, target, None);
                 self.statements.fill(parts.head - 1, declaration);
@@ -607,7 +607,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     ) -> B::S {
         match merged {
             Ok(value) => self.js.assign(&mut self.arena, target, value),
-            Err((test, yes, no)) => self.if_statement(B::node(test), yes, no),
+            Err((test, yes, no)) => self.if_statement(test, yes, no),
         }
     }
 
@@ -628,10 +628,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             // Step 2: a free then branch without effects.
             (None, Some(no)) => {
                 let test = self.js.not(&mut self.arena, test);
-                self.if_statement(B::node(test), no, EMPTY)
+                self.if_statement(test, no, EMPTY)
             }
             // Step 3: a free else branch without effects.
-            (Some(yes), None) => self.if_statement(B::node(test), yes, EMPTY),
+            (Some(yes), None) => self.if_statement(test, yes, EMPTY),
             (Some(yes), Some(no)) => {
                 // js_stmt_make.ml:186 block_last_is_return_throw_or_continue,
                 // on the literal last statement.
@@ -644,12 +644,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if self.single_return(no) {
                     // Step 4, first form: the then branch follows in place.
                     let test = self.js.not(&mut self.arena, test);
-                    self.if_statement(B::node(test), no, EMPTY)
+                    self.if_statement(test, no, EMPTY)
                 } else if terminal {
                     // Step 4, second form: the else branch follows in place.
-                    self.if_statement(B::node(test), yes, EMPTY)
+                    self.if_statement(test, yes, EMPTY)
                 } else {
-                    self.if_statement(B::node(test), yes, no)
+                    self.if_statement(test, yes, no)
                 }
             }
             (None, None) => unreachable!("two free branches are row R4 step 1"),
@@ -697,7 +697,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let statement = self.js.exp_rule(&mut self.arena, value);
         self.statements.push(statement);
         let run = self.statements.since(mark);
-        let statement = self.if_statement(B::node(test), run, EMPTY);
+        let statement = self.if_statement(test, run, EMPTY);
         let empty = self.js.is_empty_block(&self.arena, &statement)
             .then(|| self.js.stmt_id(&self.arena, &statement));
         let slot = self.statements.mark().start;
@@ -741,7 +741,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if !self.single_return(yes) && self.single_return(no) {
             // One block of `if (!c) E` and `T`; `T` stays in place.
             let test = self.js.not(&mut self.arena, test);
-            let statement = self.if_statement(B::node(test), no, EMPTY);
+            let statement = self.if_statement(test, no, EMPTY);
             self.place(parts.head, statement);
         } else {
             self.if_in_place(parts.head, test, yes, no);
@@ -938,7 +938,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         } else {
             self.js.not(&mut self.arena, left)
         };
-        let statement = self.if_statement(B::node(test), yes, no);
+        let statement = self.if_statement(test, yes, no);
         self.place(parts.head, statement);
         let value = match cx.cont {
             Cont::Value(_) | Cont::Effect(_) => {
@@ -1710,7 +1710,7 @@ mod tests {
                     let mut hand = Hand::new();
                     let (yes_run, no_run) = (hand.run(0, yes), hand.run(1, no));
                     let condition = hand.test(test);
-                    let statement = hand.state.if_statement(condition, yes_run, no_run);
+                    let statement = hand.state.if_statement(crate::bir::lower::out::of_row(condition), yes_run, no_run);
                     hand.state.statements.push(statement);
                     assert_eq!(
                         hand.text(None),

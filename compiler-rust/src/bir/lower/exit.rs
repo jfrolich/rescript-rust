@@ -419,7 +419,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let exit = self.js.var(&mut self.arena, exit);
             let order = self.js.int_literal(&mut self.arena, plan.first);
             let test = self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, exit, order);
-            let statement = self.if_statement(B::node(test), run, super::cond::EMPTY);
+            let statement = self.if_statement(test, run, super::cond::EMPTY);
             self.statements.push(statement);
             return;
         }

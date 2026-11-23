@@ -151,7 +151,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.statements.push(break_);
                 let yes = self.statements.since(mark);
                 let no = self.statements.mark();
-                let guard = self.if_statement(B::node(negated), yes, no);
+                let guard = self.if_statement(negated, yes, no);
                 let mark = self.statements.mark();
                 self.push_loop_list(blocks[0].unwrap());
                 self.statements.push(guard);

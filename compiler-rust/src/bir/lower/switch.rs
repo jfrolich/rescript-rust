@@ -1096,7 +1096,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     let merged = self.merge_assignments(test, target, yes, no);
                     self.assignment_statement(target, merged)
                 }
-                Cont::Effect(_) => self.if_statement(B::node(test), yes, no),
+                Cont::Effect(_) => self.if_statement(test, yes, no),
                 _ => unreachable!("small switch branches assign their result"),
             };
             if matches!(cx.cont, Cont::Effect(Tail::No)) && self.js.is_empty_block(&self.arena, &statement) {
