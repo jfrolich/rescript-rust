@@ -4101,29 +4101,52 @@ impl Checker {
     /// `duplicate_type` for an equation (`Subst.type_expr Subst.identity`,
     /// compiler/ml/ctype.ml:496; subst.ml:132-158): a copy of `ty` in
     /// which every node is generic, sharing kept; `ty` is as it was
-    /// afterwards. Made of parts that exist: `g.speculate()`;
-    /// `Graph::generalize(ty)` with `g.level` 0, which makes every node
-    /// of `ty` generic and logs each level it writes; [`Checker::copy`]
-    /// with `g.level` generic; `g.level` put back; `Graph::restore` of
-    /// the token, which puts the levels of `ty` back. The copy's nodes
-    /// are new and not on the trail, so they stay. It is
-    /// `Graph::generalize` and not [`Checker::generalize`]: the second
-    /// forgets the memo of constructors without arguments, which is not
-    /// on the trail (the caller has cleaned the memos already, step 2 of
+    /// afterwards. `g.speculate()`; then a walk over `ty` that makes
+    /// every node of it generic and goes THROUGH a node that is generic
+    /// already (OCaml's copy copies every node whatever its level,
+    /// `| _ ->` of `Subst.typexp`, subst.ml:144-158; `Graph::generalize`
+    /// stops at a generic node and would leave the nodes below it shared
+    /// with the copy): on `g.work`, one new generation of marks
+    /// ([`Checker::fresh_marks`]), each representative visited once, its
+    /// level written generic with `Graph::write` when it is not (logged,
+    /// so the restore puts it back), its children pushed as
+    /// `Graph::generalize` pushes them (`Graph::children` with the
+    /// memo); [`Checker::copy`] with `g.level` generic; `g.level` put
+    /// back; `Graph::restore` of the token, which puts the levels of `ty`
+    /// back. The copy's nodes are new and not on the trail, so they stay.
+    /// The walk does not forget the memo of constructors without
+    /// arguments, as [`Checker::generalize`] does: that memo is not on
+    /// the trail (the caller has cleaned the memos already, step 2 of
     /// [`Checker::add_gadt_equation`], so no copy is linked to a
     /// memorized node). OCaml's copy keeps a variable and a universal
     /// variable as the node they are (subst.ml:135-143); the destination
     /// of an equation has no variable (`reify` ran first, or it is a
     /// constructor without arguments), and a universal variable that is
     /// free in it is COPIED here: no program is known that has one
-    /// (8.9, decision 67). Cost: three passes over `ty`: one step and
-    /// one trail entry (20 bytes) a node generalized, one step a node
-    /// copied, one step a level restored. (R3h)
+    /// (8.9, decision 67). Cost: three passes over `ty`: one step a node
+    /// visited and one trail entry (20 bytes) a level written, one step
+    /// a node copied, one step a level restored. (R3h; total in R3r)
     pub fn duplicate(&mut self, ty: Ty) -> Ty {
         let token = self.g.speculate();
-        let level = std::mem::replace(&mut self.g.level, 0);
-        self.g.generalize(ty);
-        self.g.level = GENERIC;
+        let generation = self.fresh_marks();
+        self.g.work.clear();
+        self.g.work.push(ty);
+        while let Some(next) = self.g.work.pop() {
+            let next = self.g.repr(next);
+            let mark = &mut self.marks[next.0 as usize];
+            if *mark == generation {
+                continue;
+            }
+            *mark = generation;
+            #[cfg(test)]
+            super::steps::tick();
+            let node = self.g.nodes[next.0 as usize];
+            if node.level != GENERIC {
+                self.g.write(next, Node { level: GENERIC, ..node });
+            }
+            self.g.children(node, true);
+        }
+        let level = std::mem::replace(&mut self.g.level, GENERIC);
         let copy = self.copy(ty);
         self.g.level = level;
         self.g.restore(token);

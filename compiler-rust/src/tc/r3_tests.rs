@@ -5069,6 +5069,35 @@ fn an_equation_over_ten_thousand_shared_nodes_is_linear() {
     }
 }
 
+/// Witness: `duplicate` copies every node of its destination whatever
+/// its level (`Subst.typexp`, compiler/ml/subst.ml:144-158: `| _ ->`
+/// makes a stub and copies): a tuple that is not generic over a tuple
+/// that IS generic over `int` that is not. A pass that stops at a
+/// generic node, as `Graph::generalize` does, leaves `int` at its level
+/// and the copy shares it with the destination. After `duplicate` the
+/// graph has grown by exactly the three nodes, every node of the copy
+/// is generic, and the three nodes of the destination have the levels
+/// they had.
+///
+/// Reaches: R3r.
+#[test]
+fn duplicate_copies_below_a_generic_node() {
+    let mut c = checker(Mode::Success);
+    let int = constr(&mut c, INT, &[]);
+    let inner = tuple_at(&mut c, GENERIC, &[int]);
+    let outer = tuple(&mut c, &[inner]);
+    let levels: Vec<u32> = [outer, inner, int].iter().map(|ty| c.g.nodes[ty.0 as usize].level).collect();
+    assert_eq!(levels, [2, GENERIC, 2]);
+    let nodes = c.g.nodes.len();
+    let copy = c.duplicate(outer);
+    assert_ne!(copy, outer);
+    assert_eq!(c.g.nodes.len(), nodes + 3);
+    assert!(c.g.nodes[nodes..].iter().all(|node| node.level == GENERIC));
+    let after: Vec<u32> = [outer, inner, int].iter().map(|ty| c.g.nodes[ty.0 as usize].level).collect();
+    assert_eq!(after, levels);
+    assert_eq!(c.g.speculation_depth, 0);
+}
+
 /// Witness: `Int: t<k<int>>` against `t<k<a>>` below a constructor
 /// whose arguments were already entered (`generate_equations` on,
 /// `assume_injective` off), `k` abstract and of another unit. Its
