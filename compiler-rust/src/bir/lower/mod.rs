@@ -531,7 +531,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     catch_table: Vec<(NodeId, crate::bir::CatchId)>,
     catches: Vec<Option<exit::Plan>>,
     tries: Vec<try_::Plan<B::L>>,
-    loops: Vec<loops::Plan<B::L>>,
+    loops: Vec<loops::Plan<B::L, B::E>>,
     next_loop_label: u32,
     labels: label::Schedule,
     try_form_reads: usize,

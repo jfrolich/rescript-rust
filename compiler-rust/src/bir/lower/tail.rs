@@ -43,11 +43,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         self.tail_copies.resize(self.arena.vars.len(), None);
         let mut assignments = std::mem::take(&mut self.tail_assignments);
         for (i, &value) in values.iter().enumerate() {
+            // The values arrive as rows from call.rs until T6x-d.
+            let value = B::from_node(value);
             self.tail_arguments += 1;
-            if i == 0 || i > params.len() { self.js.release(&mut self.arena, B::from_node(value)); continue; }
+            if i == 0 || i > params.len() { self.js.release(&mut self.arena, value); continue; }
             let param = VarId(params.start + i as u32 - 1);
-            if self.js.var_of(&self.arena, B::at(value)) == Some(param) {
-                self.js.release(&mut self.arena, B::from_node(value));
+            if self.js.var_of(&self.arena, B::of(&value)) == Some(param) {
+                self.js.release(&mut self.arena, value);
                 continue;
             }
             let copy = if let Some(copy) = self.tail_copies[param.index()] { copy } else {
@@ -61,7 +63,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.tail_copies[param.index()] = Some(copy);
                 copy
             };
-            let assignment = self.js.assign(&mut self.arena, copy, B::from_node(value));
+            let assignment = self.js.assign(&mut self.arena, copy, value);
             assignments.push(assignment);
         }
         for statement in assignments.drain(..).rev() { self.statements.push(statement); }
