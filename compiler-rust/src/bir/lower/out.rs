@@ -977,6 +977,45 @@ mod tests {
         assert_eq!(scanned, scanned_thousand);
         assert_eq!(scanned, ((clauses + 1) * width) as usize);
     }
+    /// One slot that holds `n` statements between two plain slots, read in
+    /// place in order (`statement_refs`) and then taken last first
+    /// (`take_run_rev`): each read gives every statement of the hold once,
+    /// in its order, and allocates nothing, at 1,000 and at 10,000; a
+    /// taken hold has nothing left to read. The iterators count no step:
+    /// what the test pins is one item per held statement and no storage.
+    #[test]
+    fn a_hold_of_ten_thousand_statements_is_read_and_taken_once_each() {
+        for n in [1_000u32, 10_000] {
+            let mut stack = StatementStack::<Rows>::default();
+            stack.push(Rows::stmt_from_node(NodeId(0)));
+            let hole = stack.reserve();
+            stack.push(Rows::stmt_from_node(NodeId(n + 1)));
+            stack.fill_held(hole, (1..=n).map(|row| Rows::stmt_from_node(NodeId(row))));
+            let run = stack.since(Span::default());
+            assert_eq!(run.len, 3);
+            let read = allocation_counter::measure(|| {
+                let mut next = 0;
+                for statement in stack.statement_refs(run) {
+                    assert_eq!(statement.row(), NodeId(next));
+                    next += 1;
+                }
+                assert_eq!(next, n + 2);
+            });
+            assert_eq!(read.count_total, 0, "{n}: {read:?}");
+            let taken = allocation_counter::measure(|| {
+                let mut next = n + 2;
+                for statement in stack.take_run_rev(run) {
+                    next -= 1;
+                    assert_eq!(Rows::stmt_node(statement), NodeId(next));
+                }
+                assert_eq!(next, 0);
+            });
+            assert_eq!(taken.count_total, 0, "{n}: {taken:?}");
+            assert_eq!(stack.statement_refs(run).count(), 0);
+            stack.kill(run);
+            assert_eq!(stack.mark(), Span::default());
+        }
+    }
     #[test]
     fn append_finished_truncates_and_dummy_preserves() {
         let mut stack = StatementStack::<Rows>::default();
