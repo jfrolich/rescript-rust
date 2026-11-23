@@ -480,7 +480,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     constant_work: Vec<konst::Work>,
     constant_values: Vec<(NodeId, bool)>,
     argument_outputs: Vec<Out<B>>,
-    argument_values: Vec<NodeId>,
+    argument_values: Vec<B::E>,
     ffi_suffix: Vec<ffi_args::LaterLiteral>,
     ffi_params: Vec<usize>,
     source_steps: usize,
