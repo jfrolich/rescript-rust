@@ -154,6 +154,23 @@ pub trait JsStmt: Js {
     /// holds. One step. The list may not be given to a constructor after
     /// it: every statement of it is taken, or none.
     fn take_at(&mut self, a: &mut Pools, list: Self::L, index: u32) -> Self::S;
+    /// Statement `index` of a list in flight, read where it is: `read` is
+    /// given the statement by reference, for the readers of a statement in
+    /// hand ([`JsStmt::stmt_kind`], [`JsStmt::declared`],
+    /// [`JsStmt::stmt_aux`], [`JsStmt::value_of`]), and what it returns is
+    /// returned. The statement stays in the list, which is given to a
+    /// constructor afterwards as if it had not been read. A reference into
+    /// the statement ([`JsStmt::value_of`]) does not outlive `read`: what
+    /// the caller keeps is a fact or an id ([`Js::id`]).
+    ///
+    /// O(1) and whatever `read` costs: the statement is found by its
+    /// position, and no other statement of the list is read. Counts no
+    /// step (a reader); allocates nothing. Panics when `index` is not
+    /// below [`JsStmt::len`], and where a statement can be absent (the
+    /// builder) when it was taken out before. (T6x-b3b: `close::decide`,
+    /// which reads each declaration and each `return` of a list between
+    /// the list's making and the constructor that consumes it.)
+    fn with_stmt_at<R>(&self, a: &Pools, list: Self::L, index: u32, read: impl FnOnce(&Self::S) -> R) -> R;
 
     // ---- Statements (plain) ----
 

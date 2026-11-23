@@ -1468,3 +1468,61 @@ fn a_statement_is_effect_free_when_everything_below_it_is() {
     let (one, ten) = (steps(1_000, true), steps(10_000, true));
     assert!(one < 3 * 1_000 && ten < 3 * 10_000, "{one} {ten}");
 }
+
+/// What the close of a list reads of it (`close::decide`): each statement
+/// where it is, by position, through the readers of a statement in hand.
+/// The read finds the statement without reading a row: the rows read are
+/// those of the readers `read` calls, the same number for the first, the
+/// middle and the last statement of a list, and the same at 1,000 and at
+/// 10,000 statements. A read that walks to its statement reads a row per
+/// statement before it and fails both. It counts no step, and the list is
+/// given to a constructor afterwards with every statement in it.
+#[test]
+fn a_statement_of_a_list_in_flight_is_read_where_it_is() {
+    use crate::emit::row::flag;
+    let reads = |statements: usize| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut handles = Vec::with_capacity(statements);
+        for order in 1..statements {
+            let var = u.b.new_var_id(Name::new("v"), 10 + order as u32);
+            let x = r.var(&mut u.b, u.x);
+            handles.push(r.declare(&mut u.b, LetKind::Strict, var, Some(x)));
+        }
+        handles.push(statement(&mut r, &mut u, St::Return));
+        let ids: Vec<u32> = handles.iter().map(|s| r.stmt_id(&u.b, s)).collect();
+        let vars: Vec<Option<VarId>> = handles.iter().map(|s| r.declared(&u.b, s)).collect();
+        let list = r.list(&mut u.b, statements as u32, handles.into_iter());
+        let before = r.steps();
+        let mut rows_read = [0u64; 3];
+        for (slot, index) in [0, statements / 2 - 1, statements - 1].into_iter().enumerate() {
+            u.b.steps.set(0);
+            let (id, kind, var, aux, strict) = r.with_stmt_at(&u.b, list, index as u32, |s| {
+                let strict = r.value_of(&u.b, s).map(|value| r.has(&u.b, value, flag::STRICT));
+                (r.stmt_id(&u.b, s), r.stmt_kind(&u.b, s), r.declared(&u.b, s), r.stmt_aux(&u.b, s), strict)
+            });
+            rows_read[slot] = u.b.steps.get();
+            assert_eq!(id, ids[index]);
+            assert_eq!(kind, r.kind_at(&u.b, list, index as u32));
+            assert_eq!(var, vars[index]);
+            assert_eq!(strict, Some(true));
+            if index + 1 == statements {
+                assert_eq!((kind, var), (Kind::Return, None));
+            } else {
+                assert_eq!((kind, aux), (Kind::Declare, LetKind::Strict as u8));
+            }
+        }
+        assert_eq!(r.steps(), before);
+        // Two declarations at different positions cost the same rows.
+        assert_eq!(rows_read[0], rows_read[1]);
+        // The list is whole: a constructor takes it, in order.
+        let block = r.block_of(&mut u.b, list);
+        let mut given = Vec::with_capacity(statements);
+        r.block_ids(&u.b, &block, |id| given.push(id));
+        assert_eq!(given, ids);
+        rows_read
+    };
+    let (one, ten) = (reads(1_000), reads(10_000));
+    assert_eq!(one, ten);
+    assert!(one.iter().all(|&rows| rows > 0 && rows < 16), "{one:?}");
+}
