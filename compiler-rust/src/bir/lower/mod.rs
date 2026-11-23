@@ -543,7 +543,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     /// The variables of the export blocks, as the importer recorded them.
     export_vars: Vec<u32>,
     /// The tables of the export fold (`export.rs`).
-    coercion: export::Tables,
+    coercion: export::Tables<B::E>,
 }
 impl<B: js_stmt::JsStmt> State<'_, B> {
     /// N1: C:481 new, with the implementation `js` of the interface. Transfer cold pools, while source hot nodes/list operands
