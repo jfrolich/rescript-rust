@@ -5211,6 +5211,64 @@ then what the turn itself decided, each with what was run.
     list at the end of A1 in CHECKER_DEPARTURES.md) the new checker
     follows OCaml and the old side is not a judge. 8.11 names each.
 
+*What the eighth turn decided itself*, each with what was run.
+
+89. **A scoped lowering walks a chain of variant nodes in line**
+    (G1 (c); a correction of built code). OCaml's `update_level` hands
+    a variant to `iter_type_expr`, and `iter_row` goes on in a `more`
+    that is a variant without handing that node back
+    (compiler/ml/btype.ml:229-241):
+
+    ```text
+    let rec iter_row f row =
+      List.iter
+        (fun (_, fi) ->
+          match row_field_repr fi with
+          | Rpresent (Some ty) -> f ty
+          | Reither (_, tl, _, _) -> List.iter f tl
+          | _ -> ())
+        row.row_fields;
+      match (repr row.row_more).desc with
+      | Tvariant row -> iter_row f row
+      | Tvar _ | Tunivar _ | Tsubst _ | Tconstr _ | Tnil ->
+        Misc.may (fun (_, l) -> List.iter f l) row.row_name
+      | _ -> assert false
+    ```
+
+    As built, `lower_scoped` pushed every slot of a variant node, the
+    `more` slot included, so each inner node of a chain was visited as
+    a node of its own, and `lower_row_name` read the chain to its end
+    from each: for a chain of n nodes whose name does not escape,
+    1,002,000 steps at n = 1,000 and 100,020,000 at 10,000 (counted
+    once the chain loop had a step; before, the loop was not counted
+    at all). Now `Checker::push_row_children` pushes a `more` slot
+    whose representative is a variant with the mark `IN_LINE`, and the
+    walk pushes that node's children without a level test, a write or a
+    name test. What changes besides the cost: an inner node of a chain
+    KEEPS its level when the first node is lowered, as in OCaml (the
+    fields and the row variable at the end are lowered through the
+    first node). `Graph::lower`, the walk of a unit without a scoped
+    type, still lowers the inner nodes (it pushes every slot); no walk
+    of the kernel reads the level of an inner node except through a
+    handle to it, and no generated case differs
+    (`scoped_plan_agrees_on_generated_cases` and the pattern plans ran
+    unchanged). Not chosen: bounding the walk of `lower_row_name` with
+    marks (it keeps the visit of the inner nodes, which OCaml does not
+    make). Cost for a unit that never lowers a variant with scopes:
+    nothing (the arm is behind `types.scoped != 0` and the variant
+    test that was there). Cost of the arm: `lower_row_name` reads the
+    chain once for the name and the walk reads it once in line, 2n
+    loads for n chain nodes; the first read cannot push children,
+    because the name decides whether the node is rewritten as one row
+    before its children are known. Step tests (rows.rs): the chain
+    without a name, with a name that does not escape and with one that
+    does (`unname_row`: one row of n fields), each linear between 1,000
+    and 10,000; `match_fixed_fields` over a fixed row of n matched
+    `Reither` fields (one step a field, which the loop did not count
+    before). Lines added to a function expression mode runs:
+    `lower_scoped_loop` gets one compare of `frame.extra`, a field of
+    the frame it has popped (no load), per entry.
+
 
 ### 8.7 The hot paths of unification (K2)
 
@@ -6196,7 +6254,11 @@ eighth skeleton turn is the line "State:" below it.
    not visit the inner nodes of a chain (`iter_row` walks a `more` that
    is a variant in line, btype.ml:229-241). Decide with a step test at
    1,000 and 10,000: skip the inner nodes, or bound the chain.
-   State: open at this commit: G1 (c) of the eighth turn.
+   State: paid in the eighth turn (G1 (c)); decision 89 of 8.6. The
+   inner nodes are skipped as OCaml skips them. Tests in `rows.rs`:
+   `lowering_a_chain_of_ten_thousand_rows_is_linear` (`lower_row_name`
+   with and without a name, and `unname_row` when the name escapes)
+   and `matching_the_fields_of_a_fixed_row_is_one_step_a_field`.
 7. Section 8.11 turns tracing on when `equations` is not empty. OCaml
    turns it on when the environment has a local constraint
    (`check_trace_gadt_instances`, ctype.ml:178-184), and the types of

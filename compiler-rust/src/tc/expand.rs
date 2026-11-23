@@ -635,6 +635,10 @@ pub enum ExpandMode {
     Rigid,
 }
 
+/// `Frame::extra` of an entry of [`Checker::lower_scoped`]'s walk whose
+/// node is a variant met as the `more` of another: walked in line.
+const IN_LINE: u32 = 1;
+
 impl Checker {
     /// O(1) when `env` is the scope of the last expansion; otherwise one
     /// [`Checker::cleanup_abbrev`]. `check_abbrev_env`,
@@ -1345,7 +1349,10 @@ impl Checker {
     /// above `level` that is not a constructor costs one test of the
     /// extended bit of the head already loaded; an extended one (an
     /// object, a field, a polymorphic type, a variant, a package) one
-    /// descriptor load; a variant what [`Checker::lower_row_name`] says. Nodes are
+    /// descriptor load; a variant what [`Checker::lower_row_name`] says,
+    /// and its chain is walked in line (`Checker::push_row_children`:
+    /// an inner node of a chain is not lowered and not read for its
+    /// name, compiler/ml/btype.ml:229-241). Nodes are
     /// visited in OCaml's order (children pushed last first). On a clash the
     /// stack is cut back to where it was and the error is the constructor
     /// that clashed; the caller undoes or keeps the writes.
@@ -1361,11 +1368,19 @@ impl Checker {
     /// Its cost is the caller's.
     fn lower_scoped_loop(&mut self, base: usize, level: u32, expand: bool) -> Result<(), Ty> {
         while self.frames.len() > base {
-            let ty = self.frames.pop().expect("entry above base").left;
-            let ty = self.g.repr(ty);
+            let frame = self.frames.pop().expect("entry above base");
+            let ty = self.g.repr(frame.left);
             #[cfg(test)]
             super::steps::tick();
             let node = self.g.nodes[ty.0 as usize];
+            if frame.extra == IN_LINE {
+                // A `more` that is a variant: `iter_row` goes on in it
+                // (`| Tvariant row -> iter_row f row`, btype.ml:238) and
+                // does not hand the node to `update_level`: no level
+                // test, no write, its children.
+                self.push_row_children(node);
+                continue;
+            }
             if node.level <= level {
                 continue;
             }
@@ -1406,7 +1421,10 @@ impl Checker {
             {
                 // A row whose name is below its scope loses the name
                 // (ctype.ml:615-621).
-                self.lower_row_name(ty, node, level)
+                let node = self.lower_row_name(ty, node, level);
+                self.g.write(ty, Node { level, ..node });
+                self.push_row_children(node);
+                continue;
             } else {
                 node
             };
@@ -1414,6 +1432,39 @@ impl Checker {
             self.push_lowering_children(node);
         }
         Ok(())
+    }
+
+    /// O(slots): push the children of variant node `node` for
+    /// [`Checker::lower_scoped`], last first, as
+    /// [`Checker::push_lowering_children`] pushes the slots of an
+    /// extended node, except that a `more` slot whose representative is
+    /// a variant node is pushed [`IN_LINE`]: the walk goes on over that
+    /// node's children without lowering the node itself (`iter_row`,
+    /// compiler/ml/btype.ml:229-241). One descriptor load and one
+    /// `VariantRow` load; for the `more` slot one `repr`, one node load
+    /// and, for an extended node, one descriptor load.
+    fn push_row_children(&mut self, node: Node) {
+        let super::segment::ExtraDescriptor::Variant(row) = self.extras.descriptors[node.a as usize] else {
+            unreachable!("a variant node");
+        };
+        let more = self.extras.variants[row as usize].more;
+        for index in (0..node.arity()).rev() {
+            let ty = self.g.lists[(node.b + index) as usize];
+            let mut extra = 0;
+            if index == more {
+                let next = self.g.repr(ty);
+                let next = self.g.nodes[next.0 as usize];
+                if next.head & super::segment::EXTENDED != 0
+                    && matches!(
+                        self.extras.descriptors[next.a as usize],
+                        super::segment::ExtraDescriptor::Variant(_)
+                    )
+                {
+                    extra = IN_LINE;
+                }
+            }
+            self.frames.push(Frame { left: ty, right: Ty(NONE), kind: FrameKind::Pair, extra });
+        }
     }
 
     /// O(1) amortized: push one node of a lowering walk on [`Checker::frames`].

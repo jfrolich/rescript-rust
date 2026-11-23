@@ -1775,12 +1775,20 @@ impl Checker {
     /// descriptor load, one `VariantRow` load and one node load a chain
     /// node, then, when the row has a name, one `TypeInfo` load and one
     /// compare of its scope (`get_level`, as for a constructor). No
-    /// write, no step, when the row has no name or its name's scope is
-    /// not above `level`. Otherwise [`Checker::unname_row`].
-    /// (CHECKER_REWRITE 8.6, decision 75)
+    /// write when the row has no name or its name's scope is not above
+    /// `level`. Otherwise [`Checker::unname_row`]. One step a chain
+    /// node. The caller walks the chain a second time for the children
+    /// (`Checker::lower_scoped`, in line, as `iter_row`,
+    /// btype.ml:229-241): the name decides what `ty` is before its
+    /// children are known, and the inner nodes of the chain are not
+    /// handed to this function, so a chain of n nodes costs 2n loads
+    /// when its first node is lowered and not n squared over two.
+    /// (CHECKER_REWRITE 8.6, decisions 75 and 89)
     pub(super) fn lower_row_name(&mut self, ty: Ty, node: Node, level: u32) -> Node {
         let mut current = node;
         let row = loop {
+            #[cfg(test)]
+            super::steps::tick();
             let ExtraDescriptor::Variant(index) = self.extras.descriptors[current.a as usize]
             else {
                 unreachable!("a variant node");
@@ -2709,7 +2717,7 @@ impl Checker {
     /// annotation has matched fields when it is fixed
     /// (`make_fixed_univars`, typetexp.ml:684-696); the rows `reify`
     /// fixes do not (CHECKER_REWRITE 8.6, decision 47). O(fields of the
-    /// node + their chains).
+    /// node + their chains), one step a field.
     fn match_fixed_fields(&mut self, copy: Ty, first: u32) {
         let node = self.g.nodes[copy.0 as usize];
         let ExtraDescriptor::Variant(row) = self.extras.descriptors[node.a as usize] else {
@@ -2717,6 +2725,8 @@ impl Checker {
         };
         let row = self.extras.variants[row as usize];
         for index in row.fields.start..row.fields.start + row.fields.len {
+            #[cfg(test)]
+            super::steps::tick();
             let field = self.extras.row_fields[index as usize];
             let now = field_repr(&self.g, node.b, node.arity(), field);
             if matches!(now.kind, RowFieldKind::Either { matched: false, .. }) {
@@ -4874,6 +4884,103 @@ mod tests {
         ends.dedup();
         assert_eq!(ends.len(), 10_000);
         assert_ne!(reference(&c, ty, 0), reference(&c, copied, 0));
+    }
+
+    /// A chain of `n` variant nodes, each with the one tag `f(i)` and
+    /// its row variable linked to the next, at level 2; the first node
+    /// and the last. With `named` the last row has the name of type 0,
+    /// whose scope is `scope`.
+    fn chain_of_rows(n: u32, scope: Option<u32>) -> (Checker, Ty, Ty) {
+        let mut c = Checker::new(Graph::default(), Default::default());
+        let last = add_row(&mut c, 0..1, false, |_| RowFieldKind::Present);
+        if let Some(scope) = scope {
+            let row = c.extras.variants.len() - 1;
+            c.extras.variants[row].name = 0;
+            c.types.rows.push(TypeInfo { manifest: NONE, scope, newtype: NONE, arity: 0, flags: 0, reserved: 0 });
+        }
+        let mut first = last;
+        for i in 1..n {
+            let node = add_row(&mut c, i..i + 1, false, |_| RowFieldKind::Present);
+            c.g.link(Ty(node.0 - 1), first);
+            first = node;
+        }
+        for node in &mut c.g.nodes {
+            node.level = 2;
+        }
+        c.types.scoped = 1;
+        c.g.level = 2;
+        (c, first, last)
+    }
+
+    /// The loops of the variant arm of a lowering, as relations between
+    /// 1,000 and 10,000 (`update_level`, compiler/ml/ctype.ml:615-623;
+    /// `iter_row`, btype.ml:229-241, which walks a `more` that is a
+    /// variant IN LINE and does not hand the inner node to
+    /// `update_level`):
+    ///
+    /// - `lower_row_name` over a chain of n variant nodes whose name
+    ///   does not escape (and one without a name): linear. Seen to fail
+    ///   before the inner nodes were skipped (each inner node the walk
+    ///   visited read the chain to its end: 1,002,000 steps at 1,000
+    ///   and 100,020,000 at 10,000). The inner nodes
+    ///   keep their level, as in OCaml; the row variable at the end is
+    ///   lowered.
+    /// - `unname_row` over the same chain when the name escapes: one
+    ///   row of n fields, linear.
+    #[test]
+    fn lowering_a_chain_of_ten_thousand_rows_is_linear() {
+        let run = |n: u32, scope: Option<u32>| {
+            let (mut c, first, last) = chain_of_rows(n, scope);
+            let steps = super::super::steps::scope(|| c.lower(first, 1).unwrap());
+            let more = c.g.repr(Ty(last.0 - 1));
+            assert_eq!(c.g.nodes[first.0 as usize].level, 1);
+            assert_eq!(c.g.nodes[more.0 as usize].level, 1);
+            let escaped = scope == Some(2);
+            let node = c.g.nodes[first.0 as usize];
+            let ExtraDescriptor::Variant(row) = c.extras.descriptors[node.a as usize] else {
+                unreachable!("a variant node");
+            };
+            let row = c.extras.variants[row as usize];
+            // The name is dropped, and the node is one row of n fields.
+            assert_eq!(row.fields.len, if escaped { n } else { 1 });
+            assert_eq!(row.name, NONE);
+            if !escaped && n > 1 {
+                // `iter_row` does not hand an inner node to `update_level`.
+                assert_eq!(c.g.nodes[last.0 as usize].level, 2);
+            }
+            steps
+        };
+        for scope in [None, Some(1), Some(2)] {
+            let (small, large) = (run(1_000, scope), run(10_000, scope));
+            assert!(large <= 11 * small, "{scope:?}: {small} {large}");
+        }
+    }
+
+    /// `match_fixed_fields` over the copy of a fixed row of n `Reither`
+    /// fields that read matched (`let m = if row.row_fixed then fixed
+    /// else m`, compiler/ml/btype.ml:375): one step a field, linear
+    /// between 1,000 and 10,000, and `match_unmatched` is not reached
+    /// (no node beyond the copy's own).
+    #[test]
+    fn matching_the_fields_of_a_fixed_row_is_one_step_a_field() {
+        let run = |n: u32| {
+            let either = |_| RowFieldKind::Either { constant: false, matched: true };
+            let (mut c, ty) = row_of(n, true, either);
+            let row = c.extras.variants.len() - 1;
+            c.extras.variants[row].fixed = true;
+            c.g.nodes[ty.0 as usize].level = GENERIC;
+            c.g.nodes[ty.0 as usize - 1].level = GENERIC;
+            let nodes = c.g.nodes.len();
+            let mut copied = ty;
+            let steps = super::super::steps::scope(|| copied = c.copy(ty));
+            assert_ne!(copied, ty);
+            let made = c.g.nodes.len() - nodes;
+            (steps, made)
+        };
+        let (small, large) = (run(1_000), run(10_000));
+        assert!(large.0 <= 11 * small.0, "{small:?} {large:?}");
+        assert!(small.0 >= 1_000 && large.0 >= 10_000, "{small:?} {large:?}");
+        assert_eq!(small.1, large.1, "nodes made do not grow with the fields");
     }
 
     /// `merge_rows` of two lists of 10,000 tags, every other tag common:
