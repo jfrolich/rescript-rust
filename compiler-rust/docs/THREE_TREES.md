@@ -7158,6 +7158,344 @@ taken in another order; a hole left unfilled; a signature of cond.rs
 or of another file changed.
 ```
 
+T6x-b3b (with the common block of phase C and the common block of
+T6x-a1 to T6x-a4, read with "T6x-b3b" for the four slices; the
+paragraph "The probe" of that block is replaced by the one in the task;
+read also 11.4 "T6x-b: an output's value, as built"):
+
+```text
+Task T6x-b3b: the close of a list and the unit's finish go through the
+lowering's interface. One slice, one pull request against
+ocaml-to-rust-rewrite.
+
+Precondition, check it first and stop with a report if it fails: `rg -n
+'fn with_stmt_at' compiler-rust/src/bir/lower/js_stmt.rs` shows one
+line (the design turn of T6x-b is merged); `cargo test --manifest-path
+compiler-rust/Cargo.toml --lib bir::lower` reads 569 passed, `--lib
+bir::j` 58, `--lib emit::builder` 28, none ignored; from compiler-rust,
+`python3 ../scripts/count_lowering_ids.py | grep '^| total' | head -1`
+prints `| total | 15807 | 174 | 87 | 437 | 241 | 126 | 57 | 5 | 3 | 2 |
+3 | 0 | 5 | 162 |` (the first number may differ by lines trunk added;
+the fourth must be 437).
+
+Yours: src/bir/lower/close.rs whole; in src/bir/lower/out.rs
+`StatementStack::take_list` (one line), `StatementStack::close`,
+`FreePool::probe`, the field `FreePool::probes`, the imports and the
+tests named below; in src/bir/lower/mod.rs `complete_unit`, `complete`,
+`finish` (the one that takes `list`), the enum `ProbeInput` and one
+number in the doc comment of `realize`; in src/bir/lower/export.rs
+`extract_exports` and the one test line that calls it; in
+src/bir/node.rs the deletion of `set_block_info`; the changelog
+fragment. Nothing else. You add no function to a trait: the one this
+slice needs, `JsStmt::with_stmt_at`, is on trunk.
+
+The probe. This part was converted once as a throw-away (branch
+`bir-lower-statement-probe`; `git fetch origin
+bir-lower-statement-probe`). You may read `git show e1e5175130` and
+`git show 6b6be5b6e2 -- compiler-rust/src/bir/lower/mod.rs` as a
+starting point. They are unreviewed, they have no cost notes, and they
+leave four places marked `// PROBE-GAP`: where this task gives code,
+the task is right and the probe is not. Merge nothing and cherry-pick
+nothing from that branch.
+
+Commits, in this order, each compiling and passing the three filters on
+its own (the design turn built them in this order), each pushed when
+made:
+
+1. The close. close.rs, with these imports in place of the three it
+   has (`super::scope`, `strictly_pure`, `crate::bir::{..}`):
+
+       use super::js::{Js, Pools};
+       use super::js_stmt::JsStmt;
+       use super::scope::{Decision, VarFacts};
+       use crate::bir::{FuncHeader, NodeId};
+       use crate::emit::row::{Kind, flag};
+
+   and this body (the doc comment of `decide` stays; add to its cost
+   paragraph, after "have their capacity.": "A statement is read where
+   it is (`JsStmt::with_stmt_at`, O(1)): the list is not turned into
+   rows and no statement leaves it."):
+
+       pub(super) fn decide<B: JsStmt>(js: &B, bir: &mut Pools, list: B::L) {
+           let count = js.len(bir, list);
+           let mut steps = 0;
+           for at in (0..count).rev() {
+               steps += 1;
+               match js.kind_at(bir, list, at) {
+                   Kind::Return => {
+                       // `scope::return_sites` takes a row until T6r: the returned
+                       // value is named by its id.
+                       let value = js.with_stmt_at(bir, list, at, |statement| js.value_of(bir, statement).map(|value| js.id(bir, value)));
+                       let value = NodeId(value.expect("a return has a value"));
+                       super::scope::return_sites(bir, value, at + 1 == count)
+                   }
+                   Kind::Declare => {
+                       let decision = js.with_stmt_at(bir, list, at, |statement| {
+                           let var = js.declared(bir, statement).expect("a declaration declares");
+                           let kind = u16::from(js.stmt_aux(bir, statement));
+                           let value = js.value_of(bir, statement);
+                           // From here to `inline`: the lines of trunk, with
+                           // `js.has(bir, value, flag::STRICT)` for
+                           // `strictly_pure(bir, value)` and
+                           // `inlinable_function(js, bir, value)`.
+                           Decision::new(var, status, inline, built)
+                       });
+                       bir.js_scope.as_mut().expect("lowering scope").decisions.push(decision);
+                   }
+                   _ => {}
+               }
+           }
+           bir.js_scope.as_mut().expect("lowering scope").close_steps += steps;
+       }
+
+       /// `inline_function_decl_from_variable` of the legacy pass: a function
+       /// literal that is not a method, not `async` and has no directive. O(1):
+       /// the header of the literal and its attributes, two reads.
+       fn inlinable_function<B: Js>(js: &B, bir: &Pools, value: B::Ref<'_>) -> bool {
+           let Some(header) = js.function_of(bir, value) else { return false };
+           // the two lines of trunk
+       }
+
+   The decision is computed inside the closure, which only reads, and
+   pushed after it: a reference into the statement (`value_of`) does
+   not leave the closure. `inlinable_function` stays behind the three
+   tests of `inline` that come before it, as on trunk: it is not
+   called for every declaration.
+   out.rs: `close(&mut self, js: &B, a: &mut Pools, list: B::L)`,
+   calling `super::close::decide(js, a, list)` under `a.js_scope
+   .is_some()`; in `take_list` the two lines of the close become
+   `self.close(js, a, list);`; `use crate::bir::{Bir, ListId};` goes
+   from the head of the file and the tests import `crate::bir::{Bir,
+   NodeId}`. mod.rs, `complete_unit`: the close of the coerced list
+   becomes
+
+       let list = self.coerced_list(run);
+       // `coerced_list` gives a pool list until T6x-e.
+       self.statements.close(&self.js, &mut self.arena, B::list_from(list));
+
+   The test of close.rs: make `let rows = Rows::default();` before the
+   first `decide`, pass `&rows` to both calls, and import
+   `crate::bir::j::rows::Rows` and `crate::bir::{Bir, ListId, View}` in
+   the test module. It reads what it read: 10,004 steps (`10_001 + 3`),
+   20,000 decisions, no allocation in the second close. Those numbers
+   do not change; if one does, stop and report.
+
+2. The export block's payload. export.rs, `extract_exports`: the
+   parameter is `value: Option<B::E>` and the first line `let mut value
+   = value?;`; the filter of the block literal is `.filter(|&info|
+   matches!(self.arena.block_tag(info), TagInfo::ModuleExport(_)))`;
+   the identifiers are copied where they were taken out:
+
+       let TagInfo::ModuleExport(exports) = self.arena.block_tag(info) else { unreachable!("checked above") };
+       let exports = exports.clone();
+
+   In its doc comment, "No allocation: the identifiers are moved out
+   of the block's payload." becomes "One allocation: the identifiers
+   are copied out of the block's payload, which is the shape's and is
+   shared with every other block of that shape and with the source
+   (`Bir::block_info`)." `use crate::bir::JsPayload;` goes. The test
+   `rows_and_references_are_read_without_allocation_once_the_tables_
+   are_warm` calls `state.extract_exports(out.value, out.finished)`.
+   mod.rs, `complete_unit`: from `let value = out.value.map(B::node);`
+   to the call of `extract_exports` (the comment, the walk of the
+   comma spine, the copy of the payload and the write) becomes one
+   line, `let exports = self.extract_exports(out.value,
+   out.finished);`. src/bir/node.rs: `Node::set_block_info` and its
+   doc comment are deleted (`rg -n 'set_block_info' compiler-rust/src`
+   must then be empty; no test calls it).
+
+3. The finish. mod.rs: `fn finish(mut self, list: B::L, _finished:
+   Finished, coerced: export::Coerced) -> Lowered`, its doc comment
+   "The root block over the top-level list in flight, which is
+   consumed. One step per statement of the list and one write per
+   catch of the unit.", and the root made so:
+
+       // The rest of the unit's finish reads the root by its id: the bulk
+       // finish and the importer take a row until T6s, the replay of the
+       // names until T6r.
+       let root = self.js.block_of(&mut self.arena, list);
+       let root = NodeId(self.js.stmt_id(&self.arena, &root));
+
+   `complete_unit` gives `finish` a `B::L`: `let list =
+   B::list_from(self.coerced_list(run));` under the comment of commit
+   1, then `self.statements.close(&self.js, &mut self.arena, list);`,
+   and the other arm is `self.statements.take_list(&mut self.js, &mut
+   self.arena, run)` without `B::list_id`. `complete` (tests only):
+
+       let value = out.value.unwrap_or_else(|| {
+           let mut undefined = self.js.undefined(&mut self.arena, false);
+           self.js.assume_strict(&mut self.arena, &mut undefined);
+           undefined
+       });
+       let statement = self.js.exp(&mut self.arena, value);
+       self.statements.push(statement);
+
+   and its list is the result of `take_list` as it is.
+   `State::pure_expression` stays `#[cfg(test)]`: tests of args.rs,
+   call.rs and cond.rs call it.
+
+4. The probe function that nothing calls. out.rs: delete
+   `FreePool::probe` with its doc comment, the field `probes` with its
+   doc comment (and `probes: 0` in `Default`), and `ProbeInput` from
+   the import. mod.rs: delete the enum `ProbeInput` with its doc
+   comment; in the doc comment of `realize`, "two moves of its 88
+   bytes" becomes "two moves of its 80 bytes". out.rs tests:
+   `size_of::<FreePool<Rows>>()` is 80 (the field is gone: the one
+   size this slice moves), and the last two tests of the file
+   (`ten_thousand_deferred_nodes_are_probed_and_realized_once`,
+   `nonfree_child_is_kept_without_reprobing`) are replaced by these
+   two, verbatim:
+
+       /// A chain of 10,000 deferred sequences over one leaf, pushed as the
+       /// lowering pushes them (`Free` records, the tail first), is realized
+       /// once per record on the explicit stack: the leaf, then each head.
+       #[test]
+       fn ten_thousand_deferred_nodes_are_realized_once() {
+           let mut pool = FreePool::default();
+           let mut oracle = Oracle::default();
+           let cx = Cx::value();
+           let mut free = pool.push(Free::Leaf(Rows::from_node(NodeId(0))));
+           for n in 1..=10_000 {
+               free = pool.push(Free::Seq { first: Rows::from_node(NodeId(n)), second: free });
+           }
+           assert!(oracle.visits.is_empty());
+           let out = pool.realize(cx, Probed::Free(free), &mut oracle);
+           assert_eq!(out.value.map(Rows::node), Some(NodeId(0)));
+           assert_eq!(pool.realized, 10_001);
+           assert_eq!(oracle.visits, (0..=10_000).collect::<Vec<_>>());
+       }
+       /// A deferred conditional is realized after its branches, the then
+       /// branch first; an output that is not deferred is returned as it is
+       /// and realizes nothing.
+       #[test]
+       fn a_deferred_conditional_is_realized_after_its_branches() {
+           let mut pool = FreePool::default();
+           let mut oracle = Oracle::default();
+           let cx = Cx::returning();
+           let then_ = pool.push(Free::Leaf(Rows::from_node(NodeId(1))));
+           let else_ = pool.push(Free::Leaf(Rows::from_node(NodeId(3))));
+           let free = pool.push(Free::Cond { test: Rows::from_node(NodeId(2)), then_, else_ });
+           let out = pool.realize(cx, Probed::Free(free), &mut oracle);
+           assert_eq!(out.value.map(Rows::node), Some(NodeId(1)));
+           assert_eq!(pool.realized, 3);
+           assert_eq!(oracle.visits, vec![1, 3, 2]);
+           let kept = pool.realize(cx, Probed::Out(output(Span { start: 0, len: 1 }, None, Finished::True)), &mut oracle);
+           assert_eq!(kept.finished, Finished::True);
+           assert_eq!(pool.realized, 3);
+       }
+
+5. changes/three-trees-t6x-b3b.internal.md, one bullet.
+
+Tests. You edit only what is named above: the two calls and the
+imports of the test of close.rs, the import line of the tests of
+out.rs, one line of a test of export.rs, the size of `FreePool<Rows>`,
+and the two replaced tests. No other expected value changes; the
+replaced tests keep every assertion that does not name the deleted
+counter. `--lib bir::lower` reads 569 passed after every commit (two
+tests replaced by two), `--lib bir::j` 58, `--lib emit::builder` 28.
+The tests that guard commit 2 exist and you do not edit them:
+unit.rs `export_consumption_does_not_empty_shared_block_metadata`,
+`supported_unit_exercises_both_texts_and_shared_export_coercion` and
+the four `full_unit_allocation_boundary_*` (86, 103, 86, 156).
+
+End state, each command run from compiler-rust and pasted with its
+output. A command is one line, however long. The design turn ran each
+on trunk and on its own build of this slice; "now" is what trunk
+prints, "then" what you must print:
+
+    rg -n 'B::(from_node|node|at|stmt_from_node|stmt_node|list_from|list_id)\(|\.map\(B::node\)' src/bir/lower/close.rs src/bir/lower/out.rs src/bir/lower/mod.rs
+
+  Now seven lines: out.rs `take_list` (`B::list_id`); mod.rs
+  `complete_unit` 2, `complete` 3, `enter` 1. Then two: mod.rs
+  `complete_unit` (`B::list_from(self.coerced_list(run))`, T6x-e) and
+  `enter` (`B::from_node(self.constant(value))`, T6x-d).
+
+    rg -n 'fn decide|fn close\(|fn finish\(mut self|fn inlinable_function' src/bir/lower/close.rs src/bir/lower/out.rs src/bir/lower/mod.rs
+
+  Then: `pub(super) fn decide<B: JsStmt>(js: &B, bir: &mut Pools,
+  list: B::L)`; `fn inlinable_function<B: Js>(js: &B, bir: &Pools,
+  value: B::Ref<'_>) -> bool`; `pub(super) fn close(&mut self, js: &B,
+  a: &mut Pools, list: B::L)`; `fn finish(mut self, list: B::L,
+  _finished: Finished, coerced: export::Coerced) -> Lowered`.
+
+    rg -n -A2 'pub\(super\) fn extract_exports' src/bir/lower/export.rs
+
+  Then the second line after it reads `value: Option<B::E>,`.
+
+    rg -n 'set_block_info|ProbeInput|\.probes\b|pub probes' src/bir
+
+  Now 16 lines; then empty.
+
+    rg -n 'View::|\.view\(|lists\.get|strictly_pure' src/bir/lower/close.rs
+
+  Now 13 lines; then five, all inside `mod tests` (the rows the test
+  builds).
+
+    rg -n 'with_stmt_at\(' src/bir/lower --glob '!*_tests.rs' --glob '!js_stmt.rs'
+
+  Now empty; then two lines, both in close.rs.
+
+    rg -n 'js_info\(|block_from_list|new_node\(|pure_expression\(' src/bir/lower/mod.rs
+
+  Now nine lines; then five: the definition of `pure_expression` (two
+  lines) and three `source.new_node` of a test.
+
+    rg -n 'mem::take\(exports\)|block_tag\(' src/bir/lower/export.rs src/bir/lower/mod.rs
+
+  Now two lines (the take in export.rs, `block_tag` in mod.rs); then
+  two, both `block_tag` in export.rs.
+
+    python3 ../scripts/count_lowering_ids.py | grep '^| total' | head -1
+
+  The design turn's build read `| total | 15748 | 169 | 86 | 433 | 240
+  | 126 | 57 | 4 | 3 | 3 | 0 | 0 | 5 | 148 |`: `from_node` 241 to 240
+  (export.rs), `stmt_from_node` 5 to 4 and `list_id` 3 to 0 (mod.rs
+  and out.rs), `list_from` 2 to 3 (mod.rs, until T6x-e). Paste yours
+  beside it and explain any difference in columns four to thirteen.
+
+Cost notes. From compiler-rust: `python3
+../scripts/check_lowering_cost_docs.py --base
+origin/ocaml-to-rust-rewrite`. It reports every function whose
+signature or body changed (the design turn's build: `changed/new=8;
+missing/generic=0; removed=0`) and its last line must read
+`missing/generic=0`. The notes this task gives (`decide`,
+`inlinable_function`, `extract_exports`, `finish`) are the ones to
+write; `close`, `take_list`, `complete_unit` and `complete` keep
+theirs, which still say what a call costs.
+
+Gates of the pull request, beside those of the common blocks: the
+three filters with the counts above; clippy with `-D warnings`; `cargo
+doc` with warnings denied; CI `Backend bridge coverage` at zero
+differences and the parity jobs for JavaScript, the standard library
+and genType green, read before the pull request is marked ready (after
+commit 2 the payloads made after the export fold have ids one lower on
+rows, which no decision reads: these jobs are the check, and if one is
+not clean you stop and report the first difference); the four
+allocation counts; CI `Instruction count` at most +0.02%, one rerun
+allowed, both figures reported.
+
+Run by the design turn, in a copy that was not pushed: these four
+commits one after the other; after each, the three filters at 569, 58
+and 28; on the last, clippy and `cargo doc` clean, the cost-note check
+at zero, the allocation counts and the close test unchanged; 117 lines
+added and 188 removed in five files. Not run: `Backend bridge
+coverage`, the parity suites, `Instruction count`, check mode.
+
+Shortcuts that count as failure, beside the common lists: `B::list_id`,
+`B::stmt_from_node` or `B::stmt_node` in close.rs; `take_at` in
+`decide` (it moves the statement out); a `Vec` of the statements or of
+their ids; `inlinable_function` called before the tests that precede
+it on trunk; a second `with_stmt_at` for the same statement; the
+payload copied in `complete_unit` or written into a node
+(`set_block_info`, `js_info` in mod.rs); `std::mem::take` of the
+identifiers (it empties a payload other blocks share: six tests fail);
+the root turned back with `B::stmt_node`; `FreePool::probe` or
+`ProbeInput` kept under `#[cfg(test)]`; an edit of scope.rs, of
+`coerced_list`, of `coerce_exports` or of any function of export.rs
+other than `extract_exports`; an edit of js.rs, js_stmt.rs, rows.rs,
+rows_stmt.rs or src/emit.
+```
+
 
 ## 12. Risks and what was not measured
 
