@@ -1,5 +1,6 @@
 //! X: external calls, scoped targets, and indexed module references.
 use super::*;
+use super::js::Mark;
 use crate::bir::{ImportId, PrimId};
 use crate::emit::row::Kind;
 use crate::lambda::lam_primitive::{
@@ -49,12 +50,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         arg: NodeId,
         label: crate::lambda::lam_primitive::LabelNoname,
         attr: &crate::lambda::lam_primitive::Attr,
-    ) -> (NodeId, Option<NodeId>) {
-        let (values, effect) = self.lower_external_arg_values_and_effect(cx, arg, label, attr);
+    ) -> (NodeId, Option<B::E>) {
+        let (values, effect) =
+            self.lower_external_arg_values_and_effect(cx, B::from_node(arg), label, attr);
         let [Some(value), None] = values else {
             panic!("object argument must produce exactly one value")
         };
-        (value, effect)
+        (B::node(value), effect)
     }
 
     /// X:972 compile_js_object_create. O(specs + argument conversion work).
@@ -96,7 +98,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         } else {
                             B::node(self.js.undefined(&mut self.arena, false))
                         };
-                        let next = self.external_arg_effect(cx, arg);
+                        let next = self.external_arg_effect(cx, B::from_node(arg));
                         if let Some(next) = next {
                             effect = Some(self.add_external_effect(cx, effect, next));
                         }
@@ -104,7 +106,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 }
                 Label::ObjLabel { name } => {
                     let value = if let Attr::ArgCst(cst) = &spec.obj_arg_type {
-                        self.compile_external_arg_const(cx, cst)
+                        B::node(self.compile_external_arg_const(cx, cst))
                     } else {
                         let arg = if at < argc {
                             let value = self.arena.lists.get(args)[at];
@@ -170,14 +172,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mark = self.js.mark();
         self.js.push_list(&self.arena, values);
         let object = self.js.object(&mut self.arena, mark, info);
-        let object = self.add_external_effect(cx, effect, B::node(object));
+        let object = self.add_external_effect(cx, effect, object);
         if pending.is_empty() {
             self.external_pending = pending;
-            return object;
+            return B::node(object);
         }
         let obj = self.fresh_variable("tmp");
         let declaration =
-            self.js.declare(&mut self.arena, LetKind::Variable, obj, Some(B::from_node(object)));
+            self.js.declare(&mut self.arena, LetKind::Variable, obj, Some(object));
         self.statements.push(declaration);
         for (i, arg) in pending.drain(..) {
             let mut arg = B::node(arg);
@@ -190,7 +192,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             else {
                 unreachable!()
             };
-            if !self.optional_duplicable(cx, arg) {
+            if !self.optional_duplicable(cx, &B::from_node(arg)) {
                 let tmp = self.fresh_variable("tmp");
                 let declaration =
                     self.js.declare(&mut self.arena, LetKind::Strict, tmp, Some(B::from_node(arg)));
@@ -217,12 +219,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let mut receiver = self.js.var(&mut self.arena, obj);
             self.js.assume_strict(&mut self.arena, &mut receiver);
             let target = self.static_member(B::node(receiver), name);
-            let value = self.add_external_effect(cx, next_effect, value);
+            let value = self.add_external_effect(cx, next_effect, B::from_node(value));
             let assign = self.js.bin_plain(
                 &mut self.arena,
                 crate::js_ir::BinOp::Eq,
                 B::from_node(target),
-                B::from_node(value),
+                value,
             );
             let statement = self.js.exp_rule(&mut self.arena, assign);
             let yes = self.js.list(&mut self.arena, 1, std::iter::once(statement));
@@ -335,14 +337,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         B::node(self.js.qualified(&mut self.arena, module, None))
     }
 
-    /// O(arguments): the operands of a pooled call argument list pushed and
-    /// built into a call, without a transient vector; one step per argument.
-    fn external_call_from_list(&mut self, callee: NodeId, args: crate::bir::ListId) -> NodeId {
+    /// O(arguments): the operands pushed since `mark` built into a call;
+    /// one step per argument.
+    fn external_call(&mut self, callee: NodeId, mark: Mark) -> NodeId {
         let info = self
             .arena
             .js_info(crate::bir::JsPayload::Call(Default::default()));
-        let mark = self.js.mark();
-        self.js.push_list(&self.arena, args);
         B::node(self.js.call(&mut self.arena, B::from_node(callee), mark, info))
     }
 
@@ -372,17 +372,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             DeclKind::DeclVal { .. } if itself => {
                 let target = self.external_module_binding(cx, primitive, &call.prim_name);
-                let (args, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
-                let value = self.external_call_from_list(target, args);
-                self.add_external_effect(cx, effect, value)
+                let mark = self.js.mark();
+                let (_, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
+                let value = self.external_call(target, mark);
+                B::node(self.add_external_effect(cx, effect, B::from_node(value)))
             }
             DeclKind::DeclNew { .. } if itself => {
                 let target = self.external_module_binding(cx, primitive, &call.prim_name);
-                let (args, effect) = self.assemble_external_args_no_splice(cx, specs, args);
                 let mark = self.js.mark();
-                self.js.push_list(&self.arena, args);
+                let (_, effect) = self.assemble_external_args_no_splice(cx, specs, args);
                 let value = self.js.new_(&mut self.arena, B::from_node(target), mark);
-                self.add_external_effect(cx, effect, B::node(value))
+                B::node(self.add_external_effect(cx, effect, value))
             }
             _ if itself => unreachable!("invalid module-itself declaration"),
             DeclKind::DeclVal { name } if decl.effective_arity == 0 => {
@@ -391,30 +391,33 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if self.arena.lists.get(args).is_empty() {
                     target
                 } else {
-                    self.external_call_from_list(target, args)
+                    let mark = self.js.mark();
+                    self.js.push_list(&self.arena, args);
+                    self.external_call(target, mark)
                 }
             }
             DeclKind::DeclVal { name } => {
                 let target =
                     self.translate_scoped_module_value(cx, primitive, module, name, &decl.scopes);
-                let (args, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
-                let value = self.external_call_from_list(target, args);
-                self.add_external_effect(cx, effect, value)
+                let mark = self.js.mark();
+                let (_, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
+                let value = self.external_call(target, mark);
+                B::node(self.add_external_effect(cx, effect, B::from_node(value)))
             }
             DeclKind::DeclNew { name } => {
-                let (args, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
+                let mark = self.js.mark();
+                let (_, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
                 let target =
                     self.translate_scoped_module_value(cx, primitive, module, name, &decl.scopes);
-                let mark = self.js.mark();
-                self.js.push_list(&self.arena, args);
                 let value = self.js.new_(&mut self.arena, B::from_node(target), mark);
-                self.add_external_effect(cx, effect, B::node(value))
+                B::node(self.add_external_effect(cx, effect, value))
             }
             DeclKind::DeclSend { name } => {
                 let receiver = self.arena.lists.get(args)[0];
                 let len = self.arena.lists.get(args).len();
                 let args = self.arena.lists.slice(args, 1, len - 1);
-                let (args, effect) = self.assemble_external_args(
+                let mark = self.js.mark();
+                let (_, effect) = self.assemble_external_args(
                     cx,
                     specs.get(1..).unwrap_or(&[]),
                     args,
@@ -422,54 +425,49 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 );
                 let receiver = self.apply_scoped_access(cx, receiver, &decl.scopes);
                 let target = self.static_member(receiver, name);
-                let value = self.external_call_from_list(target, args);
-                self.add_external_effect(cx, effect, value)
+                let value = self.external_call(target, mark);
+                B::node(self.add_external_effect(cx, effect, B::from_node(value)))
             }
             DeclKind::DeclGet { name } | DeclKind::DeclSet { name } => {
-                let (args, effect) = self.assemble_external_args_no_splice(cx, specs, args);
-                let receiver = self.arena.lists.get(args)[0];
-                let receiver = self.apply_scoped_access(cx, receiver, &decl.scopes);
-                let target = self.static_member(receiver, name);
+                let (count, effect) = self.assemble_external_args_no_splice(cx, specs, args);
                 let value = if matches!(decl.kind, DeclKind::DeclSet { .. }) {
-                    assert_eq!(self.arena.lists.get(args).len(), 2);
-                    {
-                        let value = self.arena.lists.get(args)[1];
-                        let assign = self.js.bin_plain(
-                            &mut self.arena,
-                            crate::js_ir::BinOp::Eq,
-                            B::from_node(target),
-                            B::from_node(value),
-                        );
-                        B::node(assign)
-                    }
+                    assert_eq!(count, 2);
+                    Some(self.js.pop())
                 } else {
-                    assert_eq!(self.arena.lists.get(args).len(), 1);
-                    target
+                    assert_eq!(count, 1);
+                    None
                 };
-                self.add_external_effect(cx, effect, value)
+                let receiver = B::node(self.js.pop());
+                let receiver = self.apply_scoped_access(cx, receiver, &decl.scopes);
+                let target = B::from_node(self.static_member(receiver, name));
+                let value = match value {
+                    Some(value) => {
+                        self.js.bin_plain(&mut self.arena, crate::js_ir::BinOp::Eq, target, value)
+                    }
+                    None => target,
+                };
+                B::node(self.add_external_effect(cx, effect, value))
             }
             DeclKind::DeclGetIndex | DeclKind::DeclSetIndex => {
-                let (args, effect) = self.assemble_external_args_no_splice(cx, specs, args);
-                let receiver = self.arena.lists.get(args)[0];
-                let receiver = self.apply_scoped_access(cx, receiver, &decl.scopes);
-                let index = self.arena.lists.get(args)[1];
-                let target =
-                    self.js.index(&mut self.arena, B::from_node(receiver), B::from_node(index));
+                let (count, effect) = self.assemble_external_args_no_splice(cx, specs, args);
                 let value = if matches!(decl.kind, DeclKind::DeclSetIndex) {
-                    assert_eq!(self.arena.lists.get(args).len(), 3);
-                    let value = self.arena.lists.get(args)[2];
-                    self.js.bin_plain(
-                        &mut self.arena,
-                        crate::js_ir::BinOp::Eq,
-                        target,
-                        B::from_node(value),
-                    )
+                    assert_eq!(count, 3);
+                    Some(self.js.pop())
                 } else {
-                    assert_eq!(self.arena.lists.get(args).len(), 2);
-                    target
+                    assert_eq!(count, 2);
+                    None
                 };
-                let value = B::node(value);
-                self.add_external_effect(cx, effect, value)
+                let index = self.js.pop();
+                let receiver = B::node(self.js.pop());
+                let receiver = self.apply_scoped_access(cx, receiver, &decl.scopes);
+                let target = self.js.index(&mut self.arena, B::from_node(receiver), index);
+                let value = match value {
+                    Some(value) => {
+                        self.js.bin_plain(&mut self.arena, crate::js_ir::BinOp::Eq, target, value)
+                    }
+                    None => target,
+                };
+                B::node(self.add_external_effect(cx, effect, value))
             }
         }
     }
