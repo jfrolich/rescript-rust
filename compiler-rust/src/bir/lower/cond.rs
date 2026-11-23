@@ -288,8 +288,6 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             branches => branches,
         };
-        // The rows of 3.6 take a row until T6x-c3.
-        let test = B::node(test);
         match (cx.cont, target) {
             (Cont::Effect(Tail::No), _) => self.effect_conditional(cx, parts, test, yes, no),
             (Cont::Effect(Tail::Return(_)), _) => self.return_conditional(cx, parts, test, yes, no),
@@ -412,14 +410,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         Some(slot)
     }
 
-    /// The test without its negation, when it has one. O(1): one step and
-    /// the negation released.
-    fn positive(&mut self, test: NodeId) -> Option<NodeId> {
-        if self.js.kind(&self.arena, B::at(test)) != row::Kind::Not {
-            return None;
+    /// The test without its negation, when it has one; `Err` gives the test
+    /// back when it has none. O(1): one step and the negation released.
+    fn positive(&mut self, test: B::E) -> Result<B::E, B::E> {
+        if self.js.kind(&self.arena, B::of(&test)) != row::Kind::Not {
+            return Err(test);
         }
-        let value = self.js.keep_operand(&mut self.arena, B::from_node(test), 0);
-        Some(B::node(value))
+        Ok(self.js.keep_operand(&mut self.arena, test, 0))
     }
 
     /// `if (test) yes else no` with both lists as given: no rule of J-S3.
@@ -449,8 +446,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// stack leave a retained tail on the statement stack. Cost: that of
     /// `if_head` (O(consumed statements); a negation stripped counts no
     /// step), never the untouched tail; else `if_statement`'s.
-    fn if_in_place(&mut self, head: u32, test: NodeId, mut yes: Span, mut no: Span) {
-        let mut condition = B::from_node(test);
+    fn if_in_place(&mut self, head: u32, test: B::E, mut yes: Span, mut no: Span) {
+        let mut condition = test;
         if let Some(result) =
             self.js.if_head(&mut self.arena, &mut self.statements, &mut condition, &mut yes, &mut no)
         {
@@ -528,14 +525,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cont: Cont,
         parts: Parts,
-        test: NodeId,
+        test: B::E,
         target: VarId,
         yes: Span,
         no: Span,
     ) -> Probed<B> {
         if let Cont::Value(_) = cont {
             // R1, C:1812 compile_expr: `let tmp`, `if_(c, T, E)`, value `tmp`.
-            let statement = self.if_statement(test, yes, no);
+            let statement = self.if_statement(B::node(test), yes, no);
             self.place(parts.head, statement);
             let declaration = self.js.declare(&mut self.arena, LetKind::Strict, target, None);
             self.statements.fill(parts.head - 1, declaration);
@@ -546,12 +543,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         match (cont, merged) {
             // R2, C:5049 compile_declared_if_block.
             (Cont::Declare(kind, _), Ok(value)) => {
-                let statement = self.js.declare(&mut self.arena, kind, target, Some(B::from_node(value)));
+                let statement = self.js.declare(&mut self.arena, kind, target, Some(value));
                 self.statements.fill(parts.head - 1, statement);
                 self.statements.trim(Self::from(parts.head));
             }
             (Cont::Declare(kind, _), Err((test, yes, no))) => {
-                let statement = self.if_statement(test, yes, no);
+                let statement = self.if_statement(B::node(test), yes, no);
                 self.place(parts.head, statement);
                 let declaration = self.js.declare(&mut self.arena, kind, target, None);
                 self.statements.fill(parts.head - 1, declaration);
@@ -571,16 +568,19 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// consumed), else the operands after the swap. O(1) on trimmed runs.
     pub(super) fn merge_assignments(
         &mut self,
-        mut test: NodeId,
+        mut test: B::E,
         target: VarId,
         mut yes: Span,
         mut no: Span,
-    ) -> Result<NodeId, (NodeId, Span, Span)> {
-        if self.statements.first(no).is_some()
-            && let Some(value) = self.positive(test)
-        {
-            test = value;
-            std::mem::swap(&mut yes, &mut no);
+    ) -> Result<B::E, (B::E, Span, Span)> {
+        if self.statements.first(no).is_some() {
+            test = match self.positive(test) {
+                Ok(value) => {
+                    std::mem::swap(&mut yes, &mut no);
+                    value
+                }
+                Err(test) => test,
+            };
         }
         let (Some(then_), Some(else_)) = (
             self.single_assignment(yes, target),
@@ -595,8 +595,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let assignment = self.js.take_value(&mut self.arena, else_);
         let no_value = self.js.keep_operand(&mut self.arena, assignment, 1);
         self.kill(yes, no);
-        let value = self.js.cond(&mut self.arena, B::from_node(test), yes_value, no_value);
-        Ok(B::node(value))
+        Ok(self.js.cond(&mut self.arena, test, yes_value, no_value))
     }
 
     /// Row R3 as one statement: `target = cond(...)` or `if_(c, T, E)`.
@@ -604,11 +603,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn assignment_statement(
         &mut self,
         target: VarId,
-        merged: Result<NodeId, (NodeId, Span, Span)>,
+        merged: Result<B::E, (B::E, Span, Span)>,
     ) -> B::S {
         match merged {
-            Ok(value) => self.js.assign(&mut self.arena, target, B::from_node(value)),
-            Err((test, yes, no)) => self.if_statement(test, yes, no),
+            Ok(value) => self.js.assign(&mut self.arena, target, value),
+            Err((test, yes, no)) => self.if_statement(B::node(test), yes, no),
         }
     }
 
@@ -619,7 +618,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         parts: Parts,
-        test: NodeId,
+        test: B::E,
         yes: Probed<B>,
         no: Probed<B>,
     ) -> Probed<B> {
@@ -628,11 +627,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let statement = match (yes, no) {
             // Step 2: a free then branch without effects.
             (None, Some(no)) => {
-                let test = self.js.not(&mut self.arena, B::from_node(test));
+                let test = self.js.not(&mut self.arena, test);
                 self.if_statement(B::node(test), no, EMPTY)
             }
             // Step 3: a free else branch without effects.
-            (Some(yes), None) => self.if_statement(test, yes, EMPTY),
+            (Some(yes), None) => self.if_statement(B::node(test), yes, EMPTY),
             (Some(yes), Some(no)) => {
                 // js_stmt_make.ml:186 block_last_is_return_throw_or_continue,
                 // on the literal last statement.
@@ -644,13 +643,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 });
                 if self.single_return(no) {
                     // Step 4, first form: the then branch follows in place.
-                    let test = self.js.not(&mut self.arena, B::from_node(test));
+                    let test = self.js.not(&mut self.arena, test);
                     self.if_statement(B::node(test), no, EMPTY)
                 } else if terminal {
                     // Step 4, second form: the else branch follows in place.
-                    self.if_statement(test, yes, EMPTY)
+                    self.if_statement(B::node(test), yes, EMPTY)
                 } else {
-                    self.if_statement(test, yes, no)
+                    self.if_statement(B::node(test), yes, no)
                 }
             }
             (None, None) => unreachable!("two free branches are row R4 step 1"),
@@ -718,7 +717,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         parts: Parts,
-        test: NodeId,
+        test: B::E,
         yes: Probed<B>,
         no: Probed<B>,
     ) -> Probed<B> {
@@ -733,7 +732,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let then_ = self.fold_return_tail(yes);
             let else_ = self.fold_return_tail(no);
             self.kill(yes, no);
-            let value = self.js.cond(&mut self.arena, B::from_node(test), B::from_node(then_), B::from_node(else_));
+            let value = self.js.cond(&mut self.arena, test, then_, else_);
             let statement = self.js.return_(&mut self.arena, value);
             self.statements.fill(parts.head, statement);
             return Probed::Out(self.output(parts.start, None, Finished::True));
@@ -741,7 +740,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         // Step 3, C:5368 compile_test_return_block_with_fallback.
         if !self.single_return(yes) && self.single_return(no) {
             // One block of `if (!c) E` and `T`; `T` stays in place.
-            let test = self.js.not(&mut self.arena, B::from_node(test));
+            let test = self.js.not(&mut self.arena, test);
             let statement = self.if_statement(B::node(test), no, EMPTY);
             self.place(parts.head, statement);
         } else {
@@ -763,16 +762,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// R6: O(consumed statements), with the fallthrough run kept in place.
     /// Unlike R5, do not discard unit returns or fold non-free return tails.
     /// A unit return exits the loop; falling through repeats it.
-    fn tail_return_conditional(&mut self, parts: Parts, test: NodeId, yes: Span, no: Span) -> Probed<B> {
-        let conjunction = self.js.kind(&self.arena, B::at(test)) == row::Kind::Bin
-            && self.js.aux(&self.arena, B::at(test)) == BinOp::And as u8;
+    fn tail_return_conditional(&mut self, parts: Parts, test: B::E, yes: Span, no: Span) -> Probed<B> {
+        let conjunction = self.js.kind(&self.arena, B::of(&test)) == row::Kind::Bin
+            && self.js.aux(&self.arena, B::of(&test)) == BinOp::And as u8;
         let continues = self.statements.last(yes).is_some_and(|s| self.js.stmt_kind(&self.arena, s) == row::Kind::Continue);
         let terminal = self.statements.last(no).is_some_and(|s| matches!(self.js.stmt_kind(&self.arena, s), row::Kind::Return | row::Kind::Throw | row::Kind::Break));
         if conjunction && continues && terminal {
             let then_ = self.merge_tail_guard(no);
             let empty = self.js.list(&mut self.arena, 0, std::iter::empty());
             let else_ = self.js.block_of(&mut self.arena, empty);
-            let condition = self.js.not(&mut self.arena, B::from_node(test));
+            let condition = self.js.not(&mut self.arena, test);
             let statement = self.js.if_blocks(&mut self.arena, condition, then_, else_);
             self.place(parts.head, statement);
         } else {
@@ -850,7 +849,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// C:5241: `(e1, (e2, ..., value))` from `e1; e2; ...; return value`.
     /// One step per slot of the run, whose statements are moved out last
     /// first; the caller kills the run.
-    fn fold_return_tail(&mut self, run: Span) -> NodeId {
+    fn fold_return_tail(&mut self, run: Span) -> B::E {
         let mut result = None;
         for statement in self.statements.take_run_rev(run) {
             // Checked by returns_after_effects: a `return` led by expression
@@ -861,7 +860,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 Some(result) => self.js.seq_rule(&mut self.arena, value, result),
             });
         }
-        B::node(result.expect("a return statement"))
+        result.expect("a return statement")
     }
 
     /// C:3662 lambda_is_trivial_unit_undefined. One cached flag read,
@@ -968,7 +967,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Cont::Assign(target) => {
                 // R3, C:4996: the branches were realized for `A(target)`.
                 let start = yes.stmts.start;
-                let merged = self.merge_assignments(B::node(test), target, yes.stmts, no.stmts);
+                let merged = self.merge_assignments(test, target, yes.stmts, no.stmts);
                 let statement = self.assignment_statement(target, merged);
                 self.statements.trim(Self::from(start));
                 self.statements.push(statement);
@@ -1690,7 +1689,7 @@ mod tests {
                             (yes_run, hand.run(1, no))
                         };
                         let condition = hand.test(test);
-                        hand.state.if_in_place(head, condition, yes_run, no_run);
+                        hand.state.if_in_place(head, crate::bir::lower::out::of_row(condition), yes_run, no_run);
                         hand.state.block_statement(head);
                         assert_eq!(
                             hand.text(None),
@@ -1763,7 +1762,7 @@ mod tests {
         let parts = Parts { start: 0, head, folds: true };
         let Probed::Out(out) =
             hand.state
-                .effect_conditional(Cx::effect(), parts, test, then_, else_)
+                .effect_conditional(Cx::effect(), parts, crate::bir::lower::out::of_row(test), then_, else_)
         else {
             unreachable!()
         };
