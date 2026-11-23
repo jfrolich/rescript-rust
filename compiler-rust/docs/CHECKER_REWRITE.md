@@ -2305,7 +2305,7 @@ of that list.
 | Slice | Decisions | Tests | Run in this turn |
 |---|---|---|---|
 | R3q | 91 to 96; 8.10 | ten ignored in `r3_tests.rs`: nine hand-built and the step test `instance_poly_at_ten_thousand`; two that run today (`rows::tests::sizes_of_the_instance_of_a_polymorphic_type`, `template::tests::a_session_of_two_roots_shares_between_them`) | all ten passed against a prototype of the twelve bodies (429 lines), which is not in the tree; three of the four shapes of the step test were seen to fail with their structure broken. No generated case: the harness has no operation for it |
-| R3s | 8.11 | see 8.11 for its state | see 8.11 |
+| R3s | 97 to 104; 8.11 | none | nothing: the section is corrected in place and its decisions are written; no skeleton, no test, no prototype, no prompt. NOT issued |
 
 The ignored tests are checked mechanically
 (`differential::tests::ignored_tests_name_the_slices_they_reach`): each
@@ -5466,6 +5466,40 @@ then what the turn itself decided, each with what was run.
     session of two roots and no stub.** It is the label of every
     record field access; it must not pay for the walk.
 
+97. **Tracing is turned on by OCaml's test: the environment has a
+    local constraint** (R3s; 8.11, (i)). Not chosen: "an equation
+    exists" (the seventh turn): it cannot add a member either way, but
+    it would keep memorized expansions that OCaml forgets and send the
+    expansion of a constructor without arguments to the shared memo in
+    a case that has an existential type and no equation. The bit is
+    `LOCAL` of `Checker::gadt`.
+98. **A set of instances is a list headed in a node of the graph, so
+    that a restore undoes an addition** (8.11). An addition is one
+    pool row and one `Graph::write` of the scope's head node. `Try`,
+    `recover` and `Checker::restore` do not change. Not chosen: the
+    pool's length in `Try` and in a mark of the walk.
+99. **One byte, three bits, and one read a site** (8.11, the table):
+    `LOCAL` decides tracing at the four entries, `TRACING` the
+    expansion, unify2 and the two lowerings, `MEMBER` every read of a
+    set. `MEMBER` is set where a pool row is pushed (decision 87), not
+    where a scope is entered.
+100. **While tracing, the memo of a constructor without arguments is
+    a row of a dense table indexed by the node**, not a head bit
+    (8.11). `has_cached_expansion` reads it behind `own_live != 0`.
+101. **What the walk owes** (8.11, the contract): the scope and
+    `leave_case`, a call for each existential type, `traced` around the
+    four uses of `expand_head_trace`, `instance_in` and `copy_in` at
+    the sites of `instance env`. `lower_args`, `unify_var` and
+    `non_recursive_abbrev` trace themselves.
+102. **The refusal is the escape pair** (8.11): no new kind of clash,
+    no text in the kernel.
+103. **The harness gets `Op::Scope` and environment-taking instance
+    and lowering; R3s empties `UNTIL_R3S` and `EXPLAINED_UNTIL_R3S`
+    and nothing else** (8.11).
+104. **R3s is not issued in the eighth turn**, and three things are
+    left to the turn that makes its skeleton (8.11, the last
+    paragraph).
+
 
 ### 8.7 The hot paths of unification (K2)
 
@@ -6477,7 +6511,9 @@ eighth skeleton turn is the line "State:" below it.
    environment has an instance scope (1271-1276); the wrapper
    `expand_head_trace` (2781-2784); an equation whose level has no
    instance scope.
-   State: open at this commit: G3 of the eighth turn.
+   State: paid as text in the eighth turn: 8.11 is rewritten in place,
+   (i) to (v), each with the lines pasted; decisions 97 to 104. The
+   skeleton of R3s is still owed (8.11, its first paragraph).
 8. Decision 69 does not mention the `type_changed` loop of
    `occur_full` (ctype.ml:1470-1476): say why the kernel needs none,
    or build it.
@@ -6564,7 +6600,9 @@ words.
 3. `local_non_recursive_abbrev` runs under `wrap_trace_gadt_instances`
    (ctype.ml:1534). `non_recursive_abbrev` does not trace: R3s (item 7
    above names the wrappers 8.11 leaves out; this is the fourth).
-   State: open at this commit: G3 of the eighth turn.
+   State: paid as text in the eighth turn: 8.11, (iv), and the table
+   of decision 99: `non_recursive_abbrev` turns tracing on at its
+   entry. Built by R3s.
 4. Decision 65 writes the guard of the arm as `l.head == CONSTR &&
    r.head == CONSTR`; the arm as built tests tags and arities
    (decision 71, corrected above). One of the two texts is made the
@@ -6839,167 +6877,352 @@ above:
 
 ### 8.11 The ambiguity of GADT instances (R3s)
 
-Designed as text in the seventh skeleton turn, after R3r in build
-order (decision 72). NOT done: no skeleton, no test, no build prompt.
-Since pull requests 350 and 352 the old checker has this mechanism
-(types/context.rs, "GADT Tracking"; types/ctype.rs
-`gadt_instance_level`, `wrap_trace_gadt_instances`), so it is a judge
-where it traces; CHECKER_DEPARTURES.md, place A1 with its "Second
-part", is the record of what it took to make the old checker agree
-with OCaml, and names the tracing wrappers that are still open there.
+**State after the eighth skeleton turn: R3s is NOT issued.** This
+section was designed as text in the seventh turn and is corrected in
+place in the eighth against the source and against what pull requests
+350 and 352 learned (8.6, decisions 85 to 88). The decisions are 97 to
+104 of 8.6. There is still no skeleton, no test, no prototype and no
+build prompt: the eighth turn ended before them. Nothing here was run.
+The next design turn makes the skeleton from this section and runs its
+tests against a prototype before a builder starts.
 
-**What OCaml does**, by line (compiler/ml/ctype.ml, env.ml):
+**What OCaml does**, each range pasted from compiler/ml at this trunk.
 
-- *Tracing* is a flag (`trace_gadt_instances`, ctype.ml:176-192).
-  `check_trace_gadt_instances env` turns it on when it is off and the
-  environment has a local constraint, and then cleans the memos
-  (`cleanup_abbrev`); the caller turns it off again if it turned it
-  on. Callers: `unify` (2235, 2271, 2273), `unify_var` and its sibling
-  (2759-2766, 2782-2784), `local_non_recursive_abbrev` (1534), and
-  typecore's `lower_args` (typecore.ml:2828).
-- *A set per scope*: `Env.add_gadt_instance_level lv env` (env.ml:
-  1307-1308) pushes an empty set at level `lv`; typecore calls it at
-  typecore.ml:4040 (`type_function`) and 4826 (`type_cases`), before
-  the patterns that add equations.
-- *Reads and additions*: an expansion under tracing (1220-1227: the
-  level is the greater of the equation's expansion level and the set
-  that holds the node; `level < lv` is a clash `Unify [(ty, newvar2
-  level)]`; else the node and its expansion join the set of `lv`);
-  `try_expand_head` (1271-1276: when the expanded head is in a set,
-  the node and its memo chain join it); unify2 (2289-2298: of the two
-  nodes the one in the lower set joins the chain of the higher);
-  `update_level` (587-589: a node in a set of a level above the target
-  is a clash with the same pair); `copy` with an environment that has
-  local constraints (770-775: the copy of a member joins the member's
-  set); and two lowerings made only under tracing (2490: a field's
-  type against the row variable's level in `unify_fields`; 2610-2611:
-  a new row against `rm`'s level in `set_more`).
-- *Membership is by representative*: a set is re-read through `repr`
-  when it holds a link (env.ml:1314-1323).
-- *Undo*: every addition is `set_typeset`, which is logged, so
-  `backtrack` undoes it; the environment itself is dropped by the
-  caller at the end of a case.
-- *The memo*: under tracing every constructor has its own memo
-  (`proper_abbrevs`, 200-202), which decision 79 shows on generated
-  cases, and the arm of `unify` for two nullary constructors of one
-  type is taken only when neither has a cached expansion (2251).
+*Tracing* (ctype.ml:176-192):
 
-**(i) Where the sets live and how an addition is undone.** On
-`Checker`: `instance_scopes: Vec<InstanceScope>` (`level: u32`,
-`parent: u32`; 8 bytes), `instance_scope: u32` (the innermost scope of
-the environment the caller is in, `NONE` outside), and ONE pool
-`instance_members: Vec<InstanceMember>` (`ty: Ty`, `scope: u32`; 8
-bytes) in the order they were added. A set is the members of one
-scope. An addition is a push; nothing else is written. Undo: the pool
-is append-only and speculations nest, so the members added since a
-snapshot are exactly those above the length the pool had: the `Try`
-record of decision 68 gets the pool's length (44 bytes, pinned) and
-`recover` truncates to it; an owner's restore (R5b, which holds its
-own mark) truncates to the length it kept, as it cuts `equations`.
-`Graph::restore` knows nothing of it, as it knows nothing of
-equations. An equation is not cut where a set member is: `cut_
-equations` cuts rows, and the caller that cuts also truncates the pool
-and sets `instance_scope` back; the two are one call for R5b
-(`Checker::leave_case(mark)`), so that one cannot be done without the
-other.
+```text
+let trace_gadt_instances_key = Request_local.new_key (fun () -> ref false)
+let trace_gadt_instances () = Domain.DLS.get trace_gadt_instances_key
+let check_trace_gadt_instances env =
+  (not !(trace_gadt_instances ()))
+  && Env.has_local_constraints env
+  &&
+  (trace_gadt_instances () := true;
+   cleanup_abbrev ();
+   true)
 
-**(ii) The one read for a unit without a member.** The first member
-ever pushed increments `types.scoped` (once; a flag on `Checker` says
-it was done). Then:
+let reset_trace_gadt_instances b = if b then trace_gadt_instances () := false
 
-| Kernel operation | Unit without a member | With a member |
-|---|---|---|
-| lowering | nothing new: `types.scoped == 0` takes `Graph::lower` as today | `lower_scoped`: per node above the level, `instance_level(node)` |
-| expansion (`expand_once`) | one load of `tracing` (a byte of `Checker`, beside `umode`) | under tracing, `instance_level(node)` and at most two pushes |
-| `expand_head` | the same byte | `instance_level(head)`, then the chain |
-| unify2 (`unify_expanded`) | the same byte, loaded with `umode` in one read of the two adjacent bytes | two `instance_level` and a chain |
-| copy, instance | nothing: the caller that has an environment with equations calls another entry (`instance_traced`); `Graph::copy` is not touched | per copied node, `instance_level(source)` |
-| `unify_fields`, `set_more` | the same byte, on arms that already load `umode` or are per field | one lowering |
+let wrap_trace_gadt_instances env f x =
+  let b = check_trace_gadt_instances env in
+  let y = f x in
+  reset_trace_gadt_instances b;
+  y
+```
+
+It is turned on when it is off and the environment HAS A LOCAL
+CONSTRAINT, which is wider than "an equation exists" (decision 85: an
+existential type of a constructor pattern and a type `reify` made are
+local constraints too). Turning it on forgets the memorized expansions.
+Who turns it on: `unify` at its top (2235; pasted in decision 65's
+range, 2227-2273); `unify_var` in its variable arm (2759-2766);
+`expand_head_trace` (2781-2784); `local_non_recursive_abbrev` (1534);
+and typecore's application around `lower_args` (typecore.ml:2828):
+
+```text
+(* compiler/ml/ctype.ml:2759-2764, in unify_var *)
+      let reset_tracing = check_trace_gadt_instances env in
+      try
+        occur env t1 t2;
+        update_level env t1.level t2;
+        link_type t1 t2;
+        reset_trace_gadt_instances reset_tracing
+(* compiler/ml/ctype.ml:2781-2785 *)
+let expand_head_trace env t =
+  let reset_tracing = check_trace_gadt_instances env in
+  let t = expand_head_unif env t in
+  reset_trace_gadt_instances reset_tracing;
+  t
+(* compiler/ml/ctype.ml:1534 *)
+    wrap_trace_gadt_instances env (local_non_recursive_abbrev false [] env p) ty;
+(* compiler/ml/typecore.ml:2828 *)
+    wrap_trace_gadt_instances env (lower_args env []) ty;
+```
+
+*A set per scope* (env.ml:1307-1308, pasted in decision 85's
+neighbourhood): `Env.add_gadt_instance_level lv env` pushes an empty
+set at level `lv`. typecore adds one in the `init_env` of `type_cases`
+(typecore.ml:4819-4826) and of the function with patterns, when a
+pattern has a generalized constructor, and also where an
+exhaustiveness check is made without one (typecore.ml:4196-4197 and
+4913-4914: `let lev, env = if do_init && not has_gadts then init_env ()
+else (lev, env) in`). The seventh turn cited 4040 and 4826; those were
+not read from the file.
+
+*The first member of a set* comes from one place only, the expansion
+of an abbreviation that was not memorized, under tracing
+(`expand_abbrev_gen`, ctype.ml:1215-1227):
+
+```text
+        let ty' = subst env level kind abbrev (Some ty) params args body in
+        (* For gadts, remember type as non exportable *)
+        (* The ambiguous level registered for ty' should be the highest *)
+        (if !(trace_gadt_instances ()) then
+           match
+             Ext_pervasives.max_int_option lv (Env.gadt_instance_level env ty)
+           with
+           | None -> ()
+           | Some lv ->
+             if level < lv then raise (Unify [(ty, newvar2 level)]);
+             Env.add_gadt_instances env lv [ty; ty']);
+        ty'))
+```
+
+`lv` is the expansion level of the declaration, which only an equation
+has (`find_type_expansion`, the third component), or the level of a set
+that holds the node already. So without an equation no set ever gets a
+member, whatever tracing is.
+
+*The readers and the other additions.* `try_expand_head` adds the chain
+of memorized expansions WHATEVER the tracing flag, when the expanded
+head is in a set (1270-1276, pasted in decision 84's neighbourhood:
+`match Env.gadt_instance_level env ty' with ... Some lv ->
+Env.add_gadt_instance_chain env lv ty`); `update_level` refuses to
+lower a member below its set's level (587-589, pasted in decision 89's
+neighbourhood); the copy WITH an environment that has local
+constraints adds the copy of a member to the member's set (770-774);
+unify2, under tracing, adds the chain of the node in the lower set to
+the higher set (2289-2298); and two lowerings are made only under
+tracing (`unify_fields`, 2490: `if !(trace_gadt_instances ()) then
+update_level !env va.level f1.f_typ`; `set_more`, 2610-2611).
+Membership is by representative (env.ml:1314-1323). Every addition is
+`set_typeset`, which is logged and so undone by a backtrack
+(btype.ml:749-751), unlike an equation (decision 68):
+
+```text
+let set_typeset rs s =
+  log_change (Ctypeset (rs, !rs));
+  rs := s
+```
+
+*The memo.* Under tracing every constructor has its own memo
+(`proper_abbrevs`, 200-202, pasted in decision 79), and the arm of
+`unify` for two nullary constructors of one type is taken only when
+neither has a cached expansion (`has_cached_expansion`, called at
+2254).
+
+*The refusal* is `Unify [(ty, newvar2 level)]` in both places (589 and
+1226). The printer tells it from an escaping constructor by the pair
+(printtyp.ml:1342-1359):
+
+```text
+  | Tconstr (p, _, _), Tvar _ when unif && t4.level < Path.binding_time p ->
+    escape_explanation ppf p
+  | Tvar _, Tconstr (p, _, _) when unif && t3.level < Path.binding_time p ->
+    escape_explanation ppf p
+...
+  | Tvar _, _ | _, Tvar _ ->
+    let t, t' = if is_Tvar t3 then (t3, t4) else (t4, t3) in
+    if occur_in Env.empty t t' then
+      fprintf ppf "@,@[<hov>The type variable %a occurs inside@ %a@]" type_expr
+        t type_expr t'
+    else
+      fprintf ppf "@,@[<hov>This instance of %a is ambiguous:@ %s@]" type_expr
+        t' "it would escape the scope of its equation"
+```
+
+**The five corrections of the seventh turn's text** (first list of
+8.9, item 7; second list, item 3).
+
+(i) *When tracing is on.* The seventh turn turned it on when
+`equations` is not empty. OCaml's test is taken instead (decision 97).
+The narrower test is not equal: without an equation no member can be
+added (above), but turning tracing on forgets every memorized
+expansion (`cleanup_abbrev`) and, while it is on, the expansion of a
+constructor without arguments goes to the node's own memo and not to
+`simple_abbrevs`, so a later copy of such a constructor does not link
+to the node that was expanded (O11). A case with an existential type
+and no equation shows both in OCaml; the narrower test would show
+neither.
+
+(ii) *A set gets its first member only from an expansion under
+tracing* (the lines above). It is what the guard is chosen from
+(decision 87): the flag "a member was pushed in this unit" is set in
+that one place and in the three that add to a set that has a member
+already.
+
+(iii) *`try_expand_head` adds the chain whatever the tracing flag.* It
+reads `gadt_instance_level` of the expanded head on every call. In the
+kernel that read is behind the member flag, not behind the tracing
+flag.
+
+(iv) *The wrappers.* `expand_head_trace` is used by typecore's
+`filter_arrow_n`, `filter_method`, `filter_method_field` and
+`filter_object_field_for_write`: it is the walk's, through
+`Checker::traced`. `unify_var` and `local_non_recursive_abbrev` are the
+kernel's own (`Checker::unify_var`; `Checker::non_recursive_abbrev`,
+which as built does not trace): each turns tracing on at its entry by
+the same one read. `lower_args` is the kernel's function too
+(`Checker::lower_args`, R3d) though OCaml's wrapper is at its caller:
+the kernel's turns tracing on itself, so the walk cannot forget it; it
+is the one wrapper with a witness program (CHECKER_DEPARTURES A1,
+"Second part").
+
+(v) *An equation whose level has no instance scope adds nothing.*
+OCaml asserts that the scope exists (`List.assoc lv env.gadt_instances
+with Not_found -> assert false`, env.ml:1326-1328); typing never
+builds an equation without one, the tests of `src/tc` do. The kernel
+adds nothing there, as today's checker does since pull request 350.
+
+**Where the sets live and how an addition is undone** (decision 98).
+A scope is a row of `Checker::instance_scopes` (`level: u32`, `parent:
+u32`, `head: Ty`; 12 bytes); `Checker::instance_scope: u32` is the
+innermost scope of the environment the caller is in, `NONE` outside.
+`head` is a node of the graph, a variable with no name whose `b` is
+the index of the scope's newest member in the pool
+`Checker::instance_members` (`ty: Ty`, `next: u32`; 8 bytes), or
+`NONE`. An addition pushes one pool row and WRITES THE HEAD NODE with
+`Graph::write`: logged inside a speculation and put back by its
+restore, as `set_typeset` logs `Ctypeset`. So the restore of an
+attempt of pattern mode (`recover`), an owner's restore and
+`undo_compress` all undo a set addition with no line of their own, and
+`Try` does not change; the pool row an undone addition pushed is not
+reached again. This is the design of the references of a variant row
+(decision 34). Not chosen: the pool's length in the `Try` record and
+in a mark the walk holds (the seventh turn's text): an owner's restore
+that forgets to cut would leave members, and an addition outside any
+`Try` but inside an owner's speculation needs the owner to know of the
+pool.
 
 `instance_level(ty)` walks the scopes from `instance_scope` outwards
-and, per scope, its members, comparing `repr(member)` with the node:
-linear in the members of the scopes visited, as the old checker's
-(types/context.rs, `gadt_instance_level`, whose step test at 10,000
-members is the model) and as OCaml's rebuild of a set that holds a
-link. Members of one scope are not contiguous in the pool; the walk
-reads the whole pool once and keeps the innermost level found (a
-member's scope is on the path from `instance_scope` when its level is
-one of the path's, read from a small array of the path's levels built
-per call: the depth of nested cases). A per-node index (a side table
-from node to its newest membership) would make the read O(1) but
-needs every link to carry memberships to the representative, which is
-a read on the hottest write of the kernel; not proposed.
+and, per scope, its list, comparing `repr(member)` with the node; the
+first scope that holds it gives the level. Linear in the additions of
+the scopes visited (a member added twice is listed twice, as in
+today's checker; OCaml's set holds it once). A unit reaches it only
+behind the member flag.
 
-Tracing: `Checker::tracing: bool`. `unify` turns it on at its entry
-when it is off and `equations` is not empty (the load decision 65
-already makes for two nullary constructors moves to the entry of
-`unify` for every call: ONE load of `equations.len()` per top-level
-unification, which is the cost a unit without equations pays for this
-slice and must be measured on the five bench operations) and then
-calls `cleanup_abbrev`; the same in `unify_var`'s entry, in
-`non_recursive_abbrev` and in `Checker::traced(f)` for R5b.
+**The one read that decides** (decision 99). One byte of `Checker`,
+`gadt`, beside `umode`, with three bits: `LOCAL` (the environment has
+a local constraint: kept by `add_gadt_equation`, by `reify`'s fresh
+types, by `Checker::add_local_type` for an existential type, and put
+back by `leave_case`), `TRACING`, and `MEMBER` (a member was pushed in
+this unit; set where a pool row is pushed; never cleared). Per site,
+for a unit without a member:
 
-The memo under tracing: a nullary constructor node has no slot 0 (its
-`b` is 0). Under tracing `memorize` of a nullary node writes the
-expansion with no table: into the node's own `b`, which
-nothing reads for a nullary constructor, with a head bit `OWN_MEMO`
-that says `b` is an expansion; `find_expansion` tests the bit before
-the `simple` table (a bit of the head it has loaded), and
-`cleanup_abbrev` clears the nodes it listed. The prototype of the
-seventh turn wrote the expansion to `lists[b]` and corrupted slot 0 of
-another node; the head-bit form was not run. `has_cached_expansion`
-(2251) is that bit.
+| Site (kernel) | OCaml | The read | With the bit set |
+|---|---|---|---|
+| `unify_distinct`, at depth 0 | 2235 | `gadt & LOCAL`: one load, one branch a top-level unification of two distinct types | `TRACING` on, `cleanup_abbrev`; off again at the end if this call turned it on |
+| `unify_var`, `lower_args`, `non_recursive_abbrev`, `Checker::traced` | 2759, typecore 2828, 1534, 2782 | the same read at the entry | the same |
+| `subst`, the arm of an equation (an expansion that was not memorized) | 1220-1227 | `gadt & TRACING`: one load, behind the test for an equation, which a unit without one does not pass | `instance_level(ty)`, the level test, two pushes |
+| `memorize` and `find_expansion` of a constructor without arguments | 200-202 | `gadt & TRACING` in `memorize`; in `find_expansion` one load of `memo.own_live` (0 when no own memo is live) | the own memo (decision 100) |
+| `expand_head` (the chain) | 1271-1276 | `gadt & MEMBER`: one load a call | `instance_level(head)`, then the chain |
+| `lower` | 587-589 | none new: `types.scoped == 0` is `Graph::lower` as today; the first member increments `types.scoped`, so a unit with a member takes `lower_scoped`, which reads `gadt & MEMBER` once a call | `instance_level` a node above the level |
+| the binding walk | 587-589 through `update_level` | none new: it lowers through `lower_to`, behind the same test | as `lower` |
+| `instance`, `copy` | 770-774 | none: they do not change. The walk calls `Checker::instance_in` and `copy_in` where typecore passes the environment; each reads `gadt & MEMBER` once and is `instance` or `copy` when it is clear | one `instance_level(source)` a copied node, a push a member |
+| `unify_expanded` (unify2) | 2289-2298 | `gadt & TRACING`: one load a call that reaches the comparison, to be folded with the load of `umode` at R5c | two `instance_level` and a chain |
+| `unify_fields`, `set_more` | 2490, 2610-2611 | `gadt & TRACING`, one load a call | one lowering a field, one a new row |
+| `unify_pair`, two nullary constructors of one type | 2254 | one load of `memo.own_live` on that arm | the two own memos |
+| `unify_newtypes` | 2258-2270 | nothing new: `equations` is not empty, as built | its expansion is a traced one (below) |
 
-**(iii) The contract R5b receives.**
+So a unit that never has a local constraint pays one load and one
+branch at each of: a top-level unification of distinct types, an
+entry of the three kernel wrappers, an `expand_head`, a
+`unify_expanded` past its equality test, a `unify_fields`, a
+`set_more`, an `instance_in` or `copy_in`, and the arm of two nullary
+constructors of one type. Each is listed to be measured on the five
+unification operations and the copy and instance operations of
+`tc_kernel` by the builder, without a target.
 
-- *A scope is added* where typecore calls `Env.add_gadt_instance_level`
-  (typecore.ml:4040, the `init_env` of `type_function`, and 4826, the
-  `init_env` of `type_cases`, each when a pattern has a GADT
-  constructor): `Checker::enter_instance_scope(level) -> Mark` before the
-  patterns are typed; `Checker::leave_case(mark)` where the
-  environment of the case is dropped.
-- *Tracing wrappers*: typecore.ml:2828 (`lower_args`), and the three
-  that CHECKER_DEPARTURES A1 lists as still open on the old side;
-  each is `Checker::traced(|c| ...)`. The kernel's own entries trace
-  themselves.
-- *Copy sites that pass the environment*: `Ctype.instance env` and
-  `instance_list` (ctype.ml:879-894) pass it when it has local
-  constraints (`gadt_env`); `instance_def` and `instance_poly` never
-  do. R5b calls `instance_traced` exactly where typecore calls
-  `instance env` or `instance_list env` and `equations` is not empty,
-  and `instance` elsewhere.
+**The arm of two locally abstract types** (place G5 of the
+pattern-mode search; decision 65; built as `unify_newtypes`). It and
+this slice meet in one place: the arm expands the NEWER type once
+(`try_expand_once`) and lowers nothing first, and that expansion is
+the one that, under tracing, gives the equation's set its first
+members at the node's own level. Without the arm the pair goes to
+unify2, which lowers both nodes to the lower level before expanding,
+and the expansion is then refused (the program `eq<a, b>`, `Refl => if
+true { x } else { y }`, which OCaml accepts: CHECKER_DEPARTURES A1,
+p11). The arm's guard stays `equations` not empty (decision 65: without
+an equation neither side expands); tracing is on when it runs because
+`unify_distinct` turned it on.
 
-**(iv) How the refusal is reported.** The clash is `Unify [(ty,
-newvar2 level)]` in both places (587-589 and 1226). In `Mode::Success`
-it is a `Clash` like any other. In `Mode::Explain` the pair is pushed
-on `Checker::trace` by `escape_pair`, which `lower` already uses for a
-constructor below its scope (decision 14): the node and one new
-variable at the level. The text is the printer's
-(compiler/ml/printtyp.ml:1341-1359): for a pair of a variable and a
-type that the variable does not occur in, "This instance of T is
-ambiguous: it would escape the scope of its equation"; the kernel
-reports the pair and no text. What tells an ambiguity from an escaping
-constructor is the pair's shape, as in OCaml (1345-1348 against
-1352-1359), so no new kind of clash is needed.
+**The memo of a constructor without arguments while tracing**
+(decision 100). A dense table `Memo::own`, indexed by the NODE's
+handle (8 bytes a row: the generation of the memos and the expansion;
+the private bit in the generation's low bit), grown to the node when
+one is memorized under tracing, and `Memo::own_live`, how many rows
+are of the current generation. `cleanup_abbrev` already makes a new
+generation, which empties it. `has_cached_expansion` (2254) is one row
+load behind `own_live != 0`. Not chosen: the head bit `OWN_MEMO` with
+the expansion in the node's `b` (the seventh turn's text; bit 6 of the
+head is free): a copy of the node (`Node { level, ..node }` in
+`Graph::copy_ref`) would carry the bit, and every test `head ==
+CONSTR` for a nullary constructor (`mcomp_frames`; the guard text of
+decision 65) would read a memorized node as something else. The
+prototype of the seventh turn wrote the expansion to `lists[b]` and
+corrupted slot 0 of another node.
 
-**(v) The harness.** It gets both: `Op::Scope` (the old side:
-`Env::add_gadt_instance_level` at the current level; the new side:
-`enter_instance_scope`) generated before an `Op::Gadt`, and the
-existing `Op::Instance` and `Op::Lower` run with the environment when
-a scope is open. The seeds of decision 79 are the first acceptance:
-both lists empty. Hand-built tests judge what the generated cases
-cannot reach on purpose: the clash of an expansion below its set's
-level, the chain of unify2 in both directions, a member that is a
-link, the undo inside a `Try`, and the step tests (a lookup at 1,000
-and 10,000 members; a unit without a member takes the same steps as
-before the slice on the pattern step tests).
+**The contract R5b receives** (decision 101).
 
-**Not decided here, for the design turn:** whether the load of
-`equations.len()` at the entry of `unify` is acceptable on the bench
-(the alternative is a flag `tracing_possible` set by
-`add_gadt_equation` and cleared by `cut_equations`, read in the same
-byte pair as `umode`); whether the head bit `OWN_MEMO` is free in the
-head's layout; the exact list of the open wrappers of A1.
+- *A scope*: `Checker::enter_instance_scope(level) -> CaseMark` where
+  typecore calls `init_env` (typecore.ml:4819-4826 for `type_cases`
+  with a generalized constructor, 4913-4914 for its exhaustiveness
+  check without one, 4196-4197 for the function with a pattern that is
+  not a variable), before the patterns are typed;
+  `Checker::leave_case(mark)` where the environment of the case is
+  dropped: it puts back `instance_scope`, cuts `equations` and puts
+  back the `LOCAL` bit. One call, so that one cannot be done without
+  the others. (Today's checker adds no scope at 4913-4914; no program
+  shows it: A1, "Open".)
+- *A local type*: `Checker::add_local_type()` for each existential
+  type of a constructor pattern (ctype.ml:970).
+- *Tracing*: `Checker::traced(|c| ...)` around each use of
+  `expand_head_trace` (`filter_arrow_n`, `filter_method`,
+  `filter_method_field`, `filter_object_field_for_write`). The kernel's
+  own entries trace themselves, `lower_args` included.
+- *Copies*: `Checker::instance_in` and `copy_in` exactly where
+  typecore calls `instance env` or `instance_list env` (61 of the 84
+  copy sites of the expression walk, listed by OCaml line in the body
+  of pull request 350), `instance` and `copy` at the 19 sites of
+  `instance_def` and typetexp's `instance_list`; `instance_poly` and
+  `instance_label` never take the environment (ctype.ml:1081, 1097).
+- *A restore* is `Checker::restore`, as today: it undoes set additions
+  through the trail.
+
+**How the refusal is reported** (decision 102). The clash is `Unify
+[(ty, newvar2 level)]` at both places. In `Mode::Success` it is a
+`Clash`. In `Mode::Explain` the pair is pushed on `Checker::trace` by
+`escape_pair`, which `lower` already uses for a constructor below its
+scope (decision 14): the node and one new variable at the level. The
+kernel reports the pair and no text; what tells "This instance of T is
+ambiguous: it would escape the scope of its equation" from "The type
+constructor would escape its scope" is the pair's shape and the level
+of the variable against the binding time of the path (the lines
+above), which the printer reads; no new kind of clash.
+
+**The harness** (decision 103). The generated cases get both: an
+operation `Op::Scope` (old side: `Env::add_gadt_instance_level` at the
+current level; new side: `enter_instance_scope`) generated before the
+first `Op::Gadt` of a case under `PATTERN`, and `Op::Instance` and
+`Op::Lower` run with the environment while a scope is open
+(`instance_in`; the scoped lowering). Without a scope the old side
+adds nothing and judges nothing of this slice. The slice must make
+agree, and its builder empties, exactly two lists: `UNTIL_R3S` (seven
+seeds of the pattern plan) and `EXPLAINED_UNTIL_R3S` (five explained
+ones); `EXPLAINED_OLD_DIFFERS` stays as it is (decisions 77 and 78).
+The test of the lists fails when a listed seed agrees, so a builder
+cannot leave a seed listed. The old side is NOT a judge at the sites
+today's checker left open without a program (decision 88): the chain
+of unify2 after expansion (2293-2298), the lowerings of `unify_fields`
+and `set_more`, the wrappers of `unify_var`, `expand_head_trace` and
+`local_non_recursive_abbrev`, `copy ?env ~partial`, and the scope of
+4913-4914. There the hand-built tests judge, each written from the
+pasted lines: the clash of an expansion below its set's level; the
+chain of unify2 in both directions; a member that is a link; an
+addition undone by `recover` and by an owner's restore; a set with a
+level and no equation; tracing turned on by an existential type alone
+(its memo effects); the three kernel wrappers; and the step tests (a
+lookup at 1,000 and 10,000 members; a unit without a member takes the
+same steps as before the slice on the pattern step tests).
+
+**Not decided, for the turn that makes the skeleton** (decision 104):
+whether the read of `LOCAL` at the top of `unify_distinct` and the read
+of `TRACING` in `unify_expanded` are one load with `umode` (a 16-bit
+read of two adjacent bytes) or two, which the prototype measures on
+the five operations; whether `instance_level` needs the per-scope list
+or one pool scanned once (the seventh turn's form), which the step
+test at 10,000 members decides; the size of the slice (the seventh
+turn said 300 lines on paper; a size is taken from the prototype).
 
 ## 9. R4 as designed
 
