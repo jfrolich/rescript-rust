@@ -1658,8 +1658,8 @@ impl Checker {
     /// the call are reversed (ctype.ml:2301-2303). Nothing of `t1'` is
     /// put back: it was not written (`t1'.desc <- d1`, ctype.ml:2437,
     /// writes what is there). Out of line: [`Checker::unify3`] keeps the
-    /// size it has. O(1) plus the arm. (R3h; the three arms marked for
-    /// R3r in decision 64 are `todo!("R3r")` until that slice)
+    /// size it has. O(1) plus the arm. (R3h; the three arms marked 2 in
+    /// decision 64 are R3r's)
     #[inline(never)]
     fn unify3_pattern(
         &mut self,
@@ -1714,8 +1714,17 @@ impl Checker {
                     self.assume_injective = false;
                 } else if generate && self.types.info(d1.a).flags & (LOCAL | DATATYPE) == 0 {
                     // Per argument by injectivity, falling back (ctype.ml:
-                    // 2358-2375; 8.9, decision 68).
-                    todo!("R3r")
+                    // 2358-2375; 8.9, decision 68), last first so that
+                    // the first is taken first (`List.iter2`).
+                    for i in (0..arity).rev() {
+                        let (l, r) = (self.g.lists[(d1.b + 1 + i) as usize], self.g.lists[(d2.b + 1 + i) as usize]);
+                        if self.types.injective(d1.a, i) {
+                            self.push_pair(l, r);
+                        } else {
+                            self.frames.push(Frame { left: l, right: r, kind: FrameKind::Try, extra: TRY_ARGUMENT });
+                        }
+                    }
+                    return Ok(());
                 }
                 self.push_lists(d1.b + 1, d2.b + 1, arity);
                 return Ok(());
@@ -1755,7 +1764,10 @@ impl Checker {
             }
             // A snapshot, `unify_row`, and on a clash `reify` and `mcomp`
             // (ctype.ml:2402-2411; 8.9, decision 68).
-            (ExtraDescriptor::Variant(_), ExtraDescriptor::Variant(_)) => todo!("R3r"),
+            (ExtraDescriptor::Variant(_), ExtraDescriptor::Variant(_)) => {
+                self.frames.push(Frame { left: t1x, right: t2x, kind: FrameKind::Try, extra: TRY_ROWS });
+                Ok(())
+            }
             (ExtraDescriptor::Nil, ExtraDescriptor::Nil) => Ok(()),
             (ExtraDescriptor::Poly, ExtraDescriptor::Poly) if d1.arity() == 1 && d2.arity() == 1 => {
                 let (body1, body2) = (self.g.lists[d1.b as usize], self.g.lists[d2.b as usize]);
@@ -1768,7 +1780,7 @@ impl Checker {
                     Ok(()) => Ok(()),
                     // `Not_found`: the lists reified (ctype.ml:2416-2424;
                     // 8.9, decision 63).
-                    Err(Clash) => todo!("R3r"),
+                    Err(Clash) => self.package_fallback(t1x, t2x),
                 }
             }
             _ => Err(Clash),
@@ -1811,7 +1823,35 @@ impl Checker {
     #[cold]
     #[inline(never)]
     fn try_frame(&mut self, frame: Frame) -> Result<(), [Ty; 2]> {
-        todo!("R3r")
+        if frame.extra & (TRY_ARGUMENT | TRY_ROWS) == 0 {
+            let record = self.tries.pop().expect("the record of a started attempt");
+            debug_assert_eq!(self.tries.len() as u32, frame.extra);
+            self.g.keep(record.speculation);
+            self.put_flags(u32::from(record.flags));
+            return Ok(());
+        }
+        let rows = frame.extra & TRY_ROWS != 0;
+        let index = self.tries.len() as u32;
+        let record = Try {
+            speculation: self.g.speculate(),
+            frame: self.frames.len() as u32,
+            trace: self.trace.len() as u32,
+            saved: self.saved.len() as u32,
+            scopes: self.scopes.len() as u32,
+            flags: u8::from(self.generate_equations) | u8::from(self.assume_injective) << 1 | u8::from(rows) << 2,
+        };
+        self.tries.push(record);
+        self.frames.push(Frame { extra: index, ..frame });
+        if !rows {
+            // `set_mode_pattern ~generate:false ~injective:false`.
+            self.generate_equations = false;
+            self.assume_injective = false;
+            self.push_pair(frame.left, frame.right);
+            return Ok(());
+        }
+        let (left, right) = (self.g.repr(frame.left), self.g.repr(frame.right));
+        let (d1, d2) = (self.open_row(left), self.open_row(right));
+        self.unify_row([left, right], d1, d2).map_err(|Clash| [Ty(NONE), Ty(NONE)])
     }
 
     /// A clash reached [`Checker::unify_distinct`] whose frames start at
@@ -1830,7 +1870,30 @@ impl Checker {
     /// three callees, one step a record taken. (R3r; CHECKER_REWRITE 8.9,
     /// decision 68)
     pub fn recover(&mut self, base: usize) -> Option<Result<(), Clash>> {
-        todo!("R3r")
+        if (self.tries.last()?.frame as usize) < base {
+            return None;
+        }
+        #[cfg(test)]
+        super::steps::tick();
+        let record = self.tries.pop().expect("the last record");
+        let frame = self.frames[record.frame as usize];
+        self.frames.truncate(record.frame as usize);
+        self.restore(record.speculation);
+        self.scopes.truncate(record.scopes as usize);
+        self.trace.truncate(record.trace as usize);
+        self.saved.truncate(record.saved as usize);
+        self.put_flags(u32::from(record.flags));
+        // `backtrack snap; reify env t1; reify env t2` and, for two
+        // variants, `if generate_equations then mcomp` (ctype.ml:
+        // 2370-2374, 2407-2411).
+        let fallback = self.reify(frame.left).and_then(|()| self.reify(frame.right));
+        Some(fallback.and_then(|()| {
+            if record.flags & 4 != 0 && self.generate_equations {
+                self.mcomp(frame.left, frame.right)
+            } else {
+                Ok(())
+            }
+        }))
     }
 
     /// The failure path of [`Checker::unify_distinct`] while an attempt
@@ -1845,7 +1908,17 @@ impl Checker {
     #[cold]
     #[inline(never)]
     fn recover_frames(&mut self, base: usize, pair: [Ty; 2]) -> Result<(), [Ty; 2]> {
-        todo!("R3r")
+        let mut pair = pair;
+        loop {
+            match self.recover(base) {
+                None => return Err(pair),
+                Some(Ok(())) => match self.resume_frames(base) {
+                    Ok(()) => return Ok(()),
+                    Err(next) => pair = next,
+                },
+                Some(Err(Clash)) => pair = [Ty(NONE), Ty(NONE)],
+            }
+        }
     }
 
     /// Go on with the frames above `base` after an attempt was recovered:
@@ -1858,7 +1931,38 @@ impl Checker {
     #[cold]
     #[inline(never)]
     fn resume_frames(&mut self, base: usize) -> Result<(), [Ty; 2]> {
-        todo!("R3r")
+        while self.frames.len() > base {
+            let frame = self.frames.pop().expect("a frame above the base");
+            match frame.kind {
+                FrameKind::Pair => {
+                    let (left, right) = (self.g.repr(frame.left), self.g.repr(frame.right));
+                    if left != right {
+                        return self.run_frames(base, left, right);
+                    }
+                }
+                FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
+                FrameKind::LeavePoly => self.scopes.truncate(frame.extra as usize),
+                FrameKind::Fields => self.saved.truncate(frame.extra as usize),
+                FrameKind::Field => self.unify_field(frame)?,
+                FrameKind::FieldEnd | FrameKind::Assumed => {}
+                FrameKind::RowField => self.unify_row_field(frame)?,
+                FrameKind::RowFieldEnd => self.row_field_end(frame)?,
+                FrameKind::RowEnd => self.row_end(frame),
+                FrameKind::Flags => self.put_flags(frame.extra),
+                FrameKind::Try => self.try_frame(frame)?,
+                FrameKind::PackageEnd => {
+                    if self.package_end(frame).is_err() && self.package_fallback(frame.left, frame.right).is_err() {
+                        return Err([Ty(NONE), Ty(NONE)]);
+                    }
+                }
+                FrameKind::Recursion => {
+                    if self.repair_recursion(frame.left, frame.right).is_err() {
+                        return Err([Ty(NONE), Ty(NONE)]);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The failure path of the explaining mode: the trace, outermost pair

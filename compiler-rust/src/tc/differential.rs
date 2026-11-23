@@ -5120,7 +5120,6 @@ mod tests {
     ///
     /// Reaches: R3m, R3e, R3f, R3n, R3h, R3r.
     #[test]
-    #[ignore = "R3r build"]
     fn pattern_plan_agrees_on_generated_cases() {
         let program = compile(PATTERN_PROGRAM.to_string());
         let plan = Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN);

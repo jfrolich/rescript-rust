@@ -11,7 +11,7 @@
 
 use std::cmp::Ordering;
 
-use super::expand::{ABBREV, ExpandMode, Manifest, NEWTYPE, Newtype, TypeInfo, TypeTable};
+use super::expand::{ABBREV, DATATYPE, ExpandMode, Manifest, NEWTYPE, Newtype, TypeInfo, TypeTable};
 use super::graph::{ARROW, CONSTR, GENERIC, Graph, LINK, Mode, NONE, Node, TUPLE, Ty, VAR};
 use super::segment::{
     EXTENDED, ExtraDescriptor, PackageRow, Range, RowFieldKind, RowFieldRow, Segment, VariantRow,
@@ -3700,7 +3700,15 @@ impl Checker {
         if self.umode == super::unify::UnifyMode::Expression {
             return Err(Clash);
         }
-        todo!("R3r")
+        for package in [left, right] {
+            let node = self.g.nodes[package.0 as usize];
+            let arguments = self.package_row(node).arguments;
+            for slot in arguments.start..arguments.start + arguments.len {
+                let argument = self.g.lists[(node.b + slot) as usize];
+                self.reify(argument)?;
+            }
+        }
+        Ok(())
     }
 
     /// `reify env t` (compiler/ml/ctype.ml:1813-1859): every variable
@@ -4101,29 +4109,52 @@ impl Checker {
     /// `duplicate_type` for an equation (`Subst.type_expr Subst.identity`,
     /// compiler/ml/ctype.ml:496; subst.ml:132-158): a copy of `ty` in
     /// which every node is generic, sharing kept; `ty` is as it was
-    /// afterwards. Made of parts that exist: `g.speculate()`;
-    /// `Graph::generalize(ty)` with `g.level` 0, which makes every node
-    /// of `ty` generic and logs each level it writes; [`Checker::copy`]
-    /// with `g.level` generic; `g.level` put back; `Graph::restore` of
-    /// the token, which puts the levels of `ty` back. The copy's nodes
-    /// are new and not on the trail, so they stay. It is
-    /// `Graph::generalize` and not [`Checker::generalize`]: the second
-    /// forgets the memo of constructors without arguments, which is not
-    /// on the trail (the caller has cleaned the memos already, step 2 of
+    /// afterwards. `g.speculate()`; then a walk over `ty` that makes
+    /// every node of it generic and goes THROUGH a node that is generic
+    /// already (OCaml's copy copies every node whatever its level,
+    /// `| _ ->` of `Subst.typexp`, subst.ml:144-158; `Graph::generalize`
+    /// stops at a generic node and would leave the nodes below it shared
+    /// with the copy): on `g.work`, one new generation of marks
+    /// ([`Checker::fresh_marks`]), each representative visited once, its
+    /// level written generic with `Graph::write` when it is not (logged,
+    /// so the restore puts it back), its children pushed as
+    /// `Graph::generalize` pushes them (`Graph::children` with the
+    /// memo); [`Checker::copy`] with `g.level` generic; `g.level` put
+    /// back; `Graph::restore` of the token, which puts the levels of `ty`
+    /// back. The copy's nodes are new and not on the trail, so they stay.
+    /// The walk does not forget the memo of constructors without
+    /// arguments, as [`Checker::generalize`] does: that memo is not on
+    /// the trail (the caller has cleaned the memos already, step 2 of
     /// [`Checker::add_gadt_equation`], so no copy is linked to a
     /// memorized node). OCaml's copy keeps a variable and a universal
     /// variable as the node they are (subst.ml:135-143); the destination
     /// of an equation has no variable (`reify` ran first, or it is a
     /// constructor without arguments), and a universal variable that is
     /// free in it is COPIED here: no program is known that has one
-    /// (8.9, decision 67). Cost: three passes over `ty`: one step and
-    /// one trail entry (20 bytes) a node generalized, one step a node
-    /// copied, one step a level restored. (R3h)
+    /// (8.9, decision 67). Cost: three passes over `ty`: one step a node
+    /// visited and one trail entry (20 bytes) a level written, one step
+    /// a node copied, one step a level restored. (R3h; total in R3r)
     pub fn duplicate(&mut self, ty: Ty) -> Ty {
         let token = self.g.speculate();
-        let level = std::mem::replace(&mut self.g.level, 0);
-        self.g.generalize(ty);
-        self.g.level = GENERIC;
+        let generation = self.fresh_marks();
+        self.g.work.clear();
+        self.g.work.push(ty);
+        while let Some(next) = self.g.work.pop() {
+            let next = self.g.repr(next);
+            let mark = &mut self.marks[next.0 as usize];
+            if *mark == generation {
+                continue;
+            }
+            *mark = generation;
+            #[cfg(test)]
+            super::steps::tick();
+            let node = self.g.nodes[next.0 as usize];
+            if node.level != GENERIC {
+                self.g.write(next, Node { level: GENERIC, ..node });
+            }
+            self.g.children(node, true);
+        }
+        let level = std::mem::replace(&mut self.g.level, GENERIC);
         let copy = self.copy(ty);
         self.g.level = level;
         self.g.restore(token);
@@ -4158,16 +4189,328 @@ impl Checker {
     /// (`univar_pairs := old_univars`, ctype.ml:1677-1679). One step a
     /// pair popped; O(pairs). (R3r)
     pub fn mcomp(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
-        todo!("R3r")
+        let (base, scopes) = (self.frames.len(), self.scopes.len());
+        self.push_compatible(left, right);
+        let result = self.mcomp_frames(base);
+        if result.is_err() {
+            self.frames.truncate(base);
+            self.scopes.truncate(scopes);
+        }
+        if !self.compatible.keys.is_empty() {
+            self.compatible.keys.clear();
+        }
+        result
     }
 
     /// One more pair for the `mcomp` in progress: what
     /// [`LocalDecls::compare`] calls for each pair of member types.
     /// O(1) amortized: one [`FrameKind::Pair`] frame. (R3r)
     pub fn push_compatible(&mut self, left: Ty, right: Ty) {
-        todo!("R3r")
+        self.frames.push(Frame { left, right, kind: FrameKind::Pair, extra: 0 });
     }
 
+    /// The loop of [`Checker::mcomp`] over the frames above `base`, the
+    /// arms of compiler/ml/ctype.ml:1905-1967 (CHECKER_REWRITE 8.9,
+    /// decision 70). The pairs a pair gives are pushed so that they are
+    /// popped in the order OCaml's recursion takes them. Per pair: two
+    /// `repr`, two `expand_head` in [`ExpandMode::Opt`], one table
+    /// lookup and insert, then one frame a child pair, or one of the
+    /// callees. One step a pair popped; a [`FrameKind::LeavePoly`]
+    /// frame is one `truncate` and no step. O(pairs) plus the
+    /// expansions.
+    fn mcomp_frames(&mut self, base: usize) -> Result<(), Clash> {
+        while self.frames.len() > base {
+            let frame = self.frames.pop().expect("a frame above the base");
+            if frame.kind == FrameKind::LeavePoly {
+                self.scopes.truncate(frame.extra as usize);
+                continue;
+            }
+            debug_assert_eq!(frame.kind, FrameKind::Pair);
+            #[cfg(test)]
+            super::steps::tick();
+            let (t1, t2) = (self.g.repr(frame.left), self.g.repr(frame.right));
+            if t1 == t2 {
+                continue;
+            }
+            let (d1, d2) = (self.g.nodes[t1.0 as usize], self.g.nodes[t2.0 as usize]);
+            // `Tvar _, _ | _, Tvar _`; `Tconstr (p1, [], _), Tconstr (p2,
+            // [], _) when Path.same p1 p2` (ctype.ml:1913-1914).
+            if d1.tag() == VAR || d2.tag() == VAR || (d1.head == CONSTR && d2.head == CONSTR && d1.a == d2.a) {
+                continue;
+            }
+            let t1x = self.expand_head(t1, ExpandMode::Opt)?;
+            let t2x = self.expand_head(t2, ExpandMode::Opt)?;
+            let (t1x, t2x) = (self.g.repr(t1x), self.g.repr(t2x));
+            // `Type_pairs.find type_pairs (t1', t2')`: ordered pairs.
+            if t1x == t2x || !self.compatible.keys.insert(u64::from(t1x.0) << 32 | u64::from(t2x.0)) {
+                continue;
+            }
+            let (d1, d2) = (self.g.nodes[t1x.0 as usize], self.g.nodes[t2x.0 as usize]);
+            let start = self.frames.len();
+            let plain = (d1.head | d2.head) & EXTENDED == 0;
+            match (d1.tag(), d2.tag()) {
+                (VAR, VAR) => unreachable!("mcomp: two variables after expansion (ctype.ml:1926)"),
+                (ARROW, ARROW) if plain && d1.arity() == d2.arity() => {
+                    let optional = |label: u32| label != NONE && label & 1 != 0;
+                    for i in 0..d1.arity() {
+                        let (p1, p2) = (self.g.params[(d1.b + i) as usize], self.g.params[(d2.b + i) as usize]);
+                        if p1.label != p2.label && (optional(p1.label) || optional(p2.label)) {
+                            return Err(Clash);
+                        }
+                        self.push_compatible(p1.ty, p2.ty);
+                    }
+                    self.push_compatible(Ty(d1.a), Ty(d2.a));
+                }
+                (TUPLE, TUPLE) if plain => {
+                    if d1.arity() != d2.arity() {
+                        return Err(Clash);
+                    }
+                    self.push_slots(d1.b, d2.b, d1.arity());
+                }
+                (CONSTR, CONSTR) => self.mcomp_type_decl(d1, d2)?,
+                (CONSTR, _) | (_, CONSTR) => {
+                    let path = if d1.tag() == CONSTR { d1.a } else { d2.a };
+                    if let Some(&row) = self.types.rows.get(path as usize)
+                        && (TypeTable::non_aliasable(row) || row.flags & DATATYPE != 0)
+                    {
+                        return Err(Clash);
+                    }
+                }
+                _ if d1.head & d2.head & EXTENDED == 0 => return Err(Clash),
+                _ => match (self.extras.descriptors[d1.a as usize], self.extras.descriptors[d2.a as usize]) {
+                    (ExtraDescriptor::Package(_), ExtraDescriptor::Package(_))
+                    | (ExtraDescriptor::Nil, ExtraDescriptor::Nil) => {}
+                    (ExtraDescriptor::Variant(_), ExtraDescriptor::Variant(_)) => self.mcomp_row(t1x, t2x)?,
+                    (ExtraDescriptor::Object, ExtraDescriptor::Object) => {
+                        let (fields1, fields2) = (self.g.lists[d1.b as usize], self.g.lists[d2.b as usize]);
+                        self.mcomp_fields(fields1, fields2)?;
+                    }
+                    // "Actually unused" (ctype.ml:1956-1958).
+                    (ExtraDescriptor::Field { .. }, ExtraDescriptor::Field { .. }) => self.mcomp_fields(t1x, t2x)?,
+                    (ExtraDescriptor::Poly, ExtraDescriptor::Poly) if d1.arity() == 1 && d2.arity() == 1 => {
+                        let (body1, body2) = (self.g.lists[d1.b as usize], self.g.lists[d2.b as usize]);
+                        self.push_compatible(body1, body2);
+                    }
+                    // The `LeavePoly` frame below the pair of the bodies:
+                    // nothing to reverse.
+                    (ExtraDescriptor::Poly, ExtraDescriptor::Poly) => {
+                        self.enter_poly(d1, d2)?;
+                        continue;
+                    }
+                    (ExtraDescriptor::Univar(_), ExtraDescriptor::Univar(_)) => self.unify_univar(t1x, t2x)?,
+                    _ => return Err(Clash),
+                },
+            }
+            // Pushed in OCaml's order, popped in it.
+            self.frames[start..].reverse();
+        }
+        Ok(())
+    }
+
+    /// O(len): the pairs of two list ranges, first first (the caller
+    /// reverses what a pair pushed).
+    fn push_slots(&mut self, left: u32, right: u32, len: u32) {
+        for i in 0..len {
+            let (l, r) = (self.g.lists[(left + i) as usize], self.g.lists[(right + i) as usize]);
+            self.push_compatible(l, r);
+        }
+    }
+
+    /// `mcomp_type_decl` (compiler/ml/ctype.ml:2011-2039) for two
+    /// constructor descriptors, pushing first first. A type without a row
+    /// on either side: compatible (`with Not_found -> ()`). One type:
+    /// the arguments whose parameter is [`TypeTable::injective`]. Two
+    /// types, both `non_aliasable`: a clash. Two data types: the
+    /// arguments (a clash when their numbers differ), then what
+    /// [`LocalDecls::compare`] pushes or a clash; without a supplier a
+    /// clash. One data type and an abstract type that is not
+    /// `non_aliasable`, or two abstract types: compatible; else a clash.
+    /// O(arguments) plus the supplier.
+    fn mcomp_type_decl(&mut self, d1: Node, d2: Node) -> Result<(), Clash> {
+        let (Some(&row1), Some(&row2)) = (self.types.rows.get(d1.a as usize), self.types.rows.get(d2.a as usize))
+        else {
+            return Ok(());
+        };
+        if d1.a == d2.a {
+            for i in 0..d1.arity().min(d2.arity()) {
+                if self.types.injective(d1.a, i) {
+                    let (l, r) = (self.g.lists[(d1.b + 1 + i) as usize], self.g.lists[(d2.b + 1 + i) as usize]);
+                    self.push_compatible(l, r);
+                }
+            }
+            return Ok(());
+        }
+        if TypeTable::non_aliasable(row1) && TypeTable::non_aliasable(row2) {
+            return Err(Clash);
+        }
+        match (row1.flags & DATATYPE != 0, row2.flags & DATATYPE != 0) {
+            (true, true) => {
+                if d1.arity() != d2.arity() {
+                    return Err(Clash);
+                }
+                self.push_slots(d1.b + 1, d2.b + 1, d1.arity());
+                let Some(mut decls) = self.locals.take() else {
+                    return Err(Clash);
+                };
+                let answer = decls.compare(self, d1.a, d2.a);
+                self.locals = Some(decls);
+                if answer == DeclMatch::Clash { Err(Clash) } else { Ok(()) }
+            }
+            (false, false) => Ok(()),
+            (false, true) if !TypeTable::non_aliasable(row1) => Ok(()),
+            (true, false) if !TypeTable::non_aliasable(row2) => Ok(()),
+            _ => Err(Clash),
+        }
+    }
+
+    /// `mcomp_fields` (compiler/ml/ctype.ml:1969-1979) of two field lists:
+    /// both flattened into `extras.fields` ([`Checker::flatten_fields`]),
+    /// the pair of the two rests pushed, then one merge of the two sorted
+    /// lists (`associate_fields`) pushing the pair of the types of every
+    /// common name; a clash when a side lacks a name and the other's rest
+    /// is `Tnil`. O(fields) plus the flattenings, one step a merge step;
+    /// the scratch is cut back to where it was.
+    fn mcomp_fields(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
+        let mut fields = std::mem::take(&mut self.extras.fields);
+        let base = fields.len();
+        let rest1 = self.flatten_fields(left, &mut fields);
+        let n1 = fields.len();
+        let rest2 = self.flatten_fields(right, &mut fields);
+        self.push_compatible(rest1, rest2);
+        let (mut i, mut j) = (base, n1);
+        let (mut miss1, mut miss2) = (false, false);
+        while i < n1 || j < fields.len() {
+            #[cfg(test)]
+            super::steps::tick();
+            let order = if i == n1 {
+                Ordering::Greater
+            } else if j == fields.len() {
+                Ordering::Less
+            } else if fields[i].name == fields[j].name {
+                Ordering::Equal
+            } else {
+                let names = &self.extras.names;
+                names.text(fields[i].name).cmp(names.text(fields[j].name))
+            };
+            match order {
+                Ordering::Equal => self.push_compatible(fields[i].ty, fields[j].ty),
+                Ordering::Less => miss1 = true,
+                Ordering::Greater => miss2 = true,
+            }
+            i += usize::from(order != Ordering::Greater);
+            j += usize::from(order != Ordering::Less);
+        }
+        fields.truncate(base);
+        self.extras.fields = fields;
+        let nil = |c: &Checker, rest: Ty| {
+            let node = c.g.nodes[rest.0 as usize];
+            node.head & EXTENDED != 0 && c.extras.descriptors[node.a as usize] == ExtraDescriptor::Nil
+        };
+        if (miss1 && nil(self, rest2)) || (miss2 && nil(self, rest1)) {
+            return Err(Clash);
+        }
+        Ok(())
+    }
+
+    /// `mcomp_row` (compiler/ml/ctype.ml:1981-2007) of two variant nodes:
+    /// both opened and flattened ([`Checker::flatten_row`]) and merged
+    /// ([`Checker::merge_rows`]); a clash when a closed row lacks a tag
+    /// the other has present; then, per common tag in the merge's order,
+    /// the table of ctype.ml:1996-2007: a clash, the pair of the two
+    /// present types, or the present type against each type of the
+    /// other's conjunction. O(tags + chains) plus the merge, no
+    /// allocation once the scratch has the capacity; the scratch is cut
+    /// back to where it was.
+    fn mcomp_row(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
+        let base = self.extras.row_scratch.len();
+        let top1 = self.open_row(left);
+        let (last1, _) = self.flatten_row(top1);
+        let n1 = self.extras.row_scratch.len() - base;
+        let top2 = self.open_row(right);
+        let (last2, _) = self.flatten_row(top2);
+        let n2 = self.extras.row_scratch.len() - base - n1;
+        let closed = |c: &Checker, last: Ty, top: Node| {
+            let node = if last.0 == NONE { top } else { c.g.nodes[last.0 as usize] };
+            let ExtraDescriptor::Variant(row) = c.extras.descriptors[node.a as usize] else {
+                unreachable!("a variant node");
+            };
+            c.extras.variants[row as usize].closed
+        };
+        let (closed1, closed2) = (closed(self, last1, top1), closed(self, last2, top2));
+        let pairs = self.merge_rows(base, n1);
+        let r1 = base..base + n1 - pairs;
+        let r2 = r1.end..r1.end + n2 - pairs;
+        let present = |c: &Checker, range: std::ops::Range<usize>| {
+            range.into_iter().any(|at| c.field_now_at(at).kind == RowFieldKind::Present)
+        };
+        let mut result = if (closed1 && present(self, r2.clone())) || (closed2 && present(self, r1.clone())) {
+            Err(Clash)
+        } else {
+            Ok(())
+        };
+        for k in 0..pairs {
+            if result.is_err() {
+                break;
+            }
+            let at = r2.end + 2 * k;
+            let (f1, f2) = (self.field_now_at(at), self.field_now_at(at + 1));
+            result = match (mcomp_shape(f1), mcomp_shape(f2)) {
+                (Shape::Present(false), Shape::Present(true) | Shape::Either { typed: true, .. } | Shape::Absent)
+                | (Shape::Present(true), Shape::Present(false) | Shape::Either { constant: true, .. } | Shape::Absent)
+                | (Shape::Either { typed: true, .. } | Shape::Absent, Shape::Present(false))
+                | (Shape::Either { constant: true, .. } | Shape::Absent, Shape::Present(true)) => Err(Clash),
+                (Shape::Present(true), Shape::Present(true)) => {
+                    self.push_compatible(f1.first, f2.first);
+                    Ok(())
+                }
+                (Shape::Present(true), Shape::Either { constant: false, .. }) => {
+                    self.push_against(f1.first, at + 1);
+                    Ok(())
+                }
+                (Shape::Either { constant: false, .. }, Shape::Present(true)) => {
+                    self.push_against(f2.first, at);
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+        self.extras.row_scratch.truncate(base);
+        result
+    }
+
+    /// The pairs of `single` and each type of the conjunction of the
+    /// field `extras.row_scratch[at]` (`List.iter (mcomp t1) tl2`), in
+    /// order. O(types + chain), no allocation.
+    fn push_against(&mut self, single: Ty, at: usize) {
+        let field = self.extras.row_scratch[at];
+        let row_field = self.extras.row_fields[field.at as usize];
+        let frames = &mut self.frames;
+        each_field_types(&self.g, field.ty.0, u32::MAX, row_field, |types| {
+            for &ty in types {
+                frames.push(Frame { left: single, right: ty, kind: FrameKind::Pair, extra: 0 });
+            }
+        });
+    }
+
+}
+
+/// A field of a row as the table of `mcomp_row` reads it
+/// (compiler/ml/ctype.ml:1996-2007): `Rpresent` with or without a type,
+/// `Reither` with its `c` and whether it has a type, `Rabsent`.
+#[derive(Clone, Copy)]
+enum Shape {
+    Present(bool),
+    Either { constant: bool, typed: bool },
+    Absent,
+}
+
+/// O(1): the [`Shape`] of a field read now.
+fn mcomp_shape(field: FieldRepr) -> Shape {
+    match field.kind {
+        RowFieldKind::Present => Shape::Present(field.first.0 != NONE),
+        RowFieldKind::Either { constant, .. } => Shape::Either { constant, typed: field.types != 0 },
+        RowFieldKind::Absent => Shape::Absent,
+    }
 }
 
 #[cfg(test)]
