@@ -650,8 +650,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     finished: Finished::True,
                 }));
             }
-            // `compile_jsx` (jsx.rs) takes and gives rows until T6x-d.
-            Primitive::Pjsx(jsx) => B::from_node(self.compile_jsx(jsx, values.map(B::node))),
+            Primitive::Pjsx(jsx) => self.compile_jsx(jsx, values),
             Primitive::Pimport(source) => self.compile_import(source),
             Primitive::Pduprecord => self.duplicate_record(take(&mut values)),
             Primitive::PrecordRest(excluded) => self.record_rest(take(&mut values), excluded),
@@ -663,12 +662,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Primitive::Parraylength => {
                 self.js.length(&mut self.arena, take(&mut values), LengthObject::Array)
             }
-            Primitive::PjsCall(call) => {
-                // `compile_js_call` (external.rs) takes a pool list of rows
-                // and gives a row until T6x-d.
-                let values = self.arena.lists.push_iter(values.len(), values.map(B::node));
-                B::from_node(self.compile_js_call(cx, prim.primitive, call, values))
-            },
+            Primitive::PjsCall(call) => self.compile_js_call(cx, prim.primitive, call, &mut values),
             Primitive::PjsApply => match values.next() {
                 Some(callee) => {
                     let info = self.arena.js_info(crate::bir::JsPayload::Call(Default::default()));
@@ -677,12 +671,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 }
                 None => self.js.undefined(&mut self.arena, false),
             },
-            Primitive::PjsObjectCreate(specs) => {
-                // `compile_js_object_create` (external.rs) takes a pool list
-                // of rows and gives a row until T6x-d.
-                let values = self.arena.lists.push_iter(values.len(), values.map(B::node));
-                B::from_node(self.compile_js_object_create(cx, specs, values))
-            },
+            Primitive::PjsObjectCreate(specs) => self.compile_js_object_create(cx, specs, &mut values),
             Primitive::PjsFnMethod => {
                 let value = self.first_value(&mut values);
                 for unused in values.by_ref() {

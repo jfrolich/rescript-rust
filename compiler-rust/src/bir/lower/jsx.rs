@@ -99,7 +99,7 @@ fn jsx_tag(bir: &Bir, idents: &[Ident], tag: NodeId, spelling: &mut String, step
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// X: jsx_callee / translate_scoped_module_value / translate_scoped_global_value.
     /// O(module inventory + scopes + spelling bytes). Each scope is built once.
-    fn jsx_callee(&mut self, decl: &ExternalDecl) -> NodeId {
+    fn jsx_callee(&mut self, decl: &ExternalDecl) -> B::E {
         let DeclKind::DeclVal { name } = &decl.kind else {
             unreachable!("JSX external must be a value")
         };
@@ -112,7 +112,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let module = self.external_module(external, first == "default", false);
                 let member_id = Some(self.arena.intern_text(first));
                 (
-                    B::node(self.js.qualified(&mut self.arena, module, member_id)),
+                    self.js.qualified(&mut self.arena, module, member_id),
                     rest,
                     member,
                 )
@@ -125,9 +125,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let var = self.fresh_variable(first);
                 self.idents[var.index()] = Ident::create_persistent(first);
                 self.arena.mark_js_global(var);
-                let mut global = self.js.var(&mut self.arena, var);
-                self.js.assume_strict(&mut self.arena, &mut global);
-                (B::node(global), rest, member)
+                (self.js.var(&mut self.arena, var), rest, member)
             }
             Some(ModuleSource::ModuleItself) => {
                 unreachable!("JSX external cannot be the module itself")
@@ -135,66 +133,62 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         for scope in rest {
             self.primitive_steps += 1;
-            value = self.static_member(value, scope);
+            value = self.member(value, scope);
         }
         if let Some(member) = member {
-            value = self.static_member(value, member);
+            value = self.member(value, member);
         }
         value
     }
 
     /// X: compile_jsx. O(props + children + spelling bytes), after shared
     /// argument sequencing. Optional undefined props are consumed and omitted.
-    /// Operands and property keys go directly into unit pools, without vectors.
+    /// Property keys go directly into the unit's pool. The operands after
+    /// the callee pass through `State::external_values`, because the
+    /// callee is built after them: two moves each, nothing allocated once
+    /// the vector has its capacity.
     pub(super) fn compile_jsx(
         &mut self,
         jsx: &JsxElement,
-        args: impl IntoIterator<Item = NodeId>,
-    ) -> NodeId {
+        args: impl IntoIterator<Item = B::E>,
+    ) -> B::E {
         let mut args = args.into_iter();
         let tag = args.next().expect("JSX tag");
         let spread = jsx.jsx_spread.then(|| args.next().expect("JSX spread"));
         let mut props = PropertySpan {
             start: crate::bir::pools::index(self.arena.pools.property_keys.len()), len: 0,
         };
-        // Reserve stable slots before any key/callee construction can append lists.
-        // Optional properties compact this list in place; unused slots stay outside
-        // the final length and never acquire ownership of the placeholder tag.
-        let count = 2 + usize::from(jsx.jsx_spread) + jsx.jsx_props.len()
-            + jsx.jsx_children.unwrap_or(0) + usize::from(jsx.jsx_key);
-        let values = self.arena.lists.push_iter(count, std::iter::repeat_n(tag, count));
-        let mut at = 2;
+        // PROBE-GAP 1: `Js::jsx` takes the callee apart from the operands, as
+        // `Js::call` does; the callee is built last, so the operands wait
+        // in a vector until it is made.
+        let mut values = std::mem::take(&mut self.external_values);
+        debug_assert!(values.is_empty());
+        values.push(tag);
         if let Some(spread) = spread {
-            self.arena.lists.set(values, at, spread);
-            at += 1;
+            values.push(spread);
         }
         for (name, optional) in &jsx.jsx_props {
             self.primitive_steps += 1;
             let value = args.next().expect("JSX prop");
-            if *optional && self.js.kind(&self.arena, B::at(value)) == Kind::Undefined {
-                self.js.release(&mut self.arena, B::from_node(value));
+            if *optional && self.js.kind(&self.arena, B::of(&value)) == Kind::Undefined {
+                self.js.release(&mut self.arena, value);
             } else {
                 let key = PropertyKey::Literal(self.arena.intern_text(name));
                 self.arena.pools.property_keys.push(key);
                 props.len += 1;
-                self.arena.lists.set(values, at, value);
-                at += 1;
+                values.push(value);
             }
         }
         for _ in 0..jsx.jsx_children.unwrap_or(0) {
             self.primitive_steps += 1;
-            self.arena.lists.set(values, at, args.next().expect("JSX child"));
-            at += 1;
+            values.push(args.next().expect("JSX child"));
         }
         if jsx.jsx_key {
             let key = self.jsx_key(args.next().expect("JSX key"));
-            self.arena.lists.set(values, at, key);
-            at += 1;
+            values.push(key);
         }
         assert!(args.next().is_none(), "JSX argument count");
         let callee = self.jsx_callee(&jsx.jsx_ffi);
-        self.arena.lists.set(values, 0, callee);
-        self.arena.lists.truncate(values, at);
         let info = self.arena.js_info(crate::bir::JsPayload::Jsx(JsxHeader {
             spread: jsx.jsx_spread,
             props,
@@ -204,34 +198,41 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             fragment: jsx.jsx_fragment,
         }));
         let mark = self.js.mark();
-        self.js.push_list(&self.arena, values);
-        B::node(self.js.jsx(&mut self.arena, mark, info, jsx.jsx_children.is_some()))
+        self.js.push(callee);
+        for value in values.drain(..) {
+            self.js.push(value);
+        }
+        self.external_values = values;
+        self.js.jsx(&mut self.arena, mark, info, jsx.jsx_children.is_some())
     }
 
     /// X: external_optional_to_undefined_expr. O(member-spine depth) for a
     /// duplicable key, O(1) otherwise, plus J-E4/J-E7 constructor work.
-    fn jsx_key(&mut self, key: NodeId) -> NodeId {
-        match self.js.kind(&self.arena, B::at(key)) {
+    fn jsx_key(&mut self, key: B::E) -> B::E {
+        match self.js.kind(&self.arena, B::of(&key)) {
             Kind::Undefined => {
-                self.js.release(&mut self.arena, B::from_node(key));
-                B::node(self.js.undefined(&mut self.arena, false))
+                self.js.release(&mut self.arena, key);
+                self.js.undefined(&mut self.arena, false)
             }
-            Kind::Optional => B::node(self.js.keep_operand(&mut self.arena, B::from_node(key), 0)),
+            Kind::Optional => self.js.keep_operand(&mut self.arena, key, 0),
             _ => {
-                if let Some(copy) = self.duplicate_jsx_key(key) {
+                if let Some(copy) = self.duplicate_jsx_key(&key) {
                     let undefined = self.js.undefined(&mut self.arena, false);
                     let test = self.js.bin(
                         &mut self.arena,
                         crate::js_ir::BinOp::NotEqEq,
-                        B::from_node(key),
+                        key,
                         undefined,
                     );
-                    let value =
-                        self.primitive_runtime("Primitive_option", "valFromOption", &[copy]);
+                    let mark = self.js.mark();
+                    self.js.push(copy);
+                    let value = self.runtime_call("Primitive_option", "valFromOption", mark);
                     let undefined = self.js.undefined(&mut self.arena, false);
-                    B::node(self.js.cond(&mut self.arena, test, B::from_node(value), undefined))
+                    self.js.cond(&mut self.arena, test, value, undefined)
                 } else {
-                    self.primitive_runtime("Primitive_option", "valFromOption", &[key])
+                    let mark = self.js.mark();
+                    self.js.push(key);
+                    self.runtime_call("Primitive_option", "valFromOption", mark)
                 }
             }
         }
@@ -240,15 +241,26 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// A: is_okay_to_duplicate(false), with copying in the same walk. O(d)
     /// for a d-deep member spine; one reusable stack, no per-node allocation.
     /// A failed shape leaves the original key untouched and creates no nodes.
-    /// The spine holds the ids of the member reads, read by reference.
-    fn duplicate_jsx_key(&mut self, key: NodeId) -> Option<NodeId> {
+    /// The spine holds the ids of the member reads, read by reference. A
+    /// reference is read with `var_of` before the kind (THREE_TREES 11.4,
+    /// "For T6v: a dotted global").
+    fn duplicate_jsx_key(&mut self, key: &B::E) -> Option<B::E> {
         let mut spine = std::mem::take(&mut self.scratch);
         debug_assert!(spine.is_empty());
-        let mut r = B::at(key);
+        let mut r = B::of(key);
         loop {
             self.primitive_steps += 1;
-            match self.js.kind(&self.arena, r) {
-                Kind::Dot
+            let reference = self.js.var_of(&self.arena, r).map(|var| {
+                !self
+                    .arena
+                    .vars
+                    .flags(var)
+                    .contains(crate::bir::VarFlags::JS_GLOBAL)
+                    || !self.arena.vars.name(var).as_str().contains('.')
+            });
+            match (reference, self.js.kind(&self.arena, r)) {
+                (Some(true), _) => break,
+                (None, Kind::Dot)
                     if self
                         .js
                         .member_of(&self.arena, r)
@@ -257,20 +269,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     spine.push(NodeId(self.js.id(&self.arena, r)));
                     r = self.js.operand(&self.arena, r, 0);
                 }
-                Kind::Var
-                    if self.js.var_of(&self.arena, r).is_some_and(|var| {
-                        !self
-                            .arena
-                            .vars
-                            .flags(var)
-                            .contains(crate::bir::VarFlags::JS_GLOBAL)
-                            || !self.arena.vars.name(var).as_str().contains('.')
-                    }) =>
-                {
-                    break;
-                }
-                Kind::Qualified | Kind::Bool | Kind::Str | Kind::Number => break,
-                Kind::Template if self.js.aux(&self.arena, r) == 1 => break,
+                (None, Kind::Qualified | Kind::Bool | Kind::Str | Kind::Number) => break,
+                (None, Kind::Template) if self.js.aux(&self.arena, r) == 1 => break,
                 _ => {
                     spine.clear();
                     self.scratch = spine;
@@ -278,6 +278,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 }
             }
         }
+        // PROBE-GAP 2: a node of the key's chain read again by its id once
+        // the arena is borrowed mutably (`Js::at` is the transition's).
         let leaf = NodeId(self.js.id(&self.arena, r));
         let mut copy = self.js.copy_leaf(&mut self.arena, B::at(leaf));
         self.js.copy_cold(&mut self.arena, B::at(leaf), &mut copy);
@@ -289,7 +291,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.js.copy_cold(&mut self.arena, B::at(node), &mut copy);
         }
         self.scratch = spine;
-        Some(B::node(copy))
+        Some(copy)
     }
 }
 
