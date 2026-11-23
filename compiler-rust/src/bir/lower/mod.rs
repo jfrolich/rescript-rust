@@ -803,13 +803,13 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
         let (list, coerced) = match exports {
             Some(exports) if !exports.is_empty() => {
                 let coerced = self.coerce_exports(run, exports, out.finished);
-                let list = self.coerced_list(run);
                 // `coerced_list` gives a pool list until T6x-e.
-                self.statements.close(&self.js, &mut self.arena, B::list_from(list));
+                let list = B::list_from(self.coerced_list(run));
+                self.statements.close(&self.js, &mut self.arena, list);
                 (list, coerced)
             }
             _ => (
-                B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, run)),
+                self.statements.take_list(&mut self.js, &mut self.arena, run),
                 export::Coerced::default(),
             ),
         };
@@ -821,30 +821,36 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     #[cfg(test)]
     fn complete(mut self, cx: Cx, probed: Probed<B>) -> Lowered {
         let out = self.realize(cx, probed);
-        let value = out
-            .value
-            .map(B::node)
-            .unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
-        let value = self.arena.new_node(View::SExp { value }, 0);
-        self.statements.push(B::stmt_from_node(value));
+        let value = out.value.unwrap_or_else(|| {
+            let mut undefined = self.js.undefined(&mut self.arena, false);
+            self.js.assume_strict(&mut self.arena, &mut undefined);
+            undefined
+        });
+        let statement = self.js.exp(&mut self.arena, value);
+        self.statements.push(statement);
         let run = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,
         });
-        let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, run));
+        let list = self.statements.take_list(&mut self.js, &mut self.arena, run);
         self.finish(list, out.finished, export::Coerced::default())
     }
 
-    /// The root block over the top-level list. One step per statement of
-    /// the list and one write per catch of the unit.
-    fn finish(mut self, list: crate::bir::ListId, _finished: Finished, coerced: export::Coerced) -> Lowered {
+    /// The root block over the top-level list in flight, which is consumed.
+    /// One step per statement of the list and one write per catch of the
+    /// unit.
+    fn finish(mut self, list: B::L, _finished: Finished, coerced: export::Coerced) -> Lowered {
         #[cfg(test)]
         let coerced = export::Coerced {
             steps: self.coercion.steps,
             site_visits: self.coercion.site_visits,
             ..coerced
         };
-        let root = self.arena.block_from_list(list);
+        // The rest of the unit's finish reads the root by its id: the bulk
+        // finish and the importer take a row until T6s, the replay of the
+        // names until T6r.
+        let root = self.js.block_of(&mut self.arena, list);
+        let root = NodeId(self.js.stmt_id(&self.arena, &root));
         // The headers keep their labels and parameters; the exits they count
         // stay in the source, which reads the counts while a function of
         // another module is inlined. One write per catch of the unit.
