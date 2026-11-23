@@ -157,9 +157,9 @@ pub(super) struct Tables<E, S> {
     resolved: Vec<Resolved>,
 }
 
-/// Empty tables: no allocation. Written out because a derived `Default`
-/// would ask the handle for one.
+/// Written out because a derived `Default` would ask the handles for one.
 impl<E, S> Default for Tables<E, S> {
+    /// Empty tables. Cost: O(1), no allocation.
     fn default() -> Self {
         Tables {
             values: Vec::new(),
@@ -1757,8 +1757,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// rows counts the list and takes the statements of a dissolved block
     /// out of it; the second moves each statement into the list where it
     /// is: the top level's out of the run, in order (one per row of the top
-    /// level), the fold's declarations out of `inserted` and `tail`. One
-    /// step per row, and the list's: one and one per statement.
+    /// level), the fold's declarations out of `inserted` and `tail`. Cost:
+    /// one step per row, and the list's: one and one per statement.
     pub(super) fn coerced_list(&mut self, run: Span) -> B::L {
         let flattened = self.coercion.flattened;
         let mut len = self.coercion.inserted.len();
