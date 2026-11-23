@@ -125,7 +125,7 @@ struct ActionState<S> {
     remaining: u32,
     finished: Finished,
 }
-pub(super) struct Storage<S> {
+pub(super) struct Storage<S, E> {
     program: Pool<Op>,
     actions: Pool<Action>,
     states: Pool<ActionState<S>>,
@@ -134,7 +134,7 @@ pub(super) struct Storage<S> {
     work: Vec<Work>,
     cache: Vec<[u32; 2]>,
     test_work: Vec<(TestId, bool)>,
-    test_values: Vec<NodeId>,
+    test_values: Vec<E>,
     copied_vars: Vec<(VarId, VarId)>,
     program_steps: usize,
     copied_outputs: usize,
@@ -145,8 +145,9 @@ pub(super) struct Storage<S> {
     literals: Vec<LiteralEmission>,
     aliases: Vec<Option<u32>>,
 }
-impl<S> Default for Storage<S> {
-    /// Empty pools and tables, written out so that `S` needs no `Default`.
+impl<S, E> Default for Storage<S, E> {
+    /// Empty pools and tables, written out so that `S` and `E` need no
+    /// `Default`.
     /// Cost: O(1); allocates nothing.
     fn default() -> Self {
         Self {
@@ -216,7 +217,7 @@ struct LiteralEmission {
 /// entries, interns B spelling bytes among U texts and A ancestry entries among I instances,
 /// then creates E literal-emission rows. Reserves known unit domains; performs no dispatch
 /// planning.
-pub(super) fn prepare<S>(arena: &mut Bir) -> (Storage<S>, dispatch::Plan<u32>) {
+pub(super) fn prepare<S, E>(arena: &mut Bir) -> (Storage<S, E>, dispatch::Plan<u32>) {
     let mut storage = Storage::default();
     let mut graph = dispatch::Plan::default();
     let (mut literals, mut payloads, mut fact_count, mut kind_count, mut variants) = (0, 0, 0, 0, 0);
@@ -359,13 +360,13 @@ pub(super) fn prepare<S>(arena: &mut Bir) -> (Storage<S>, dispatch::Plan<u32>) {
     (storage, graph)
 }
 
-pub(super) struct Plan<S> {
+pub(super) struct Plan<S, E> {
     source: NodeId,
     operands: crate::bir::ListId,
     start: Span,
     cont: Cont,
     target: Option<VarId>,
-    scrutinee: Option<NodeId>,
+    scrutinee: Option<E>,
     payload_only: bool,
     program: Run<Op>,
     pc: usize,
@@ -647,7 +648,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.statements.push(declaration);
                 value = self.js.var(&mut self.arena, var);
             }
-            p.scrutinee = Some(B::node(value));
+            p.scrutinee = Some(value);
         } else {
             let Op::Run(action) = self.untagged_storage.program.get(&p.program, p.pc) else {
                 unreachable!("paused for source action")
@@ -715,11 +716,22 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Copy the cached statement of `action`, a multiply-emitted one, in
     /// place; never relower its source. O(emitted nodes): one step per node
     /// `copy_stmt` copies, plus `name_fresh`.
-    fn copy_dispatch_output(&mut self, p: &Plan<B::S>, action: usize) -> B::S {
+    fn copy_dispatch_output(&mut self, p: &Plan<B::S, B::E>, action: usize) -> B::S {
+        self.copy_named(|state, vars| {
+            let cached = state.untagged_storage.states.get_ref(&p.states, action).cached.as_ref();
+            state.js.copy_stmt(&mut state.arena, cached.expect("cached action"), vars)
+        })
+    }
+
+    /// A copy made by `copy` with the reused vector of the binders it
+    /// freshens, which are then named (`name_fresh`) and the vector given
+    /// back; counts one copied output. Cost: what `copy` costs, plus
+    /// `name_fresh`'s O(fresh binders); allocates nothing once the vector
+    /// has its capacity.
+    fn copy_named<R>(&mut self, copy: impl FnOnce(&mut Self, &mut Vec<(VarId, VarId)>) -> R) -> R {
         self.untagged_storage.copied_outputs += 1;
         let mut vars = std::mem::take(&mut self.untagged_storage.copied_vars);
-        let cached = self.untagged_storage.states.get_ref(&p.states, action).cached.as_ref();
-        let copied = self.js.copy_stmt(&mut self.arena, cached.expect("cached action"), &mut vars);
+        let copied = copy(self, &mut vars);
         self.name_fresh(&mut vars);
         self.untagged_storage.copied_vars = vars;
         copied
@@ -738,7 +750,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// V: untagged_fallback_block, generalized to all shared plan actions.
     /// O(output size) for repeated occurrences; the last takes the original.
-    fn emit_cached_action(&mut self, p: &mut Plan<B::S>, action: u32) {
+    fn emit_cached_action(&mut self, p: &mut Plan<B::S, B::E>, action: u32) {
         let i = action as usize;
         self.untagged_storage.states.get_mut(&p.states, i).remaining -= 1;
         let root = if self.untagged_storage.states.get_ref(&p.states, i).remaining == 0 {
@@ -767,23 +779,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// A scrutinee occurrence. O(1) for variables (the normal bound case),
     /// otherwise O(emitted expression) for the legacy payload-only form: one
     /// step per node `copy_fresh` copies, plus `name_fresh`.
-    fn untagged_scrutinee(&mut self, p: &Plan<B::S>) -> NodeId {
-        let value = p.scrutinee.unwrap();
-        if let Some(var) = self.js.var_of(&self.arena, B::at(value)) {
-            B::node(self.js.var(&mut self.arena, var))
+    fn untagged_scrutinee(&mut self, p: &Plan<B::S, B::E>) -> B::E {
+        let value = p.scrutinee.as_ref().unwrap();
+        if let Some(var) = self.js.var_of(&self.arena, B::of(value)) {
+            self.js.var(&mut self.arena, var)
         } else {
-            self.untagged_storage.copied_outputs += 1;
-            let mut vars = std::mem::take(&mut self.untagged_storage.copied_vars);
-            let copied = self.js.copy_fresh(&mut self.arena, B::at(value), &mut vars);
-            self.name_fresh(&mut vars);
-            self.untagged_storage.copied_vars = vars;
-            B::node(copied)
+            self.copy_named(|state, vars| state.js.copy_fresh(&mut state.arena, B::of(value), vars))
         }
     }
 
     /// V: emit_untagged_tree. O(emitted program steps + J-rule costs), with
     /// all control stacks explicit and all kept statement runs left in place.
-    fn advance_untagged(&mut self, p: &mut Plan<B::S>, dispatch: &dispatch::Plan<u32>) {
+    fn advance_untagged(&mut self, p: &mut Plan<B::S, B::E>, dispatch: &dispatch::Plan<u32>) {
         while p.pc < p.program.len as usize {
             let op = self.untagged_storage.program.get(&p.program, p.pc);
             if matches!(op, Op::Run(_)) {
@@ -844,9 +851,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// V: untagged_if / normalized_if_block. O(statements consumed by J-S3).
-    fn untagged_if(&mut self, p: &mut Plan<B::S>, test: NodeId, yes: Span, no: Span) {
+    fn untagged_if(&mut self, p: &mut Plan<B::S, B::E>, test: B::E, yes: Span, no: Span) {
         let start = self.untagged_storage.marks.pop(&mut p.marks);
-        let statement = self.if_statement(test, yes, no);
+        let statement = self.if_statement(B::node(test), yes, no);
         self.place(start.start, statement);
         if matches!(p.cont, Cont::Effect(Tail::Return(_))) {
             self.unnest(start.start);
@@ -862,7 +869,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// V: emit_untagged_clause. O(1) control/exit facts, plus one list transfer.
-    fn untagged_clause(&mut self, p: &Plan<B::S>, out: Output) -> (B::S, ClauseMeta) {
+    fn untagged_clause(&mut self, p: &Plan<B::S, B::E>, out: Output) -> (B::S, ClauseMeta) {
         let should_break = if out.action == NONE {
             false
         } else if self
@@ -918,7 +925,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// transferred), with default-first source order and case-first output.
     fn untagged_switch_statement(
         &mut self,
-        p: &mut Plan<B::S>,
+        p: &mut Plan<B::S, B::E>,
         dispatch: &dispatch::Plan<u32>,
         tree: TreeId,
     ) {
@@ -999,7 +1006,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         let actions = self.statements.take_actions(&mut self.js, &mut self.arena, self.statements.since(mark));
         p.outputs.len = base as u32;
-        let mut scrutinee = B::from_node(self.untagged_scrutinee(p));
+        let mut scrutinee = self.untagged_scrutinee(p);
         if typeof_ {
             scrutinee = self.js.typeof_plain(&mut self.arena, scrutinee);
         }
@@ -1025,15 +1032,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// V: untagged_typeof_expr. O(1), retaining raw typeof rather than folding.
-    fn untagged_typeof(&mut self, value: NodeId, kind: &dispatch::Kind) -> NodeId {
-        let value = self.js.typeof_plain(&mut self.arena, B::from_node(value));
+    fn untagged_typeof(&mut self, value: B::E, kind: &dispatch::Kind) -> B::E {
+        let value = self.js.typeof_plain(&mut self.arena, value);
         let text = self.js.string(&mut self.arena, kind.typeof_name().expect("typeof kind"));
-        B::node(self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, text))
+        self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, text)
     }
 
     /// V: untagged_test_expr. O(test occurrences + emitted scrutinee copies),
     /// using explicit stacks instead of recursion on the planner's tests.
-    fn untagged_test(&mut self, p: &Plan<B::S>, dispatch: &dispatch::Plan<u32>, test: TestId) -> NodeId {
+    fn untagged_test(&mut self, p: &Plan<B::S, B::E>, dispatch: &dispatch::Plan<u32>, test: TestId) -> B::E {
         let mut work = std::mem::take(&mut self.untagged_storage.test_work);
         let mut values = std::mem::take(&mut self.untagged_storage.test_values);
         work.push((test, false));
@@ -1053,7 +1060,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             let value = match test {
                 Test::Equals(tag) => {
-                    let left = B::from_node(self.untagged_scrutinee(p));
+                    let left = self.untagged_scrutinee(p);
                     let right = match self.untagged_storage.literals[tag.0 as usize].value {
                         LiteralValue::String(text) => self.js.str(&mut self.arena, text),
                         LiteralValue::Number(value) => self.js.number(&mut self.arena, value),
@@ -1065,25 +1072,25 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 }
                 Test::Typeof(kind) => {
                     let value = self.untagged_scrutinee(p);
-                    B::from_node(self.untagged_typeof(value, kind))
+                    self.untagged_typeof(value, kind)
                 }
                 Test::Instance(instance) => {
                     let value = self.untagged_scrutinee(p);
-                    B::from_node(self.untagged_instance(value, &dispatch.metadata, *instance))
+                    self.untagged_instance(value, &dispatch.metadata, *instance)
                 }
                 Test::NotNull => {
-                    let value = B::from_node(self.untagged_scrutinee(p));
+                    let value = self.untagged_scrutinee(p);
                     let null = self.js.null(&mut self.arena);
                     let eq = self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, null);
                     self.js.not(&mut self.arena, eq)
                 }
                 Test::Not(_) => {
-                    let value = B::from_node(values.pop().unwrap());
+                    let value = values.pop().unwrap();
                     self.js.not(&mut self.arena, value)
                 }
                 Test::And(..) | Test::Or(..) => {
-                    let r = B::from_node(values.pop().unwrap());
-                    let l = B::from_node(values.pop().unwrap());
+                    let r = values.pop().unwrap();
+                    let l = values.pop().unwrap();
                     self.js.bin(
                         &mut self.arena,
                         if matches!(test, Test::And(..)) {
@@ -1096,7 +1103,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     )
                 }
             };
-            values.push(B::node(value));
+            values.push(value);
         }
         let value = values.pop().unwrap();
         self.untagged_storage.test_work = work;
@@ -1108,10 +1115,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// use the same ordinary CallInfo as the legacy constructor.
     fn untagged_instance(
         &mut self,
-        value: NodeId,
+        value: B::E,
         metadata: &dispatch::Metadata,
         instance: dispatch::InstanceId,
-    ) -> NodeId {
+    ) -> B::E {
         let name = metadata.instance_name(instance);
         let mut parts = name.split('.');
         let first = parts.next().unwrap();
@@ -1119,13 +1126,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         self.idents.push(Ident::create_persistent(first));
         self.arena.vars.flags[var.index()].0 |=
             crate::bir::VarFlags::JS_GLOBAL | crate::bir::VarFlags::JS_IDENT;
-        let value = B::from_node(value);
         let mut class = self.js.var(&mut self.arena, var);
         for property in parts {
             let property = self.arena.intern_text(property);
             class = self.js.dot(&mut self.arena, class, property, crate::js_ir::arena::FieldPos::NONE, false);
         }
-        B::node(if !metadata.is_class(instance) {
+        if !metadata.is_class(instance) {
             let property = self.arena.intern_text("isArray");
             let callee = self.js.dot(&mut self.arena, class, property, crate::js_ir::arena::FieldPos::NONE, false);
             let info = self.arena.js_info(crate::bir::JsPayload::Call(
@@ -1141,7 +1147,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 value,
                 class,
             )
-        })
+        }
     }
 
     /// V: compile_untagged_switch result. O(trailing empty block shells),
@@ -1153,7 +1159,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         assert_eq!(p.pc, p.program.len as usize);
         assert_eq!(p.outputs.len as usize, 1);
-        self.js.release(&mut self.arena, B::from_node(p.scrutinee.unwrap()));
+        self.js.release(&mut self.arena, p.scrutinee.unwrap());
         if matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
             self.unnest(p.start.start);
         }
@@ -1820,7 +1826,7 @@ mod tests {
             8
         );
         assert_eq!(std::mem::size_of::<ImportedPlan>(), 32);
-        assert_eq!(std::mem::size_of::<Plan<crate::bir::j::rows_stmt::S>>(), 120);
+        assert_eq!(std::mem::size_of::<Plan<crate::bir::j::rows_stmt::S, <crate::bir::j::rows::Rows as crate::bir::lower::js::Js>::E>>(), 120);
         assert_eq!(std::mem::size_of::<Run<Op>>(), 12);
         assert_eq!(std::mem::size_of::<Run<Action>>(), 12);
         assert_eq!(std::mem::size_of::<ActionState<crate::bir::j::rows_stmt::S>>(), 16);
