@@ -415,7 +415,7 @@ impl Checker {
             return self.bind_routed(var, ty, route.then_some([left, right]));
         }
         // `has_cached_expansion p1 !a1` reads the node's own memo
-        // (ctype.ml:2251), which `proper_abbrevs` never writes for a
+        // (ctype.ml:2254), which `proper_abbrevs` never writes for a
         // nullary constructor: its expansion goes to `simple_abbrevs`
         // (ctype.ml:200-202). Slot 0 of a nullary node stays empty here too
         // (expand.rs), so the test is always false. With GADT instance

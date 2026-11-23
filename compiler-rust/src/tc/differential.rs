@@ -4594,7 +4594,7 @@ mod tests {
     /// that is no longer the name of the innermost row (section 8.6,
     /// decision 60; observed). `[> #B]` is unified with `[> #A] as p<y>`:
     /// the named row gains `#B` through a new variant node its row
-    /// variable is linked to (`set_more`, compiler/ml/ctype.ml:2596-2616)
+    /// variable is linked to (`set_more`, compiler/ml/ctype.ml:2597-2619)
     /// and the merged row has no name (ctype.ml:2574-2586), so `p<y>` is
     /// the name of a row whose `more` is a variant. `iter_row` visits a
     /// name's arguments only for the row a chain ends in

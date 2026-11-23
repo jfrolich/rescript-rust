@@ -1541,7 +1541,7 @@ impl Checker {
             }
         };
         // A row that is not fixed has a variant node as its `more` now
-        // (`link_type rm ty`, ctype.ml:2616), so its name's arguments are
+        // (`link_type rm ty`, ctype.ml:2619), so its name's arguments are
         // children no longer (`iter_row`, btype.ml:229-241).
         // The home of row 1 is the left node itself when `last1` is none.
         // In expression mode `unify3` has linked that node away and it
@@ -1851,7 +1851,7 @@ impl Checker {
                 && matches!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Univar(_)))
     }
 
-    /// `set_more row rest` (compiler/ml/ctype.ml:2596-2616). `rest` is
+    /// `set_more row rest` (compiler/ml/ctype.ml:2597-2619). `rest` is
     /// `extras.row_scratch[rest]`, the fields the other row has and `row`
     /// lacks; `row` is the `VariantRow` of the row that gains them, `rm`
     /// its `more`, `fixed` its [`Checker::row_is_fixed`]; `more`, `closed`
@@ -4281,7 +4281,7 @@ impl Checker {
     }
 
     /// The loop of [`Checker::mcomp`] over the frames above `base`, the
-    /// arms of compiler/ml/ctype.ml:1905-1967 (CHECKER_REWRITE 8.9,
+    /// arms of compiler/ml/ctype.ml:1905-1965 (CHECKER_REWRITE 8.9,
     /// decision 70). The pairs a pair gives are pushed so that they are
     /// popped in the order OCaml's recursion takes them. Per pair: two
     /// `repr`, two `expand_head` in [`ExpandMode::Opt`], one table
@@ -4434,7 +4434,7 @@ impl Checker {
         }
     }
 
-    /// `mcomp_fields` (compiler/ml/ctype.ml:1969-1979) of two field lists:
+    /// `mcomp_fields` (compiler/ml/ctype.ml:1971-1981) of two field lists:
     /// both flattened into `extras.fields` ([`Checker::flatten_fields`]),
     /// the pair of the two rests pushed, then one merge of the two sorted
     /// lists (`associate_fields`) pushing the pair of the types of every
@@ -4483,11 +4483,11 @@ impl Checker {
         Ok(())
     }
 
-    /// `mcomp_row` (compiler/ml/ctype.ml:1981-2007) of two variant nodes:
+    /// `mcomp_row` (compiler/ml/ctype.ml:1983-2009) of two variant nodes:
     /// both opened and flattened ([`Checker::flatten_row`]) and merged
     /// ([`Checker::merge_rows`]); a clash when a closed row lacks a tag
     /// the other has present; then, per common tag in the merge's order,
-    /// the table of ctype.ml:1996-2007: a clash, the pair of the two
+    /// the table of ctype.ml:1996-2008: a clash, the pair of the two
     /// present types, or the present type against each type of the
     /// other's conjunction. O(tags + chains) plus the merge, one step a
     /// tag flattened, a merge step, a tag only one row has (when the

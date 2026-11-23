@@ -2272,7 +2272,7 @@ fn opening_a_row_gives_each_reither_field_a_reference() {
 }
 
 /// Two open rows with no tag in common (compiler/ml/ctype.ml:380-386,
-/// 2548-2552, 2596-2616):
+/// 2548-2552, 2597-2619):
 ///
 /// ```text
 /// | [p1], _ when not (List.mem_assoc (fst p1) fi2) -> (fi1, fi2, [])
@@ -2320,7 +2320,7 @@ fn an_open_row_takes_the_tags_it_lacks() {
 }
 
 /// A closed row closes the other and takes nothing; the static row
-/// (compiler/ml/ctype.ml:2553, 2596-2616, 2630-2636):
+/// (compiler/ml/ctype.ml:2553, 2597-2619, 2630-2636):
 ///
 /// ```text
 /// and closed = row1.row_closed || row2.row_closed in
@@ -3571,7 +3571,7 @@ fn lowering_a_row_below_the_scope_of_its_name_drops_the_name() {
 /// Witness, per walk: `[> #B]` unified with `[> #A] as P<y>` at level 2,
 /// `y` in no field. The named row is the right node, gains `#B` through
 /// a variant node its row variable is linked to, and the merged row has
-/// no name (ctype.ml:2574-2586, 2596-2616). Then, each on a graph of its
+/// no name (ctype.ml:2574-2586, 2597-2619). Then, each on a graph of its
 /// own:
 /// - `Checker::lower` of the row to level 1 leaves `y` at 2
 ///   (`update_level`, ctype.ml:584-630, through `iter_type_expr`);
@@ -5482,7 +5482,7 @@ fn recovering_ten_thousand_attempts_is_linear() {
 
 /// `mcomp` on two wide types, as relations between 1,000 and 10,000
 /// (owed by the review of R3r: `mcomp_fields` and `mcomp_row` loop over
-/// fields and tags, compiler/ml/ctype.ml:1969-2007, and no step test
+/// fields and tags, compiler/ml/ctype.ml:1971-2009, and no step test
 /// drove them wide). Witnesses: two closed objects of n fields and two
 /// closed rows of n present tags; the type of every field or tag of the
 /// left is ONE n-deep chain and of the right ANOTHER, so each of the n
@@ -5604,7 +5604,7 @@ fn recovering_inside_ten_thousand_nested_attempts_is_linear() {
 /// add_type_equality t1' t2'`, compiler/ml/ctype.ml:2327-2332), so the
 /// home of row 1 is the left node itself, still a variant node whose
 /// `more` is linked to a variant node by `set_more` (`link_type rm ty`,
-/// ctype.ml:2616): the arguments of its name are children no longer
+/// ctype.ml:2619): the arguments of its name are children no longer
 /// (`iter_row`, compiler/ml/btype.ml:229-241):
 ///
 /// ```text

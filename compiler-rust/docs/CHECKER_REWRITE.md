@@ -3460,7 +3460,7 @@ skeleton; all three were the skeleton's, not the builder's.
       `fixture_10_two_abbreviations_stay_two_nodes` and the relation in the
       R3c prompt said otherwise and were wrong; both are corrected.
     - The cached-expansion test of the nullary shortcut reads the node's
-      own memo (ctype.ml:2251), which a nullary constructor never gets
+      own memo (ctype.ml:2254), which a nullary constructor never gets
       outside GADT instance tracing: its expansions go to the nullary memo
       (`proper_abbrevs`, ctype.ml:200-202). R3a read the nullary memo
       there; the test is gone until R3h needs the node's own memo.
@@ -3958,7 +3958,7 @@ from this turn.
       r1` then `set_more row1 r2`, each of which filters the other side's
       fields when `closed`, clashes when a closed or fixed row would gain
       a field, and links the row's `more` to a **new generic variant
-      node** holding the fields it lacked (ctype.ml:2596-2616); then
+      node** holding the fields it lacked (ctype.ml:2597-2619); then
       `unify_row_field` per common tag in merged order; then a static row
       1 gets `Tnil` as its `more`. On any failure `rm1` and `rm2` get
       their descriptors back.
@@ -4759,7 +4759,7 @@ the reviews above left owed; every test named runs today.
     a phantom parameter of a named open row, after the row gained a tag.
     Corrected on the write side, so that no walk pays a descriptor load
     per variant node: when `unify_row` has run both `set_more`, each row
-    that is not fixed has a variant node as its `more` (ctype.ml:2616),
+    that is not fixed has a variant node as its `more` (ctype.ml:2619),
     and when such a row has a name with arguments its home node is
     written with a new list in which the slots of those arguments hold
     what the `more` slot holds (`Checker::drop_name_children`; in the
@@ -5090,7 +5090,10 @@ questions of the sixth turn are decisions 72 to 76.
     under `PATTERN` without `SCOPED` lowers without scopes on the new
     side (`Graph::lower`): the old side lowers without an environment
     there, and the locally abstract types and the types `reify` makes
-    have scopes on the new side. (c) The equations are printed from
+    have scopes on the new side. (Eighth turn: this holds for every
+    plan without `SCOPED`, not only under `PATTERN`: for a plan
+    without scoped types `Checker::lower` is `Graph::lower`, so nothing
+    changed for those plans.) (c) The equations are printed from
     `manifest.body`, which is a node of the graph. (d) The predefined
     types of the program are marked (`TypeTable::set_predefined`).
 
@@ -6038,7 +6041,10 @@ the variable a link to the tuple; in expression mode a clash; `'v`
 against `k<'v>`, `k` abstract and not contractive, a clash in both; the
 levels below the tuple are lowered.
 
-**70. `mcomp(left, right)`** (ctype.ml:1905-1984). Never links, never
+**70. `mcomp(left, right)`** (ctype.ml:1905-2009; the citations of
+this decision were pasted from the file in the eighth turn: `mcomp`
+1905-1965, `mcomp_list` 1967-1969, `mcomp_fields` 1971-1981,
+`mcomp_row` 1983-2009, `mcomp_type_decl` from 2011). Never links, never
 lowers; it expands (`expand_head(·, ExpandMode::Opt)`), which
 memorizes. Its own table `Checker::compatible` (a second `PairSet`;
 ORDERED pairs, `Type_pairs.find type_pairs (t1', t2')`), emptied when
@@ -6064,8 +6070,8 @@ and, by the heads:
 - a constructor against anything else: a clash when its row is
   `non_aliasable` or `DATATYPE`, else compatible;
 - packages, `nil`: compatible. Objects: `mcomp_fields`
-  (ctype.ml:1969-1981) over `flatten_fields` and the merge
-  `unify_fields` uses. Variants: `mcomp_row` (ctype.ml:1985-2009) over
+  (ctype.ml:1971-1981) over `flatten_fields` and the merge
+  `unify_fields` uses. Variants: `mcomp_row` (ctype.ml:1983-2009) over
   `flatten_row` and `merge_rows`, the table of ctype.ml:1996-2008;
 - polymorphic types without variables: the bodies. With variables:
   `enter_poly(left, right)`, which pushes a `LeavePoly` frame and the
@@ -6319,7 +6325,14 @@ eighth skeleton turn is the line "State:" below it.
     without `SCOPED`, not only under `PATTERN` (for a plan without
     scoped types `Checker::lower` is `Graph::lower`, so nothing
     changed there).
-    State: open at this commit: G1 (f) of the eighth turn.
+    State: paid in the eighth turn (G1 (f)). Each range was pasted
+    from the file: `link_type rm ty` is ctype.ml:2619 and `set_more`
+    2597-2619 (decision 60, the comment in `unify_row`, the doc of
+    `set_more` and three tests); `has_cached_expansion` is called at
+    2254 (the comment in `unify_pair`; 8.11 is rewritten in this
+    turn); `mcomp` 1905-1965, `mcomp_fields` 1971-1981, `mcomp_row`
+    1983-2009 with its table at 1996-2008 (decision 70 and the doc
+    comments of the three functions); decision 80 (b).
 
 **Corrections after the review of R3h** (pull request 356). Item 1 is
 decided here and built by R3r; 2 to 4 and 6 are owed by the next
@@ -6382,7 +6395,23 @@ words.
    r.head == CONSTR`; the arm as built tests tags and arities
    (decision 71, corrected above). One of the two texts is made the
    other's at R5c, when the arm is measured.
-   State: open at this commit: G1 (f) of the eighth turn.
+   State: recorded in the eighth turn (G1 (f)); R5c settles it. The
+   two texts, pasted: decision 65 has `l.head == CONSTR && r.head ==
+   CONSTR && !self.equations.is_empty()`; `unify_pair` as built has
+   `l.tag() == CONSTR && r.tag() == CONSTR && l.arity() == 0 &&
+   r.arity() == 0`, then the arm of one type (`l.a == r.a`), then
+   `!self.equations.is_empty()` and the call. They differ in one
+   thing: `head == CONSTR` is also false for a nullary constructor
+   node with a flag bit set in its head (bits 4 to 8), which the
+   tag-and-arity form accepts. What R5c must measure and decide: (1)
+   whether any nullary constructor node of a checked unit carries a
+   head flag (if one can, the one-compare form is wrong and the text
+   of decision 65 is made the code's); (2) if none can, the
+   instructions of the five unification operations of `tc_kernel`
+   with each form of the guard, and the cheaper form is made both
+   texts; (3) the one load of `equations.len()` for a pair of two
+   nullary constructors of different types on the application, with
+   the byte load of `umode` in `unify_expanded` (decision 71).
 5. Doc comments of the skeleton the builder changed, each read and
    accepted: `match_unmatched` (a shared chain longer than one node is
    copied from its first shared node, so that no slot of the source's
