@@ -4839,6 +4839,76 @@ fn an_equation_names_its_type_only_below_a_structure_or_a_contractive_type() {
     }
 }
 
+/// `non_recursive_abbrev` on a type that reaches itself: OCaml's
+/// `visited` is the list of the nodes on the way, and a node on it is
+/// skipped whatever the strictness it was entered with
+/// (`local_non_recursive_abbrev`, compiler/ml/ctype.ml:1503-1511 and
+/// 1525-1529):
+///
+/// ```text
+/// let rec local_non_recursive_abbrev strict visited env p ty =
+///   let ty = repr ty in
+///   if not (List.memq ty visited) then
+///     match ty.desc with
+///     | Tconstr (p', args, _abbrev) -> (
+///       if Path.same p p' then raise Occur;
+///       if (not strict) && is_contractive env p' then ()
+///       else
+///         let visited = ty :: visited in
+/// ...
+///     | _ ->
+///       if strict then
+///         (* PR#7374 *)
+///         let visited = ty :: visited in
+///         iter_type_expr (local_non_recursive_abbrev true visited env p) ty
+/// ```
+///
+/// `k2` is abstract (not contractive), its first parameter a variable
+/// and its second constrained. Two witnesses, both hand-built (only
+/// pattern mode makes a type that reaches itself, and no source program
+/// was found for either):
+///
+/// 1. `y = k2<(n0, int), (y)>`. OCaml enters `y` not strictly
+///    (`visited = [y]`), does not search `(n0, int)` (not strict),
+///    enters `(y)` strictly and skips `y`, which is on the way: "not
+///    recursive". A walk that enters `y` again because the second
+///    meeting is strict finds `n0` in the first argument.
+/// 2. `r = k2<y, x>` with `x = (y)` the second argument of that `y`.
+///    Below the first argument all is as in 1, and `y` and `x` are
+///    left. The second argument is `x`, strictly, with `visited = [r]`:
+///    `y` is not on the way now and is entered strictly, and `(n0,
+///    int)` holds `n0`: "recursive". A walk that remembered `x` as done
+///    when it left it in the first argument answers "not recursive":
+///    `x` was left after a strict meeting of `y`, which was on the way
+///    and entered otherwise, so it is not remembered.
+///
+/// Reaches: R3h.
+#[test]
+fn a_type_on_the_way_is_skipped_whatever_its_strictness() {
+    let build = |c: &mut Checker| {
+        c.types.constrained_bits = vec![0; K2 as usize + 1];
+        c.types.constrained_bits[K2 as usize] = 2;
+        let (n0, int) = (constr(c, N0, &[]), constr(c, INT, &[]));
+        let first = tuple(c, &[n0, int]);
+        let hole = var(c);
+        let x = tuple(c, &[hole]);
+        let y = constr(c, K2, &[first, x]);
+        c.g.link(hole, y);
+        (y, x)
+    };
+    let (mut c, _) = pattern_checker(Mode::Success);
+    let (y, _) = build(&mut c);
+    assert_eq!(c.non_recursive_abbrev(N0, y), Ok(true));
+    assert!(c.frames.is_empty());
+    // The same answer a second time: the marks of a call are its own.
+    assert_eq!(c.non_recursive_abbrev(N0, y), Ok(true));
+    let (mut c, _) = pattern_checker(Mode::Success);
+    let (y, x) = build(&mut c);
+    let r = constr(&mut c, K2, &[y, x]);
+    assert_eq!(c.non_recursive_abbrev(N0, r), Ok(false));
+    assert!(c.frames.is_empty());
+}
+
 /// The occurrence test of a variable in pattern mode (`occur_full` with
 /// `allow_recursive`, compiler/ml/ctype.ml:1467-1490; `occur_rec`,
 /// 1384-1408):

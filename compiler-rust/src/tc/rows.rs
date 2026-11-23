@@ -4018,24 +4018,69 @@ impl Checker {
     /// for a data type `box` are equations, while `a := M.t<a>` for an
     /// abstract `M.t` is none (both compilers; 8.9, decision 67).
     ///
-    /// OCaml's `visited` is the list of the nodes on the way from `ty`,
-    /// which only stops a cycle and walks a shared node once per path.
-    /// The kernel marks: two generations, one for a node visited strictly
-    /// and one for a node visited otherwise; a strict visit of a node
-    /// that was visited otherwise visits it again (it reaches more), so a
-    /// node is visited at most twice and the answer is OCaml's. The stack
-    /// is [`Checker::frames`] above the length the call finds: an
-    /// expansion lowers and unifies, which use `g.work` and the frames
-    /// above. Cost: at most two steps a node reached, one `TypeInfo` load
-    /// a constructor, one [`Checker::expand_head`] a constructor that is
-    /// entered. (R3h; CHECKER_REWRITE 8.9, decision 67)
+    /// OCaml's `visited` is the list of the nodes on the way from `ty`
+    /// (`if not (List.memq ty visited)`, 1505; `let visited = ty ::
+    /// visited`, 1511 and 1528): a node that is on the way is skipped
+    /// WHATEVER the strictness it was entered with, and a shared node
+    /// is walked once per path. The kernel keeps both facts in the
+    /// marks of one node, five generations:
+    ///
+    /// - *on the way* (entered strictly, entered otherwise, or entered
+    ///   otherwise and met again strictly: "met"): set when a
+    ///   constructor is entered or a structure is entered strictly, and
+    ///   taken off by a LEAVE entry of the stack that lies below the
+    ///   node's children. A node on the way is skipped, as line 1505
+    ///   skips it.
+    /// - *done* (strictly, or otherwise): what the LEAVE entry writes.
+    ///   A node that is done is not entered again, except strictly
+    ///   after a visit that was not strict (it reaches more). That
+    ///   memory across paths is not OCaml's, and it is sound only for a
+    ///   node whose walk skipped nothing a later path would enter. The
+    ///   one skip that breaks it is a STRICT meeting of a node that is
+    ///   on the way and was entered otherwise: on a later path that
+    ///   node is entered strictly. So while such a "met" node is on the
+    ///   way (`met`, a count), a node that is left is not remembered
+    ///   (its mark goes back to none), and is walked once per path as
+    ///   in OCaml. Every other skip is of a node whose own walk, once
+    ///   it is left, covered at least what the later visit would.
+    ///
+    /// The stack is [`Checker::frames`] above the length the call
+    /// finds: an expansion lowers and unifies, which use `g.work` and
+    /// the frames above. Cost: at most two entries and two LEAVE
+    /// entries a node reached, one `TypeInfo` load a constructor, one
+    /// [`Checker::expand_head`] a constructor that is entered; a node
+    /// below a "met" node is entered once per path that reaches it
+    /// while that node is on the way (a type that reaches itself
+    /// through a parameter that is not constrained and again through
+    /// one that is: only pattern mode makes one). (R3h; corrected in
+    /// the eighth skeleton turn; CHECKER_REWRITE 8.9, decision 67)
     pub fn non_recursive_abbrev(&mut self, source: u32, ty: Ty) -> Result<bool, Clash> {
+        /// The bit of `extra` that makes an entry a LEAVE entry.
+        const LEAVE: u32 = 2;
         let lax = self.fresh_marks();
         let strictly = self.fresh_marks();
+        let on_lax = self.fresh_marks();
+        let on_strict = self.fresh_marks();
+        let on_met = self.fresh_marks();
+        // How many nodes on the way are "met".
+        let mut met = 0u32;
         let base = self.frames.len();
         self.push_visit(ty, false);
         while self.frames.len() > base {
             let frame = self.frames.pop().expect("an entry above the base");
+            if frame.extra & LEAVE != 0 {
+                // The node's frame is left: `visited` loses it.
+                let slot = frame.left.0 as usize;
+                let mut done = if self.marks[slot] == on_strict { strictly } else { lax };
+                if self.marks[slot] == on_met {
+                    met -= 1;
+                }
+                if met != 0 {
+                    done = 0;
+                }
+                self.marks[slot] = done;
+                continue;
+            }
             let strict = frame.extra != 0;
             let t = self.g.repr(frame.left);
             // An expansion of the walk adds nodes past the marks.
@@ -4043,25 +4088,37 @@ impl Checker {
                 self.marks.resize(self.g.nodes.len(), 0);
             }
             let mark = self.marks[t.0 as usize];
+            if mark == on_lax || mark == on_strict || mark == on_met {
+                // `if not (List.memq ty visited)` (1505).
+                if strict && mark == on_lax {
+                    self.marks[t.0 as usize] = on_met;
+                    met += 1;
+                }
+                continue;
+            }
             if mark == strictly || (mark == lax && !strict) {
                 continue;
             }
-            self.marks[t.0 as usize] = if strict { strictly } else { lax };
+            let (done, on_the_way) = if strict { (strictly, on_strict) } else { (lax, on_lax) };
             #[cfg(test)]
             super::steps::tick();
             let node = self.g.nodes[t.0 as usize];
             if node.tag() != CONSTR {
                 // `| _ -> if strict then ... iter_type_expr` (1525-1529).
-                if strict {
-                    let count = match node.tag() {
-                        ARROW => node.arity() + 1,
-                        TUPLE => node.arity(),
-                        _ => 0,
-                    };
-                    for index in (0..count).rev() {
-                        let child = self.child(node, index).expect("a child below the count");
-                        self.push_visit(child, true);
-                    }
+                let count = match node.tag() {
+                    ARROW if strict => node.arity() + 1,
+                    TUPLE if strict => node.arity(),
+                    _ => 0,
+                };
+                if count == 0 {
+                    self.marks[t.0 as usize] = done;
+                    continue;
+                }
+                self.marks[t.0 as usize] = on_the_way;
+                self.frames.push(Frame { left: t, right: Ty(NONE), kind: FrameKind::Pair, extra: LEAVE });
+                for index in (0..count).rev() {
+                    let child = self.child(node, index).expect("a child below the count");
+                    self.push_visit(child, true);
                 }
                 continue;
             }
@@ -4070,8 +4127,12 @@ impl Checker {
                 return Ok(false);
             }
             if !strict && TypeTable::contractive(self.types.info(node.a)) {
+                self.marks[t.0 as usize] = done;
                 continue;
             }
+            // `let visited = ty :: visited in` (1511).
+            self.marks[t.0 as usize] = on_the_way;
+            self.frames.push(Frame { left: t, right: Ty(NONE), kind: FrameKind::Pair, extra: LEAVE });
             let head = match self.expand_head(t, ExpandMode::Unif) {
                 Ok(head) => self.g.repr(head),
                 Err(clash) => {
