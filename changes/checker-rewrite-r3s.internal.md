@@ -1,0 +1,1 @@
+- Type checker rewrite: GADT instance tracing (instance sets, own memos of traced expansions, tracing around unification) built in the new checker (R3s).

@@ -501,7 +501,14 @@ impl Checker {
     #[inline(never)]
     #[allow(unused_variables, dead_code)]
     fn unify_distinct_gadt(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
-        todo!("R3s")
+        let before = self.gadt & GADT_TRACING;
+        let late = self.gadt & GADT_LOCAL == 0;
+        if !late {
+            self.trace_on();
+        }
+        let result = self.unify_distinct_from(left, right, late);
+        self.gadt = self.gadt & !GADT_TRACING | before;
+        result
     }
 
     /// `check_trace_gadt_instances env` (compiler/ml/ctype.ml:178-184):
@@ -515,7 +522,12 @@ impl Checker {
     #[inline(never)]
     #[allow(unused_variables, dead_code)]
     pub fn trace_on(&mut self) -> bool {
-        todo!("R3s")
+        if self.gadt & (GADT_LOCAL | GADT_TRACING) != GADT_LOCAL {
+            return false;
+        }
+        self.gadt |= GADT_TRACING;
+        self.cleanup_abbrev();
+        true
     }
 
     /// `reset_trace_gadt_instances b` (compiler/ml/ctype.ml:186). O(1).
@@ -555,7 +567,19 @@ impl Checker {
     #[inline(never)]
     #[allow(unused_variables, dead_code)]
     fn late_pair(&mut self, left: Ty, right: Ty) -> Result<(), [Ty; 2]> {
-        todo!("R3s")
+        if self.gadt & (GADT_LOCAL | GADT_TRACING) != GADT_LOCAL {
+            return self.run_frames(usize::MAX, left, right);
+        }
+        let untrace = Frame {
+            left: Ty(NONE),
+            right: Ty(NONE),
+            kind: FrameKind::Untrace,
+            extra: 0,
+        };
+        self.frames.push(untrace);
+        self.trace_on();
+        let base = self.frames.len();
+        self.run_frames(base, left, right)
     }
 
     /// One pair of distinct representatives: the first step of `unify`
@@ -1708,7 +1732,7 @@ impl Checker {
     #[inline(never)]
     #[allow(unused_variables, dead_code)]
     fn has_own_expansion(&self, left: Ty, right: Ty) -> bool {
-        todo!("R3s")
+        self.own_expansion(left).0 != NONE || self.own_expansion(right).0 != NONE
     }
 
     /// The chains of the two sides of unify2 after `expand_head_unif`
@@ -1722,7 +1746,12 @@ impl Checker {
     #[inline(never)]
     #[allow(unused_variables, dead_code)]
     fn expanded_instances(&mut self, sides: [Ty; 2], heads: [Ty; 2]) {
-        todo!("R3s")
+        for (side, head) in sides.into_iter().zip(heads) {
+            let side = self.g.repr(side);
+            if side != head {
+                self.expanded_instance(side, head);
+            }
+        }
     }
 
     /// unify2 under tracing (compiler/ml/ctype.ml:2289-2298), for `t1`
@@ -1737,7 +1766,15 @@ impl Checker {
     #[inline(never)]
     #[allow(unused_variables, dead_code)]
     fn join_instance_levels(&mut self, t1: Ty, t2: Ty) {
-        todo!("R3s")
+        if self.gadt & GADT_MEMBER == 0 {
+            return;
+        }
+        let (lv1, lv2) = (self.instance_level(t1), self.instance_level(t2));
+        if lv1 > lv2 {
+            self.add_instance_chain(lv1, t2);
+        } else if lv2 > lv1 {
+            self.add_instance_chain(lv2, t1);
+        }
     }
 
     /// `Env.add_gadt_instance_level lv env` (compiler/ml/env.ml:
@@ -1748,7 +1785,21 @@ impl Checker {
     /// variable at level 0 with `b = NONE`) and one 12-byte row. (R3s)
     #[allow(unused_variables, dead_code)]
     pub fn enter_instance_scope(&mut self, level: u32) -> CaseMark {
-        todo!("R3s")
+        let mark = self.case_mark();
+        let head = self.g.push(Node {
+            head: VAR,
+            level: 0,
+            a: NONE,
+            b: NONE,
+        });
+        let parent = self.instance_scope;
+        self.instance_scope = self.instance_scopes.len() as u32;
+        self.instance_scopes.push(InstanceScope {
+            level,
+            parent,
+            head,
+        });
+        mark
     }
 
     /// O(1): the environment as it is: the number of equations, the
@@ -1773,7 +1824,9 @@ impl Checker {
     /// decision 101)
     #[allow(unused_variables, dead_code)]
     pub fn leave_case(&mut self, mark: CaseMark) {
-        todo!("R3s")
+        self.cut_equations(mark.equations as usize);
+        self.instance_scope = mark.scope;
+        self.gadt = self.gadt & !GADT_LOCAL | mark.local;
     }
 
     /// `Env.add_local_type path decl env` (compiler/ml/env.ml:1802-1803)
@@ -1785,7 +1838,7 @@ impl Checker {
     #[inline]
     #[allow(unused_variables, dead_code)]
     pub fn add_local_type(&mut self) {
-        todo!("R3s")
+        self.gadt |= GADT_LOCAL;
     }
 
     /// `Env.gadt_instance_level env t` (compiler/ml/env.ml:1314-1323)
@@ -1798,7 +1851,24 @@ impl Checker {
     /// A caller reads [`GADT_MEMBER`] first. (R3s; decision 106)
     #[allow(unused_variables, dead_code)]
     pub fn instance_level(&mut self, ty: Ty) -> u32 {
-        todo!("R3s")
+        let mut scope = self.instance_scope;
+        while scope != NONE {
+            #[cfg(test)]
+            super::steps::tick();
+            let row = self.instance_scopes[scope as usize];
+            let mut member = self.g.nodes[row.head.0 as usize].b;
+            while member != NONE {
+                #[cfg(test)]
+                super::steps::tick();
+                let entry = self.instance_members[member as usize];
+                if self.g.repr(entry.ty) == ty {
+                    return row.level;
+                }
+                member = entry.next;
+            }
+            scope = row.parent;
+        }
+        0
     }
 
     /// O(scopes visited): the first scope of level `level` from the
@@ -1808,7 +1878,17 @@ impl Checker {
     /// (CHECKER_REWRITE 8.11, (v)). One step a scope.
     #[allow(unused_variables, dead_code)]
     fn instance_scope_at(&self, level: u32) -> u32 {
-        todo!("R3s")
+        let mut scope = self.instance_scope;
+        while scope != NONE {
+            #[cfg(test)]
+            super::steps::tick();
+            let row = self.instance_scopes[scope as usize];
+            if row.level == level {
+                return scope;
+            }
+            scope = row.parent;
+        }
+        NONE
     }
 
     /// O(1) amortized: `ty` joins the set of scope `scope` (an index of
@@ -1821,7 +1901,16 @@ impl Checker {
     /// member. (R3s; decision 98)
     #[allow(unused_variables, dead_code)]
     fn push_instance(&mut self, scope: u32, ty: Ty) {
-        todo!("R3s")
+        if self.gadt & GADT_MEMBER == 0 {
+            self.gadt |= GADT_MEMBER;
+            self.types.scoped += 1;
+        }
+        let head = self.instance_scopes[scope as usize].head;
+        let node = self.g.nodes[head.0 as usize];
+        let member = self.instance_members.len() as u32;
+        self.instance_members
+            .push(InstanceMember { ty, next: node.b });
+        self.g.write(head, Node { b: member, ..node });
     }
 
     /// `Env.add_gadt_instances env lv tl` (compiler/ml/env.ml:1325-1329)
@@ -1830,7 +1919,14 @@ impl Checker {
     /// O(scopes visited + tys). (R3s)
     #[allow(unused_variables, dead_code)]
     pub fn add_instances(&mut self, level: u32, tys: &[Ty]) {
-        todo!("R3s")
+        let scope = self.instance_scope_at(level);
+        if scope == NONE {
+            return;
+        }
+        for &ty in tys {
+            let ty = self.g.repr(ty);
+            self.push_instance(scope, ty);
+        }
     }
 
     /// `Env.add_gadt_instance_chain env lv t` (compiler/ml/env.ml:
@@ -1847,7 +1943,51 @@ impl Checker {
     /// chain), not their product. (R3s; decision 106)
     #[allow(unused_variables, dead_code)]
     pub fn add_instance_chain(&mut self, level: u32, ty: Ty) {
-        todo!("R3s")
+        let scope = self.instance_scope_at(level);
+        if scope == NONE {
+            return;
+        }
+        // The set's members, marked once.
+        let generation = self.fresh_marks();
+        let mut member = self.g.nodes[self.instance_scopes[scope as usize].head.0 as usize].b;
+        while member != NONE {
+            #[cfg(test)]
+            super::steps::tick();
+            let entry = self.instance_members[member as usize];
+            let node = self.g.repr(entry.ty);
+            self.marks[node.0 as usize] = generation;
+            member = entry.next;
+        }
+        // `add_instance`, a loop: each node of the chain once.
+        let mut ty = self.g.repr(ty);
+        loop {
+            #[cfg(test)]
+            super::steps::tick();
+            if self.marks[ty.0 as usize] == generation {
+                return;
+            }
+            self.marks[ty.0 as usize] = generation;
+            self.push_instance(scope, ty);
+            let node = self.g.nodes[ty.0 as usize];
+            if node.tag() != CONSTR {
+                return;
+            }
+            // `find_expans Private p !memo` on the node's own memo.
+            let expansion = if node.arity() == 0 {
+                self.own_expansion(ty)
+            } else {
+                let slot = self.g.lists[node.b as usize];
+                if slot.0 != NONE || self.types.info(node.a).flags & INHERITS == 0 {
+                    slot
+                } else {
+                    self.inherited_expansion(node, true)
+                }
+            };
+            if expansion.0 == NONE {
+                return;
+            }
+            ty = self.g.repr(expansion);
+        }
     }
 
     /// The copy WITH an environment (`copy ?env`, compiler/ml/ctype.ml:
@@ -1863,7 +2003,42 @@ impl Checker {
     /// lookup a copied node. (R3s; decisions 101 and 107)
     #[allow(unused_variables, dead_code)]
     pub fn copy_in(&mut self, root: Ty) -> Ty {
-        todo!("R3s")
+        let copied = self.copy(root);
+        // `Some env when Env.has_local_constraints env` (ctype.ml:771).
+        if self.gadt & (GADT_MEMBER | GADT_LOCAL) != GADT_MEMBER | GADT_LOCAL {
+            return copied;
+        }
+        // A source whose copy was added is marked: an outer scope that
+        // holds it too adds nothing (`gadt_instance_level` answers the
+        // innermost scope).
+        let generation = self.fresh_marks();
+        let mut scope = self.instance_scope;
+        while scope != NONE {
+            #[cfg(test)]
+            super::steps::tick();
+            let row = self.instance_scopes[scope as usize];
+            let mut member = self.g.nodes[row.head.0 as usize].b;
+            while member != NONE {
+                #[cfg(test)]
+                super::steps::tick();
+                let entry = self.instance_members[member as usize];
+                member = entry.next;
+                let source = self.g.repr(entry.ty);
+                let Some(&forward) = self.g.forward.get(source.0 as usize) else {
+                    continue;
+                };
+                if forward.generation != self.g.copy_generation
+                    || self.marks[source.0 as usize] == generation
+                {
+                    continue;
+                }
+                self.marks[source.0 as usize] = generation;
+                let target = self.g.repr(Ty(forward.target));
+                self.push_instance(scope, target);
+            }
+            scope = row.parent;
+        }
+        copied
     }
 
     /// `unify_var` (compiler/ml/ctype.ml:2752-2771): unify a variable that
@@ -1972,11 +2147,14 @@ impl Checker {
         debug_assert!(self.scopes.is_empty(), "no scope of universal variables is open");
         let before = (self.umode, self.generate_equations, self.assume_injective);
         self.umode = UnifyMode::Pattern;
+        let pattern = self.gadt & GADT_PATTERN;
+        self.gadt |= GADT_PATTERN;
         self.generate_equations = generate;
         self.assume_injective = injective;
         self.newtype_level = newtype_level;
         let result = self.unify(left, right);
         (self.umode, self.generate_equations, self.assume_injective) = before;
+        self.gadt = self.gadt & !GADT_PATTERN | pattern;
         self.newtype_level = 0;
         if !self.pairs.keys.is_empty() {
             self.pairs.keys.clear();
@@ -2374,12 +2552,6 @@ impl Checker {
                 FrameKind::Pair => {
                     let (left, right) = (self.g.repr(frame.left), self.g.repr(frame.right));
                     if left != right {
-                        // Until R3s sets `GADT_PATTERN` the rest is
-                        // run as before; its last commit deletes this
-                        // test and the `return` (8.4, the prompt).
-                        if self.gadt & GADT_PATTERN == 0 {
-                            return self.run_frames(base, left, right);
-                        }
                         self.late_pair(left, right)?;
                     }
                 }

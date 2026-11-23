@@ -3990,6 +3990,8 @@ impl Checker {
         if newtype_level != 0 {
             self.types.scoped += 1;
         }
+        // `Env.add_local_type` (compiler/ml/ctype.ml:1823). (R3s)
+        self.gadt |= super::unify::GADT_LOCAL;
         let b = self.g.lists.len() as u32;
         self.g.lists.push(Ty(NONE));
         self.g.push(Node { head: CONSTR, level, a: fresh, b })
@@ -4054,6 +4056,8 @@ impl Checker {
         let expansion_level = self.newtype_level;
         self.types.newtypes.push(Newtype { level, expansion_level });
         self.equations.push(Equation { type_index: source, previous });
+        // `Env.add_local_constraint` (compiler/ml/ctype.ml:2099). (R3s)
+        self.gadt |= super::unify::GADT_LOCAL;
         let flags = previous.flags | ABBREV | NEWTYPE;
         self.types.rows[source as usize] = TypeInfo { manifest, newtype, flags, ..previous };
         Ok(())
