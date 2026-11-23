@@ -1,0 +1,1 @@
+- Backend rewrite: the new lowering keeps the block an untagged dispatch's `if` becomes as one statement where the dispatch returns, as the backend in use does since the fix of an `else` lost after a nested guarded switch. Check mode agrees on `tests/tests` again.

@@ -850,14 +850,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
     }
 
-    /// V: untagged_if / normalized_if_block. O(statements consumed by J-S3).
+    /// V: untagged_if. One `S.if_` statement whatever the continuation, as
+    /// `compile_untagged_plan` gives it (compiler/core/lam_compile.ml:1008,
+    /// 1028). When the rule turns the `if` into a guard and a sequence,
+    /// that block stays one statement, also where the dispatch returns: an
+    /// enclosing `if` then does not see the sequence's last `return` and
+    /// keeps its `else`. O(statements consumed by J-S3).
     fn untagged_if(&mut self, p: &mut Plan<B::S, B::E>, test: B::E, yes: Span, no: Span) {
         let start = self.untagged_storage.marks.pop(&mut p.marks);
         let statement = self.if_statement(test, yes, no);
         self.place(start.start, statement);
-        if matches!(p.cont, Cont::Effect(Tail::Return(_))) {
-            self.unnest(start.start);
-        }
         self.untagged_storage.outputs.push(
             &mut p.outputs,
             Output {
