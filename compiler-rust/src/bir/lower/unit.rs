@@ -67,7 +67,7 @@ pub(super) fn lower(
         let mut out = state.realize(cx, probed);
         if next.is_some() {
             if let Some(value) = out.value.take() {
-                state.drop_pure_effect(<crate::bir::j::rows::Rows as js::Js>::node(value));
+                state.drop_pure_effect(value);
                 out.stmts = state.statements.since(Span { start: out.stmts.start, len: 0 });
             }
         }

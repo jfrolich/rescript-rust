@@ -192,7 +192,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     if out.finished == Finished::True {
                         self.js.release(&mut self.arena, value);
                     } else {
-                        self.drop_pure_effect(B::node(value));
+                        self.drop_pure_effect(value);
                     }
                 }
             }
@@ -673,7 +673,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     return None;
                 }
                 let mark = self.statements.mark();
-                self.drop_pure_effect(B::node(value));
+                self.drop_pure_effect(value);
                 Some(self.statements.since(mark))
             }
         }
@@ -688,7 +688,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             (None, None) => return self.push_s_if_empty(test),
             (Some(yes), Some(no)) => {
                 let value = self.js.cond(&mut self.arena, test, yes, no);
-                return self.drop_pure_effect(B::node(value));
+                return self.drop_pure_effect(value);
             }
             (Some(value), None) => (test, value),
             (None, Some(value)) => (self.js.not(&mut self.arena, test), value),

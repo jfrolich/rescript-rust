@@ -667,7 +667,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         } else {
             let start = out.stmts.start;
             if let Some(value) = out.value.take() {
-                self.drop_pure_effect(B::node(value));
+                self.drop_pure_effect(value);
             }
             let p = self.switch_plan(frame);
             // O(1): default-first traversal still writes stable pooled case slots.

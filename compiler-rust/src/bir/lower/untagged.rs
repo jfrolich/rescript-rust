@@ -656,7 +656,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             assert_eq!(action as usize, index - 1);
             p.pc += 1;
             if let Some(value) = out.value.take() {
-                self.drop_pure_effect(B::node(value));
+                self.drop_pure_effect(value);
             }
             self.unnest(out.stmts.start);
             out.stmts = self.statements.since(Span {

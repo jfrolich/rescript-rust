@@ -80,7 +80,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mut out = self.realize(cx, child);
         let body_index = if self.loops[frame.0 as usize].nodes[2].is_some() { 2 } else { 1 };
         if index == body_index {
-            if let Some(value) = out.value.take() { self.drop_pure_effect(B::node(value)); }
+            if let Some(value) = out.value.take() { self.drop_pure_effect(value); }
         } else {
             self.loops[frame.0 as usize].values[index] = out.value;
         }

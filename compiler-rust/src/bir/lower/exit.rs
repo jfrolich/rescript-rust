@@ -327,7 +327,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mut out = self.realize(cx, child);
         if let Some(value) = out.value.take() {
             debug_assert!(matches!(cx.cont, Cont::Effect(Tail::No)));
-            self.drop_pure_effect(B::node(value));
+            self.drop_pure_effect(value);
         }
         let run = self.statements.trim(Span { start: out.stmts.start, len: 0 });
         let finished = out.finished;
