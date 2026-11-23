@@ -5269,6 +5269,26 @@ then what the turn itself decided, each with what was run.
     `lower_scoped_loop` gets one compare of `frame.extra`, a field of
     the frame it has popped (no load), per entry.
 
+90. **The step tests the review of R3r asked for** (G1 (e)).
+    `mcomp_fields` counted its merge steps; `mcomp_row` had two loops
+    without a step (the tags only one row has, read when the other row
+    is closed; the common tags) and now counts both (test-only code).
+    Tests, relations between 1,000 and 10,000, each seen to fail with
+    its structure broken:
+    `r3_tests::mcomp_on_ten_thousand_fields_and_tags_is_linear` (two
+    closed objects of n fields and two closed rows of n present tags
+    whose types are one n-deep chain a side; with the table's test
+    taken out: 4,007,006 against 400,070,006 steps for the objects and
+    4,005,003 against 400,050,003 for the rows) and
+    `r3_tests::recovering_inside_ten_thousand_nested_attempts_is_
+    linear` (with a `recover` that reads every open record: 520,501
+    against 50,205,001). The witness of the second is made of rows
+    and not of arguments: the attempt of an argument cannot be nested
+    in another, because inside one `generate_equations` is off and the
+    arguments of a constructor go to `unify_list` (ctype.ml:2349-2350);
+    the attempt of two variants is taken in pattern mode whatever the
+    flags (2402-2411).
+
 
 ### 8.7 The hot paths of unification (K2)
 

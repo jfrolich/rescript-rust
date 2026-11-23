@@ -4489,9 +4489,11 @@ impl Checker {
     /// the other has present; then, per common tag in the merge's order,
     /// the table of ctype.ml:1996-2007: a clash, the pair of the two
     /// present types, or the present type against each type of the
-    /// other's conjunction. O(tags + chains) plus the merge, no
-    /// allocation once the scratch has the capacity; the scratch is cut
-    /// back to where it was.
+    /// other's conjunction. O(tags + chains) plus the merge, one step a
+    /// tag flattened, a merge step, a tag only one row has (when the
+    /// other row is closed) and a common tag; no allocation once the
+    /// scratch has the capacity; the scratch is cut back to where it
+    /// was.
     fn mcomp_row(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
         let base = self.extras.row_scratch.len();
         let top1 = self.open_row(left);
@@ -4512,7 +4514,11 @@ impl Checker {
         let r1 = base..base + n1 - pairs;
         let r2 = r1.end..r1.end + n2 - pairs;
         let present = |c: &Checker, range: std::ops::Range<usize>| {
-            range.into_iter().any(|at| c.field_now_at(at).kind == RowFieldKind::Present)
+            range.into_iter().any(|at| {
+                #[cfg(test)]
+                super::steps::tick();
+                c.field_now_at(at).kind == RowFieldKind::Present
+            })
         };
         let mut result = if (closed1 && present(self, r2.clone())) || (closed2 && present(self, r1.clone())) {
             Err(Clash)
@@ -4523,6 +4529,8 @@ impl Checker {
             if result.is_err() {
                 break;
             }
+            #[cfg(test)]
+            super::steps::tick();
             let at = r2.end + 2 * k;
             let (f1, f2) = (self.field_now_at(at), self.field_now_at(at + 1));
             result = match (mcomp_shape(f1), mcomp_shape(f2)) {

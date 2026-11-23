@@ -5480,6 +5480,124 @@ fn recovering_ten_thousand_attempts_is_linear() {
     assert!(large <= 11 * small, "recover: {small} {large}");
 }
 
+/// `mcomp` on two wide types, as relations between 1,000 and 10,000
+/// (owed by the review of R3r: `mcomp_fields` and `mcomp_row` loop over
+/// fields and tags, compiler/ml/ctype.ml:1969-2007, and no step test
+/// drove them wide). Witnesses: two closed objects of n fields and two
+/// closed rows of n present tags; the type of every field or tag of the
+/// left is ONE n-deep chain and of the right ANOTHER, so each of the n
+/// pairs the loop gives is the same pair of chains. With the table of
+/// pairs (`Type_pairs.find type_pairs (t1', t2')`, ctype.ml:1922-1924)
+/// the chains are compared once and the steps are linear in n: one a
+/// field flattened, one a merge step, one a common tag, one a pair
+/// popped. Seen to fail with the table's test taken out (every pair
+/// walks the chains again; objects 4,007,006 against 400,070,006 steps,
+/// the rows 4,005,003 against 400,050,003).
+///
+/// Reaches: R3r.
+#[test]
+fn mcomp_on_ten_thousand_fields_and_tags_is_linear() {
+    let run = |n: u32, rows: bool| {
+        let (mut c, _) = pattern_checker(Mode::Success);
+        let chain = |c: &mut Checker| {
+            let mut ty = constr(c, T, &[]);
+            for _ in 0..n {
+                let int = constr(c, INT, &[]);
+                ty = tuple(c, &[int, ty]);
+            }
+            ty
+        };
+        let labels: Vec<String> = (0..n).map(|k| format!("f{k:05}")).collect();
+        let side = |c: &mut Checker, ty: Ty| {
+            if rows {
+                let tags: Vec<(&str, Tag)> = labels.iter().map(|label| (label.as_str(), Tag::Present(Some(ty)))).collect();
+                let more = nil_at(c, 1);
+                variant_at(c, 1, &tags, more, true, NONE)
+            } else {
+                let fields: Vec<(&str, bool, Ty)> = labels.iter().map(|label| (label.as_str(), false, ty)).collect();
+                let rest = nil_at(c, 1);
+                obj(c, &fields, rest).0
+            }
+        };
+        let (a, b) = (chain(&mut c), chain(&mut c));
+        let (left, right) = (side(&mut c, a), side(&mut c, b));
+        let mut result = Err(super::unify::Clash);
+        let count = steps::scope(|| result = c.mcomp(left, right));
+        assert!(result.is_ok());
+        assert!(c.compatible.keys.is_empty() && c.frames.is_empty());
+        assert!(count >= u64::from(n), "{count}");
+        count
+    };
+    for rows in [false, true] {
+        let (small, large) = (run(1_000, rows), run(10_000, rows));
+        assert!(large <= 11 * small, "mcomp, rows {rows}: {small} {large}");
+    }
+}
+
+/// Attempts nested n deep, each with a failure of its own (owed by the
+/// review of R3r: `recovering_ten_thousand_attempts_is_linear` runs its
+/// attempts one after the other). The attempt of an argument cannot be
+/// nested in another (inside one `generate_equations` is off and the
+/// arguments go to `unify_list`, compiler/ml/ctype.ml:2349-2350); the
+/// attempt of two variants can (ctype.ml:2402-2411, taken in pattern
+/// mode whatever the flags):
+///
+/// ```text
+/// | Tvariant row1, Tvariant row2 -> (
+///   if !(umode ()) = Expression then unify_row env row1 row2
+///   else
+///     let snap = snapshot () in
+///     try unify_row env row1 row2
+///     with Unify _ ->
+///       backtrack snap;
+///       reify env t1';
+///       reify env t2';
+///       if !(generate_equations ()) then mcomp !env t1' t2')
+/// ```
+///
+/// Witness: `t(0) = int`, `t(i + 1) = [#A(([#B], t(i)))]` on the left
+/// and the same with `[#C]` on the right, every row closed, with
+/// `generate_equations` off. The attempt of the two rows at depth i
+/// stays open while the pair of the arguments of `#A` is unified; in it
+/// `[#B]` against `[#C]` is an attempt of its own that fails (a closed
+/// row lacks the other's tag) inside i + 1 open attempts and is
+/// recovered by the LAST record alone; then the walk goes one row
+/// deeper. At the end the n outer attempts are kept. Relation between
+/// 1,000 and 10,000: linear. Seen to fail with a `recover` that reads
+/// every open record (one step a record: 520,501 against 50,205,001 steps).
+///
+/// Reaches: R3h, R3r.
+#[test]
+fn recovering_inside_ten_thousand_nested_attempts_is_linear() {
+    let run = |n: u32| {
+        let (mut c, _) = pattern_checker(Mode::Success);
+        let side = |c: &mut Checker, tag: &str| {
+            let mut ty = constr(c, INT, &[]);
+            for _ in 0..n {
+                let nil = nil_at(c, 1);
+                let leaf = variant_at(c, 1, &[(tag, Tag::Present(None))], nil, true, NONE);
+                let pair = tuple(c, &[leaf, ty]);
+                let nil = nil_at(c, 1);
+                ty = variant_at(c, 1, &[("A", Tag::Present(Some(pair)))], nil, true, NONE);
+            }
+            ty
+        };
+        let (left, right) = (side(&mut c, "B"), side(&mut c, "C"));
+        let (mut result, mut deepest) = (Err(super::unify::Clash), 0);
+        let count = steps::scope(|| result = c.unify_pattern(2, false, false, left, right));
+        assert!(result.is_ok());
+        assert_pattern_left(&c);
+        assert_eq!(c.g.speculation_depth, 0);
+        assert!(c.tries.is_empty());
+        deepest += c.tries.capacity();
+        // The records were nested: the pool grew to the depth.
+        assert!(deepest > n as usize, "{deepest}");
+        count
+    };
+    let (small, large) = (run(1_000), run(10_000));
+    assert!(large <= 11 * small, "nested recover: {small} {large}");
+}
+
 /// Decision 60 in pattern mode. Witness: `[> #A] as P<y>` (the LEFT
 /// node, its own last row) against `[> #B]` in pattern mode, `y` in no
 /// field. Pattern mode links neither variant node (`Pattern ->
