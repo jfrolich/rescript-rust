@@ -193,6 +193,15 @@ pub(crate) const UNIVARS: u16 = 1 << 8;
 /// sides end their form with the equations in force, one line a type
 /// that has one, sorted by name: `= name := body`.
 pub(crate) const PATTERN: u16 = 1 << 9;
+/// GADT instances (slice R3s; section 8.6, decisions 103 and 110), on
+/// top of [`PATTERN`]. A case gets [`Op::Scope`] before a pattern
+/// unification; [`Op::Copy`] and [`Op::Lower`] run WITH the environment
+/// of the case on both sides (`instance env`, compiler/ml/ctype.ml:
+/// 846-851; `update_level env`, 633-640), and a pattern unification that
+/// fails drops the whole environment it made (`Checker::leave_case`).
+/// Without the bit no case has a scope, and the old checker, which adds
+/// a member only to a set that exists, judges nothing of the slice.
+pub(crate) const INSTANCES: u16 = 1 << 10;
 
 /// A tier and what a case adds to it. 4 bytes, passed by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,6 +296,12 @@ pub(crate) enum Op {
     /// constructor, ctype.ml:2352, 2368). The equations it adds stay in
     /// force for the rest of the case. [`PATTERN`].
     Gadt(u16, u16, u8),
+    /// A scope of GADT instances at the current level
+    /// (`Env.add_gadt_instance_level lev env`, compiler/ml/env.ml:
+    /// 1307-1308; `Checker::enter_instance_scope`), for the rest of the
+    /// case: a pattern unification at this level then adds its
+    /// equations at the level of a set that exists. [`INSTANCES`].
+    Scope,
 }
 
 /// A deliberately wrong new side, for the tests that prove the harness sees
@@ -733,7 +748,18 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
                         Op::Child(instance, rng.below(4) as u8),
                         Op::Child(instance, rng.below(4) as u8),
                     ];
+                    // [`INSTANCES`]: two in three get a scope at the
+                    // level of the pattern, popped just before it. The
+                    // generator is asked only under the bit: the cases
+                    // of every other plan are what they were.
+                    if plan.has(INSTANCES) && rng.below(3) != 0 {
+                        follow.insert(1, Op::Scope);
+                    }
                     Op::Instance(value as u16)
+                }
+                3 | 4 if plan.has(INSTANCES) && rng.below(2) == 0 => {
+                    follow = vec![Op::Gadt(operand(rng), operand(rng), 3)];
+                    Op::Scope
                 }
                 3 => Op::Gadt(operand(rng), operand(rng), 3),
                 4 => Op::Gadt(operand(rng), operand(rng), rng.below(3) as u8),
@@ -1107,7 +1133,17 @@ fn run_old_until(program: &Program, plan: Plan, ops: &[Op], cut: &mut Option<usi
         let mut refined = None;
         match *op {
             Op::Instance(value) => operands.push(ctype::instance(ctx, old.values[value as usize])),
+            // `instance env` (ctype.ml:846-851): the copy of a member
+            // joins the member's set.
+            Op::Copy(operand) if plan.has(INSTANCES) => {
+                operands.push(ctype::instance_in(ctx, env, operands[operand as usize]))
+            }
             Op::Copy(operand) => operands.push(ctype::instance(ctx, operands[operand as usize])),
+            Op::Scope => {
+                let mut scoped = env.clone();
+                scoped.add_gadt_instance_level(ctx, ctx.current_level());
+                refined = Some(scoped);
+            }
             Op::BeginDef => ctx.begin_def(),
             Op::EndDef => ctx.end_def(),
             Op::Generalize(operand) => ctype::generalize(ctx, operands[operand as usize]),
@@ -1116,7 +1152,7 @@ fn run_old_until(program: &Program, plan: Plan, ops: &[Op], cut: &mut Option<usi
             }
             Op::Lower(operand, level) => {
                 let (level, ty) = (base + i32::from(level), operands[operand as usize]);
-                if plan.has(SCOPED) {
+                if plan.has(SCOPED) || plan.has(INSTANCES) {
                     // `update_level` with the environment
                     // (compiler/ml/ctype.ml:633-640). Its trace pair is the
                     // escaping node and a fresh variable; see `Fault` and
@@ -1863,9 +1899,20 @@ impl New {
                 }
                 self.operands.push(ty);
             }
+            Op::Scope => {
+                let level = self.checker.g.level;
+                self.checker.enter_instance_scope(level);
+                // A scope is a new environment, and the next expansion
+                // in a new environment forgets the memorized ones
+                // (`check_abbrev_env`, compiler/ml/ctype.ml:1163-1167);
+                // the walk says so with `Checker::set_env`.
+                self.checker.cleanup_abbrev();
+            }
             Op::Copy(operand) => {
                 let source = self.operands[operand as usize];
-                let ty = if self.tier.memo_aware() {
+                let ty = if self.plan.has(INSTANCES) {
+                    self.checker.copy_in(source)
+                } else if self.tier.memo_aware() {
                     self.checker.copy(source)
                 } else {
                     self.checker.g.copy(source)
@@ -1905,6 +1952,10 @@ impl New {
                     if node.level > level {
                         self.checker.g.nodes[ty.0 as usize].level = level;
                     }
+                } else if self.plan.has(INSTANCES) {
+                    // With the environment, as the old side lowers
+                    // under this bit.
+                    return self.checker.lower(ty, level).map_err(|_| ());
                 } else if !self.tier.scoped_lower() || !self.plan.has(SCOPED) {
                     // Without late types the old side lowers without an
                     // environment (`ctype::update_level`): no scope
@@ -2039,11 +2090,18 @@ impl New {
                 // compiler/ml/typecore.ml:1299-1305), as the old side of
                 // the harness does: the equations it added are cut.
                 let equations = self.checker.equations.len();
+                let mark = self.checker.case_mark();
                 let result =
                     self.checker
                         .unify_pattern(level, flags & 1 != 0, flags & 2 != 0, left, right);
                 if result.is_err() {
-                    self.checker.cut_equations(equations);
+                    if self.plan.has(INSTANCES) {
+                        // The whole environment: the reified types it
+                        // made are local constraints too (decision 85).
+                        self.checker.leave_case(mark);
+                    } else {
+                        self.checker.cut_equations(equations);
+                    }
                 }
                 return result.map_err(|_| ());
             }
@@ -3608,7 +3666,8 @@ mod tests {
     /// R3x.
     #[test]
     fn ignored_tests_name_the_slices_they_reach() {
-        let before: [(&str, &[&str]); 12] = [
+        let before: [(&str, &[&str]); 13] = [
+            ("R3s", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3h", "R3r", "R3q"]),
             ("R3q", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3h", "R3r"]),
             ("R3r", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3h"]),
             ("R3p", &["R3m", "R3e"]),
@@ -5122,6 +5181,21 @@ mod tests {
         );
     }
 
+    /// AFTER R3s (run against its prototype; CHECKER_REWRITE 8.6,
+    /// decision 110 as corrected in its review): `EXPLAINED_UNTIL_R3S`
+    /// is empty, `EXPLAINED_OLD_DIFFERS` stays as it is, and
+    /// `EXPLAINED_NEW_DIFFERS` is `[4_000_045, 20_000_132]`. On those
+    /// two seeds it is the NEW side that differs from OCaml. After a
+    /// unification that failed, OCaml's `unify` expands the types of
+    /// the trace with tracing off (`raise (Unify (expand_trace !env
+    /// trace))`, compiler/ml/ctype.ml:2732-2737; `expand_trace`,
+    /// 1697-1701), so the expansion of `n1` is in the memo all `n1`
+    /// nodes share (200-202) and a later instance links to the node.
+    /// The old side does the same (`ctype::record_trace_expansions`).
+    /// The new side expands no trace yet: once it traces, its expansion
+    /// is in the node's own memo only and the instance is a new node.
+    /// Owed by the design turn after R3s.
+    ///
     /// The seeds of the explained pattern plan (20 programs of 100 cases)
     /// that differ. The first five wait for R3s as [`UNTIL_R3S`] does (a
     /// nullary constructor's memo while instances are traced; in
@@ -5144,10 +5218,15 @@ mod tests {
     const EXPLAINED_UNTIL_R3S: [u64; 5] =
         [10_000_129, 11_000_054, 17_000_100, 18_000_066, 20_000_132];
     const EXPLAINED_OLD_DIFFERS: [u64; 2] = [8_000_098, 11_000_046];
+    /// The seeds of the explained pattern plan on which the NEW side
+    /// differs from OCaml and the old checker is right (see above):
+    /// none until R3s is built.
+    const EXPLAINED_NEW_DIFFERS: [u64; 0] = [];
 
     /// The seeds of the pattern plan on which the new side differs from
     /// OCaml (and from the old checker, which is right here) until slice
-    /// R3s. In each, an instance is taken after a pattern case has added
+    /// R3s (all seven agree against the prototype of R3s; its build
+    /// makes this list empty). In each, an instance is taken after a pattern case has added
     /// an equation and expanded a locally abstract type inside a later
     /// case: the copy of a nullary constructor of that type links to the
     /// node that was expanded, where OCaml makes a node. While GADT
@@ -5236,7 +5315,8 @@ mod tests {
         assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
         let (explained, differing) =
             run_plan(Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN), 1, 20, 100);
-        let mut known = [&EXPLAINED_UNTIL_R3S[..], &EXPLAINED_OLD_DIFFERS[..]].concat();
+        let mut known =
+            [&EXPLAINED_UNTIL_R3S[..], &EXPLAINED_OLD_DIFFERS[..], &EXPLAINED_NEW_DIFFERS[..]].concat();
         known.sort_unstable();
         let seeds: Vec<u64> = differing.iter().map(|(seed, _)| *seed).collect();
         let unknown = differing.iter().find(|(seed, _)| !known.contains(seed));
@@ -5259,5 +5339,114 @@ mod tests {
         assert_eq!(coverage.cases, 10_000);
         assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
         run_cases(Plan::new(Tier::Full, UNIVAR_PLAN | BUILD), 1, 100, 100);
+    }
+
+    /// The plan of the cases of GADT instances.
+    const INSTANCE_PLAN: u16 = PATTERN_PLAN | INSTANCES;
+
+    /// `n0 := int` at the level of a scope when `scope`, then `n0`
+    /// against `int` in expression mode, which expands the node `n0`
+    /// under tracing, then `last`. Operand 1 is the node `n0`, operand 2
+    /// the node `int`.
+    fn instance_case(scope: bool, last: &[Op]) -> Vec<Op> {
+        let mut ops = vec![Op::BeginDef, Op::Instance(0), Op::Child(0, 0), Op::Child(0, 2)];
+        if scope {
+            ops.push(Op::Scope);
+        }
+        ops.extend([Op::Gadt(1, 2, 3), Op::Unify(1, 2)]);
+        ops.extend_from_slice(last);
+        ops
+    }
+
+    /// What today's checker does with GADT instances when the case has
+    /// a scope ([`INSTANCES`]; pull requests 350 and 352), observed: it
+    /// is the judge of the generated cases of R3s. `n0 := int` at the
+    /// level of a scope, then `n0` used at `int`, which expands the node
+    /// under tracing (compiler/ml/ctype.ml:1218-1227): the node and the
+    /// node of `int` it was unified with are members of the set, and
+    ///
+    /// - lowering either below the scope is refused
+    ///   (`| Some lv -> if level < lv then raise (Unify [(ty, newvar2
+    ///   level)])`, ctype.ml:587-589);
+    /// - without [`Op::Scope`] the same lowering succeeds: no set exists
+    ///   and nothing joined one (8.11, (v));
+    /// - a copy of the generalized member made with the environment is
+    ///   a member (`Env.add_gadt_instances env lv [t]`, ctype.ml:
+    ///   770-774): lowering the copy is refused.
+    #[test]
+    fn old_checker_refuses_a_member_below_its_scope() {
+        let program = compile(PATTERN_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, INSTANCE_PLAN);
+        let failed = |scope: bool, last: &[Op]| run_old(&program, plan, &instance_case(scope, last)).failed;
+        assert_eq!(failed(true, &[Op::Lower(1, 0)]), Some(7));
+        assert_eq!(failed(true, &[Op::Lower(2, 0)]), Some(7));
+        assert_eq!(failed(false, &[Op::Lower(1, 0)]), None);
+        let copied = [Op::Generalize(1), Op::EndDef, Op::Copy(1), Op::Lower(3, 0)];
+        assert_eq!(failed(true, &copied), Some(10));
+        assert_eq!(failed(false, &copied), None);
+    }
+
+    /// The seeds of the explained plan of GADT instances (20 programs of
+    /// 100 cases) on which the two sides differ, with the side that
+    /// differs from OCaml for each class, read against the lines:
+    ///
+    /// - 8,000,098 and 11,000,046: `EXPLAINED_OLD_DIFFERS` (decisions
+    ///   77 and 78);
+    /// - 17,000,064 and 20,000,132: the NEW side differs. After a
+    ///   unification that failed, OCaml's `unify` expands the types of
+    ///   the trace with tracing off (compiler/ml/ctype.ml:2732-2737,
+    ///   1697-1701), so the expansion of `n1` is in the memo all `n1`
+    ///   nodes share (200-202) and a later instance links to the node,
+    ///   as on the old side (`ctype::record_trace_expansions`,
+    ///   types/ctype.rs). The new side expands no trace yet; owed by
+    ///   the design turn after R3s;
+    /// - 4,000,069: `a3` (a nullary abbreviation whose head, through
+    ///   `t0 := k<int>`, is a member) against a function type at a lower
+    ///   level. unify2 expands `a3` first, and `try_expand_head` adds
+    ///   the chain of `a3` to the set of the head (ctype.ml:1271-1276);
+    ///   `update_level` then refuses `a3` itself (587-589): the pair is
+    ///   `a3` and a variable, and `a3` keeps its level, as on the new
+    ///   side. The old side lowers `a3` and reports a node below it.
+    const EXPLAINED_INSTANCES_DIFFER: [u64; 5] =
+        [4_000_069, 8_000_098, 11_000_046, 17_000_064, 20_000_132];
+
+    /// The acceptance test of R3s on generated cases (section 8.11;
+    /// decisions 103 and 110): the fixed cases of
+    /// `old_checker_refuses_a_member_below_its_scope` agree, 10,000
+    /// cases of the pattern plan with scopes agree in the success mode,
+    /// and of 2,000 in the explaining mode all but the listed seeds.
+    /// More than a quarter of the cases fail somewhere, a refused
+    /// member among them. A seed that differs is read against the OCaml
+    /// lines of 8.11 before anything is pinned; the builder pins none.
+    ///
+    /// Reaches: R3m, R3e, R3f, R3n, R3h, R3r, R3s.
+    #[test]
+    #[ignore = "R3s build"]
+    fn instance_plan_agrees_on_generated_cases() {
+        let program = compile(PATTERN_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, INSTANCE_PLAN);
+        let copied = [Op::Generalize(1), Op::EndDef, Op::Copy(1), Op::Lower(3, 0)];
+        let cases = [
+            instance_case(true, &[Op::Lower(1, 0)]),
+            instance_case(true, &[Op::Lower(2, 0)]),
+            instance_case(false, &[Op::Lower(1, 0)]),
+            instance_case(true, &copied),
+            instance_case(false, &copied),
+        ];
+        for (index, ops) in cases.iter().enumerate() {
+            compare(index as u64, &program, plan, ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let coverage = run_cases(plan, 1, 100, 100);
+        assert_eq!(coverage.cases, 10_000);
+        assert!(coverage.failures * 4 > coverage.cases, "{coverage:?}");
+        let (explained, differing) = run_plan(Plan::new(Tier::Full, INSTANCE_PLAN | EXPLAIN), 1, 20, 100);
+        let seeds: Vec<u64> = differing.iter().map(|(seed, _)| *seed).collect();
+        let unknown = differing.iter().find(|(seed, _)| !EXPLAINED_INSTANCES_DIFFER.contains(seed));
+        assert!(
+            seeds == EXPLAINED_INSTANCES_DIFFER,
+            "{seeds:?}\n{}",
+            unknown.map_or("", |(_, report)| report.as_str())
+        );
+        assert_eq!(explained.cases + seeds.len(), 2_000);
     }
 }

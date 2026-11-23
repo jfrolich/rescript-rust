@@ -4717,10 +4717,20 @@ fn the_newer_of_two_locally_abstract_types_is_expanded_once() {
         (c.find_newtype_level(N1), c.find_newtype_level(N0)),
         ((2, 3), (1, 4))
     );
+    // The two nodes are made at the level of the newer equation: an
+    // expansion under tracing refuses a node below the level of its
+    // equation (compiler/ml/ctype.ml:1226; R3s).
+    c.g.level = 4;
     let (left, right) = (constr(&mut c, N1, &[]), constr(&mut c, N0, &[]));
     assert!(c.unify(left, right).is_ok());
     assert_eq!((c.g.repr(left), c.g.repr(right)), (left, right));
-    let expansion = c.find_expansion(left, false);
+    // The unification traced GADT instances (an equation is a local
+    // constraint), so once R3s is built the expansion is in the node's
+    // own memo, which is not read outside tracing.
+    let mut expansion = c.find_expansion(left, false);
+    if expansion.0 == NONE {
+        expansion = c.own_expansion(left);
+    }
     assert_eq!(c.g.repr(expansion), right);
     assert_eq!(c.find_expansion(right, false).0, NONE);
     // The other way round the same type is expanded: the newer one,
@@ -6603,6 +6613,663 @@ fn instance_poly_at_ten_thousand() {
         assert!(c.g.nodes.len() - nodes <= 4 * n as usize + 8, "{shape}: {}", c.g.nodes.len() - nodes);
         assert!(count >= u64::from(n), "{shape}: {count}");
         count
+    };
+    for shape in 0..4 {
+        let (small, large) = (run(shape, 1_000), run(shape, 10_000));
+        assert!(large <= 11 * small, "shape {shape}: {small} {large}");
+    }
+}
+
+// ---------------------------------------------------------------------
+// R3s: the ambiguity of GADT instances (CHECKER_REWRITE 8.11; 8.6,
+// decisions 97 to 110). Each test says which bodies and arms it reaches
+// and which program of pull requests 350 and 352 (CHECKER_DEPARTURES A1,
+// p01 to p30 and "Second part") it is the kernel's form of.
+// ---------------------------------------------------------------------
+
+use super::unify::{GADT_LOCAL, GADT_MEMBER, GADT_TRACING};
+
+/// The level of the case in the tests of R3s: the level `init_env`
+/// reads (compiler/ml/typecore.ml:4819-4826), which is the level of the
+/// scope, the newtype level of the pattern and so the expansion level of
+/// its equations.
+const CASE: u32 = 5;
+
+/// [`pattern_checker`] inside one case: a scope at [`CASE`], the equation
+/// `n0 := int` added by a pattern unification at that level, and the
+/// current level one above it (where the body of the case is typed).
+/// What `type rec t<_> = Int: t<int>` and `switch x { | Int => ... }`
+/// with `x: t<a>` leave (CHECKER_DEPARTURES A1).
+fn case_checker(mode: Mode) -> Checker {
+    let (mut c, _) = pattern_checker(mode);
+    c.g.level = CASE;
+    c.enter_instance_scope(CASE);
+    let (n0, int) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
+    assert!(c.unify_pattern(CASE, true, true, n0, int).is_ok());
+    assert_eq!(c.equations.len(), 1);
+    c.g.level = CASE + 1;
+    c
+}
+
+/// `y: a` used at `int` inside the case: the two nodes, after the
+/// unification that expands `y` under tracing.
+fn used_at_int(c: &mut Checker) -> (Ty, Ty) {
+    let (y, int) = (constr(c, N0, &[]), constr(c, INT, &[]));
+    assert!(c.unify(y, int).is_ok());
+    (y, int)
+}
+
+/// The first member of a set comes from an expansion under tracing, and
+/// a member is not lowered below its set's level. The kernel's form of
+/// p01 (`Int => if true { y } else { 0 }`, refused by OCaml: "This
+/// instance of int is ambiguous") and of p03 (the same with `: int` on
+/// the function, accepted).
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:1218-1227, expand_abbrev_gen *)
+///         (if !(trace_gadt_instances ()) then
+///            match
+///              Ext_pervasives.max_int_option lv (Env.gadt_instance_level env ty)
+///            with
+///            | None -> ()
+///            | Some lv ->
+///              if level < lv then raise (Unify [(ty, newvar2 level)]);
+///              Env.add_gadt_instances env lv [ty; ty']);
+/// (* compiler/ml/ctype.ml:584-589, update_level *)
+///   if ty.level > level then (
+///     (match Env.gadt_instance_level env ty with
+///     | Some lv -> if level < lv then raise (Unify [(ty, newvar2 level)])
+///     | None -> ());
+/// ```
+///
+/// Bodies: `unify_distinct_gadt` (a local constraint: `trace_on`, off
+/// again), `subst_traced` (the arm that adds), `add_instances`,
+/// `push_instance`, `memorize_own`, `instance_level`, `instance_escapes`
+/// (the refusal of the lowering, through the binding of a variable).
+///
+/// Reaches: R3h, R3s.
+#[test]
+#[ignore = "R3s build"]
+fn an_expansion_under_tracing_gives_the_set_its_first_members() {
+    let mut c = case_checker(Mode::Success);
+    assert_eq!(c.gadt & (GADT_LOCAL | GADT_TRACING | GADT_MEMBER), GADT_LOCAL);
+    let (y, int) = used_at_int(&mut c);
+    // Tracing was on inside the unification only; the set has members.
+    assert_eq!(c.gadt & (GADT_LOCAL | GADT_TRACING | GADT_MEMBER), GADT_LOCAL | GADT_MEMBER);
+    let (y, int) = (c.g.repr(y), c.g.repr(int));
+    assert_eq!((c.instance_level(y), c.instance_level(int)), (CASE, CASE));
+    // The expansion is in the node's own memo, not in the memo all `n0`
+    // nodes share (`proper_abbrevs`, ctype.ml:200-202).
+    assert_eq!((c.memo.live, c.memo.own_live), (0, 1));
+    // The result of the `if` is a variable made outside the case: the
+    // branch `y` may not come down to it (p01).
+    let result = var_at(&mut c, CASE - 1);
+    assert!(c.unify(result, y).is_err());
+    assert_eq!(c.g.nodes[y.0 as usize].level, CASE + 1);
+    // A node of `int` that is no member comes down (p03: the annotation).
+    let (result, annotation) = (var_at(&mut c, CASE - 1), constr(&mut c, INT, &[]));
+    assert!(c.unify(result, annotation).is_ok());
+    assert_eq!(c.g.nodes[annotation.0 as usize].level, CASE - 1);
+    // Inside the case a member is used freely (p04: `y + 1`).
+    let inside = var_at(&mut c, CASE);
+    assert!(c.unify(inside, y).is_ok());
+}
+
+/// A node below the level of its equation is not expanded under tracing:
+/// `if level < lv then raise (Unify [(ty, newvar2 level)])`
+/// (compiler/ml/ctype.ml:1226, pasted above). In [`ExpandMode::Unif`] it
+/// is a clash whose pair, in the explaining mode, is the node and a new
+/// variable at the node's level (the pair of an escape, decision 102;
+/// compiler/ml/printtyp.ml:1354-1359 prints "This instance of ... is
+/// ambiguous" for it); in [`ExpandMode::Safe`] the node does not expand
+/// and nothing is left (`try_expand_safe` backtracks, ctype.ml:
+/// 1251-1256). No source program: typing makes the nodes of a case at
+/// or above its level.
+///
+/// Bodies: `subst_traced` (both refusals), `instance_clash`, `traced`.
+///
+/// Reaches: R3h, R3s.
+#[test]
+#[ignore = "R3s build"]
+fn a_node_below_its_equation_is_not_expanded_under_tracing() {
+    let mut c = case_checker(Mode::Explain);
+    let (below, int) = (constr_at(&mut c, CASE - 1, N0, &[]), constr_at(&mut c, CASE - 1, INT, &[]));
+    assert!(c.unify(below, int).is_err());
+    let &[node, variable] = c.trace.last().expect("the pair of the refusal");
+    assert_eq!(node, below);
+    let variable = c.g.nodes[variable.0 as usize];
+    assert_eq!((variable.tag(), variable.level), (VAR, CASE - 1));
+    assert_eq!(c.gadt & GADT_MEMBER, 0);
+    // Safe: no expansion, no member, no clash.
+    let nodes = c.g.nodes.len();
+    let head = c.traced(|c| c.expand_head(below, ExpandMode::Safe)).unwrap();
+    assert_eq!((head, c.g.nodes.len(), c.gadt & GADT_MEMBER), (below, nodes, 0));
+    // Outside tracing the same node expands: only the traced expansion
+    // tests the level.
+    let head = c.expand_head(below, ExpandMode::Safe).unwrap();
+    assert_eq!(path(&mut c, head), INT);
+}
+
+/// The copy WITH the environment adds the copy of a member to the
+/// member's set, and the copy without does not. The kernel's form of p08
+/// (`let z = switch ...` unannotated and used after it, refused) for the
+/// copy site.
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:770-774, copy *)
+///         (match env with
+///         | Some env when Env.has_local_constraints env -> (
+///           match Env.gadt_instance_level env ty with
+///           | Some lv -> Env.add_gadt_instances env lv [t]
+///           | None -> ())
+///         | _ -> ());
+/// ```
+///
+/// Bodies: `copy_in` (a member copied; no member; no local constraint),
+/// `push_instance`.
+///
+/// Reaches: R3h, R3s.
+#[test]
+#[ignore = "R3s build"]
+fn a_copy_with_the_environment_joins_the_set_of_its_source() {
+    let mut c = case_checker(Mode::Success);
+    let (y, _) = used_at_int(&mut c);
+    let pair = tuple(&mut c, &[y, y]);
+    c.g.level = CASE;
+    c.generalize(pair);
+    let with = c.copy_in(pair);
+    let without = c.copy(pair);
+    let member = |c: &mut Checker, pair: Ty| {
+        let pair = c.g.repr(pair);
+        let first = c.g.lists[c.g.nodes[pair.0 as usize].b as usize];
+        let first = c.g.repr(first);
+        c.instance_level(first)
+    };
+    assert_eq!((member(&mut c, with), member(&mut c, without)), (CASE, 0));
+    // The copy made with the environment may not leave the case; the
+    // other one may.
+    assert!(c.lower(with, CASE - 1).is_err());
+    assert!(c.lower(without, CASE - 1).is_ok());
+    // Without a local constraint the copy adds nothing
+    // (`Env.has_local_constraints env`).
+    c.gadt &= !GADT_LOCAL;
+    let later = c.copy_in(pair);
+    assert_eq!(member(&mut c, later), 0);
+}
+
+/// unify2 under tracing: the side that is in no set joins the set of the
+/// other, with the chain of its memorized expansions.
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:2289-2298, unify2 *)
+///     (if !(trace_gadt_instances ()) then
+///        (* All types in chains already have the same ambiguity levels *)
+///        let ilevel t =
+///          match Env.gadt_instance_level !env t with
+///          | None -> 0
+///          | Some lv -> lv
+///        in
+///        let lv1 = ilevel t1 and lv2 = ilevel t2 in
+///        if lv1 > lv2 then Env.add_gadt_instance_chain !env lv1 t2
+///        else if lv2 > lv1 then Env.add_gadt_instance_chain !env lv2 t1);
+/// ```
+///
+/// `y: a` against `w: myint` (`type myint = int`), in both orders: `w`
+/// is in no set, `y` is in the set of the case once unify2 has expanded
+/// it; `w` and the node it expanded to (its own memo, since it was
+/// expanded under tracing) join. Today's checker has no chain here
+/// (CHECKER_DEPARTURES A1, "Open": r01 to r04 and r12 to r16 agree
+/// without it), so this test follows the lines.
+///
+/// Bodies: `join_instance_levels` (both orders), `add_instance_chain`
+/// (a node, its own memo), `own_expansion`.
+///
+/// Reaches: R3h, R3s.
+#[test]
+#[ignore = "R3s build"]
+fn unify2_adds_the_chain_of_the_side_that_is_in_no_set() {
+    for swapped in [false, true] {
+        let mut c = case_checker(Mode::Success);
+        let (y, w) = (constr(&mut c, N0, &[]), constr(&mut c, MYINT, &[]));
+        let result = if swapped { c.unify(w, y) } else { c.unify(y, w) };
+        assert!(result.is_ok());
+        assert_eq!(c.instance_level(w), CASE, "swapped: {swapped}");
+        // `w` was linked or kept; what it expanded to is a member too.
+        let below = var_at(&mut c, CASE - 1);
+        assert!(c.unify(below, w).is_err());
+    }
+}
+
+/// `try_expand_head` adds the chain of the expanded type WHATEVER the
+/// tracing flag, when the head it reaches is in a set.
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:1271-1276 *)
+/// let try_expand_head try_once env ty =
+///   let ty' = try_expand_head try_once env ty in
+///   (match Env.gadt_instance_level env ty' with
+///   | None -> ()
+///   | Some lv -> Env.add_gadt_instance_chain env lv ty);
+///   ty'
+/// ```
+///
+/// A node of `n0` whose expansion is memorized as a MEMBER (the first
+/// expansion was traced) is expanded again with tracing off, by a call
+/// of `expand_head` and not of `unify`: the node joins. A type that
+/// does not expand adds nothing (`Cannot_expand` leaves before the
+/// test).
+///
+/// Bodies: `expand_head` and `expand_head_unif` (the guard),
+/// `expanded_instance`, `add_instance_chain` (a node that is a member
+/// already ends the chain).
+///
+/// Reaches: R3h, R3s.
+#[test]
+#[ignore = "R3s build"]
+fn expanding_a_head_into_a_set_adds_the_chain_whatever_the_flag() {
+    let mut c = case_checker(Mode::Success);
+    let (y, int) = used_at_int(&mut c);
+    let _ = (y, int);
+    // `pa<n0>` expands to `(n0, int)`: a head in no set, nothing added.
+    let inner = constr(&mut c, N0, &[]);
+    let pa = constr(&mut c, PA, &[inner]);
+    let members = c.instance_members.len();
+    c.expand_head(pa, ExpandMode::Safe).unwrap();
+    assert_eq!(c.instance_members.len(), members);
+    // A second `n0` node expanded under `traced`: it and its expansion
+    // join through the expansion's arm. Forgetting its memo and
+    // expanding it again WITHOUT tracing memorizes in the shared memo;
+    // the node is a member already, so its new expansion joins through
+    // `subst_traced`? No: tracing is off. It joins through the chain.
+    let z = constr(&mut c, N0, &[]);
+    let first = c.traced(|c| c.expand_head(z, ExpandMode::Unif)).unwrap();
+    assert_eq!((c.instance_level(z), c.instance_level(first)), (CASE, CASE));
+    for mode in [ExpandMode::Safe, ExpandMode::Unif] {
+        // A node that is linked to a member expands into the set: the
+        // unexpanded node `alias` of `myint` unified with the member
+        // `first` is a link, so take a fresh abbreviation instead whose
+        // expansion is forced to be the member by its memo.
+        let fresh = constr(&mut c, MYINT, &[]);
+        c.memorize(fresh, first, false);
+        assert_eq!(c.instance_level(fresh), 0);
+        assert_eq!(c.gadt & GADT_TRACING, 0);
+        assert_eq!(c.expand_head(fresh, mode).unwrap(), first);
+        assert_eq!(c.instance_level(fresh), CASE, "{mode:?}");
+    }
+}
+
+/// An addition is undone by a restore and stays after a keep, with no
+/// line in either: the head of a set is a node of the graph, and an
+/// addition writes it (decision 98).
+///
+/// ```text
+/// (* compiler/ml/btype.ml:749-751 *)
+/// let set_typeset rs s =
+///   log_change (Ctypeset (rs, !rs));
+///   rs := s
+/// ```
+///
+/// `backtrack` undoes every logged change (btype.ml:773-784), so a
+/// member added inside a snapshot that is backtracked is no member; a
+/// failed unification of the explaining mode, which only undoes path
+/// compression (`undo_compress`, btype.ml:792-804), keeps it.
+///
+/// Bodies: `add_instances`, `push_instance`, `instance_level`,
+/// `instance_scope_at` (a level with no scope adds nothing: 8.11, (v)).
+///
+/// Reaches: R3s.
+#[test]
+#[ignore = "R3s build"]
+fn a_restore_undoes_an_addition_and_a_keep_keeps_it() {
+    let mut c = checker(Mode::Success);
+    c.enter_instance_scope(CASE);
+    let (kept, undone, nowhere) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
+    let outer = c.g.speculate();
+    let token = c.g.speculate();
+    c.add_instances(CASE, &[kept]);
+    c.g.keep(token);
+    let token = c.g.speculate();
+    c.add_instances(CASE, &[undone]);
+    assert_eq!((c.instance_level(kept), c.instance_level(undone)), (CASE, CASE));
+    c.restore(token);
+    assert_eq!((c.instance_level(kept), c.instance_level(undone)), (CASE, 0));
+    // A level no scope has: nothing, where OCaml asserts.
+    c.add_instances(CASE + 1, &[nowhere]);
+    assert_eq!(c.instance_level(nowhere), 0);
+    // The enclosing snapshot undoes the kept one too.
+    c.restore(outer);
+    assert_eq!(c.instance_level(kept), 0);
+    // The bit stays; it says a member was pushed, not that one exists.
+    assert_ne!(c.gadt & GADT_MEMBER, 0);
+    // A member is found by its representative (env.ml:1314-1323).
+    let (variable, member) = (var(&mut c), constr(&mut c, INT, &[]));
+    c.add_instances(CASE, &[variable]);
+    assert!(c.unify(variable, member).is_ok());
+    assert_eq!(c.instance_level(member), CASE);
+}
+
+/// `leave_case` puts back the three things a case added, and an inner
+/// scope answers before an outer one.
+///
+/// ```text
+/// (* compiler/ml/env.ml:1314-1323 *)
+/// let gadt_instance_level env t =
+///   let rec find_instance = function
+///     | [] -> None
+///     | (lv, r) :: rem ->
+///       if Type_set.exists is_Tlink !r then
+///         (* Should we use set_typeset ? *)
+///         r := Type_set.fold (fun ty -> Type_set.add (repr ty)) !r Type_set.empty;
+///       if Type_set.mem t !r then Some lv else find_instance rem
+///   in
+///   find_instance env.gadt_instances
+/// ```
+///
+/// Bodies: `enter_instance_scope`, `case_mark`, `leave_case`,
+/// `add_local_type`, `instance_level` (two scopes).
+///
+/// Reaches: R3h, R3s.
+#[test]
+#[ignore = "R3s build"]
+fn leaving_a_case_puts_its_environment_back() {
+    let (mut c, _) = pattern_checker(Mode::Success);
+    c.g.level = CASE;
+    let outer = c.enter_instance_scope(CASE);
+    assert_eq!((outer.equations, outer.scope, outer.local), (0, NONE, 0));
+    let shared = constr(&mut c, INT, &[]);
+    c.add_instances(CASE, &[shared]);
+    let inner = c.enter_instance_scope(CASE + 2);
+    let (n0, int) = (constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
+    assert!(c.unify_pattern(CASE + 2, true, true, n0, int).is_ok());
+    assert_ne!(c.gadt & GADT_LOCAL, 0);
+    c.add_instances(CASE + 2, &[shared]);
+    assert_eq!(c.instance_level(shared), CASE + 2);
+    c.leave_case(inner);
+    assert_eq!((c.equations.len(), c.gadt & GADT_LOCAL), (0, 0));
+    assert_eq!(c.instance_level(shared), CASE);
+    // An existential type alone is a local constraint (ctype.ml:970).
+    c.add_local_type();
+    assert_ne!(c.gadt & GADT_LOCAL, 0);
+    c.leave_case(outer);
+    assert_eq!((c.instance_scope, c.gadt & GADT_LOCAL), (NONE, 0));
+    assert_eq!(c.instance_level(shared), 0);
+}
+
+/// Tracing is turned on by a local constraint that is not an equation
+/// (decisions 85 and 97): the memorized expansions are forgotten, and
+/// while it is on a constructor without arguments is memorized in its
+/// own memo, so that a later copy of that type does not link to it.
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:178-184 *)
+/// let check_trace_gadt_instances env =
+///   (not !(trace_gadt_instances ()))
+///   && Env.has_local_constraints env
+///   &&
+///   (trace_gadt_instances () := true;
+///    cleanup_abbrev ();
+///    true)
+/// (* compiler/ml/ctype.ml:200-202 *)
+/// let proper_abbrevs path tl abbrev =
+///   if tl <> [] || !(trace_gadt_instances ()) || is_object_type path then abbrev
+///   else simple_abbrevs ()
+/// ```
+///
+/// It is the difference of the seeds the pattern plan set aside until
+/// this slice (`differential::tests::UNTIL_R3S`).
+///
+/// Bodies: `unify_distinct_gadt`, `trace_on`, `memorize_own`,
+/// `find_own_expansion` (traced: found; not traced: not read),
+/// `forget_own_memos`.
+///
+/// Reaches: R3s.
+#[test]
+#[ignore = "R3s build"]
+fn an_existential_type_alone_turns_tracing_on() {
+    for local in [false, true] {
+        let mut c = checker(Mode::Success);
+        if local {
+            c.add_local_type();
+        }
+        // A memorized expansion of a constructor with an argument.
+        let argument = constr(&mut c, INT, &[]);
+        let pa = constr(&mut c, PA, &[argument]);
+        c.expand_head(pa, ExpandMode::Safe).unwrap();
+        assert_ne!(c.find_expansion(pa, false).0, NONE);
+        let (left, right) = (constr(&mut c, MYINT, &[]), constr(&mut c, INT, &[]));
+        assert!(c.unify(left, right).is_ok());
+        assert_eq!(c.gadt & GADT_TRACING, 0);
+        // Forgotten when tracing was turned on; kept otherwise.
+        assert_eq!(c.find_expansion(pa, false).0 == NONE, local);
+        // Which memo holds the expansion of `myint`.
+        assert_eq!((c.memo.live, c.memo.own_live), if local { (0, 1) } else { (1, 0) });
+        // A later instance of `myint` links to the expanded node only
+        // through the shared memo (`find_repr`, ctype.ml:720, 782).
+        let source = constr_at(&mut c, GENERIC, MYINT, &[]);
+        let copy = c.copy(source);
+        assert_eq!(c.g.repr(copy) == left, !local);
+        // The own memo is not read outside tracing, and a cleanup
+        // forgets it.
+        if local {
+            assert_eq!(c.find_expansion(left, false).0, NONE);
+            let own = c.traced(|c| c.find_expansion(left, false));
+            assert_eq!(own.0, NONE, "turning tracing on cleaned the memos");
+            assert_eq!(c.memo.own_live, 0);
+        }
+    }
+}
+
+/// Two constructors without arguments of one type are linked at once
+/// only when neither has a cached expansion; one that was expanded
+/// under tracing has one, and the pair goes to unify2.
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:2248-2257 *)
+///         | Tconstr (p1, [], a1), Tconstr (p2, [], a2)
+///           when Path.same p1 p2
+///                (* This optimization assumes that t1 does not expand to t2
+///                   (and conversely), so we fall back to the general case
+///                   when any of the types has a cached expansion. *)
+///                && not
+///                     (has_cached_expansion p1 !a1 || has_cached_expansion p2 !a2)
+///           ->
+///           update_level !env t1.level t2;
+///           link_type t1 t2
+/// ```
+///
+/// One unification of `(y, y)` with `(int, z)`, `y` and `z` nodes of
+/// `n0`: the first pair expands `y` (its own memo holds the expansion),
+/// the second finds it cached and unifies the two expansions; `y` is
+/// not linked to `z`, where the arm above would link it.
+///
+/// Bodies: `has_own_expansion` (true), the guard of `unify_pair`.
+///
+/// Reaches: R3h, R3s.
+#[test]
+#[ignore = "R3s build"]
+fn a_constructor_expanded_under_tracing_is_not_linked_at_once() {
+    let mut c = case_checker(Mode::Success);
+    let (y, z, int) = (constr(&mut c, N0, &[]), constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
+    let (left, right) = (tuple(&mut c, &[y, y]), tuple(&mut c, &[int, z]));
+    assert!(c.unify(left, right).is_ok());
+    assert_eq!((c.g.repr(y), c.g.repr(z)), (y, z));
+    // Without a cached expansion the same two nodes link.
+    let mut c = case_checker(Mode::Success);
+    let (y, z) = (constr(&mut c, N0, &[]), constr(&mut c, N0, &[]));
+    assert!(c.unify(y, z).is_ok());
+    assert_eq!(c.g.repr(y), z);
+}
+
+/// The wrappers the kernel owns trace by themselves: `lower_args`
+/// (compiler/ml/typecore.ml:2828, `wrap_trace_gadt_instances env
+/// (lower_args env []) ty`), `unify_var` (ctype.ml:2759-2764) and
+/// `non_recursive_abbrev` (ctype.ml:1534). `lower_args` is the kernel's
+/// form of the programs of "Second part" (`switch x { | Int => ((z: a)
+/// => z)(y) }`, refused by OCaml): the expansion of the function's
+/// result `a` under tracing makes it a member, and the result of the
+/// application may then not leave the case. The other two have no
+/// program (CHECKER_DEPARTURES A1, "Second part", last paragraph): each
+/// is seen by what turning tracing on does, the cleanup of the memos.
+///
+/// Bodies: `lower_args` (traced), `unify_var` (the variable arm with a
+/// local constraint), `non_recursive_abbrev` (traced), `trace_on`,
+/// `trace_off`.
+///
+/// Reaches: R3h, R3s.
+#[test]
+#[ignore = "R3s build"]
+fn the_wrappers_of_the_kernel_trace_by_themselves() {
+    let mut c = case_checker(Mode::Success);
+    let (parameter, result) = (constr(&mut c, N0, &[]), constr(&mut c, N0, &[]));
+    let function = arrow(&mut c, &[parameter], result);
+    c.lower_args(function);
+    assert_eq!(c.instance_level(result), CASE);
+    assert_eq!(c.gadt & GADT_TRACING, 0);
+    let outside = var_at(&mut c, CASE - 1);
+    assert!(c.unify(outside, result).is_err());
+    // `unify_var` and `non_recursive_abbrev`: a memorized expansion of a
+    // constructor with an argument is forgotten by each.
+    let memorized = |c: &mut Checker| {
+        let argument = constr(c, INT, &[]);
+        let pa = constr(c, PA, &[argument]);
+        c.expand_head(pa, ExpandMode::Safe).unwrap();
+        assert_ne!(c.find_expansion(pa, false).0, NONE);
+        pa
+    };
+    let pa = memorized(&mut c);
+    let (variable, int) = (var(&mut c), constr(&mut c, INT, &[]));
+    assert!(c.unify_var(variable, int).is_ok());
+    assert_eq!((c.find_expansion(pa, false).0, c.gadt & GADT_TRACING), (NONE, 0));
+    let pa = memorized(&mut c);
+    let int = constr(&mut c, INT, &[]);
+    assert_eq!(c.non_recursive_abbrev(N1, int), Ok(true));
+    assert_eq!((c.find_expansion(pa, false).0, c.gadt & GADT_TRACING), (NONE, 0));
+    // Without a local constraint neither forgets.
+    let mark = c.case_mark();
+    c.gadt &= !GADT_LOCAL;
+    let pa = memorized(&mut c);
+    let (variable, int) = (var(&mut c), constr(&mut c, INT, &[]));
+    assert!(c.unify_var(variable, int).is_ok());
+    assert_eq!(c.non_recursive_abbrev(N1, int), Ok(true));
+    assert_ne!(c.find_expansion(pa, false).0, NONE);
+    assert_eq!(mark.local, GADT_LOCAL);
+}
+
+/// In ONE pattern unification, a pair that is unified after the first
+/// equation was added is traced: OCaml makes the test at every `unify`
+/// (compiler/ml/ctype.ml:2235, `let reset_tracing =
+/// check_trace_gadt_instances !env in`), and `!env` has the equation by
+/// then (decision 105).
+///
+/// `(a1, a2)` against `(int, int)` at the level of a scope, `a1` and
+/// `a2` two nodes of `n0`: the first pair adds `n0 := int`; the second
+/// expands `a2` under tracing, so `a2` and its expansion are members
+/// and the expansion is in `a2`'s own memo. Tracing is off afterwards,
+/// and no frame is left.
+///
+/// Bodies: `unify_distinct_gadt` (pattern mode without a local
+/// constraint), `late_pair` (a pair alone; a pair that turns tracing
+/// on), `resume_frames` (the `Untrace` frame).
+///
+/// Reaches: R3h, R3r, R3s.
+#[test]
+#[ignore = "R3s build"]
+fn a_pair_after_the_first_equation_of_a_pattern_is_traced() {
+    let (mut c, _) = pattern_checker(Mode::Success);
+    c.g.level = CASE;
+    c.enter_instance_scope(CASE);
+    let (a1, a2) = (constr(&mut c, N0, &[]), constr(&mut c, N0, &[]));
+    let (i1, i2) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
+    let (left, right) = (tuple(&mut c, &[a1, a2]), tuple(&mut c, &[i1, i2]));
+    assert_eq!(c.gadt, 0);
+    assert!(c.unify_pattern(CASE, true, true, left, right).is_ok());
+    assert_eq!(c.equations.len(), 1);
+    assert_eq!(c.gadt, GADT_LOCAL | GADT_MEMBER);
+    assert!(c.frames.is_empty());
+    assert_eq!((c.instance_level(a1), c.instance_level(a2)), (0, CASE));
+    assert_eq!((c.memo.live, c.memo.own_live), (0, 1));
+}
+
+/// The loops of the sets, as relations between 1,000 and 10,000:
+///
+/// 0. `instance_level` over `n` nested scopes of one member each, asked
+///    for a node in none: one step a scope and one a member. (Decision
+///    106: with one pool scanned for every scope it is `n * n`.)
+/// 1. `add_instance_chain` of a chain of `n` nullary abbreviations whose
+///    expansions are in their own memos, into a set of `n` members: the
+///    members are marked once and each node of the chain is one step.
+/// 2. `copy_in` of a tuple of `n` generic nodes while a set has `n`
+///    members that are not copied: the members are read once.
+/// 3. The undo of `n` additions: one trail entry each, so a restore is
+///    `n` steps.
+///
+/// Bodies: `instance_level`, `instance_scope_at`, `add_instance_chain`,
+/// `copy_in`, `push_instance`.
+///
+/// Reaches: R3s.
+#[test]
+#[ignore = "R3s build"]
+fn instance_sets_at_ten_thousand() {
+    let run = |shape: u32, n: u32| {
+        let mut c = checker(Mode::Success);
+        c.g.level = CASE;
+        match shape {
+            0 => {
+                for level in 0..n {
+                    c.enter_instance_scope(CASE + level);
+                    let member = constr(&mut c, INT, &[]);
+                    c.add_instances(CASE + level, &[member]);
+                }
+                let asked = constr(&mut c, INT, &[]);
+                steps::scope(|| assert_eq!(c.instance_level(asked), 0))
+            }
+            1 => {
+                c.types.rows.resize(TYPES + n as usize, c.types.rows[INT as usize]);
+                c.enter_instance_scope(CASE);
+                for _ in 0..n {
+                    let member = constr(&mut c, INT, &[]);
+                    c.add_instances(CASE, &[member]);
+                }
+                // `t_i = t_{i-1}`, each node memorized in its own memo.
+                c.add_local_type();
+                let first = constr(&mut c, INT, &[]);
+                let mut chain = first;
+                c.gadt |= GADT_TRACING;
+                for index in 0..n {
+                    let node = constr(&mut c, TYPES as u32 + index, &[]);
+                    c.memorize(node, chain, false);
+                    chain = node;
+                }
+                c.gadt &= !GADT_TRACING;
+                let count = steps::scope(|| c.add_instance_chain(CASE, chain));
+                assert_eq!(c.instance_level(first), CASE);
+                count
+            }
+            2 => {
+                c.enter_instance_scope(CASE);
+                c.add_local_type();
+                for _ in 0..n {
+                    let member = constr(&mut c, INT, &[]);
+                    c.add_instances(CASE, &[member]);
+                }
+                let elements: Vec<Ty> = (0..n).map(|_| constr_at(&mut c, GENERIC, INT, &[])).collect();
+                let root = tuple_at(&mut c, GENERIC, &elements);
+                steps::scope(|| {
+                    c.copy_in(root);
+                })
+            }
+            _ => {
+                c.enter_instance_scope(CASE);
+                let token = c.g.speculate();
+                for _ in 0..n {
+                    let member = constr(&mut c, INT, &[]);
+                    c.add_instances(CASE, &[member]);
+                }
+                let count = steps::scope(|| c.restore(token));
+                assert_eq!(count, u64::from(n), "one trail entry an addition");
+                count
+            }
+        }
     };
     for shape in 0..4 {
         let (small, large) = (run(shape, 1_000), run(shape, 10_000));
