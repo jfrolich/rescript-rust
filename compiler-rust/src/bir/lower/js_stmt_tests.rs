@@ -84,6 +84,8 @@ enum St {
     Return,
     /// `break;`
     Break,
+    /// `continue;`
+    Continue,
     /// `throw x;`
     Throw,
     /// `{}`: an explicit block without a statement.
@@ -104,6 +106,7 @@ fn statement(r: &mut Rows, u: &mut Unit, st: St) -> S {
             r.return_(a, y)
         }
         St::Break => r.break_(a, None),
+        St::Continue => r.continue_(a, None),
         St::Throw => {
             let x = r.var(a, u.x);
             r.throw(a, x)
@@ -128,6 +131,7 @@ fn statement_today(u: &mut Unit, st: St) -> NodeId {
             crate::bir::j::return_value(b, value)
         }
         St::Break => b.new_node(View::SBreak { label: None }, 0),
+        St::Continue => b.new_node(View::SContinue { label: None }, 0),
         St::Throw => {
             let value = var(b, u.x);
             plain::node(b, View::SThrow { value }, 0)
@@ -257,6 +261,7 @@ fn a_list_is_the_pool_list_of_its_statements() {
                         St::Call => Kind::Exp,
                         St::Return => Kind::Return,
                         St::Break => Kind::Break,
+                        St::Continue => Kind::Continue,
                         St::Throw => Kind::Throw,
                         St::Empty => Kind::Block,
                     };
@@ -958,6 +963,7 @@ fn a_guard_is_taken_apart_and_rebuilt_over_its_blocks() {
                         St::Return => Kind::Return,
                         St::Throw => Kind::Throw,
                         St::Break => Kind::Break,
+                        St::Continue => Kind::Continue,
                         St::Call => Kind::Exp,
                         St::Empty => Kind::Block,
                     };
@@ -1344,6 +1350,42 @@ fn if_head_over_two_runs_is_rules_0_to_6_of_j_s3() {
     }
     // The head applies to most pairs; the rest went through `if_`.
     assert!(heads > 600 && heads < VALUES.len() * HEAD_SHAPES.len() * HEAD_SHAPES.len(), "{heads}");
+}
+
+/// Rule 6 of J-S3 for each of the four jumps a then-run can end in: the
+/// run becomes the guard `if (x) { f(); jump } else {}` and the else-run
+/// is the tail, where it was. Asserted on the outcome: the comparison
+/// with `js3_simplify_if` above runs the same head on both sides, so it
+/// cannot see a jump the head does not know. A then-run that ends in a
+/// call has no rule.
+#[test]
+fn rule_6_of_if_head_makes_a_guard_of_a_run_that_ends_in_any_jump() {
+    let head = |last: St| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut slots = Slots::default();
+        let (mut then_, mut else_) =
+            (slots.push_run(&mut r, &mut u, &[St::Call, last]), slots.push_run(&mut r, &mut u, &[St::Call, St::Call]));
+        let mut test = value(&mut r, &mut u, Value::X);
+        let head = r.if_head(&mut u.b, &mut slots, &mut test, &mut then_, &mut else_)?;
+        let guard = head.statement.expect("the guard");
+        assert_eq!(r.stmt_kind(&u.b, &guard), Kind::If);
+        assert_eq!(r.branch_last_kind(&u.b, &guard, true), None, "an empty else");
+        // The else-run is the tail, with its two statements; nothing else
+        // is left on the runs.
+        assert_eq!(slots.live(head.tail), 2);
+        assert_eq!(slots.live(Span { start: 0, len: slots.slots.len() as u32 }), 2);
+        Some(r.branch_last_kind(&u.b, &guard, false).expect("the guard's block ends in the jump"))
+    };
+    for (last, kind) in [
+        (St::Return, Kind::Return),
+        (St::Throw, Kind::Throw),
+        (St::Break, Kind::Break),
+        (St::Continue, Kind::Continue),
+    ] {
+        assert_eq!(head(last), Some(kind), "{last:?}");
+    }
+    assert_eq!(head(St::Call), None);
 }
 
 /// What one `if_head` costs for a conditional `if (x) yes else no` whose
