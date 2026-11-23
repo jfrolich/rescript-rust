@@ -1114,37 +1114,47 @@ impl Checker {
             self.begin_cell_session();
         }
         for index in first..end {
-            #[cfg(test)]
-            super::steps::tick();
-            let node = self.g.nodes[index];
-            if node.tag() != CONSTR {
-                if cells && node.head & super::segment::EXTENDED != 0 {
-                    match self.extras.descriptors[node.a as usize] {
-                        super::segment::ExtraDescriptor::Field { .. } => {
-                            self.dup_cell(Ty(index as u32), node, first as u32)
-                        }
-                        // The references of a copied variant row (R3n).
-                        super::segment::ExtraDescriptor::Variant(_) if self.extras.copying => {
-                            self.copy_refs(Ty(index as u32), node, first as u32)
-                        }
-                        _ => {}
-                    }
-                }
-                continue;
-            }
-            if node.arity() != 0 {
-                if chain != NONE {
-                    self.inherit(Ty(index as u32), node, chain);
-                }
-                continue;
-            }
-            let target = self.find_repr(node.a);
-            if target.0 != NONE {
-                self.g.nodes[index] = link_node(node, target);
-            }
+            self.memorized_node(index, first, chain, cells);
         }
         if cells {
             self.end_cell_session();
+        }
+    }
+
+    /// One node of the pass of [`Checker::link_memorized`]: node `index`
+    /// of a copy session whose first node is `first`. Its cost and its
+    /// arms are that function's; it is the body of its loop, apart so
+    /// that `Checker::instance_poly` runs the same pass inside a cell
+    /// session of its own (R3q). One step.
+    #[inline(always)]
+    pub(super) fn memorized_node(&mut self, index: usize, first: usize, chain: u32, cells: bool) {
+        #[cfg(test)]
+        super::steps::tick();
+        let node = self.g.nodes[index];
+        if node.tag() != CONSTR {
+            if cells && node.head & super::segment::EXTENDED != 0 {
+                match self.extras.descriptors[node.a as usize] {
+                    super::segment::ExtraDescriptor::Field { .. } => {
+                        self.dup_cell(Ty(index as u32), node, first as u32)
+                    }
+                    // The references of a copied variant row (R3n).
+                    super::segment::ExtraDescriptor::Variant(_) if self.extras.copying => {
+                        self.copy_refs(Ty(index as u32), node, first as u32)
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+        if node.arity() != 0 {
+            if chain != NONE {
+                self.inherit(Ty(index as u32), node, chain);
+            }
+            return;
+        }
+        let target = self.find_repr(node.a);
+        if target.0 != NONE {
+            self.g.nodes[index] = link_node(node, target);
         }
     }
 

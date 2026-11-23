@@ -12,7 +12,9 @@ impl Graph {
     /// O(1) except representative links and amortized arena growth. Allocate
     /// each generic source once; non-generic nodes stay shared. This is the
     /// copy/share decision of compiler/ml/ctype.ml:copy and instance.
-    fn copy_ref(&mut self, ty: Ty) -> Ty {
+    /// One root or one child of a session opened by [`Graph::copy_begin`];
+    /// the node it makes is filled by [`Graph::copy_drain`].
+    pub(crate) fn copy_ref(&mut self, ty: Ty) -> Ty {
         let ty = self.repr(ty);
         let node = self.nodes[ty.0 as usize];
         if node.level != GENERIC {
@@ -43,15 +45,38 @@ impl Graph {
     /// pass over the forwarding array. Also initializes rows for nodes made
     /// since the last copy/capture: each row is initialized at most once per
     /// unit, so the sum of that work is linear in nodes made. Exhaustion of
-    /// the generation counter is an explicit error.
+    /// the generation counter is an explicit error. It is one session of
+    /// one root: [`Graph::copy_begin`], [`Graph::copy_ref`],
+    /// [`Graph::copy_drain`].
     pub fn copy(&mut self, root: Ty) -> Ty {
+        self.copy_begin();
+        let result = self.copy_ref(root);
+        self.copy_drain();
+        result
+    }
+
+    /// Begin a copy session (`with_copy_session`, compiler/ml/ctype.ml):
+    /// a new generation of the forwarding array, grown to the nodes made
+    /// since the last one, and an empty queue. Between this call and
+    /// [`Graph::copy_drain`] every node the graph gains is made by
+    /// [`Graph::copy_ref`], so that node `first + i` of the session is the
+    /// copy of `work[i]` (`Checker::copy_refs` reads that). O(1) amortized.
+    #[inline]
+    pub(crate) fn copy_begin(&mut self) {
         self.forward.resize(self.nodes.len(), Forward::default());
         self.copy_generation = self
             .copy_generation
             .checked_add(1)
             .expect("copy generation exhausted");
         self.work.clear();
-        let result = self.copy_ref(root);
+    }
+
+    /// End a copy session: fill every node [`Graph::copy_ref`] made since
+    /// [`Graph::copy_begin`], which makes the copies of their children.
+    /// O(generic nodes reached + edges); one step a node is counted where
+    /// the node is made.
+    #[inline]
+    pub(crate) fn copy_drain(&mut self) {
         let mut cursor = 0;
         while cursor < self.work.len() {
             let source = self.work[cursor];
@@ -93,7 +118,6 @@ impl Graph {
             // node refers to them until the caller publishes the result.
             self.nodes[target.0 as usize] = node;
         }
-        result
     }
 }
 
@@ -101,6 +125,39 @@ impl Graph {
 mod tests {
     use super::super::steps;
     use super::*;
+    /// A session of two roots (`with_copy_session`): a generic node both
+    /// reach is one node in both copies, each root's copy is a node of
+    /// its own, and node `first + i` of the session is the copy of
+    /// `work[i]`. A second session shares nothing with the first.
+    #[test]
+    fn a_session_of_two_roots_shares_between_them() {
+        let mut g = Graph::default();
+        let var = g.push(Node { head: VAR, level: GENERIC, a: NONE, b: 0 });
+        let tuple = |g: &mut Graph, slots: &[Ty]| {
+            let b = g.lists.len() as u32;
+            g.lists.extend_from_slice(slots);
+            g.push(Node { head: TUPLE | (slots.len() as u32) << 8, level: GENERIC, a: 0, b })
+        };
+        let (left, right) = (tuple(&mut g, &[var]), tuple(&mut g, &[var, var]));
+        g.level = 1;
+        let first = g.nodes.len();
+        g.copy_begin();
+        let (left_copy, right_copy) = (g.copy_ref(left), g.copy_ref(right));
+        g.copy_drain();
+        assert_ne!(left_copy, right_copy);
+        assert_eq!(g.nodes.len(), first + 3);
+        let shared = g.lists[g.nodes[left_copy.0 as usize].b as usize];
+        assert_ne!(shared, var);
+        let b = g.nodes[right_copy.0 as usize].b as usize;
+        assert_eq!([g.lists[b], g.lists[b + 1]], [shared, shared]);
+        for (index, &source) in g.work.iter().enumerate() {
+            assert_eq!(g.forward[source.0 as usize].target as usize, first + index);
+        }
+        // `copy` is a session of one root.
+        let again = g.copy(left);
+        assert_ne!(g.lists[g.nodes[again.0 as usize].b as usize], shared);
+    }
+
     #[test]
     fn forwarding_size() {
         assert_eq!(std::mem::size_of::<Forward>(), 8);
