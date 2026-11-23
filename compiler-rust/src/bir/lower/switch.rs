@@ -1093,7 +1093,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             };
             let statement = match plan.target.map_or(cx.cont, Cont::Assign) {
                 Cont::Assign(target) => {
-                    let merged = self.merge_assignments(test, target, yes, no);
+                    let merged = self.merge_assignments(B::from_node(test), target, yes, no);
                     self.assignment_statement(target, merged)
                 }
                 Cont::Effect(_) => self.if_statement(test, yes, no),
