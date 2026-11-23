@@ -3,18 +3,18 @@ use super::*;
 use crate::bir::PropertyKey;
 use crate::emit::row::{Kind, flag};
 
-enum Work {
-    Enter(NodeId),
-    Rebuild(NodeId, usize),
+enum Work<E> {
+    Enter(E),
+    Rebuild(E, usize),
 }
-/// The work, values and statements in flight (`S`) of `evaluate_now`,
-/// reused across calls.
-pub(super) struct Evaluation<S> {
-    work: Vec<Work>,
-    values: Vec<NodeId>,
+/// The work, values (`E`) and statements in flight (`S`) of
+/// `evaluate_now`, reused across calls.
+pub(super) struct Evaluation<E, S> {
+    work: Vec<Work<E>>,
+    values: Vec<E>,
     statements: Vec<S>,
 }
-impl<S> Default for Evaluation<S> {
+impl<E, S> Default for Evaluation<E, S> {
     /// Empty storage. O(1); allocates nothing.
     fn default() -> Self {
         Self { work: Vec::new(), values: Vec::new(), statements: Vec::new() }
@@ -23,8 +23,8 @@ impl<S> Default for Evaluation<S> {
 
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// A:28 delay_safe: a cached fact, never a subtree walk. O(1).
-    fn delay_safe(&self, value: NodeId) -> bool {
-        self.js.has(&self.arena, B::at(value), flag::DELAY_SAFE)
+    fn delay_safe(&self, value: &B::E) -> bool {
+        self.js.has(&self.arena, B::of(value), flag::DELAY_SAFE)
     }
 
     /// A:90 runs_no_code: inspect each owned member spine without recursion.
@@ -69,7 +69,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Cost: O(V + E + B + J): walks V held literal/sequence occurrences and E child/property
     /// slots, appends B bindings/statements, plus J JS-normalizer and released-node visits.
     /// Uses enter/rebuild frames rather than copying whole literal trees.
-    fn evaluate_now(&mut self, root: NodeId) -> (Span, NodeId) {
+    fn evaluate_now(&mut self, root: B::E) -> (Span, B::E) {
         let mut evaluation = std::mem::take(&mut self.evaluation);
         let Evaluation { work, values, statements } = &mut evaluation;
         assert!(work.is_empty() && values.is_empty() && statements.is_empty(), "argument evaluation scratch must be empty");
@@ -79,13 +79,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.sequence_steps += 1;
             match task {
                 Work::Enter(value) => {
-                    if self.delay_safe(value) {
+                    if self.delay_safe(&value) {
                         values.push(value);
                         continue;
                     }
-                    let kind = self.js.kind(&self.arena, B::at(value));
+                    let kind = self.js.kind(&self.arena, B::of(&value));
                     if kind == Kind::Seq {
-                        self.js.unpack_rev(&mut self.arena, B::from_node(value));
+                        self.js.unpack_rev(&mut self.arena, value);
                         let first = self.js.pop();
                         let second = self.js.pop();
                         if self.js.has(&self.arena, B::of(&first), flag::STRICT) {
@@ -94,13 +94,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             let statement = self.js.exp_rule(&mut self.arena, first);
                             statements.push(statement);
                         }
-                        work.push(Work::Enter(B::node(second)));
+                        work.push(Work::Enter(second));
                         continue;
                     }
                     let literal = match kind {
                         Kind::Optional | Kind::Array | Kind::BlockLit => true,
                         Kind::Object => {
-                            let info = self.js.info_of(&self.arena, B::at(value)).expect("object information");
+                            let info = self.js.info_of(&self.arena, B::of(&value)).expect("object information");
                             let crate::bir::JsPayload::Object(keys) = self.arena.javascript(info) else {
                                 unreachable!("object payload")
                             };
@@ -111,12 +111,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         _ => false,
                     };
                     if literal {
-                        let mut shell = B::from_node(value);
+                        let mut shell = value;
                         let count = self.js.take_operands(&mut self.arena, &mut shell);
-                        work.push(Work::Rebuild(B::node(shell), count as usize));
+                        work.push(Work::Rebuild(shell, count as usize));
                         let at = work.len();
                         for _ in 0..count {
-                            work.push(Work::Enter(B::node(self.js.pop())));
+                            work.push(Work::Enter(self.js.pop()));
                         }
                         // The first operand is entered first.
                         work[at..].reverse();
@@ -126,24 +126,22 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             &mut self.arena,
                             LetKind::Strict,
                             var,
-                            Some(B::from_node(value)),
+                            Some(value),
                         );
                         statements.push(statement);
-                        let mut held = self.js.var(&mut self.arena, var);
-                        self.js.assume_strict(&mut self.arena, &mut held);
-                        values.push(B::node(held));
+                        let held = self.js.var(&mut self.arena, var);
+                        values.push(held);
                     }
                 }
                 Work::Rebuild(old, count) => {
                     let begin = values.len() - count;
                     let mark = self.js.mark();
-                    for &child in &values[begin..] {
-                        self.js.push(B::from_node(child));
+                    for child in values.drain(begin..) {
+                        self.js.push(child);
                     }
-                    values.truncate(begin);
-                    let mut value = self.js.refill(&mut self.arena, B::from_node(old), mark);
+                    let mut value = self.js.refill(&mut self.arena, old, mark);
                     self.js.assume_strict(&mut self.arena, &mut value);
-                    values.push(B::node(value));
+                    values.push(value);
                 }
             }
         }
@@ -194,14 +192,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     let mut shell = value;
                     self.js.take_operands(&mut self.arena, &mut shell);
                     let object = self.js.pop();
-                    let (held, object) = self.evaluate_now(B::node(object));
+                    let (held, object) = self.evaluate_now(object);
                     let mark = self.js.mark();
-                    self.js.push(B::from_node(object));
+                    self.js.push(object);
                     let value = self.js.refill(&mut self.arena, shell, mark);
                     (held, value)
                 } else {
-                    let (held, value) = self.evaluate_now(B::node(value));
-                    (held, B::from_node(value))
+                    self.evaluate_now(value)
                 };
             has_code |= self.statements.has_statements(arg.stmts) || held.len != 0;
             later_defines_pure &= self.defines_pure_values(&self.evaluation.statements[held.start as usize..(held.start + held.len) as usize])
@@ -243,7 +240,7 @@ mod tests {
         let value = state.arena.new_node(View::JNull, 0);
         let statement = state.arena.new_node(View::SDebugger, 0);
         state.evaluation.statements.push(<crate::bir::j::rows::Rows as js_stmt::JsStmt>::stmt_from_node(statement));
-        state.evaluate_now(value);
+        state.evaluate_now(crate::bir::lower::out::of_row(value));
     }
 
     #[test]
@@ -317,7 +314,7 @@ mod tests {
         assert_eq!(state.free.capacities(), free_before);
         assert!(state.evaluation.work.is_empty() && state.evaluation.values.is_empty() && state.evaluation.statements.is_empty());
         assert_eq!(std::mem::size_of::<Span>(), 8);
-        assert_eq!(std::mem::size_of::<Work>(), 16);
+        assert_eq!(std::mem::size_of::<Work<<crate::bir::j::rows::Rows as super::super::js::Js>::E>>(), 16);
     }
 
     #[test]

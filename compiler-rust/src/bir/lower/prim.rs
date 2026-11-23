@@ -22,6 +22,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// encounter order; purity annotations are comments, not purity facts.
     /// O(r + a + text bytes), with r runtime modules (bounded by the primitive
     /// runtime inventory) and a operands; no expression subtree is walked.
+    /// The row form of `runtime_call`, kept until T6x-d for `external.rs`,
+    /// `ffi_args.rs`, `jsx.rs` and `rec.rs`, which hold rows: it wraps each
+    /// operand and turns the call back.
     pub(super) fn primitive_runtime(
         &mut self,
         name: &str,
@@ -210,13 +213,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         match key {
                             Some(text) => {
                                 keys.push(crate::bir::PropertyKey::Literal(text));
-                                kept.push(B::node(self.js.keep_operand(&mut self.arena, item, 1)));
+                                kept.push(self.js.keep_operand(&mut self.arena, item, 1));
                             }
                             None => self.js.release(&mut self.arena, item),
                         }
                     }
                     let info = self.arena.object_info(&keys);
-                    let mark = self.push_values(kept.drain(..).map(B::from_node));
+                    let mark = self.push_values(kept.drain(..));
                     self.js.object(&mut self.arena, mark, info)
                 } else {
                     for value in values.by_ref() {
@@ -258,15 +261,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     if literal {
                         let count = self.js.unpack_rev(&mut self.arena, arg);
                         for _ in 0..count {
-                            kept.push(B::node(self.js.pop()));
+                            kept.push(self.js.pop());
                         }
                     } else {
                         keys.push(crate::bir::PropertyKey::Spread);
-                        kept.push(B::node(arg));
+                        kept.push(arg);
                     }
                 }
                 let info = self.arena.object_info(&keys);
-                let mark = self.push_values(kept.drain(..).map(B::from_node));
+                let mark = self.push_values(kept.drain(..));
                 let result = self.js.object(&mut self.arena, mark, info);
                 keys.clear(); kept.clear();
                 self.object_scratch.keys = keys;
@@ -647,10 +650,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     finished: Finished::True,
                 }));
             }
+            // `compile_jsx` (jsx.rs) takes and gives rows until T6x-d.
             Primitive::Pjsx(jsx) => B::from_node(self.compile_jsx(jsx, values.map(B::node))),
-            Primitive::Pimport(source) => B::from_node(self.compile_import(source)),
-            Primitive::Pduprecord => B::from_node(self.duplicate_record(B::node(take(&mut values)))),
-            Primitive::PrecordRest(excluded) => B::from_node(self.record_rest(B::node(take(&mut values)), excluded)),
+            Primitive::Pimport(source) => self.compile_import(source),
+            Primitive::Pduprecord => self.duplicate_record(take(&mut values)),
+            Primitive::PrecordRest(excluded) => self.record_rest(take(&mut values), excluded),
             // P: compile_primitive_js, Pawait. O(1): one owned J node.
             Primitive::Pawait => self.js.await_(&mut self.arena, take(&mut values)),
             Primitive::Pstringlength => {
@@ -660,7 +664,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.js.length(&mut self.arena, take(&mut values), LengthObject::Array)
             }
             Primitive::PjsCall(call) => {
-                // T6x-c2: `compile_js_call` (external.rs) takes a pool list of rows.
+                // `compile_js_call` (external.rs) takes a pool list of rows
+                // and gives a row until T6x-d.
                 let values = self.arena.lists.push_iter(values.len(), values.map(B::node));
                 B::from_node(self.compile_js_call(cx, prim.primitive, call, values))
             },
@@ -673,7 +678,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 None => self.js.undefined(&mut self.arena, false),
             },
             Primitive::PjsObjectCreate(specs) => {
-                // T6x-c2: `compile_js_object_create` (external.rs) takes a pool list of rows.
+                // `compile_js_object_create` (external.rs) takes a pool list
+                // of rows and gives a row until T6x-d.
                 let values = self.arena.lists.push_iter(values.len(), values.map(B::node));
                 B::from_node(self.compile_js_object_create(cx, specs, values))
             },
@@ -690,10 +696,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Primitive::PjsObjectGet(name) | Primitive::PjsObjectSet(name) => {
                 match (primitive, values.len()) {
                     (Primitive::PjsObjectGet(_), 1) => {
-                        B::from_node(self.static_member(B::node(take(&mut values)), name))
+                        self.member(take(&mut values), name)
                     }
                     (Primitive::PjsObjectSet(_), 2) => {
-                        let target = B::from_node(self.static_member(B::node(take(&mut values)), name));
+                        let target = self.member(take(&mut values), name);
                         let assign = self.js.bin_plain(&mut self.arena, BinOp::Eq, target, take(&mut values));
                         let unit = self.js.undefined(&mut self.arena, true);
                         self.js.seq(&mut self.arena, assign, unit)
