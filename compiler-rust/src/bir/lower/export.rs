@@ -1422,6 +1422,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         // Each value is moved out once, in export order, and every arm
         // consumes it: released, or the initialiser of a declaration.
         let mut values = std::mem::take(&mut self.coercion.values);
+        // The loop pairs each export with its value: one missing would end
+        // it early without a word.
+        assert_eq!(values.len(), exports.len(), "an export without its value");
         for (index, value) in (0..exports.len() as u32).zip(values.drain(..)) {
             self.coercion.steps += 1;
             let export = exports[index as usize];
@@ -1778,7 +1781,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// out of it; the second moves each statement into the list where it
     /// is: the top level's out of the run, in order (one per row of the top
     /// level), the fold's declarations out of `inserted` and `tail`. Cost:
-    /// one step per row, and the list's: one and one per statement.
+    /// both passes walk the rows, and the tables count one step per row,
+    /// once; the second also walks the slots of the run; the list counts
+    /// one step and one per statement on the interface; each dissolved
+    /// block is released, one step per node released. `blocks` allocates
+    /// once in a unit that dissolves a block; nothing else allocates once
+    /// the tables have their capacity.
     pub(super) fn coerced_list(&mut self, run: Span) -> B::L {
         let flattened = self.coercion.flattened;
         let mut len = self.coercion.inserted.len();
@@ -1834,7 +1842,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 }
                 if flattened {
                     if bits & Row::BLOCK != 0 {
-                        // By id 1 for a block inside a block.
+                        // By id 1 for a block inside a block; like every
+                        // dissolved block it is released below (by id 4).
                         blocks.push(own.unwrap_or_else(|| B::stmt_from_node(stmt)));
                         continue;
                     }
