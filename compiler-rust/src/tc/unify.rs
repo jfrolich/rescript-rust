@@ -499,7 +499,6 @@ impl Checker {
     /// body. (R3s; CHECKER_REWRITE 8.11, decisions 97 and 105)
     #[cold]
     #[inline(never)]
-    #[allow(unused_variables, dead_code)]
     fn unify_distinct_gadt(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
         let before = self.gadt & GADT_TRACING;
         let late = self.gadt & GADT_LOCAL == 0;
@@ -520,7 +519,6 @@ impl Checker {
     /// and calls this only when it is set. O(1) plus the cleanup. (R3s)
     #[cold]
     #[inline(never)]
-    #[allow(unused_variables, dead_code)]
     pub fn trace_on(&mut self) -> bool {
         if self.gadt & (GADT_LOCAL | GADT_TRACING) != GADT_LOCAL {
             return false;
@@ -565,7 +563,6 @@ impl Checker {
     /// them. O(1) plus the callee. (R3s; decision 105)
     #[cold]
     #[inline(never)]
-    #[allow(unused_variables, dead_code)]
     fn late_pair(&mut self, left: Ty, right: Ty) -> Result<(), [Ty; 2]> {
         if self.gadt & (GADT_LOCAL | GADT_TRACING) != GADT_LOCAL {
             return self.run_frames(usize::MAX, left, right);
@@ -1730,7 +1727,6 @@ impl Checker {
     /// CHECKER_REWRITE 8.11, decision 100)
     #[cold]
     #[inline(never)]
-    #[allow(unused_variables, dead_code)]
     fn has_own_expansion(&self, left: Ty, right: Ty) -> bool {
         self.own_expansion(left).0 != NONE || self.own_expansion(right).0 != NONE
     }
@@ -1744,7 +1740,6 @@ impl Checker {
     /// [`GADT_MEMBER`]. Cold. (R3s; decision 111)
     #[cold]
     #[inline(never)]
-    #[allow(unused_variables, dead_code)]
     fn expanded_instances(&mut self, sides: [Ty; 2], heads: [Ty; 2]) {
         for (side, head) in sides.into_iter().zip(heads) {
             let side = self.g.repr(side);
@@ -1764,7 +1759,6 @@ impl Checker {
     /// one [`Checker::add_instance_chain`]. Cold. (R3s)
     #[cold]
     #[inline(never)]
-    #[allow(unused_variables, dead_code)]
     fn join_instance_levels(&mut self, t1: Ty, t2: Ty) {
         if self.gadt & GADT_MEMBER == 0 {
             return;
@@ -1783,7 +1777,6 @@ impl Checker {
     /// one becomes the current one; the mark is what the environment was
     /// ([`Checker::case_mark`]). Amortized O(1): one node (the head, a
     /// variable at level 0 with `b = NONE`) and one 12-byte row. (R3s)
-    #[allow(unused_variables, dead_code)]
     pub fn enter_instance_scope(&mut self, level: u32) -> CaseMark {
         let mark = self.case_mark();
         let head = self.g.push(Node {
@@ -1822,7 +1815,6 @@ impl Checker {
     /// was left are not reached again; [`GADT_MEMBER`] stays. One call,
     /// so that none of the three is forgotten. O(equations cut). (R3s;
     /// decision 101)
-    #[allow(unused_variables, dead_code)]
     pub fn leave_case(&mut self, mark: CaseMark) {
         self.cut_equations(mark.equations as usize);
         self.instance_scope = mark.scope;
@@ -1836,7 +1828,6 @@ impl Checker {
     /// pattern (ctype.ml:970); `reify` and `add_gadt_equation` set the
     /// bit themselves. O(1). (R3s; decisions 85 and 97)
     #[inline]
-    #[allow(unused_variables, dead_code)]
     pub fn add_local_type(&mut self) {
         self.gadt |= GADT_LOCAL;
     }
@@ -1849,7 +1840,6 @@ impl Checker {
     /// a member read: linear in the additions of the scopes visited, as
     /// OCaml's is in their members (`Type_set.exists is_Tlink` a scope).
     /// A caller reads [`GADT_MEMBER`] first. (R3s; decision 106)
-    #[allow(unused_variables, dead_code)]
     pub fn instance_level(&mut self, ty: Ty) -> u32 {
         let mut scope = self.instance_scope;
         while scope != NONE {
@@ -1876,7 +1866,6 @@ impl Checker {
     /// compiler/ml/env.ml:1326-1328), or `NONE`: OCaml asserts that it
     /// exists; an equation whose level has no scope adds nothing
     /// (CHECKER_REWRITE 8.11, (v)). One step a scope.
-    #[allow(unused_variables, dead_code)]
     fn instance_scope_at(&self, level: u32) -> u32 {
         let mut scope = self.instance_scope;
         while scope != NONE {
@@ -1899,7 +1888,6 @@ impl Checker {
     /// type (`TypeTable::scoped`), so that every lowering of the unit is
     /// the scoped one from here on. No test that `ty` is already a
     /// member. (R3s; decision 98)
-    #[allow(unused_variables, dead_code)]
     fn push_instance(&mut self, scope: u32, ty: Ty) {
         if self.gadt & GADT_MEMBER == 0 {
             self.gadt |= GADT_MEMBER;
@@ -1917,7 +1905,6 @@ impl Checker {
     /// for the representatives `tys`: each joins the set of the first
     /// scope of level `level`; nothing when no scope has that level.
     /// O(scopes visited + tys). (R3s)
-    #[allow(unused_variables, dead_code)]
     pub fn add_instances(&mut self, level: u32, tys: &[Ty]) {
         let scope = self.instance_scope_at(level);
         if scope == NONE {
@@ -1941,7 +1928,6 @@ impl Checker {
     /// are marked once (one step each), then each node of the chain is
     /// one step, one mark and one memo lookup. O(members of the set +
     /// chain), not their product. (R3s; decision 106)
-    #[allow(unused_variables, dead_code)]
     pub fn add_instance_chain(&mut self, level: u32, ty: Ty) {
         let scope = self.instance_scope_at(level);
         if scope == NONE {
@@ -2001,7 +1987,6 @@ impl Checker {
     /// copy added to the innermost scope that holds it. Cost: the copy,
     /// then one step a scope and one a member read, instead of one
     /// lookup a copied node. (R3s; decisions 101 and 107)
-    #[allow(unused_variables, dead_code)]
     pub fn copy_in(&mut self, root: Ty) -> Ty {
         let copied = self.copy(root);
         // `Some env when Env.has_local_constraints env` (ctype.ml:771).

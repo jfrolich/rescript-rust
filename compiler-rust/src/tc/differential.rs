@@ -5418,7 +5418,6 @@ mod tests {
     ///
     /// Reaches: R3m, R3e, R3f, R3n, R3h, R3r, R3s.
     #[test]
-    #[ignore = "R3s build"]
     fn instance_plan_agrees_on_generated_cases() {
         let program = compile(PATTERN_PROGRAM.to_string());
         let plan = Plan::new(Tier::Full, INSTANCE_PLAN);

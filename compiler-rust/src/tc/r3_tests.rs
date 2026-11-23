@@ -6689,7 +6689,6 @@ fn used_at_int(c: &mut Checker) -> (Ty, Ty) {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn an_expansion_under_tracing_gives_the_set_its_first_members() {
     let mut c = case_checker(Mode::Success);
     assert_eq!(c.gadt & (GADT_LOCAL | GADT_TRACING | GADT_MEMBER), GADT_LOCAL);
@@ -6730,7 +6729,6 @@ fn an_expansion_under_tracing_gives_the_set_its_first_members() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn a_node_below_its_equation_is_not_expanded_under_tracing() {
     let mut c = case_checker(Mode::Explain);
     let (below, int) = (constr_at(&mut c, CASE - 1, N0, &[]), constr_at(&mut c, CASE - 1, INT, &[]));
@@ -6770,7 +6768,6 @@ fn a_node_below_its_equation_is_not_expanded_under_tracing() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn a_copy_with_the_environment_joins_the_set_of_its_source() {
     let mut c = case_checker(Mode::Success);
     let (y, _) = used_at_int(&mut c);
@@ -6826,7 +6823,6 @@ fn a_copy_with_the_environment_joins_the_set_of_its_source() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn unify2_adds_the_chain_of_the_side_that_is_in_no_set() {
     for swapped in [false, true] {
         let mut c = case_checker(Mode::Success);
@@ -6865,7 +6861,6 @@ fn unify2_adds_the_chain_of_the_side_that_is_in_no_set() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn expanding_a_head_into_a_set_adds_the_chain_whatever_the_flag() {
     let mut c = case_checker(Mode::Success);
     let (y, int) = used_at_int(&mut c);
@@ -6919,7 +6914,6 @@ fn expanding_a_head_into_a_set_adds_the_chain_whatever_the_flag() {
 ///
 /// Reaches: R3s.
 #[test]
-#[ignore = "R3s build"]
 fn a_restore_undoes_an_addition_and_a_keep_keeps_it() {
     let mut c = checker(Mode::Success);
     c.enter_instance_scope(CASE);
@@ -6970,7 +6964,6 @@ fn a_restore_undoes_an_addition_and_a_keep_keeps_it() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn leaving_a_case_puts_its_environment_back() {
     let (mut c, _) = pattern_checker(Mode::Success);
     c.g.level = CASE;
@@ -7024,7 +7017,6 @@ fn leaving_a_case_puts_its_environment_back() {
 ///
 /// Reaches: R3s.
 #[test]
-#[ignore = "R3s build"]
 fn an_existential_type_alone_turns_tracing_on() {
     for local in [false, true] {
         let mut c = checker(Mode::Success);
@@ -7086,7 +7078,6 @@ fn an_existential_type_alone_turns_tracing_on() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn a_constructor_expanded_under_tracing_is_not_linked_at_once() {
     let mut c = case_checker(Mode::Success);
     let (y, z, int) = (constr(&mut c, N0, &[]), constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
@@ -7117,7 +7108,6 @@ fn a_constructor_expanded_under_tracing_is_not_linked_at_once() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn the_wrappers_of_the_kernel_trace_by_themselves() {
     let mut c = case_checker(Mode::Success);
     let (parameter, result) = (constr(&mut c, N0, &[]), constr(&mut c, N0, &[]));
@@ -7173,7 +7163,6 @@ fn the_wrappers_of_the_kernel_trace_by_themselves() {
 ///
 /// Reaches: R3h, R3r, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn a_pair_after_the_first_equation_of_a_pattern_is_traced() {
     let (mut c, _) = pattern_checker(Mode::Success);
     c.g.level = CASE;
@@ -7208,7 +7197,6 @@ fn a_pair_after_the_first_equation_of_a_pattern_is_traced() {
 ///
 /// Reaches: R3s.
 #[test]
-#[ignore = "R3s build"]
 fn instance_sets_at_ten_thousand() {
     let run = |shape: u32, n: u32| {
         let mut c = checker(Mode::Success);

@@ -642,9 +642,7 @@ pub struct OwnMemo {
     pub type_index: u32,
 }
 
-/// A row of [`Memo::own`] that holds nothing. (The bodies of R3s read
-/// it; its build removes the `allow`.)
-#[allow(dead_code)]
+/// A row of [`Memo::own`] that holds nothing.
 const NO_OWN: OwnMemo = OwnMemo { generation: 0, expansion: Ty(NONE), parent: Ty(NONE), type_index: NONE };
 
 impl Default for Memo {
@@ -733,7 +731,6 @@ impl Checker {
     /// (compiler/ml/btype.ml:623-627), a nullary node's own one
     /// included. (R3s)
     #[cold]
-    #[allow(unused_variables, dead_code)]
     fn forget_own_memos(&mut self) {
         self.memo.own_generation = self
             .memo
@@ -747,7 +744,6 @@ impl Checker {
     /// its own memo, of either kind, or `NONE`: one row load.
     /// `find_expans Private p !memo` on the node's own `abbrev`
     /// (compiler/ml/btype.ml:612-619). (R3s; decision 100)
-    #[allow(unused_variables, dead_code)]
     pub(super) fn own_expansion(&self, ty: Ty) -> Ty {
         match self.memo.own.get(ty.0 as usize) {
             Some(row) if row.generation & !1 == self.memo.own_generation => row.expansion,
@@ -765,7 +761,6 @@ impl Checker {
     /// `Checker::gadt` and one row load. (R3s)
     #[cold]
     #[inline(never)]
-    #[allow(unused_variables, dead_code)]
     fn find_own_expansion(&self, ty: Ty, private: bool) -> Ty {
         if self.gadt & super::unify::GADT_TRACING == 0 {
             return Ty(NONE);
@@ -789,7 +784,6 @@ impl Checker {
     /// 200-202). Not logged, as slot 0 is not. (R3s)
     #[cold]
     #[inline(never)]
-    #[allow(unused_variables, dead_code)]
     fn memorize_own(&mut self, ty: Ty, expansion: Ty, private: bool) {
         let index = ty.0 as usize;
         if index >= self.memo.own.len() {
@@ -824,7 +818,6 @@ impl Checker {
     /// the chain (`Mnil`); a row that was never memorized is passed
     /// (`Mlink`). One step a row: at most the number of traced
     /// expansions in progress above this copy. (R3s; decision 109)
-    #[allow(unused_variables, dead_code)]
     fn own_ancestor(&self, from: Ty, type_index: u32) -> Ty {
         let mut at = from;
         while at.0 != NONE {
@@ -858,7 +851,6 @@ impl Checker {
     /// nothing is traced; without it a type that reaches itself through
     /// two equations is unfolded without end. One step a node made,
     /// plus the chain. (R3s; decision 109)
-    #[allow(unused_variables, dead_code)]
     fn inherit_own(&mut self, ty: Ty, first: usize) {
         for index in first..self.g.nodes.len() {
             #[cfg(test)]
@@ -1173,7 +1165,6 @@ impl Checker {
     /// Cold. O(1) plus the callees. (R3s; decisions 99 and 108)
     #[cold]
     #[inline(never)]
-    #[allow(unused_variables, dead_code)]
     fn subst_traced(&mut self, ty: Ty, node: Node, info: TypeInfo, mode: ExpandMode) -> Result<Ty, Clash> {
         let mut lv = 0;
         if info.flags & NEWTYPE != 0 {
@@ -1218,7 +1209,6 @@ impl Checker {
     /// (compiler/ml/printtyp.ml:1342-1359). O(1) amortized. (R3s;
     /// decision 102)
     #[cold]
-    #[allow(unused_variables, dead_code)]
     fn instance_clash(&mut self, ty: Ty, level: u32) -> Clash {
         if self.g.mode == super::graph::Mode::Explain {
             let var = self.g.push(Node {
@@ -1374,7 +1364,6 @@ impl Checker {
     /// [`Checker::add_instance_chain`]. Cold. (R3s)
     #[cold]
     #[inline(never)]
-    #[allow(unused_variables, dead_code)]
     pub(super) fn expanded_instance(&mut self, ty: Ty, head: Ty) {
         let lv = self.instance_level(head);
         if lv != 0 {
@@ -1822,7 +1811,6 @@ impl Checker {
     /// member. (R3s)
     #[cold]
     #[inline(never)]
-    #[allow(unused_variables, dead_code)]
     fn instance_escapes(&mut self, ty: Ty, level: u32) -> bool {
         level < self.instance_level(ty)
     }
