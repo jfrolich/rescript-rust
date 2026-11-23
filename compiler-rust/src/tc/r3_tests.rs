@@ -5669,6 +5669,63 @@ fn matching_the_fields_of_a_fixed_copy_at_ten_thousand_is_linear() {
     }
 }
 
+/// `occur_rec` keeps its set per path (compiler/ml/ctype.ml:1389-1402):
+///
+/// ```text
+/// | Tconstr (p, _tl, _abbrev) -> (
+///   if allow_recursive && is_contractive env p then ()
+///   else
+///     try
+///       if Type_set.mem ty visited then raise Occur;
+///       let visited = Type_set.add ty visited in
+///       iter_type_expr (occur_rec env allow_recursive visited ty0) ty
+///     with Occur -> (
+///       try
+///         let ty' = try_expand_head try_expand_once env ty in
+///         (* This call used to be inlined, but there seems no reason for it.
+///            Message was referring to change in rev. 1.58 of the CVS repo. *)
+///         occur_rec env allow_recursive visited ty0 ty'
+///       with Cannot_expand -> raise Occur))
+/// ```
+///
+/// Witness (hand-built; a binding through a constructor whose expansion
+/// drops its argument makes such a cycle, and no source program was
+/// tried): `e<'x> = int`, `k` and `k2` abstract and not contractive, `c
+/// = k<e<x>>`, `x = k2<c, ('u, int)>`, and `'u` against `r = k2<c, x>`.
+/// By the lines above: below `r`, `c` enters `e<x>`, which enters `x`,
+/// whose first argument `c` is on the way: `Occur`; `c` does not
+/// expand, so `x` raises, `x` does not expand, so `e<x>` raises and is
+/// expanded to `int`: free, and `c` is free. Then the second argument
+/// of `r`, `x`, which is NOT on the way now: its first argument `c`
+/// enters `e<x>`, where `x` is on the way: `Occur`, `x` does not
+/// expand, `e<x>` expands to `int`: `c` is free; the tuple is not
+/// entered: `x` is free, and `'u` is bound to `r`. A walk that
+/// remembered "`x` holds it" from the first path (where it was decided
+/// with `c` on the way) clashes.
+///
+/// Reaches: R3h.
+#[test]
+fn the_occurrence_test_of_pattern_mode_keeps_its_set_per_path() {
+    let (mut c, _) = pattern_checker(Mode::Success);
+    let level = std::mem::replace(&mut c.g.level, GENERIC);
+    let parameter = var(&mut c);
+    let body = constr(&mut c, INT, &[]);
+    c.g.level = level;
+    abbreviation(&mut c, E, &[parameter], body);
+    let u = var_at(&mut c, 1);
+    let int = constr(&mut c, INT, &[]);
+    let pair = tuple(&mut c, &[u, int]);
+    let hole = var(&mut c);
+    let dropped = constr(&mut c, E, &[hole]);
+    let cycle = constr(&mut c, K, &[dropped]);
+    let x = constr(&mut c, K2, &[cycle, pair]);
+    c.g.link(hole, x);
+    let r = constr(&mut c, K2, &[cycle, x]);
+    assert!(c.unify_pattern(2, true, true, u, r).is_ok());
+    assert_pattern_left(&c);
+    assert_eq!(c.g.repr(u), c.g.repr(r));
+}
+
 /// The occurrence test of a variable in pattern mode over a type nested
 /// n deep that holds it: `t(0) = ('v, int)`, `t(i + 1) = k2<t(i),
 /// t(i)>` for the abstract `k2` (not contractive), n + 1 nodes and 2^n

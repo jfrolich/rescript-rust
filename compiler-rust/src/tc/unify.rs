@@ -272,6 +272,11 @@ pub struct Checker {
     pub compatible: PairSet,
 }
 
+/// `Frame::extra` of the frame [`Checker::occur_pattern`] pushes for a
+/// constructor it meets again on the way; no constructor has as many
+/// arguments.
+const AGAIN: u32 = u32::MAX;
+
 impl Checker {
     /// O(1): a context over a graph and its declaration facts, in the
     /// graph's mode. Allocates nothing.
@@ -849,19 +854,40 @@ impl Checker {
     /// the graph has a cycle through that node afterwards (every walk of
     /// the kernel marks or cuts by level; `Checker::reaches` gives up at
     /// its budget and marks). The walk of [`Checker::occur_expanding`]
-    /// with these two rules: marks (free, holding, on the way), one frame
-    /// a constructor entered on [`Checker::frames`] above the length it
-    /// finds. Cost: one step and one `TypeInfo` load a constructor
-    /// reached through constructors that are not contractive, one
-    /// expansion a constructor that holds `node`. (R3h; CHECKER_REWRITE
-    /// 8.9, decision 69)
+    /// with these two rules, one frame a constructor entered on
+    /// [`Checker::frames`] above the length it finds.
+    ///
+    /// OCaml's `visited` is the set of the PATH (`if Type_set.mem ty
+    /// visited then raise Occur; let visited = Type_set.add ty visited`,
+    /// 1393-1394), and what a constructor answers depends on it: one on
+    /// the way answers what its expansion does, one met elsewhere
+    /// answers that only when an argument holds `node`. The kernel
+    /// remembers an answer across paths (marks: free, holding) only for
+    /// a constructor whose visit met no constructor that was on the
+    /// way, itself included: such a visit is the same from every path.
+    /// While a constructor that was met again is on the way (`met`, a
+    /// count; its mark says "on the way, met"), a constructor that is
+    /// left is not remembered and is walked once per path, as in OCaml.
+    /// Witness: `the_occurrence_test_of_pattern_mode_keeps_its_set_per_
+    /// path` (tc/r3_tests.rs), where an answer remembered from a path
+    /// that held `c` is wrong on a path that does not.
+    ///
+    /// Cost: one step and one `TypeInfo` load a constructor reached
+    /// through constructors that are not contractive, one expansion a
+    /// constructor that holds `node`; for a type that reaches itself
+    /// through constructors that are not contractive (made by a binding
+    /// through a constructor whose expansion drops the argument), the
+    /// constructors below one that was met again are walked once per
+    /// path. (R3h; the set per path in the eighth skeleton turn;
+    /// CHECKER_REWRITE 8.9, decision 69)
     #[cold]
     #[inline(never)]
     fn occur_pattern(&mut self, node: Ty, ty: Ty) -> Result<(), Clash> {
-        let marks = [self.fresh_marks(), self.fresh_marks(), self.fresh_marks()];
-        let [free, holds, _] = marks;
+        let marks = [self.fresh_marks(), self.fresh_marks(), self.fresh_marks(), self.fresh_marks()];
+        // How many constructors on the way were met again.
+        let mut met = 0u32;
         let base = self.frames.len();
-        let mut result = self.occur_pattern_visit(node, ty, marks);
+        let mut result = self.occur_pattern_visit(node, ty, marks, &mut met);
         while self.frames.len() > base {
             let top = self.frames.len() - 1;
             let frame = self.frames[top];
@@ -869,7 +895,7 @@ impl Checker {
             match result.take() {
                 // The expansion of `parent` decided it.
                 Some(holds_node) if frame.right.0 != NONE => {
-                    result = Some(self.occur_finish(parent, holds_node, [free, holds]));
+                    result = Some(self.occur_pattern_finish(frame, holds_node, marks, &mut met));
                 }
                 Some(false) => {}
                 Some(true) => {
@@ -882,10 +908,10 @@ impl Checker {
                     };
                     if expansion == parent {
                         // `Cannot_expand`: the constructor holds it.
-                        result = Some(self.occur_finish(parent, true, [free, holds]));
+                        result = Some(self.occur_pattern_finish(frame, true, marks, &mut met));
                     } else {
                         self.frames[top].right = expansion;
-                        result = self.occur_pattern_visit(node, expansion, marks);
+                        result = self.occur_pattern_visit(node, expansion, marks, &mut met);
                     }
                 }
                 None => {
@@ -893,9 +919,9 @@ impl Checker {
                     if frame.extra < descriptor.arity() {
                         self.frames[top].extra += 1;
                         let argument = self.g.lists[(descriptor.b + 1 + frame.extra) as usize];
-                        result = self.occur_pattern_visit(node, argument, marks);
+                        result = self.occur_pattern_visit(node, argument, marks, &mut met);
                     } else {
-                        result = Some(self.occur_finish(parent, false, [free, holds]));
+                        result = Some(self.occur_pattern_finish(frame, false, marks, &mut met));
                     }
                 }
             }
@@ -905,15 +931,16 @@ impl Checker {
 
     /// O(1): one node of [`Checker::occur_pattern`]: decided at once
     /// (`node` itself; a node that is not a constructor, or of a
-    /// contractive type, which is not entered; a constructor decided
-    /// before; one without arguments), or pushed as a frame whose `extra`
-    /// is the next argument and whose `right` is the expansion it waits
-    /// for. A constructor met again on the way (`Type_set.mem ty
-    /// visited`, compiler/ml/ctype.ml:1393) holds `node` in its own frame,
-    /// pushed with no argument left, so that it is expanded and its
-    /// expansion tested in its place. One step; the marks grow, amortized,
-    /// to nodes an expansion made.
-    fn occur_pattern_visit(&mut self, node: Ty, ty: Ty, [free, holds, busy]: [u32; 3]) -> Option<bool> {
+    /// contractive type, which is not entered; a constructor remembered
+    /// from a visit that met none on the way; one without arguments), or
+    /// pushed as a frame whose `extra` is the next argument and whose
+    /// `right` is the expansion it waits for. A constructor met again on
+    /// the way (`Type_set.mem ty visited`, compiler/ml/ctype.ml:1393)
+    /// holds `node` in a frame of its own ([`AGAIN`] in `extra`), so
+    /// that it is expanded and its expansion tested in its place; its
+    /// mark becomes "on the way, met" and `met` counts it once. One
+    /// step; the marks grow, amortized, to nodes an expansion made.
+    fn occur_pattern_visit(&mut self, node: Ty, ty: Ty, [free, holds, busy, busy_met]: [u32; 4], met: &mut u32) -> Option<bool> {
         #[cfg(test)]
         super::steps::tick();
         let ty = self.g.repr(ty);
@@ -931,16 +958,46 @@ impl Checker {
         if mark == free || mark == holds {
             return Some(mark == holds);
         }
-        let extra = if mark == busy { descriptor.arity() } else { 0 };
-        if extra == 0 && descriptor.arity() == 0 {
+        if mark == busy || mark == busy_met {
+            if mark == busy {
+                self.marks[ty.0 as usize] = busy_met;
+                *met += 1;
+            }
+            self.frames.push(Frame { left: ty, right: Ty(NONE), kind: FrameKind::Pair, extra: AGAIN });
+            return Some(true);
+        }
+        if descriptor.arity() == 0 {
             self.marks[ty.0 as usize] = free;
             return Some(false);
         }
         self.marks[ty.0 as usize] = busy;
-        self.frames.push(Frame { left: ty, right: Ty(NONE), kind: FrameKind::Pair, extra });
-        if mark == busy { Some(true) } else { None }
+        self.frames.push(Frame { left: ty, right: Ty(NONE), kind: FrameKind::Pair, extra: 0 });
+        None
     }
 
+    /// O(1): pop `frame` in [`Checker::occur_pattern`] and return
+    /// `holds_node`. The frame of a constructor met again ([`AGAIN`])
+    /// leaves the mark as it is: the constructor is still on the way.
+    /// Any other frame takes its constructor off the way; the answer is
+    /// remembered only when neither it nor a constructor still on the
+    /// way was met again.
+    fn occur_pattern_finish(&mut self, frame: Frame, holds_node: bool, [free, holds, _, busy_met]: [u32; 4], met: &mut u32) -> bool {
+        self.frames.pop();
+        if frame.extra == AGAIN {
+            return holds_node;
+        }
+        let slot = frame.left.0 as usize;
+        let was_met = self.marks[slot] == busy_met;
+        if was_met {
+            *met -= 1;
+        }
+        self.marks[slot] = match (was_met || *met != 0, holds_node) {
+            (true, _) => 0,
+            (false, true) => holds,
+            (false, false) => free,
+        };
+        holds_node
+    }
 
     /// O(1): one node of [`Checker::occur_expanding`]: decided at once
     /// (`node` itself, a node already decided or on the path, a node with no
