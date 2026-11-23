@@ -1,6 +1,6 @@
 //! H12: K:60 compile_constant, K:34 compile_some_constant, K:26 nested_some_none.
 use super::State;
-use crate::bir::{ConstId, Constant, JsPayload, NodeId};
+use crate::bir::{ConstId, Constant, JsPayload};
 use crate::emit::row::Kind;
 use crate::lambda::lam_constant::{ConstructorRuntimeTag, PointerInfo};
 use crate::types::VariantLiteralTag;
@@ -188,7 +188,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Cost: O(C + E + B): visits C constant occurrences and E child edges with enter/rebuild
     /// frames, normalizes/copies B spelling bytes, and pushes the resulting J nodes and
     /// operand runs. Repeated constant handles count as separate occurrences.
-    pub(super) fn constant(&mut self, root: ConstId) -> NodeId {
+    pub(super) fn constant(&mut self, root: ConstId) -> B::E {
         let mut work = std::mem::take(&mut self.constant_work);
         let mut values = std::mem::take(&mut self.constant_values);
         let mut text = std::mem::take(&mut self.constant_text);
@@ -298,8 +298,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         self.constant_values = values;
         self.constant_text = text;
         self.constant_encoding = encoding;
-        // T6x-d: `constant` gives a row to its one caller, in `mod.rs`.
-        B::node(result)
+        result
     }
 }
 
