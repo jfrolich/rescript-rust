@@ -18,36 +18,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         self.js.int(&self.arena, B::of(value))
     }
 
-    /// C: runtime_call_expr / X: pure_runtime_call_expr. Runtime imports retain
-    /// encounter order; purity annotations are comments, not purity facts.
-    /// O(r + a + text bytes), with r runtime modules (bounded by the primitive
-    /// runtime inventory) and a operands; no expression subtree is walked.
-    /// The row form of `runtime_call`, kept until T6x-d for `external.rs`,
-    /// `ffi_args.rs`, `jsx.rs` and `rec.rs`, which hold rows: it wraps each
-    /// operand and turns the call back.
-    pub(super) fn primitive_runtime(
-        &mut self,
-        name: &str,
-        member: &str,
-        args: &[NodeId],
-    ) -> NodeId {
-        let mark = self.js.mark();
-        for &arg in args {
-            self.js.push(B::from_node(arg));
-        }
-        B::node(self.runtime_call(name, member, mark))
-    }
-
-    /// `primitive_runtime` on handles: the operands of `args` pushed in
+    /// A call of a runtime function: the operands of `args` pushed in
     /// order, then [`Self::runtime_call`]. O(r + a + text bytes), as
-    /// `primitive_runtime`.
+    /// `runtime_call`; no expression subtree is walked.
     fn runtime(&mut self, name: &str, member: &str, args: impl Iterator<Item = B::E>) -> B::E {
         let mark = self.push_values(args);
         self.runtime_call(name, member, mark)
     }
 
-    /// C: runtime_call_expr: `name.member(...)` over the operands pushed
-    /// since `mark`. O(r + a + text bytes), with r runtime modules (bounded
+    /// C: runtime_call_expr / X: pure_runtime_call_expr: `name.member(...)`
+    /// over the operands pushed since `mark`. Runtime imports retain
+    /// encounter order; purity annotations are comments, not purity facts.
+    /// O(r + a + text bytes), with r runtime modules (bounded
     /// by the primitive runtime inventory) and a operands since `mark`.
     pub(super) fn runtime_call(&mut self, name: &str, member: &str, mark: Mark) -> B::E {
         let module = match self

@@ -44,15 +44,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
     }
 
-    /// X: static_index. O(name bytes), one plain member node.
-    /// The row form of `member`, kept until T6x-d for `external.rs` and
-    /// `jsx.rs`, which hold rows: it wraps the object and turns the member
-    /// back.
-    pub(super) fn static_member(&mut self, object: NodeId, name: &str) -> NodeId {
-        B::node(self.member(B::from_node(object), name))
-    }
-
-    /// X: static_index, on a handle. O(name bytes): the name is interned;
+    /// X: static_index. O(name bytes): the name is interned;
     /// one plain member node.
     pub(super) fn member(&mut self, object: B::E, name: &str) -> B::E {
         let property = self.arena.intern_text(name);

@@ -158,9 +158,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mut props = PropertySpan {
             start: crate::bir::pools::index(self.arena.pools.property_keys.len()), len: 0,
         };
-        // PROBE-GAP 1: `Js::jsx` takes the callee apart from the operands, as
-        // `Js::call` does; the callee is built last, so the operands wait
-        // in a vector until it is made.
+        // `Js::jsx` reads the callee as its first operand, and the callee is
+        // built last (built earlier, its module and variable would be
+        // registered before the key's runtime module). So the operands wait
+        // in the reused vector `external_values` until it is made: one more
+        // move each, no step. Owed by the interface before T6x-f: a `jsx`
+        // that takes the callee apart from its operands, as `call` does.
         let mut values = std::mem::take(&mut self.external_values);
         debug_assert!(values.is_empty());
         values.push(tag);
@@ -278,8 +281,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 }
             }
         }
-        // PROBE-GAP 2: a node of the key's chain read again by its id once
-        // the arena is borrowed mutably (`Js::at` is the transition's).
+        // The key's chain is read again by id: a reference taken through
+        // `Js::operand` borrows the pools and cannot be held across
+        // `copy_leaf`, `dot` and `copy_cold`. These four `B::at` stay until
+        // the interface gives a copy of a member chain (owed before T6x-f).
         let leaf = NodeId(self.js.id(&self.arena, r));
         let mut copy = self.js.copy_leaf(&mut self.arena, B::at(leaf));
         self.js.copy_cold(&mut self.arena, B::at(leaf), &mut copy);
