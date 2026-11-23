@@ -5500,6 +5500,11 @@ then what the turn itself decided, each with what was run.
     left to the turn that makes its skeleton (8.11, the last
     paragraph).
 
+State at the end of the eighth turn: R3q is issued (8.10; its prompt is
+in 8.4), R3s is not (8.11). `cargo test --lib tc::` after, with trunk
+`b8b78d7d5` merged: 314 passed, none failed, 10 ignored, the ten tests
+of R3q.
+
 
 ### 8.7 The hot paths of unification (K2)
 
