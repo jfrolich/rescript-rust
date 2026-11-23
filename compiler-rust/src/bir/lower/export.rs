@@ -361,6 +361,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         t.seen.resize(variables, false);
         t.row_of.clear();
         t.inserted.clear();
+        t.tail.clear();
         t.selected.clear();
         #[cfg(test)]
         {
