@@ -204,11 +204,11 @@ mod tests {
 
     /// `f(x) = let a1 = x; ...; f(1)`: a loop body of `width` declarations
     /// in a unit whose source has four list operands, so the operand stack
-    /// is reserved for 64. `loop_function_body` gives the body's block back
-    /// to the statement stack through `unblock`, which buffers nothing: the
-    /// stack does not grow.
+    /// is reserved for 64. `loop_function_body` moves the statements of
+    /// the body's list onto the statement stack one by one (`take_at`),
+    /// which buffers nothing: the operand stack does not grow.
     #[test]
-    fn a_block_wider_than_the_operand_stack_is_unblocked_without_growing_it() {
+    fn a_body_wider_than_the_operand_stack_is_moved_without_growing_it() {
         for width in [1_000usize, 10_000] {
             let mut a = crate::lambda::arena::LamArena::new();
             let (f, x) = (ident("f", 1), ident("x", 2));
@@ -227,7 +227,7 @@ mod tests {
             let output = state.probe(Cx::value(), root).unwrap();
             let out = state.realize(Cx::value(), output);
             assert!(out.value.is_some());
-            assert!(state.tail_body_statements >= width, "the body went through unblock");
+            assert!(state.tail_body_statements >= width, "the body was moved statement by statement");
             assert_eq!(state.js.operand_capacity(), reserved, "width {width}");
         }
     }
