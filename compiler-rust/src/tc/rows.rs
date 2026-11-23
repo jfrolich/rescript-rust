@@ -4636,8 +4636,6 @@ impl Checker {
 // -----------------------------------------------------------------
 // `instance_poly` and `instance_label` (R3q; CHECKER_REWRITE 8.10)
 // -----------------------------------------------------------------
-// R3q removes this `allow` with its last `todo!`.
-#[allow(unused_variables, dead_code)]
 impl Checker {
     /// `instance_poly ?keep_names ~fixed univars sch`
     /// (compiler/ml/ctype.ml:1081-1095) for the polymorphic type node
@@ -4664,7 +4662,10 @@ impl Checker {
     /// ctype.ml:1030). A unit that never calls it pays nothing: the
     /// tables of [`PolyCopy`] are empty until the first call.
     pub fn instance_poly(&mut self, fixed: bool, keep_names: bool, poly: Ty, vars: &mut Vec<Ty>) -> Ty {
-        todo!("R3q")
+        self.poly_begin();
+        let body = self.poly_walk(fixed, keep_names, poly, vars);
+        self.poly_session(Ty(NONE));
+        body
     }
 
     /// `instance_label fixed lbl` (compiler/ml/ctype.ml:1097-1105): the
@@ -4692,7 +4693,22 @@ impl Checker {
     /// Cost: one copy of the two types, plus [`Checker::instance_poly`]'s
     /// for a polymorphic argument.
     pub fn instance_label(&mut self, fixed: bool, argument: Ty, result: Ty, vars: &mut Vec<Ty>) -> (Ty, Ty) {
-        todo!("R3q")
+        let argument = self.g.repr(argument);
+        let node = self.g.nodes[argument.0 as usize];
+        let poly = node.head & EXTENDED != 0 && self.extras.descriptors[node.a as usize] == ExtraDescriptor::Poly;
+        if !poly {
+            let first = self.g.nodes.len();
+            self.g.copy_begin();
+            let result = self.g.copy_ref(result);
+            let argument = self.g.copy_ref(argument);
+            self.g.copy_drain();
+            self.poly_pass(first);
+            return (argument, result);
+        }
+        self.poly_begin();
+        let argument = self.poly_walk(fixed, false, argument, vars);
+        let result = self.poly_session(result);
+        (argument, result)
     }
 
     /// Start a call: [`PolyCopy::slots`] grown to the graph (new rows
@@ -4701,13 +4717,48 @@ impl Checker {
     /// stamps (`2 * call + 1`), every stamp is cleared once. O(1)
     /// amortized.
     fn poly_begin(&mut self) {
-        todo!("R3q")
+        let poly = &mut self.extras.poly;
+        let empty = PolySlot { stamp: 0, parents: NONE, copy: Ty(NONE), depth: 0 };
+        poly.slots.resize(self.g.nodes.len(), empty);
+        if poly.call >= u32::MAX / 2 - 1 {
+            for slot in &mut poly.slots {
+                slot.stamp = 0;
+            }
+            poly.call = 0;
+        }
+        poly.call += 1;
+        poly.edges.clear();
+        poly.binders.clear();
+        debug_assert!(poly.delayed.is_empty() && poly.fields.is_empty());
+        poly.depth = 0;
     }
 
     /// Parts 1 and 2 of [`Checker::instance_poly`] for the `Poly` node
     /// `poly`, after [`Checker::poly_begin`]. Its cost is theirs.
     fn poly_walk(&mut self, fixed: bool, keep_names: bool, poly: Ty, vars: &mut Vec<Ty>) -> Ty {
-        todo!("R3q")
+        let poly = self.g.repr(poly);
+        let node = self.g.nodes[poly.0 as usize];
+        debug_assert_eq!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Poly);
+        let body = self.g.lists[node.b as usize];
+        self.mark_holders(node, body);
+        for index in 1..node.arity() {
+            let univar = self.g.repr(self.g.lists[(node.b + index) as usize]);
+            let ExtraDescriptor::Univar(name) = self.extras.descriptors[self.g.nodes[univar.0 as usize].a as usize]
+            else {
+                unreachable!("a bound variable is a universal variable (ctype.ml:1087)");
+            };
+            let name = if keep_names { name } else { NONE };
+            let var = self.g.push(Node { head: VAR, level: self.g.level, a: name, b: 0 });
+            let slot = &mut self.extras.poly.slots[univar.0 as usize];
+            (slot.copy, slot.depth) = (var, 0);
+            vars.push(var);
+        }
+        let instance = self.copy_sep(fixed, body);
+        for index in 1..node.arity() {
+            let univar = self.g.repr(self.g.lists[(node.b + index) as usize]);
+            self.extras.poly.slots[univar.0 as usize].copy = Ty(NONE);
+        }
+        instance
     }
 
     /// `compute_univars sch` (compiler/ml/ctype.ml:693-713), as far as
@@ -4742,7 +4793,72 @@ impl Checker {
     /// binders otherwise (OCaml keeps a set of variables a node: the same
     /// bound with a set operation a step).
     fn mark_holders(&mut self, poly: Node, body: Ty) {
-        todo!("R3q")
+        let seen = 2 * self.extras.poly.call;
+        let holder = seen + 1;
+        self.g.work.clear();
+        let body = self.g.repr(body);
+        let slot = &mut self.extras.poly.slots[body.0 as usize];
+        (slot.stamp, slot.parents) = (seen, NONE);
+        self.g.work.push(body);
+        while let Some(t) = self.g.work.pop() {
+            #[cfg(test)]
+            super::steps::tick();
+            let node = self.g.nodes[t.0 as usize];
+            if node.head & EXTENDED != 0
+                && node.arity() > 1
+                && self.extras.descriptors[node.a as usize] == ExtraDescriptor::Poly
+            {
+                self.extras.poly.binders.push(t);
+            }
+            let mut index = 0;
+            while let Some(child) = self.child(node, index) {
+                index += 1;
+                let child = self.g.repr(child);
+                let poly = &mut self.extras.poly;
+                let slot = &mut poly.slots[child.0 as usize];
+                if slot.stamp != seen {
+                    (slot.stamp, slot.parents) = (seen, NONE);
+                    self.g.work.push(child);
+                }
+                poly.edges.push(PolyEdge { parent: t, next: slot.parents });
+                slot.parents = poly.edges.len() as u32 - 1;
+            }
+        }
+        for class in 0..=self.extras.poly.binders.len() {
+            let (binder, vars) = match class {
+                0 => (Ty(NONE), poly),
+                _ => {
+                    let binder = self.extras.poly.binders[class - 1];
+                    (binder, self.g.nodes[binder.0 as usize])
+                }
+            };
+            let generation = self.fresh_marks();
+            for index in 1..vars.arity() {
+                let univar = self.g.repr(self.g.lists[(vars.b + index) as usize]);
+                let slot = &mut self.extras.poly.slots[univar.0 as usize];
+                if slot.stamp & !1 != seen || self.marks[univar.0 as usize] == generation {
+                    continue;
+                }
+                self.marks[univar.0 as usize] = generation;
+                slot.stamp = holder;
+                self.g.work.push(univar);
+            }
+            while let Some(t) = self.g.work.pop() {
+                #[cfg(test)]
+                super::steps::tick();
+                let mut edge = self.extras.poly.slots[t.0 as usize].parents;
+                while edge != NONE {
+                    let PolyEdge { parent, next } = self.extras.poly.edges[edge as usize];
+                    edge = next;
+                    if parent == binder || self.marks[parent.0 as usize] == generation {
+                        continue;
+                    }
+                    self.marks[parent.0 as usize] = generation;
+                    self.extras.poly.slots[parent.0 as usize].stamp = holder;
+                    self.g.work.push(parent);
+                }
+            }
+        }
     }
 
     /// `copy_sep fixed free bound visited ty` (compiler/ml/ctype.ml:
@@ -4767,7 +4883,20 @@ impl Checker {
     /// filled; three frames at most a node (16 bytes each); what
     /// [`Checker::sep_fill`] makes.
     fn copy_sep(&mut self, fixed: bool, root: Ty) -> Ty {
-        todo!("R3q")
+        let base = self.frames.len();
+        let result = self.sep_child(root);
+        while self.frames.len() > base {
+            let frame = self.frames.pop().expect("a frame above the base");
+            match frame.kind {
+                FrameKind::Linked => {
+                    let slot = &mut self.extras.poly.slots[frame.left.0 as usize];
+                    (slot.copy, slot.depth) = (frame.right, frame.extra);
+                }
+                FrameKind::LeavePoly => self.extras.poly.depth = frame.extra,
+                _ => self.sep_fill(fixed, frame.left, frame.right),
+            }
+        }
+        result
     }
 
     /// The first lines of `copy_sep` for one child (compiler/ml/ctype.ml:
@@ -4791,7 +4920,23 @@ impl Checker {
     /// O(1) besides `sep_conflicts`: one `repr`, one [`PolySlot`] load
     /// and, for a node that is copied, one node and one frame.
     fn sep_child(&mut self, child: Ty) -> Ty {
-        todo!("R3q")
+        let c = self.g.repr(child);
+        let slot = self.extras.poly.slots[c.0 as usize];
+        if slot.stamp != 2 * self.extras.poly.call + 1 {
+            if self.g.nodes[c.0 as usize].level != GENERIC {
+                return c;
+            }
+            let stub = self.g.push(Node { head: VAR, level: self.g.level, a: NONE, b: 0 });
+            self.extras.poly.delayed.push([stub, c]);
+            return stub;
+        }
+        if slot.copy.0 != NONE && (slot.depth == self.extras.poly.depth || self.is_univar(c) || !self.sep_conflicts(c))
+        {
+            return slot.copy;
+        }
+        let stub = self.g.push(Node { head: VAR, level: self.g.level, a: NONE, b: 0 });
+        self.frames.push(Frame { left: c, right: stub, kind: FrameKind::Pair, extra: 0 });
+        stub
     }
 
     /// `conflicts univars dl` (compiler/ml/ctype.ml:1046, 1023-1025) for
@@ -4811,7 +4956,46 @@ impl Checker {
     /// entered since, the nodes its variables are free in. Reached only
     /// by a type that reaches itself through a polymorphic type.
     fn sep_conflicts(&mut self, c: Ty) -> bool {
-        todo!("R3q")
+        let mut at = self.frames.len();
+        loop {
+            at -= 1;
+            let frame = self.frames[at];
+            #[cfg(test)]
+            super::steps::tick();
+            if frame.kind == FrameKind::Linked && frame.left == c {
+                return false;
+            }
+            if frame.kind != FrameKind::LeavePoly {
+                continue;
+            }
+            let binder = frame.left;
+            let node = self.g.nodes[binder.0 as usize];
+            let generation = self.fresh_marks();
+            let start = self.g.work.len();
+            for index in 1..node.arity() {
+                let univar = self.g.repr(self.g.lists[(node.b + index) as usize]);
+                self.marks[univar.0 as usize] = generation;
+                self.g.work.push(univar);
+            }
+            while self.g.work.len() > start {
+                let t = self.g.work.pop().expect("an entry above the start");
+                #[cfg(test)]
+                super::steps::tick();
+                if t == c {
+                    self.g.work.truncate(start);
+                    return true;
+                }
+                let mut edge = self.extras.poly.slots[t.0 as usize].parents;
+                while edge != NONE {
+                    let PolyEdge { parent, next } = self.extras.poly.edges[edge as usize];
+                    edge = next;
+                    if parent != binder && self.marks[parent.0 as usize] != generation {
+                        self.marks[parent.0 as usize] = generation;
+                        self.g.work.push(parent);
+                    }
+                }
+            }
+        }
     }
 
     /// The rest of `copy_sep` for one node (compiler/ml/ctype.ml:
@@ -4846,7 +5030,77 @@ impl Checker {
     /// One step; one list or `Param` slot a child; no trail entry (the
     /// stub is a node of this call).
     fn sep_fill(&mut self, fixed: bool, c: Ty, stub: Ty) {
-        todo!("R3q")
+        #[cfg(test)]
+        super::steps::tick();
+        let node = self.g.nodes[c.0 as usize];
+        let level = self.g.level;
+        let descriptor = (node.head & EXTENDED != 0).then(|| self.extras.descriptors[node.a as usize]);
+        let on_the_way = matches!(
+            descriptor,
+            None | Some(ExtraDescriptor::Object | ExtraDescriptor::Variant(_) | ExtraDescriptor::Package(_))
+        );
+        if on_the_way {
+            let slot = self.extras.poly.slots[c.0 as usize];
+            self.frames.push(Frame { left: c, right: slot.copy, kind: FrameKind::Linked, extra: slot.depth });
+            let depth = self.extras.poly.depth;
+            let slot = &mut self.extras.poly.slots[c.0 as usize];
+            (slot.copy, slot.depth) = (stub, depth);
+        }
+        let filled = match (node.tag(), descriptor) {
+            (ARROW, _) => {
+                let result = self.sep_child(Ty(node.a));
+                let start = self.g.params.len() as u32;
+                for index in 0..node.arity() {
+                    let param = self.g.params[(node.b + index) as usize];
+                    let ty = self.sep_child(param.ty);
+                    self.g.params.push(super::graph::Param { ty, ..param });
+                }
+                Node { level, a: result.0, b: start, ..node }
+            }
+            (_, Some(ExtraDescriptor::Poly)) => {
+                let b = self.g.lists.len() as u32;
+                self.g.lists.resize((b + node.arity()) as usize, Ty(NONE));
+                let depth = self.extras.poly.depth;
+                self.frames.push(Frame { left: c, right: Ty(NONE), kind: FrameKind::LeavePoly, extra: depth });
+                self.extras.poly.depth = depth + 1;
+                for index in 1..node.arity() {
+                    let univar = self.g.repr(self.g.lists[(node.b + index) as usize]);
+                    let copy = self.g.push(Node { level, ..self.g.nodes[univar.0 as usize] });
+                    let slot = self.extras.poly.slots[univar.0 as usize];
+                    self.frames.push(Frame {
+                        left: univar,
+                        right: slot.copy,
+                        kind: FrameKind::Linked,
+                        extra: slot.depth,
+                    });
+                    let slot = &mut self.extras.poly.slots[univar.0 as usize];
+                    (slot.copy, slot.depth) = (copy, depth + 1);
+                    self.g.lists[(b + index) as usize] = copy;
+                }
+                let body = self.sep_child(self.g.lists[node.b as usize]);
+                self.g.lists[b as usize] = body;
+                Node { level, b, ..node }
+            }
+            (_, Some(ExtraDescriptor::Variant(_))) => self.copy_sep_row(fixed, c, node),
+            (CONSTR | TUPLE, _) => {
+                let memo = u32::from(node.tag() == CONSTR);
+                let b = self.g.lists.len() as u32;
+                if memo != 0 {
+                    self.g.lists.push(Ty(NONE));
+                }
+                for index in 0..node.arity() {
+                    let child = self.g.lists[(node.b + memo + index) as usize];
+                    let child = self.sep_child(child);
+                    self.g.lists.push(child);
+                }
+                if matches!(descriptor, Some(ExtraDescriptor::Field { .. })) {
+                    self.extras.poly.fields.push(stub);
+                }
+                Node { level, b, ..node }
+            }
+            _ => unreachable!("a variable holds no universal variable"),
+        };
+        self.g.nodes[stub.0 as usize] = filled;
     }
 
     /// The variant arm of `copy_sep` (compiler/ml/ctype.ml:1061-1069)
@@ -4907,7 +5161,150 @@ impl Checker {
     /// `keep`, per `Reither` field with types one node, its slots and 8
     /// bytes of holder.
     fn copy_sep_row(&mut self, fixed: bool, c: Ty, node: Node) -> Node {
-        todo!("R3q")
+        let level = self.g.level;
+        let row_of = |c: &Checker, node: Node| {
+            let ExtraDescriptor::Variant(row) = c.extras.descriptors[node.a as usize] else {
+                unreachable!("a variant node");
+            };
+            c.extras.variants[row as usize]
+        };
+        let is_variant = |c: &Checker, node: Node| {
+            node.head & EXTENDED != 0 && matches!(c.extras.descriptors[node.a as usize], ExtraDescriptor::Variant(_))
+        };
+        // The last row of the chain and its `more`.
+        let (mut last, mut last_node) = (row_of(self, node), node);
+        let more = loop {
+            let more = self.g.repr(self.g.lists[(last_node.b + last.more) as usize]);
+            let next = self.g.nodes[more.0 as usize];
+            if !is_variant(self, next) {
+                break more;
+            }
+            (last, last_node) = (row_of(self, next), next);
+        };
+        let more_node = self.g.nodes[more.0 as usize];
+        let keep = more_node.tag() == VAR && more_node.level != GENERIC;
+        let copied_more = self.sep_child(more);
+        let fixed = fixed && self.g.nodes[copied_more.0 as usize].tag() == VAR;
+        let b = self.g.lists.len() as u32;
+        self.g.lists.push(copied_more);
+        let arguments = if last.name == NONE { Range::default() } else { last.name_arguments };
+        for index in 0..arguments.len {
+            let argument = self.g.lists[(last_node.b + arguments.start + index) as usize];
+            let argument = self.sep_child(argument);
+            self.g.lists.push(argument);
+        }
+        // The fields, home by home.
+        let start = self.extras.row_fields.len() as u32;
+        let shared = self.extras.row_scratch.len();
+        let scratch = self.extras.poly.types.len();
+        let (mut home, mut home_node) = (c, node);
+        loop {
+            let row = row_of(self, home_node);
+            for at in row.fields.start..row.fields.start + row.fields.len {
+                #[cfg(test)]
+                super::steps::tick();
+                let field = self.extras.row_fields[at as usize];
+                let now = field_repr(&self.g, home_node.b, home_node.arity(), field);
+                let mut copy = RowFieldRow { name: field.name, types: Range::default(), link: NONE, kind: now.kind };
+                match now.kind {
+                    RowFieldKind::Present if now.types != 0 => {
+                        let ty = self.sep_child(now.first);
+                        copy.types = Range { start: self.g.lists.len() as u32 - b, len: 1 };
+                        self.g.lists.push(ty);
+                    }
+                    RowFieldKind::Either { constant, matched } => {
+                        let types = &mut self.extras.poly.types;
+                        each_field_types(&self.g, home_node.b, home_node.arity(), field, |own| {
+                            types.extend_from_slice(own)
+                        });
+                        copy.types =
+                            Range { start: self.g.lists.len() as u32 - b, len: (types.len() - scratch) as u32 };
+                        for index in scratch..self.extras.poly.types.len() {
+                            let ty = self.sep_child(self.extras.poly.types[index]);
+                            self.g.lists.push(ty);
+                        }
+                        self.extras.poly.types.truncate(scratch);
+                        copy.kind =
+                            RowFieldKind::Either { constant, matched: if last.fixed { fixed } else { matched } };
+                        if keep {
+                            let name = self.extras.row_fields.len() as u32;
+                            self.extras.row_scratch.push(FieldRef { name, at, ty: home });
+                        }
+                    }
+                    _ => {}
+                }
+                self.extras.row_fields.push(copy);
+            }
+            let next = self.g.repr(self.g.lists[(home_node.b + row.more) as usize]);
+            let next_node = self.g.nodes[next.0 as usize];
+            if !is_variant(self, next_node) {
+                break;
+            }
+            (home, home_node) = (next, next_node);
+        }
+        let published = self.g.lists.len() as u32 - b;
+        let mut references = 0;
+        for field in &mut self.extras.row_fields[start as usize..] {
+            if matches!(field.kind, RowFieldKind::Either { .. }) {
+                field.link = published + references;
+                references += 1;
+            }
+        }
+        let row = self.extras.variants.len() as u32;
+        self.extras.variants.push(VariantRow {
+            fields: Range { start, len: self.extras.row_fields.len() as u32 - start },
+            more: 0,
+            name: last.name,
+            name_arguments: Range { start: 1, len: arguments.len },
+            closed: last.closed,
+            fixed: last.fixed && fixed,
+        });
+        let a = self.extras.descriptors.len() as u32;
+        self.extras.descriptors.push(ExtraDescriptor::Variant(row));
+        let mut arity = published;
+        if self.extras.row_scratch.len() > shared {
+            // `keep`: the copy is opened onto the references of its source.
+            arity += references;
+            self.g.lists.resize((b + arity) as usize, Ty(NONE));
+            let (mut opened_home, mut fresh) = (Ty(NONE), false);
+            for index in shared..self.extras.row_scratch.len() {
+                let FieldRef { name, at, ty: home } = self.extras.row_scratch[index];
+                let source = self.extras.row_fields[at as usize];
+                if home != opened_home {
+                    fresh = self.g.nodes[home.0 as usize].arity() <= source.link;
+                    opened_home = home;
+                }
+                let home_node = self.open_row(home);
+                let end = field_repr(&self.g, home_node.b, home_node.arity(), source).end;
+                if fresh {
+                    self.g.nodes[end.0 as usize].level = more_node.level;
+                }
+                let field = self.extras.row_fields[name as usize];
+                let RowFieldKind::Either { constant, matched } = field.kind else {
+                    unreachable!("a shared field is a `Reither`");
+                };
+                let slot = if field.types.len == 0 {
+                    end
+                } else {
+                    let own = (b + field.types.start) as usize..(b + field.types.start + field.types.len) as usize;
+                    let list = self.g.lists.len() as u32;
+                    self.g.lists.extend_from_within(own.clone());
+                    self.g.lists.push(end);
+                    let chain = self.g.push(Node {
+                        head: TUPLE | (field.types.len + 1) << 8,
+                        level,
+                        a: either_flags(constant, matched),
+                        b: list,
+                    });
+                    self.hold(chain, end);
+                    self.g.lists[own].fill(chain);
+                    chain
+                };
+                self.g.lists[(b + field.link) as usize] = slot;
+            }
+            self.extras.row_scratch.truncate(shared);
+        }
+        Node { head: TUPLE | EXTENDED | arity << 8, level, a, b }
     }
 
     /// The copy session of [`Checker::instance_poly`] and
@@ -4924,7 +5321,21 @@ impl Checker {
     /// `Checker::copy_refs` reads. Cost: one [`Checker::copy`] of all the
     /// roots.
     fn poly_session(&mut self, result: Ty) -> Ty {
-        todo!("R3q")
+        let first = self.g.nodes.len();
+        self.g.copy_begin();
+        let copied = if result.0 == NONE { result } else { self.g.copy_ref(result) };
+        for index in 0..self.extras.poly.delayed.len() {
+            let [stub, source] = self.extras.poly.delayed[index];
+            let target = self.g.copy_ref(source);
+            let node = self.g.nodes[stub.0 as usize];
+            self.g.nodes[stub.0 as usize] = super::expand::link_node(node, target);
+        }
+        self.g.copy_drain();
+        self.poly_pass(first);
+        // Empty between calls: the pass of a plain label reads `fields`.
+        self.extras.poly.delayed.clear();
+        self.extras.poly.fields.clear();
+        copied
     }
 
     /// The pass of [`Checker::copy`] over the nodes a session made since
@@ -4942,7 +5353,27 @@ impl Checker {
     /// temporary link), and `end_cell_session`. Cost: one step a node of
     /// the session and what `dup_cell` says a field.
     fn poly_pass(&mut self, first: usize) {
-        todo!("R3q")
+        let cells = !self.extras.descriptors.is_empty();
+        if self.memo.live == 0 && !cells {
+            return;
+        }
+        let end = self.g.nodes.len();
+        if cells {
+            self.begin_cell_session();
+        }
+        self.extras.copying = true;
+        for index in first..end {
+            self.memorized_node(index, first, NONE, cells);
+        }
+        self.extras.copying = false;
+        if cells {
+            for index in 0..self.extras.poly.fields.len() {
+                let field = self.extras.poly.fields[index];
+                let node = self.g.nodes[field.0 as usize];
+                self.dup_cell(field, node, first as u32);
+            }
+            self.end_cell_session();
+        }
     }
 }
 
