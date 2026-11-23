@@ -984,6 +984,89 @@ mod statements {
         assert!(again.is_err(), "a taken statement is not read again");
     }
 
+    /// What the close of a list reads (`bir::lower::close::decide`), on
+    /// the builder: each statement of a list in flight where it is, last
+    /// first. A declaration gives its variable and its kind from the row
+    /// in the handle and the flags of its value from the value's row; a
+    /// `return` gives its value. No read counts a step or takes a
+    /// statement, at 1,000 and at 10,000 statements, and the list is then
+    /// consumed whole in one step per statement.
+    #[test]
+    fn the_statements_of_a_list_in_flight_are_read_where_they_are() {
+        let read = |statements: usize| {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let mark = b.stage_mark();
+            for variable in 1..statements as u32 {
+                let value = b.reference(0, 0);
+                let declaration = b.declare(variable, LetKind::Strict as u8, Some(value));
+                b.stage(declaration);
+            }
+            let call = {
+                let callee = b.named("f", false);
+                let mark = b.mark();
+                b.call(callee, mark, 0, false)
+            };
+            let last = b.return_(call);
+            b.stage(last);
+            let list = b.list(mark);
+            let before = b.steps;
+            let (mut declared, mut returned) = (0, 0);
+            for index in (0..statements).rev() {
+                let statement = b.statement_at(list, index);
+                let value = statement.value().expect("a declaration with a value, or a return");
+                match statement.row.kind {
+                    Kind::Declare => {
+                        assert_eq!(statement.row.payload as usize, index + 1);
+                        assert_eq!(statement.row.aux, LetKind::Strict as u8);
+                        assert!(b.row(value).has(flag::STRICT));
+                        declared += 1;
+                    }
+                    Kind::Return => {
+                        assert_eq!(index + 1, statements);
+                        assert_eq!(b.row(value).kind, Kind::Call);
+                        assert!(!b.row(value).has(flag::STRICT));
+                        returned += 1;
+                    }
+                    kind => panic!("{kind:?}"),
+                }
+            }
+            assert_eq!((declared, returned), (statements - 1, 1));
+            assert_eq!(b.steps, before, "a read counts no step");
+            // The list is whole: it is consumed as if it had not been read.
+            assert_eq!(b.statements_of(list).len(), statements);
+            b.steps - before
+        };
+        let (one, ten) = (read(1_000), read(10_000));
+        assert_eq!((one, ten), (1_000, 10_000));
+    }
+
+    #[test]
+    fn a_statement_reads_the_expression_it_evaluates_first() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let shapes = [
+            (St::Exp(n("a")), true),
+            (St::Return(n("a")), true),
+            (St::Throw(n("a")), true),
+            (St::Declare(1, Some(n("a"))), true),
+            (St::Declare(1, None), false),
+            (St::If(n("a"), vec![], vec![]), true),
+            (St::While(n("a"), vec![]), true),
+            (St::Break, false),
+            (St::Continue, false),
+            (St::Debugger, false),
+        ];
+        for (shape, has_value) in shapes {
+            let statement = built_statement(&shape, &mut b);
+            let value = statement.value();
+            assert_eq!(value.is_some(), has_value, "{:?}", statement.row.kind);
+            if let Some(value) = value {
+                assert_eq!(b.row(value).kind, Kind::Named);
+            }
+        }
+    }
+
     #[test]
     fn the_marks_of_a_statement_are_those_of_what_it_holds() {
         let allocator = Allocator::default();
