@@ -432,13 +432,6 @@ impl Node {
             words: [callee.0, args.0, info.map_or(0, |id| id.0)],
         }
     }
-    /// Replace only immutable block metadata with an equivalent owned payload
-    /// at the export boundary; child links and cached expression facts stay valid.
-    pub(super) fn set_block_info(&mut self, info: JsId) {
-        assert_eq!(self.op(), Op::JBlockLit);
-        self.words[1] = info.0;
-    }
-
     pub(super) fn block_list(list: ListId) -> Self {
         Self { op: Op::SBlock, flags: NodeFlags::default(), aux: 0, words: [list.0, 0, 0] }
     }

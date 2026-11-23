@@ -140,29 +140,6 @@ impl Cx {
     }
 }
 
-/// K1/K2/K6: deferred, already-lowered operands, not a second L tree.
-/// The caller has lowered expression operands exactly once before probing.
-pub enum ProbeInput<B: js::Js> {
-    /// An already-lowered expression or statement result.
-    Output(Out<B>),
-    /// A retained effect value followed by a probed child.
-    Seq {
-        /// Already-lowered effect value.
-        first: B::E,
-        /// Result of probing the tail.
-        second: Probed<B>,
-    },
-    /// An already-lowered condition and its probed branches.
-    Cond {
-        /// Already-lowered test value.
-        test: B::E,
-        /// Probed true branch.
-        then_: Probed<B>,
-        /// Probed false branch.
-        else_: Probed<B>,
-    },
-}
-
 /// K2/K6: C:4715 append_effect_output and C:5144 compile_if_return_output.
 /// Construction policy is supplied by J constructors, not by the output algebra.
 pub trait Realizer<B: js::Js> {
@@ -766,7 +743,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     }
     /// K2/K6: C:4715 append_effect_output / C:5144 compile_if_return_output.
     /// Cost: that of `FreePool::realize`; the pool is moved out and back,
-    /// two moves of its 88 bytes, no allocation.
+    /// two moves of its 80 bytes, no allocation.
     fn realize(&mut self, cx: Cx, probed: Probed<B>) -> Out<B> {
         let mut free = std::mem::take(&mut self.free);
         let out = free.realize(cx, probed, self);
@@ -795,21 +772,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// and of `finish`.
     fn complete_unit(mut self, probed: Probed<B>) -> Lowered {
         let out = self.realize(Cx::value(), probed);
-        let value = out.value.map(B::node);
-        // Export coercion takes ownership of the root's identifier vector.
-        // Isolate that output-boundary payload so shared source/block shapes
-        // remain immutable for any other surviving block occurrence.
-        if let Some(mut end) = value {
-            while let View::JSeq { second, .. } = self.arena.view(end) { end = second; }
-            if let View::JBlockLit { info, .. } = self.arena.view(end) {
-                if let crate::lambda::TagInfo::ModuleExport(exports) = self.arena.block_tag(info) {
-                    let tag = crate::lambda::TagInfo::ModuleExport(exports.clone());
-                    let owned = self.arena.js_info(crate::bir::JsPayload::Block(tag));
-                    self.arena.nodes[end.index()].set_block_info(owned);
-                }
-            }
-        }
-        let exports = self.extract_exports(value, out.finished);
+        let exports = self.extract_exports(out.value, out.finished);
         let run = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,
@@ -817,12 +780,13 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
         let (list, coerced) = match exports {
             Some(exports) if !exports.is_empty() => {
                 let coerced = self.coerce_exports(run, exports, out.finished);
-                let list = self.coerced_list(run);
-                self.statements.close(&mut self.arena, list);
+                // `coerced_list` gives a pool list until T6x-e.
+                let list = B::list_from(self.coerced_list(run));
+                self.statements.close(&self.js, &mut self.arena, list);
                 (list, coerced)
             }
             _ => (
-                B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, run)),
+                self.statements.take_list(&mut self.js, &mut self.arena, run),
                 export::Coerced::default(),
             ),
         };
@@ -834,30 +798,36 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     #[cfg(test)]
     fn complete(mut self, cx: Cx, probed: Probed<B>) -> Lowered {
         let out = self.realize(cx, probed);
-        let value = out
-            .value
-            .map(B::node)
-            .unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
-        let value = self.arena.new_node(View::SExp { value }, 0);
-        self.statements.push(B::stmt_from_node(value));
+        let value = out.value.unwrap_or_else(|| {
+            let mut undefined = self.js.undefined(&mut self.arena, false);
+            self.js.assume_strict(&mut self.arena, &mut undefined);
+            undefined
+        });
+        let statement = self.js.exp(&mut self.arena, value);
+        self.statements.push(statement);
         let run = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,
         });
-        let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, run));
+        let list = self.statements.take_list(&mut self.js, &mut self.arena, run);
         self.finish(list, out.finished, export::Coerced::default())
     }
 
-    /// The root block over the top-level list. One step per statement of
-    /// the list and one write per catch of the unit.
-    fn finish(mut self, list: crate::bir::ListId, _finished: Finished, coerced: export::Coerced) -> Lowered {
+    /// The root block over the top-level list in flight, which is consumed.
+    /// One step per statement of the list and one write per catch of the
+    /// unit.
+    fn finish(mut self, list: B::L, _finished: Finished, coerced: export::Coerced) -> Lowered {
         #[cfg(test)]
         let coerced = export::Coerced {
             steps: self.coercion.steps,
             site_visits: self.coercion.site_visits,
             ..coerced
         };
-        let root = self.arena.block_from_list(list);
+        // The rest of the unit's finish reads the root by its id: the bulk
+        // finish and the importer take a row until T6s, the replay of the
+        // names until T6r.
+        let root = self.js.block_of(&mut self.arena, list);
+        let root = NodeId(self.js.stmt_id(&self.arena, &root));
         // The headers keep their labels and parameters; the exits they count
         // stay in the source, which reads the counts while a function of
         // another module is inlined. One write per catch of the unit.

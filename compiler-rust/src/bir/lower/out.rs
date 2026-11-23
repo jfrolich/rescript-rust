@@ -1,8 +1,7 @@
 //! K0 output algebra: C:89–135 BlockOutput, BACKEND_LOWERING §§1.3–1.5.
 use super::js::{Js, Pools};
 use super::js_stmt::JsStmt;
-use super::{Cx, ProbeInput, Realizer};
-use crate::bir::{Bir, ListId};
+use super::{Cx, Realizer};
 
 /// K0: C:73 OutputFinished. Dummy is distinct from ordinary fallthrough.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -530,8 +529,7 @@ impl<B: JsStmt> StatementStack<B> {
     /// JavaScript occurrences.
     pub fn take_list(&mut self, js: &mut B, a: &mut Pools, span: Span) -> B::L {
         let list = self.take_actions(js, a, span);
-        // T6x-b: `close.rs` takes the interface; until then the pool list.
-        self.close(a, B::list_id(list));
+        self.close(js, a, list);
         list
     }
     /// The actions of a switch, pushed or filled above the runs
@@ -554,9 +552,9 @@ impl<B: JsStmt> StatementStack<B> {
     }
     /// THREE_TREES 11.4, step A: decide the declarations of a copied list.
     /// Cost: that of `close::decide`; nothing on an arena without counts.
-    pub(super) fn close(&mut self, bir: &mut Bir, list: ListId) {
-        if bir.js_scope.is_some() {
-            super::close::decide(bir, list);
+    pub(super) fn close(&mut self, js: &B, a: &mut Pools, list: B::L) {
+        if a.js_scope.is_some() {
+            super::close::decide(js, a, list);
         }
     }
 }
@@ -666,8 +664,6 @@ pub struct FreePool<B: Js> {
     nodes: Vec<Option<Free<B>>>,
     work: Vec<RealizeWork<B>>,
     outputs: Vec<Out<B>>,
-    /// Combinations probed.
-    pub probes: usize,
     /// Deferred nodes consumed.
     pub realized: usize,
 }
@@ -680,7 +676,7 @@ enum RealizeWork<B: Js> {
 impl<B: Js> Default for FreePool<B> {
     /// An empty pool without capacity. O(1); allocates nothing.
     fn default() -> Self {
-        Self { nodes: Vec::new(), work: Vec::new(), outputs: Vec::new(), probes: 0, realized: 0 }
+        Self { nodes: Vec::new(), work: Vec::new(), outputs: Vec::new(), realized: 0 }
     }
 }
 impl<B: Js> FreePool<B> {
@@ -713,39 +709,6 @@ impl<B: Js> FreePool<B> {
         let id = FreeId(u32::try_from(self.nodes.len()).expect("free pool capacity"));
         self.nodes.push(Some(free));
         id
-    }
-    /// K1/K2/K6: C:1529 compile_expr, C:4715 append_effect_output,
-    /// C:5144 compile_if_return_output. Probe one combination of already-lowered
-    /// children. A non-free child is realized for cx, not lowered again.
-    /// Cost: O(1) for an output, a sequence, and a conditional whose
-    /// branches are both free; otherwise what [`FreePool::realize`] of the
-    /// two branches costs, each deferred record consumed once.
-    pub fn probe(&mut self, cx: Cx, input: ProbeInput<B>, emit: &mut impl Realizer<B>) -> Probed<B> {
-        self.probes += 1;
-        match input {
-            ProbeInput::Output(mut out) => {
-                if out.stmts.len == 0 && out.finished == Finished::False {
-                    if let Some(value) = out.value.take() {
-                        return Probed::Free(self.push(Free::Leaf(value)));
-                    }
-                }
-                Probed::Out(out)
-            }
-            ProbeInput::Seq { first, second } => match second {
-                Probed::Free(second) => Probed::Free(self.push(Free::Seq { first, second })),
-                Probed::Out(second) => Probed::Out(emit.seq(cx, first, second)),
-            },
-            ProbeInput::Cond { test, then_, else_ } => match (then_, else_) {
-                (Probed::Free(then_), Probed::Free(else_)) => {
-                    Probed::Free(self.push(Free::Cond { test, then_, else_ }))
-                }
-                (then_, else_) => {
-                    let then_ = self.realize(cx, then_, emit);
-                    let else_ = self.realize(cx, else_, emit);
-                    Probed::Out(emit.cond(cx, test, then_, else_))
-                }
-            },
-        }
     }
     /// K2/K6: C:4715 append_effect_output / C:5144 compile_if_return_output.
     /// Explicit postorder stack: each Free is consumed once, even at depth 10k.
@@ -823,8 +786,8 @@ impl<B: Js> FreePool<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bir::NodeId;
     use crate::bir::j::rows::Rows;
+    use crate::bir::{Bir, NodeId};
     fn output(span: Span, value: Option<NodeId>, finished: Finished) -> Out<Rows> {
         Out {
             stmts: span,
@@ -866,7 +829,7 @@ mod tests {
         assert_eq!(size_of::<Probed<Rows>>(), 20);
         assert_eq!(size_of::<StatementStack<Rows>>(), 96);
         assert_eq!(size_of::<Option<Slot<<Rows as JsStmt>::S>>>(), 12);
-        assert_eq!(size_of::<FreePool<Rows>>(), 88);
+        assert_eq!(size_of::<FreePool<Rows>>(), 80);
     }
     #[test]
     fn a_statement_is_copied_once() {
@@ -1119,50 +1082,41 @@ mod tests {
         assert_eq!(out.value.map(Rows::node), Some(NodeId(2)));
         assert_eq!(stack.copied, 0);
     }
+    /// A chain of 10,000 deferred sequences over one leaf, pushed as the
+    /// lowering pushes them (`Free` records, the tail first), is realized
+    /// once per record on the explicit stack: the leaf, then each head.
     #[test]
-    fn ten_thousand_deferred_nodes_are_probed_and_realized_once() {
+    fn ten_thousand_deferred_nodes_are_realized_once() {
         let mut pool = FreePool::default();
         let mut oracle = Oracle::default();
         let cx = Cx::value();
-        let leaf = output(Span::default(), Some(NodeId(0)), Finished::False);
-        let mut probed = pool.probe(cx, ProbeInput::Output(leaf), &mut oracle);
+        let mut free = pool.push(Free::Leaf(Rows::from_node(NodeId(0))));
         for n in 1..=10_000 {
-            probed = pool.probe(
-                cx,
-                ProbeInput::Seq {
-                    first: Rows::from_node(NodeId(n)),
-                    second: probed,
-                },
-                &mut oracle,
-            );
+            free = pool.push(Free::Seq { first: Rows::from_node(NodeId(n)), second: free });
         }
         assert!(oracle.visits.is_empty());
-        let out = pool.realize(cx, probed, &mut oracle);
+        let out = pool.realize(cx, Probed::Free(free), &mut oracle);
         assert_eq!(out.value.map(Rows::node), Some(NodeId(0)));
-        assert_eq!(pool.probes, 10_001);
         assert_eq!(pool.realized, 10_001);
         assert_eq!(oracle.visits, (0..=10_000).collect::<Vec<_>>());
     }
+    /// A deferred conditional is realized after its branches, the then
+    /// branch first; an output that is not deferred is returned as it is
+    /// and realizes nothing.
     #[test]
-    fn nonfree_child_is_kept_without_reprobing() {
+    fn a_deferred_conditional_is_realized_after_its_branches() {
         let mut pool = FreePool::default();
         let mut oracle = Oracle::default();
         let cx = Cx::returning();
-        let leaf = output(Span::default(), Some(NodeId(1)), Finished::False);
-        let then_ = pool.probe(cx, ProbeInput::Output(leaf), &mut oracle);
-        let else_ = Probed::Out(output(Span { start: 0, len: 1 }, None, Finished::True));
-        let result = pool.probe(
-            cx,
-            ProbeInput::Cond {
-                test: Rows::from_node(NodeId(2)),
-                then_,
-                else_,
-            },
-            &mut oracle,
-        );
-        assert!(matches!(result, Probed::Out(_)));
-        assert_eq!(pool.probes, 2);
-        assert_eq!(pool.realized, 1);
-        assert_eq!(oracle.visits, vec![1, 2]);
+        let then_ = pool.push(Free::Leaf(Rows::from_node(NodeId(1))));
+        let else_ = pool.push(Free::Leaf(Rows::from_node(NodeId(3))));
+        let free = pool.push(Free::Cond { test: Rows::from_node(NodeId(2)), then_, else_ });
+        let out = pool.realize(cx, Probed::Free(free), &mut oracle);
+        assert_eq!(out.value.map(Rows::node), Some(NodeId(1)));
+        assert_eq!(pool.realized, 3);
+        assert_eq!(oracle.visits, vec![1, 3, 2]);
+        let kept = pool.realize(cx, Probed::Out(output(Span { start: 0, len: 1 }, None, Finished::True)), &mut oracle);
+        assert_eq!(kept.finished, Finished::True);
+        assert_eq!(pool.realized, 3);
     }
 }
