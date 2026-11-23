@@ -368,6 +368,12 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE"
           python3 scripts/check_lowering_cost_docs.py --self-test --base "$BASE"
 
+      # The count of transition calls is read by every slice of T6x: the
+      # script must find the lowering's files and count their calls.
+      - name: Test the lowering id count
+        working-directory: compiler-rust
+        run: python3 ../scripts/count_lowering_ids.py --self-test
+
   compiler-tests:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 40

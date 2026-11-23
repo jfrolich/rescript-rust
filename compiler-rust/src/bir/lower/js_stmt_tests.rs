@@ -84,6 +84,8 @@ enum St {
     Return,
     /// `break;`
     Break,
+    /// `continue;`
+    Continue,
     /// `throw x;`
     Throw,
     /// `{}`: an explicit block without a statement.
@@ -104,6 +106,7 @@ fn statement(r: &mut Rows, u: &mut Unit, st: St) -> S {
             r.return_(a, y)
         }
         St::Break => r.break_(a, None),
+        St::Continue => r.continue_(a, None),
         St::Throw => {
             let x = r.var(a, u.x);
             r.throw(a, x)
@@ -128,6 +131,7 @@ fn statement_today(u: &mut Unit, st: St) -> NodeId {
             crate::bir::j::return_value(b, value)
         }
         St::Break => b.new_node(View::SBreak { label: None }, 0),
+        St::Continue => b.new_node(View::SContinue { label: None }, 0),
         St::Throw => {
             let value = var(b, u.x);
             plain::node(b, View::SThrow { value }, 0)
@@ -257,6 +261,7 @@ fn a_list_is_the_pool_list_of_its_statements() {
                         St::Call => Kind::Exp,
                         St::Return => Kind::Return,
                         St::Break => Kind::Break,
+                        St::Continue => Kind::Continue,
                         St::Throw => Kind::Throw,
                         St::Empty => Kind::Block,
                     };
@@ -958,6 +963,7 @@ fn a_guard_is_taken_apart_and_rebuilt_over_its_blocks() {
                         St::Return => Kind::Return,
                         St::Throw => Kind::Throw,
                         St::Break => Kind::Break,
+                        St::Continue => Kind::Continue,
                         St::Call => Kind::Exp,
                         St::Empty => Kind::Block,
                     };
@@ -1346,6 +1352,42 @@ fn if_head_over_two_runs_is_rules_0_to_6_of_j_s3() {
     assert!(heads > 600 && heads < VALUES.len() * HEAD_SHAPES.len() * HEAD_SHAPES.len(), "{heads}");
 }
 
+/// Rule 6 of J-S3 for each of the four jumps a then-run can end in: the
+/// run becomes the guard `if (x) { f(); jump } else {}` and the else-run
+/// is the tail, where it was. Asserted on the outcome: the comparison
+/// with `js3_simplify_if` above runs the same head on both sides, so it
+/// cannot see a jump the head does not know. A then-run that ends in a
+/// call has no rule.
+#[test]
+fn rule_6_of_if_head_makes_a_guard_of_a_run_that_ends_in_any_jump() {
+    let head = |last: St| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut slots = Slots::default();
+        let (mut then_, mut else_) =
+            (slots.push_run(&mut r, &mut u, &[St::Call, last]), slots.push_run(&mut r, &mut u, &[St::Call, St::Call]));
+        let mut test = value(&mut r, &mut u, Value::X);
+        let head = r.if_head(&mut u.b, &mut slots, &mut test, &mut then_, &mut else_)?;
+        let guard = head.statement.expect("the guard");
+        assert_eq!(r.stmt_kind(&u.b, &guard), Kind::If);
+        assert_eq!(r.branch_last_kind(&u.b, &guard, true), None, "an empty else");
+        // The else-run is the tail, with its two statements; nothing else
+        // is left on the runs.
+        assert_eq!(slots.live(head.tail), 2);
+        assert_eq!(slots.live(Span { start: 0, len: slots.slots.len() as u32 }), 2);
+        Some(r.branch_last_kind(&u.b, &guard, false).expect("the guard's block ends in the jump"))
+    };
+    for (last, kind) in [
+        (St::Return, Kind::Return),
+        (St::Throw, Kind::Throw),
+        (St::Break, Kind::Break),
+        (St::Continue, Kind::Continue),
+    ] {
+        assert_eq!(head(last), Some(kind), "{last:?}");
+    }
+    assert_eq!(head(St::Call), None);
+}
+
 /// What one `if_head` costs for a conditional `if (x) yes else no` whose
 /// branches have `yes` and `no` statements before their last: the steps of
 /// the call and the statements the runs were asked for or moved.
@@ -1467,4 +1509,62 @@ fn a_statement_is_effect_free_when_everything_below_it_is() {
     // read of `x`. An effect at the bottom is found after one step a level.
     let (one, ten) = (steps(1_000, true), steps(10_000, true));
     assert!(one < 3 * 1_000 && ten < 3 * 10_000, "{one} {ten}");
+}
+
+/// What the close of a list reads of it (`close::decide`): each statement
+/// where it is, by position, through the readers of a statement in hand.
+/// The read finds the statement without reading a row: the rows read are
+/// those of the readers `read` calls, the same number for the first, the
+/// middle and the last statement of a list, and the same at 1,000 and at
+/// 10,000 statements. A read that walks to its statement reads a row per
+/// statement before it and fails both. It counts no step, and the list is
+/// given to a constructor afterwards with every statement in it.
+#[test]
+fn a_statement_of_a_list_in_flight_is_read_where_it_is() {
+    use crate::emit::row::flag;
+    let reads = |statements: usize| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut handles = Vec::with_capacity(statements);
+        for order in 1..statements {
+            let var = u.b.new_var_id(Name::new("v"), 10 + order as u32);
+            let x = r.var(&mut u.b, u.x);
+            handles.push(r.declare(&mut u.b, LetKind::Strict, var, Some(x)));
+        }
+        handles.push(statement(&mut r, &mut u, St::Return));
+        let ids: Vec<u32> = handles.iter().map(|s| r.stmt_id(&u.b, s)).collect();
+        let vars: Vec<Option<VarId>> = handles.iter().map(|s| r.declared(&u.b, s)).collect();
+        let list = r.list(&mut u.b, statements as u32, handles.into_iter());
+        let before = r.steps();
+        let mut rows_read = [0u64; 3];
+        for (slot, index) in [0, statements / 2 - 1, statements - 1].into_iter().enumerate() {
+            u.b.steps.set(0);
+            let (id, kind, var, aux, strict) = r.with_stmt_at(&u.b, list, index as u32, |s| {
+                let strict = r.value_of(&u.b, s).map(|value| r.has(&u.b, value, flag::STRICT));
+                (r.stmt_id(&u.b, s), r.stmt_kind(&u.b, s), r.declared(&u.b, s), r.stmt_aux(&u.b, s), strict)
+            });
+            rows_read[slot] = u.b.steps.get();
+            assert_eq!(id, ids[index]);
+            assert_eq!(kind, r.kind_at(&u.b, list, index as u32));
+            assert_eq!(var, vars[index]);
+            assert_eq!(strict, Some(true));
+            if index + 1 == statements {
+                assert_eq!((kind, var), (Kind::Return, None));
+            } else {
+                assert_eq!((kind, aux), (Kind::Declare, LetKind::Strict as u8));
+            }
+        }
+        assert_eq!(r.steps(), before);
+        // Two declarations at different positions cost the same rows.
+        assert_eq!(rows_read[0], rows_read[1]);
+        // The list is whole: a constructor takes it, in order.
+        let block = r.block_of(&mut u.b, list);
+        let mut given = Vec::with_capacity(statements);
+        r.block_ids(&u.b, &block, |id| given.push(id));
+        assert_eq!(given, ids);
+        rows_read
+    };
+    let (one, ten) = (reads(1_000), reads(10_000));
+    assert_eq!(one, ten);
+    assert!(one.iter().all(|&rows| rows > 0 && rows < 16), "{one:?}");
 }

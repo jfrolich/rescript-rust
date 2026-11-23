@@ -204,11 +204,11 @@ mod tests {
 
     /// `f(x) = let a1 = x; ...; f(1)`: a loop body of `width` declarations
     /// in a unit whose source has four list operands, so the operand stack
-    /// is reserved for 64. `loop_function_body` gives the body's block back
-    /// to the statement stack through `unblock`, which buffers nothing: the
-    /// stack does not grow.
+    /// is reserved for 64. `loop_function_body` moves the statements of
+    /// the body's list onto the statement stack one by one (`take_at`),
+    /// which buffers nothing: the operand stack does not grow.
     #[test]
-    fn a_block_wider_than_the_operand_stack_is_unblocked_without_growing_it() {
+    fn a_body_wider_than_the_operand_stack_is_moved_without_growing_it() {
         for width in [1_000usize, 10_000] {
             let mut a = crate::lambda::arena::LamArena::new();
             let (f, x) = (ident("f", 1), ident("x", 2));
@@ -227,9 +227,22 @@ mod tests {
             let output = state.probe(Cx::value(), root).unwrap();
             let out = state.realize(Cx::value(), output);
             assert!(out.value.is_some());
-            assert!(state.tail_body_statements >= width, "the body went through unblock");
+            assert!(state.tail_body_statements >= width, "the body was moved statement by statement");
             assert_eq!(state.js.operand_capacity(), reserved, "width {width}");
         }
+    }
+
+    /// The `if`s whose else-block has a statement: the merged guards of
+    /// `guard_chain`, where no other `if` has one. One step per row.
+    fn merged_guards(b: &crate::bir::Bir) -> usize {
+        use crate::bir::{NodeId, Op, View};
+        (0..b.nodes.len())
+            .filter(|&index| b.nodes[index].op() == Op::SIf)
+            .filter(|&index| {
+                let View::SIf { else_: Some(block), .. } = b.view(NodeId(index as u32)) else { return false };
+                matches!(b.view(block), View::SBlock { statements } if !statements.is_empty())
+            })
+            .count()
     }
 
     #[test]
@@ -262,6 +275,10 @@ mod tests {
             let output = state.probe(Cx::value(), root).unwrap();
             let out = state.realize(Cx::value(), output);
             assert!(out.value.is_some());
+            // The merge is taken at every level, at every size: the steps
+            // below are those of a chain that merged, not of one that
+            // stopped merging above some depth.
+            assert_eq!(merged_guards(&state.arena), depth, "depth {depth}");
             (crate::bir::lower::js::Js::steps(&state.js), state.statements.scanned as u64, state.tail_body_statements as u64)
         };
         let (one, two, ten) = (steps(1_000), steps(2_000), steps(10_000));

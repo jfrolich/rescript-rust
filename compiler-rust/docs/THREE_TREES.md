@@ -3194,7 +3194,7 @@ read. None needs a walk, because each is one of these:
 | The kind of a node it holds, and a literal's value (`View::JUndefined`, `JOptional`, `JStr`, `primitive_int`, `primitive_bool`, `primitive_string`, `primitive_bigint`) | `kind(a, r)`, `aux(a, r)`, `int(a, r)`, `text(a, r)`, `bigint(a, r)`, `var_of(a, r)`, `qualified_of(a, r)` | O(1) each: the row, or one pool entry |
 | A child, or a child of a child (`JCall` of a `JQualified` in `primitive_int_comparison`; the elements of an array of pairs in `Pmakedict`; `JDot` chains in `jsx_tag`, `copy_replacement`; `JSeq` ends in `complete_unit`, `extract_exports`) | `operand(a, r, i)` gives the reference of operand `i`; `arity(a, r)` | Each step is one read chosen by the caller; the depth is the pattern's, which is fixed (two for the runtime `compare` call, three for a dictionary entry) or counted where it is a chain (`descent` steps of the JSX tag and of `copy_replacement`, as today) |
 | Taking a node apart to keep a part (`detach` then `release`: `positive`, `PvalFromOption`, `evaluate_now`, `fold_return_tail`, `hold_external_arg`, `primitive_int_comparison`) | `keep_operand(a, e, i)` for one part of a node with a fixed number of operands (the rest is released); `unpack(a, e) -> Mark` for a list (its operands go onto the operand stack, in order; `take(a, mark, i)` moves one out, `drop_operands(a, mark)` releases what is left) | The parts are operands of the node in hand; releasing the rest is `release`'s cost, one step per node released |
-| A statement of a run or of a list (`single_return`, `terminal`, `merge_tail_guard`, `returns_after_effects`, empty blocks; `tail.rs`; `switch.rs`) | `JsStmt` (T6l): `stmt_kind(a, &S)`, `stmt_has`, `value_of(a, &S) -> Ref` and, for a list in flight, `len(l)`, `kind_at(a, l, i)`, `take_at(a, l, i)` (a read by reference of a list's statement is open: the design turn of T6x-b) | The statement stack owns the handles of a run; a list in flight is read by position |
+| A statement of a run or of a list (`single_return`, `terminal`, `merge_tail_guard`, `returns_after_effects`, empty blocks; `tail.rs`; `switch.rs`) | `JsStmt` (T6l): `stmt_kind(a, &S)`, `stmt_has`, `value_of(a, &S) -> Ref` and, for a list in flight, `len(l)`, `kind_at(a, l, i)`, `take_at(a, l, i)` and `with_stmt_at(a, l, i, read)`, which lends statement `i` to a reader where it is ("T6x-b: an output's value, as built" (b)) | The statement stack owns the handles of a run; a list in flight is read by position |
 | Equality of two expressions (`same_reusable_value` in `export.rs`; inside the rules) | `equal(a, r1, r2)`, with the cost of `bir/j/equal.rs` (stops at the first difference; pairs on an explicit stack) | It is a rule's read, already counted |
 | The parent of a node (`export::row_of`, `declared`; `globals::shadowed`, `binding_scope`; the prelude of `names::replay`) | `owner(a, id)`: (f). `globals.rs` and the prelude stop needing it: (d) | - |
 | Cold data: a location, a comment, a character (`set_cold`, `JS_LOC_PRESENT`, `js_char`) | `locate(a, &mut E, LamLoc)`, `located(a, r)`, `comment(a, &mut E, StrId)`, `copy_cold(a, from: Ref, &mut E)` | O(1). The builder sets the span and drops the comment (decoration comments stay dropped; the pure annotation is the `pure` bit of the call's `JsId`) |
@@ -4282,13 +4282,13 @@ is not a call: `Out` is passed by value in 37 constructions and read at
 | T6x-a2 | The statement-holding fields of one file (`Evaluation::statements`, the `blocks` of the two plans, `rec::Member`, `tail_assignments`), `primitive_statement`, a hold filled by a sink; `loop_function_body` takes and returns a list, and `function_of_block` is deleted | `args.rs`, `loops.rs`, `try_.rs`, `rec.rs`, `tail.rs`, `prim.rs`, `expr.rs`, `mod.rs`, `out.rs`; the interface for the deletion | 154 measured, about 200 with the deletion | T6x-a1 | none |
 | T6x-a3 | The stack's reads give references, `take(slot)`, the stack implements `Runs` and `if_in_place` calls `JsStmt::if_head`; `place`, `if_statement`, `unnest`, `single_assignment`, `assignment_statement` change with all their callers | `out.rs`, `cond.rs`, `location.rs`, `export.rs`, `mod.rs`, `exit.rs`, `loops.rs`, `switch.rs`, `untagged.rs`, `variant.rs` | about 475 measured | T6x-a2 | none |
 | T6x-a4 | The reserved pool list of a switch's actions becomes a run of the stack taken with `take_actions`; `switch_output_nodes` and `ActionState::cached` hold handles | `exit.rs`, `switch.rs`, `ffi_args.rs`, `untagged.rs`, `mod.rs`, `out.rs` | about 210 measured | T6x-a3 | none |
-| T6x-b | `Out<B>`, `Probed`, `Free`, `RealizeWork`: an output's value is a `B::E`. `Out` stops being a value that is copied; the 37 constructions and 54 reads move their transition call or lose it. `mod.rs`'s probe and realisation (78 raw sites, and the 4 `stmt_from_node` and 2 `list_id` T6x-a1 puts around them) go through the interface. `close.rs` takes the interface from `out.rs` (the `list_id` of `take_list`) | `out.rs`, `mod.rs`, `unit.rs`, `close.rs`, every file of the 91 sites | re-cut after a second probe on trunk (pull request 353; the first, pull request 345, measured 838 changed lines with a first step of 658). Three parts, each of which compiled and passed the lowering tests at its place in the probe: **b1** `Free`, `RealizeWork`, `FreePool`, `ProbeInput` and `Realizer` hold `B::E`, `Out::value` unchanged (about 120 lines); **b2** `Out::value` is `Option<B::E>` (about 540 lines in 27 files, one whole: the type changes every file at once); **b3a** the turn-backs b1 and b2 leave are removed in the ten files that need no new interface function (about 120 lines; transition calls 493 to 437): a value is built through the interface and handed on as a handle, so the interface's constructors, `release` and `seq_rule` count their steps on rows where the direct calls did not (no lowering test reads the count across them); **b3b** the two places the probe could not write: `close::decide`, a read by reference of a statement of a list in flight, with the call of `close` in `out.rs` and `mod.rs`; `complete_unit`, the payload written below the comma spine, with `complete` and `finish`. They get their interface functions from the design turn of T6x-b first and stay as on trunk until then. b1 raises the count of transition calls for one slice; b3a ends below the count b1 started from | T6x-a4 | none |
-| T6x-c1 | Bodies and private functions: the primitives. `values` becomes a vector of handles from `sequence_arguments` on; `constant_children` goes; the functions of the cluster that only the cluster calls take and return handles | `prim.rs`, `prim_cmp.rs`, `prim_block.rs`, `konst.rs`, `record.rs`, `import.rs`, `args.rs`, `call.rs` | 139 + 7 + 15 + 7 + 8 + 22 + 10 calls: about 300 | T6x-b | c2, c3, c4 |
-| T6x-c2 | The same for the externals; the operand lists in the pool become operands pushed as they are converted, and `push_list` loses its five calls; the three chain walks read `var_of` first | `external.rs`, `ffi_args.rs`, `jsx.rs` (not `printed_form`, `jsx_tag`) | 40 + 64 + 19 calls and the list assembly: about 300 | T6x-b | c1, c3, c4 |
-| T6x-c3 | The same for conditionals and switches | `cond.rs`, `expr.rs`, `switch.rs`, `variant.rs`, `untagged.rs`, `location.rs` | after T6x-a the files have 55 + 11 + 6 + 18 + 22 + 0 transition calls, none of a statement outside two test helpers: about 200 (estimate) | T6x-b | c1, c2, c4 |
-| T6x-c4 | The same for loops, exits and recursion; `recursive_dummy` gives a handle to its two callers in `rec.rs` | `loops.rs`, `try_.rs`, `exit.rs`, `rec.rs`, `tail.rs`, `assign.rs`, `label.rs` | after T6x-a the files have 5 + 2 + 4 + 7 + 4 + 2 transition calls: about 60 (estimate) | T6x-b | c1, c2, c3 |
-| T6x-d | The functions that cross clusters, each with all its callers in one slice: the 31 rows of the callers' table that are left after T6x-a (`drop_pure_effect`, `primitive_runtime`, `static_member`, `number`, `string`, `constant`, `add_external_effect`, `compile_js_call`, `compile_jsx`, `sequence_arguments`, ..., and `if_statement`, `assignment_statement` and `merge_assignments` for the expression each still takes or returns). `place`, `unnest`, `single_assignment`, `loop_function_body` and `locate_switch_run` are no longer rows: T6x-a changed the first four, and the last names a source node only. No turn-back is left between two files | every file of a row | 31 signatures and 95 calls in other files: about 260 (estimate) | c1 to c4 | none |
-| T6x-e | `export.rs`: its tables hold handles or ids the interface gives (`Js::id`), and its three edits are interface calls (the replacement in place, a row taken out of its block, the final list) | `export.rs` | to be counted after T6q | T6x-d, T6q | none |
+| T6x-b | `Out<B>`, `Probed`, `Free`, `RealizeWork` and the five types that change with them: an output's value is a `B::E`. Built in four parts ("T6x-b: an output's value, as built"). On trunk: **b1** (pull request 355) `Free`, `RealizeWork`, `FreePool`, `ProbeInput` and `Realizer` hold `B::E`; **b2** (357) `Out::value` is `Option<B::E>`, one whole in 27 files; **b3a** (358) the turn-backs b1 and b2 left are removed in ten files. To build: **b3b**, the close of a list and the unit's finish. `close::decide` takes the implementation and a list in flight and reads each statement where it is (`JsStmt::with_stmt_at`); `StatementStack::close` takes `B::L` and `take_list` loses the last `B::list_id`; the `return` arm names the returned value by its id for `scope::return_sites` (T6r). `extract_exports` takes the value as a handle and copies the export identifiers out of the block's shared payload, so `complete_unit` no longer walks the comma spine, copies the payload or writes it (`Node::set_block_info` is deleted). `finish` takes `B::L`, makes the root with `block_of` and reads it by its id until T6s. `FreePool::probe`, `ProbeInput` and the counter `probes` are deleted (`FreePool<Rows>` 88 to 80 bytes) and their two tests become tests of `FreePool::realize` | b3b: `close.rs`, `out.rs`, `mod.rs`, `export.rs` (`extract_exports` only), `bir/node.rs` (the deletion) | b3b: 117 lines added and 188 removed, measured in the design turn's check; transition calls 437 to 433 | T6x-a4; b3b after this design turn | none |
+| T6x-c1 | Bodies and private functions: the primitives. `values` becomes a vector of handles from `sequence_arguments` on; `constant_children` goes; the functions of the cluster that only the cluster calls take and return handles | `prim.rs`, `prim_cmp.rs`, `prim_block.rs`, `konst.rs`, `record.rs`, `import.rs`, `args.rs`, `call.rs` | 198 transition calls after T6x-b ("T6x-b: an output's value, as built" (i)); its size is its probe's to measure | T6x-b | c2, c3, c4 |
+| T6x-c2 | The same for the externals; the operand lists in the pool become operands pushed as they are converted, and `push_list` loses its five calls; the three chain walks read `var_of` first | `external.rs`, `ffi_args.rs`, `jsx.rs` (not `printed_form`, `jsx_tag`) | 105 transition calls after T6x-b and the list assembly ("T6x-b: an output's value, as built" (i)): about 300 (estimate) | T6x-b | c1, c3, c4 |
+| T6x-c3 | The same for conditionals and switches | `cond.rs`, `expr.rs`, `switch.rs`, `variant.rs`, `untagged.rs`, `location.rs` | 75 transition calls after T6x-b ("T6x-b: an output's value, as built" (i)), none of a statement outside two test helpers: about 150 (estimate) | T6x-b | c1, c2, c4 |
+| T6x-c4 | The same for loops, exits and recursion; `recursive_dummy` gives a handle to its two callers in `rec.rs` | `loops.rs`, `try_.rs`, `exit.rs`, `rec.rs`, `tail.rs`, `assign.rs`, `label.rs` | 17 transition calls after T6x-b ("T6x-b: an output's value, as built" (i)): about 50 (estimate) | T6x-b | c1, c2, c3 |
+| T6x-d | The functions that cross clusters, each with all its callers in one slice: the 31 rows of the callers' table that are left after T6x-a (`drop_pure_effect`, `primitive_runtime`, `static_member`, `number`, `string`, `constant`, `add_external_effect`, `compile_js_call`, `compile_jsx`, `sequence_arguments`, ..., and `if_statement`, `assignment_statement` and `merge_assignments` for the expression each still takes or returns). `place`, `unnest`, `single_assignment`, `loop_function_body` and `locate_switch_run` are no longer rows: T6x-a changed the first four, and the last names a source node only. No turn-back is left between two files | every file of a row | about 30 signatures and 97 calls in other files after T6x-b ("T6x-b: an output's value, as built" (i)): about 260 (estimate) | c1 to c4 | none |
+| T6x-e | `export.rs`: its tables hold handles or ids the interface gives (`Js::id`), and its three edits are interface calls (the replacement in place, a row taken out of its block, the final list) | `export.rs` | 37 transition calls after T6x-b, 36 after b3b ("T6x-b: an output's value, as built" (i)) | T6x-d, T6q | none |
 | T6x-f | The transition functions leave the two traits and `Rows`: `from_node`, `node`, `at`, `stmt_from_node`, `stmt_node`, `list_from`, `list_id`, `push_list` (`function_of_block` left in T6x-a2); `rg 'B::(from_node\|node\|at\|stmt_)' src/bir/lower` is empty. `norm::jm14_push_effect_expression`, which only tests call since T6q, gets `#[cfg(test)]` | `js.rs`, `js_stmt.rs`, `rows.rs`, `rows_stmt.rs`, `norm.rs`, the interface tests | about 150 (estimate) | T6x-e, T6r | none |
 
 Order: a1, a2, a3, a4, b, then c1 to c4 at once, then d, e, f. The
@@ -4392,16 +4392,16 @@ The functions of `StatementStack<B>` after T6x-a4 (`js: &mut B`, `a:
 | `statement_refs(run) -> impl Iterator<Item = &B::S>` | one step per slot of the run and per held statement |
 | `first(run) -> Option<&B::S>`, `first_slot(run) -> Option<u32>`, `first_single_slot(run) -> Option<(u32, &B::S)>` | the holes and dead ranges before the first statement, counted in `scanned` |
 | `only(run) -> Option<(u32, &B::S)>` | as `first`, twice |
-| `last(run) -> Option<&B::S>`, `last_slot(run) -> Option<u32>` | O(1) on a trimmed run, else one step per trailing hole or dead slot, counted |
+| `last(run) -> Option<&B::S>`, `last_slot(run) -> Option<u32>` | O(1) on a trimmed run, else one step per trailing hole or dead range, counted ("T6x-b: an output's value, as built" (h)) |
 | `at(slot) -> &B::S`, `head(slot) -> &B::S`, `head_mut(slot) -> &mut B::S` | O(1) |
 | `take(slot) -> B::S` | O(1): one write, the slot is dead |
-| `take_run(run)`, `take_run_rev(run) -> impl Iterator<Item = B::S>` | one step per slot of the run and per held statement; the caller kills the run |
+| `take_run(run)`, `take_run_rev(run) -> impl Iterator<Item = B::S>` | one step per slot of the run and per held statement, a dead range crossed in one; the caller kills the run |
 | `trim(floor)`, `kill(run)`, `has_statements(run)`, `remove_empty(run)`, `append(first, second, value)` | as today |
 | `note_empty_block(slot, id: u32)` | a binary search and an insertion among the unit's empty blocks; `id` is the block's `stmt_id` |
 | `drop_empty_blocks(js, a, run)` | two binary searches, then one step per empty block of the run |
 | `take_list(js, a, run) -> B::L` | one step per slot and per statement of the run, each moved once, and the close of the list |
 | `take_actions(js, a, run) -> B::L` | `take_list` without the close: (c) |
-| `close(a, ListId)` | as today, until T6x-b |
+| `close(a, ListId)` | as today, until T6x-b3b, which makes it `close(js: &B, a, B::L)` |
 | `impl Runs<B>` | the six functions above under the names of `Runs` |
 | `statements(run) -> impl Iterator<Item = NodeId>`, `#[cfg(test)]`, on `StatementStack<Rows>` only | the rows of a run, for the tests that release a run row by row |
 
@@ -4602,6 +4602,415 @@ functions above, every function a slice changes gets its cost note
 (the probe has none, which is why its `script-tests` job is red:
 `scripts/check_lowering_cost_docs.py`), and nothing is merged or
 cherry-picked from that branch.
+
+#### T6x-b: an output's value, as built
+
+Status: b1, b2 and b3a are on trunk; b3b is designed here and checked
+(below), not built; its prompt is in 11.9. Row T6x-b was probed twice
+(pull requests 345 and 353, neither merged). The second probe was made
+on trunk after T6x-a4 and its body is the report this section starts
+from.
+
+**(a) What was built, and where it differs from the row.**
+
+| Part | Pull request | What it changed | Transition calls |
+| --- | --- | --- | --- |
+| b1 | 355 | `Free`, `RealizeWork`, `FreePool`, `ProbeInput` and `Realizer` hold `B::E`; `Out::value` unchanged. About 120 lines | 498 to 507 |
+| b2 | 357 | `Out`, `Probed` and `ProbePlan` take the implementation as a type parameter and `Out::value` is `Option<B::E>`; `ProbeRules` has the associated type `Js`. About 540 lines in 27 files, one whole | 507 to 493 |
+| b3a | 358 | The turn-backs b1 and b2 left are removed in ten files; `State::pure_expression` is `#[cfg(test)]`. About 120 lines | 493 to 437 |
+
+The row said one slice of 600 lines; it is three and a fourth to come.
+It listed four types; nine change (`ProbeInput`, `Realizer`,
+`ProbePlan`, `SourceProbe` and `ProbeRules` with them). It said "`Out`
+stops being a value that is copied": `Out` never derived `Copy`; what
+was copied was the `Option<NodeId>` read out of `.value`, at the 15
+sites of the report's section 3, each of which is now a move
+(`Option::take`) or a read in place. Its "37 constructions and 54
+reads" were columns of the script, not sites: 24 and 28 production
+lines changed.
+
+On trunk after b3a: `--lib bir::lower` 568 passed, `--lib bir::j` 58,
+`--lib emit::builder` 26, none ignored; the four allocation counts of
+`unit.rs` are 86, 103, 86, 156; `size_of::<Rows>()` is 416; `Out`,
+`Probed`, `Free`, `FreePool` and `StatementStack` on rows are 20, 20,
+16, 88 and 96 bytes, as before the row. `Instruction count` read
++0.014%, −0.039% and +0.023% on the three pull requests (the default
+build does not reach the lowering).
+
+*Steps.* b3a builds a value through the interface where the lowering
+called `bir::j` directly: `Js::var`, `Js::qualified`, `JsStmt::declare`,
+`assign`, `return_`, `Js::release`, `Js::seq_rule` and `JsStmt::effect`
+count a step on rows (`Rows::steps`) where `pure_expression`,
+`j::declare`, `Bir::release` and `jm1_js_seq` counted none. No node
+differs. One test of the lowering reads that count across these calls,
+and it reads a relation, not a number: `tail.rs`,
+`a_chain_of_merged_guards_moves_each_statement_once`, requires the
+interface's steps to grow linearly from 1,000 to 2,000 to 10,000
+levels, which holds with a constant more per level as it did without.
+Found with `rg -n 'steps\(&|\.steps\(\)' src/bir/lower src/bir/shadow.rs
+src/lambda`: beside it the search matches `js_tests.rs` and
+`js_stmt_tests.rs` (the interface's own tests, which build through the
+interface on both sides of every comparison), `names.rs`
+(`Replayed::steps`) and `globals.rs` (a local counter of its tests).
+The counters the other tests read (`SwitchStats`, `close_steps`,
+`StatementStack::copied` and `scanned`, `Coerced::steps`) are not
+`Rows::steps`. The row of the table said "no lowering test reads the
+count across them"; it is corrected by this paragraph.
+
+**(b) What b3b lacked, and what this turn added.** Two places of the
+probe could not be written through the interface. One gets a function;
+the other needs none.
+
+| | Decision | On rows | On the builder | Probe site that uses it | Tests |
+| --- | --- | --- | --- | --- | --- |
+| A statement of a list in flight, read by reference | `JsStmt::with_stmt_at<R>(&self, a, list, index, read: impl FnOnce(&Self::S) -> R) -> R`. O(1) and what `read` costs; counts no step; allocates nothing | `read(&S(a.lists.get(list)[index]))`: the row of the pool entry is named for the length of the call; no row is read to find it | `Builder::statement_at(list, index)`, which exists since T6b; the reads a declaration and a `return` then need are in the handle's row (`kind`, `payload`, `aux`) and in `S::value`, added here: the expression a statement evaluates first, in place, O(1) | `close::decide`, both arms: the three `PROBE-GAP 1` comments of `git show e1e5175130` | `js_stmt_tests.rs`, `a_statement_of_a_list_in_flight_is_read_where_it_is`; `builder_tests.rs`, `the_statements_of_a_list_in_flight_are_read_where_they_are` and `a_statement_reads_the_expression_it_evaluates_first` |
+| The payload of the unit's export block | No function. `export.rs::extract_exports` holds the block literal by reference when it reads the exports (it walked to the end of the comma spine to find it): it reads the tag through `Bir::block_tag` and copies the identifiers, where it took them out of the payload. `complete_unit` loses its walk, its copy of the payload and `Node::set_block_info`, which has no other caller | the same code | the same code: the payload is in the pools on both sides, and nothing is written into the owned node | `complete_unit`, the `PROBE-GAP 2` comment of `git show 6b6be5b6e2` | exist: `unit.rs`, `export_consumption_does_not_empty_shared_block_metadata`, `supported_unit_exercises_both_texts_and_shared_export_coercion` and the four allocation counts |
+| The root block in `finish` | No function. `finish` takes `B::L`, makes the root with `JsStmt::block_of` and reads its id with `JsStmt::stmt_id` | the row | T6s rewrites `finish` (the program is the list) | `finish`, `complete`, `complete_unit` | the lowering's tests |
+
+*The read by reference: why a closure.* `decide` reads, of a statement
+of the list: its kind (`kind_at`, which exists); of a declaration the
+variable (`declared`), the declaration kind (`stmt_aux`) and of its
+value the `STRICT` flag and whether it is a function literal that may
+be inlined (`value_of`, then `Js::has` and `Js::function_of`); of a
+`return` its value. Every one of these is a reader of a statement in
+hand that takes `&S`. Three forms give them without detaching:
+
+- a function that returns `&Self::S`. Not possible on rows without
+  `unsafe`: the pool stores row ids, not statements, so there is
+  nothing for the reference to point at;
+- position twins of each reader (`declared_at`, `aux_at`, `value_at`).
+  Three functions now and one more for every later reader of a list,
+  each a second name for a reader that exists;
+- one function that lends the statement to a closure. Chosen: one
+  function, every reader of `&S` works under it, and the statement
+  cannot leave the list because the closure is given a reference.
+
+What the closure cannot do is return a reference into the statement
+(`value_of` gives a `Ref` that lives as long as the `&S`). `decide`
+does not need to: it returns a `Decision` (8 bytes) from the
+declaration arm and the id of the returned value from the `return`
+arm.
+
+`Rows::take_at` does not detach, and that is a fact, not a fault: a
+list in flight is a pool list no node holds, its statements have no
+parent, and `take_at` gives the entry (the header table of
+`rows_stmt.rs` says so). The report's item reads as a fault only
+because the probe used a transition call to read without taking;
+`with_stmt_at` makes the question irrelevant to `decide`, and `take_at`
+is unchanged.
+
+*The step test.* A reader counts no step, so the relation is on the
+rows read (`Bir`'s test counter of row reads): reading the first, a
+middle and the last statement of a list with the readers `decide` uses
+reads the same number of rows at each position, and the same at 1,000
+and at 10,000 statements. Seen to fail with a body that walks to the
+statement (6 rows read against 505). What it cannot see is a walk that
+reads no row (a scan of the pool's ids): the body is one indexed read
+of a slice, and on the builder one indexed read of a vector, which has
+no counter; the builder's test pins that the reads count no step and
+leave the list whole at both sizes.
+
+*The payload: why the fold and not a function of `Js`.* The copy
+exists because the fold took the identifier vector out of the block's
+payload, and the payload is the shape's: `Bir::block_info` interns one
+per distinct tag, so another block of the same shape, and the source,
+share it. `complete_unit` therefore gave the unit's block a payload of
+its own before the fold emptied it. The fold already holds what it
+needs: it finds the block literal at the end of the comma spine by
+reference and reads its `JsId`. Copying the identifiers there (one
+`Vec` clone, the allocation `complete_unit` made) leaves the shared
+payload untouched, so no payload is written into a node and no node is
+found a second time. Per unit: one `JsPayload` fewer in the pool, the
+same number of allocations. The fold reads the tag through
+`Bir::block_tag`, which also reads a block whose shape is a constant's
+(`JsPayload::ConstantBlock`); `complete_unit`'s copy turned that into a
+`JsPayload::Block` on the way, which is why the fold matched `Block`
+only.
+
+Not chosen: `Js::set_info_at_seq_end(a, &mut E, JsId) -> bool`, the
+probe's proposal. It is a second walk of the spine the fold walks, it
+is O(spine) on the builder through `&mut` operands, and it exists for
+one call that the fold makes unnecessary.
+
+What changes on rows: the `JsId`s of payloads made after the fold are
+one lower, and the pool has no emptied copy. No decision reads a
+`JsId`'s value. Checked by the lowering's tests (the constant-block
+unit runs `check_lower`); `Backend bridge coverage` in the pull request
+of b3b is the gate.
+
+`extract_exports` takes the value as `Option<B::E>` in the same commit
+(it has one production caller, `complete_unit`, and one test): the body
+changes there anyway, and `complete_unit` then makes no node id of the
+unit's value at all.
+
+*The root.* The rest of `finish` reads the root as a row three times:
+`Bir::finish_bulk(root)`, `replay_names(root, ..)` (`names.rs`, T6r)
+and `bridge_j::Imported::from_lowering(arena, root, ..)` (T6s). So the
+root stays a row until T6s. It is made through the interface
+(`block_of`, which is `Bir::block_from_list` on rows and counts one
+step and one per statement) and read by its id (`NodeId(js.stmt_id(a,
+&root))`), not turned back with `B::stmt_node`: T6x-f can then delete
+the transition functions while `finish` still has its row. An id
+made into a row this way is the form `export.rs` and `jsx.rs` already
+use where a row is still needed (`rg -n 'NodeId\(self\.js\.(id|stmt_id)\('
+src/bir/lower` shows ten lines there, and this one after b3b); the
+slice that removes the last reader of the row removes the line. T6r
+changes `replay_names` to take the statement; T6s deletes
+`finish_bulk`, the importer and this line.
+
+**How it was checked.** A test of a function nothing calls shows the
+two sides alike, not that the lowering needs it. In a copy of this
+turn's tree that was not pushed, b3b was built as the four commits of
+its prompt, from the probe's `close.rs` and its hunks of `mod.rs`
+(`complete_unit`, `complete`, `finish`) with the gaps closed as above.
+After each of the four commits: `--lib bir::lower` 569 passed (trunk's
+568 and this turn's interface test), `--lib bir::j` 58, `--lib
+emit::builder` 28 (trunk's 26 and this turn's two), none ignored, no
+compiler warning. The four were then put on this turn's final head,
+which has three more tests of the lowering: 572, 58 and 28. On the
+last: `cargo clippy --all-targets -- -D
+warnings` clean; `cargo doc` with warnings denied clean;
+`check_lowering_cost_docs.py --base` prints `changed/new=8;
+missing/generic=0; removed=0`; the four allocation counts hold at 86,
+103, 86, 156; the close test of `close.rs` reads the same 10,004 steps
+and no allocation; transition calls 437 to 433; 117 lines added and
+188 removed in five files (`close.rs`, `out.rs`, `mod.rs`, `export.rs`,
+`bir/node.rs`). One size moves, by a deletion: `FreePool<Rows>` 88 to
+80 ((f)). The shortcut was run too: the copy deleted from
+`complete_unit` and the fold left taking the identifiers out fails six
+tests (the two export tests of `unit.rs` and the four allocation
+counts). Not run on the copy: `Backend bridge coverage`, the parity
+suites, `Instruction count`, check mode on the application. The
+builder's pull request runs them.
+
+**(c) The `Return` arm of `close::decide`.** It stays on a row until
+T6r, as one named turn-back: the arm reads the id of the returned
+value under `with_stmt_at` and calls `scope::return_sites(bir,
+NodeId(id), last)`. `return_sites` is not given a signature on the
+interface now, for two reasons read off the code. It keeps its pending
+operands in `Scope::spine`, a vector of rows that lives across calls;
+a `Ref` of the builder is a borrow and cannot be kept there, so the
+generic form is a descent the implementation owns, of the kind T6r adds
+for function literals and globals (`JsStmt::functions`, `globals`), not
+a change of parameter type. And it has a second caller on rows,
+`norm.rs` (J-S3, where a branch becomes a list of its own), which T6s
+deletes with the file.
+
+What T6r does with it: adds the descent to `JsStmt` beside its other
+two (the calls in tail position of a `return` in hand: both branches
+of a conditional, the last operand of a sequence, a call of a
+variable; the same steps), calls it from `decide` under `with_stmt_at`,
+and makes `VarFacts::site` the id the interface gives (production only
+compares it with `NO_SITE`: `rg -n '\.site\b' src/bir` shows `close.rs`
+as its one reader). Until T6s `Rows` implements the descent by calling
+`return_sites`; T6s deletes `return_sites` and `Scope::spine` with
+`norm.rs`. If T6r's design turn finds the descent does not fit its
+walk, the turn-back stays until T6s and nothing else depends on it:
+it uses no transition function.
+
+**(d) The leaves.** `Js::var` builds a strictly pure node
+(`plain::node` sets `STRICT` on a variable). `Js::qualified` and
+`Js::undefined` do not, where `pure_expression` did, because whether a
+module reference or an `undefined` is known pure is the caller's
+knowledge: six sites of `qualified` build it without the flag, as
+they did with `plain::node` before the interface (`prim_block.rs` 2,
+`prim.rs`, `jsx.rs`, `external.rs` 2). So the pair `qualified` then
+`assume_strict` is the form, and no constructor is added: a
+`qualified_strict` would be a second name for two sites, and a
+constructor that always marks would be wrong at six.
+
+Every site where a node is made and then marked (`rg -n 'assume_strict'
+src/bir/lower`, 18 calls outside the trait):
+
+| What is marked | Sites |
+| --- | --- |
+| `qualified` | `mod.rs` `enter` (the global leaf); `call.rs` `finish_application` (an external callee) |
+| `copy_leaf` of a module member | `export.rs` `copy_replacement` |
+| `var` (the flag is already set: the mark writes the bit it has) | `args.rs` `evaluate_now`; `external.rs` `hold_external_receiver`, `compile_js_object_create` 3, `translate_scoped_global_value`; `ffi_args.rs` `hold_in_variable`; `call.rs` `apply_with_arity`; `jsx.rs` `jsx_callee`; `import.rs` `import_of_path`, `wrap_then_path` |
+| a node that is not a leaf | `rec.rs` `recursive_dummy` (an array or an object); `args.rs` `evaluate_now` and `ffi_args.rs` `hold_external_arg` (a `refill`); `konst.rs` `strict` (a constant) |
+
+None can be reached with the flag missing: at each site the mark is
+the statement after the construction, in straight-line code, before
+the handle is given to anything. The eleven marks of a `var` are
+no-ops left by the conversion slices; T6x-c1 (`args.rs`, `call.rs`,
+`import.rs`) and T6x-c2 (`external.rs`, `ffi_args.rs`, `jsx.rs`) delete
+them in their files, and each says so in its end state. The test-only
+`complete` of `mod.rs` makes its `undefined` the same way in b3b.
+
+**(e) `append_outputs`.** It keeps its value parameter and owns the
+value it is given (its doc comment states the rule since pull request
+357). Five of its eight calls give the value moved out of the second
+output; three give `None`, because the caller has consumed that value
+or keeps it for itself (`expr.rs` twice, `unit.rs` once). Not chosen:
+the first probe's form, a `bool` for "the second output's value is the
+result's". The function would move the value out of `second` itself,
+which saves a line at five calls and leaves the other three a flag to
+get right in place of a value they no longer hold. Accepted as built.
+
+**(f) `FreePool::probe` and `ProbeInput`.** Neither has a production
+caller: `rg -n 'ProbeInput|\.probe\(cx' src/bir/lower` shows the
+definition, the body of `probe` and two tests of `out.rs`; the lowering
+pushes `Free` records itself (`cond.rs`, `expr.rs`, `mod.rs`
+`probe_leaf`). b3b deletes both, with the counter `FreePool::probes`
+that only `probe` wrote, in its last commit. `FreePool<Rows>` is then
+80 bytes (the size test and the cost note of `State::realize` move
+from 88, by the deleted field). Not `#[cfg(test)]`: a function kept
+for its tests is a second path that the tests then keep alive.
+
+The two tests were tests of `probe`'s policy, which production has in
+`cond.rs::finish_if`. They become tests of `FreePool::realize`, which
+is what runs: `ten_thousand_deferred_nodes_are_realized_once` builds
+the chain of 10,000 sequences with `push`, as the lowering does, and
+keeps its assertions on the result, on `realized` and on the order of
+the visits (it loses the one on `probes`);
+`a_deferred_conditional_is_realized_after_its_branches` replaces
+`nonfree_child_is_kept_without_reprobing` and asserts the order then,
+else, test and that an output that is not deferred is returned without
+a realization. The prompt gives both verbatim.
+
+**(g) The turn-backs T6x-b leaves, and the slice that removes each.**
+On this turn's head, the transition calls under a comment that names a
+later slice, and the others the row leaves:
+
+| File, function | The call | Because | Removed by |
+| --- | --- | --- | --- |
+| `call.rs` `finish_application` | `B::from_node(value)` | `call_node` and `apply_with_arity` give rows | T6x-d |
+| `cond.rs` `finish_if` | `B::node(test)` | the rows of 3.6 (`effect_conditional`, `return_conditional`, `assigning_conditional`) take a row | T6x-c3 |
+| `variant.rs` `bind_named_scrutinee` | `B::node(..)` twice | `Plan::value` holds a row | T6x-c3 |
+| `mod.rs` `enter` | `B::from_node(self.constant(value))` | `konst.rs::constant` gives a row | T6x-d |
+| `unit.rs` `lower` | `<Rows as js::Js>::node(value)` into `drop_pure_effect`. Written on `Rows` by name (the function is not generic), so `count_lowering_ids.py` does not count it | `expr.rs::drop_pure_effect` takes a row | T6x-d, with the row of `drop_pure_effect` |
+| `out.rs` `take_list` | `B::list_id(list)` into `close` | `close` takes a pool list | T6x-b3b |
+| `mod.rs` `complete_unit`, `complete` | `B::list_id(..)` twice, `.map(B::node)` twice, `B::stmt_from_node` | `finish` and `extract_exports` take rows | T6x-b3b |
+| `mod.rs` `complete_unit` (after b3b) | `B::list_from(self.coerced_list(run))` | `export.rs::coerced_list` gives a pool list | T6x-e |
+| `close.rs` `decide` (after b3b) | `NodeId(js.id(..))`; not a transition function | `scope::return_sites` takes a row | T6r ((c)) |
+| `mod.rs` `finish` (after b3b) | `NodeId(js.stmt_id(..))`; not a transition function | `finish_bulk`, `replay_names` and the importer take a row | T6s ((b)) |
+
+Every other transition call on trunk (433 after b3b) is inside the
+cluster of a c slice or `export.rs`, without a comment: the counts by
+file are in the table of T6x and in the probe prompt of T6x-c1.
+
+**(i) What the probes of T6x-c1 to f start from.** Counted on this
+turn's head (`python3 ../scripts/count_lowering_ids.py` from
+`compiler-rust`; 437 transition calls, 433 after b3b). These counts
+replace the ones in the rows of the table of T6x, which were taken
+before T6x-a or after it.
+
+| Row | Files and their transition calls | What T6x-b changed in the row |
+| --- | --- | --- |
+| T6x-c1 | `prim.rs` 133 (123 `from_node`), `prim_cmp.rs` 7, `prim_block.rs` 0, `konst.rs` 15, `record.rs` 7, `import.rs` 8, `args.rs` 18, `call.rs` 10: 198 | A value arrives as a handle: `sequence_arguments` takes `&mut [Out<B>]` and moves each value out, and turns it back where it pushes into `values: &mut Vec<NodeId>` (`args.rs`, three arms); `primitive_result` takes `B::E` and `call.rs` wraps `values[0]` for it. So the row starts at the push into `values`, not at the output. `probe_leaf` takes a handle, which removed five turn-backs at its callers |
+| T6x-c2 | `external.rs` 33, `ffi_args.rs` 53, `jsx.rs` 19: 105, and 5 `push_list` | `hold_external_receiver`, `hold_external_arg` and `hold_external_obj_args` read an output's value in place and take it only where they hold it; what they hand on is still a row (`external_values`, the argument lists). `ffi_args.rs` fell from 64 to 53 and `external.rs` from 40 to 33 |
+| T6x-c3 | `cond.rs` 35, `expr.rs` 2, `switch.rs` 5, `variant.rs` 13, `untagged.rs` 20, `location.rs` 0: 75 | `cond.rs` fell from 55 to 35 and `expr.rs` from 11 to 2: `finish_if`, `short_circuit`, `free_value`, `free_effect`, `push_s_if_empty`, `output` and `hold_effect` take or give handles. What is left in `cond.rs` is the rows of 3.6 (`effect_conditional`, `return_conditional`, `assigning_conditional`, behind the one `B::node(test)` of `finish_if`) and `Conditional`'s three fields; in `variant.rs`, `Plan::value` |
+| T6x-c4 | `loops.rs` 4, `try_.rs` 1, `exit.rs` 2, `rec.rs` 6, `tail.rs` 4, `assign.rs` 0, `label.rs` 0: 17 | `recursive_block` takes a handle and `assign.rs` has nothing left. The plan fields `loops::Plan::values` hold rows |
+| T6x-d | 33 rows in the callers' table of the script, 97 calls in other files. Three are not rows of this slice: `enter` (matched by name against `names.rs`), `locate_switch_run` (a source node only) and `extract_exports` (b3b) | `realize_conditional`, `append_outputs`, `leaf`, `probe_leaf` and `primitive_result` left the table. `drop_pure_effect` lost its caller in `mod.rs` (`Realizer::effect` calls `JsStmt::effect`) and has one written on `Rows` by name in `unit.rs`, which the script does not count ((g)) |
+| T6x-e | `export.rs` 37 (10 `from_node`, 7 `node`, 15 `at`, 4 `stmt_from_node`, 1 `stmt_node`), 36 after b3b; and ten `NodeId(self.js.id(..))` in `export.rs` and `jsx.rs` | After b3b `extract_exports` takes the unit's value as a handle; `Tables::values` still holds rows (it turns each back with `B::node(self.js.pop())`). `coerced_list` gives a pool list that `complete_unit` wraps ((g)) |
+| T6x-f | The seven transition functions of the two traits, `push_list`, and what calls them when e is merged | After b3b nothing in `close.rs` or `out.rs` calls one; `mod.rs` has two, both another slice's ((g)). `finish` reads the root by its id and needs none |
+
+Read off the code for the design of c1, not probed (corrected in the
+review of this turn, which read every use): the vector the values of an
+application or a primitive are sequenced into is one field of `State`,
+`argument_values`. In production it is taken and given back in two
+functions, both of c1: `finish_application` (`call.rs`) and
+`finish_primitive_payload` (`prim.rs`). Every other file that names it
+(`konst.rs`, `import.rs`, `prim_block.rs`, `external.rs`, `ffi_args.rs`,
+`jsx.rs`, `tail.rs`) reads its capacity in an allocation test and
+nothing else, so the field's element type can change in c1 without a
+wrap in another cluster. What crosses clusters is what is made from it:
+`finish_self_call` (`tail.rs`, c4) takes `values: &[NodeId]` from
+`call.rs`, a row of T6x-d, and the externals are given a pool list
+(`compile_js_call`) or an iterator of rows (`compile_jsx`). Whether c1
+can be built beside c2 to c4 with those calls wrapped is the first
+question of c1's probe.
+
+**(h) Changes to earlier sections of this document**, each with its
+reason:
+
+- "T6: the interface" (a), the read-back table: the read by reference
+  of a statement of a list in flight, left open there and in "T6x-a:
+  the statement stack, after the probe" (e), is
+  `JsStmt::with_stmt_at`.
+- "T6: the interface" (a), the read-back table, "`JSeq` ends in
+  `complete_unit`, `extract_exports`": after b3b only `extract_exports`
+  walks the spine. (The line is not edited in this turn: it is true
+  once b3b is merged, and the review of b3b edits it.)
+- "T6x: the cut", the row of T6x-b: rewritten for b3b. `close.rs`
+  "takes the interface from `out.rs`" as the row said; what the row did
+  not say is in (b), (c) and (f).
+- "T6x-a: the statement stack, after the probe" (a), the table of the
+  stack: `close(a, ListId)` is `close(js: &B, a, B::L)` after b3b.
+- "T6: the cut of the interface, revisited", row T6x: `State::{leaf,
+  seq, effect}` were b3a's; `complete_unit`, `complete` and `finish`
+  are b3b's. (Not edited in this turn either, for the same reason.)
+- T6r gains one thing ((c)): the descent of a returned value. T6s
+  gains the root's row in `finish` ((b)).
+- "T6x-a: the statement stack, after the probe" (a), the table of the
+  stack: `last`, `last_slot`, `take_run_rev` and `trim` cross a dead
+  range from its end in one step, where they took one per slot. `kill`
+  marks the last slot of a range of more than one slot with the
+  range's length (`Slot::DeadEnd`); a slot stays 12 bytes on rows. The
+  read from the end that (c) there describes for the actions of a
+  switch crosses one step per run of the last switch, not one per
+  slot.
+- One expected value of a test of the lowering changes on trunk in
+  this turn, by that change: `out.rs`,
+  `the_actions_of_ten_thousand_switches_leave_only_the_slots_of_their_runs`
+  counted 8 slots crossed (four dead ranges of two slots) and counts
+  4. In b3b one pinned size moves by a deletion (`FreePool<Rows>`, 88
+  to 80) and two tests of a deleted function are replaced ((f)).
+- Tests added in this turn, each seen to fail without what it is there
+  for: rule 6 of `if_head` for a run that ends in `continue` (the
+  comparison with `js3_simplify_if` runs the same head on both sides
+  and passed with `continue` removed from the rule); a hold of 10,000
+  statements read through `statement_refs` and `take_run_rev`; a dead
+  range of 10,000 slots crossed from its end; the number of merged
+  guards at each size of the guard-chain test of `tail.rs`.
+- `scripts/count_lowering_ids.py` stops with an error where it finds
+  no file (from the repository root it printed zeros) and has a
+  `--self-test`.
+
+**Corrections after the review of this turn.** Made in place by the
+reviewer's commit, or owed as said:
+
+1. (i): `argument_values` is taken and given back in two functions of
+   c1 only; the paragraph and step 1 of the probe prompt of T6x-c1 said
+   it crossed three rows. Corrected in both places.
+2. The prompt of T6x-b3b set `Instruction count` at most +0.02% as a
+   gate. The default build does not reach the lowering, and b3a read
+   +0.023% on code it cannot run: a limit the builder cannot control.
+   Reworded to a report with a stop above the job's spread. The prompt
+   listed the fragment as a fifth item of "four commits": it is part of
+   commit 4.
+3. (h) listed two lines of earlier sections as changed that this turn
+   did not edit; each now says so.
+4. `out.rs`: the cost note of `Runs::last` and the doc comment of
+   `Slot::Dead` still described a slot-by-slot crossing; corrected. The
+   invariant `Slot::DeadEnd` rests on is stated in its doc comment (no
+   assertion checks it: a check would read the range it is there to
+   skip).
+5. `emit/builder.rs`, `S::value` gives nothing for a `switch`, where
+   `JsStmt::value_of` gives the scrutinee. The builder makes no `switch`
+   yet; the doc comment says who adds it.
+6. The self-test of `scripts/count_lowering_ids.py` is run by the
+   `script-tests` job (the reviewer's commit adds the step). It pins no
+   count, by intent: it fails where the script finds no file or no
+   call, not when a slice moves the number.
+7. Owed by the design turn of T6v, which puts the builder behind the
+   interface before T6s: the two reads of an id as a row that b3b
+   leaves (`close::decide`, the `return` arm, until T6r; `finish`, the
+   root, until T6s) are right on rows only. That the id is the row is
+   a fact of `Rows`, not a promise of `Js::id` or `JsStmt::stmt_id`
+   (on the builder the id is the `node_id` of an owned node). T6v says
+   how its tests reach `finish` on the builder, or that they stop
+   before it; if T6r leaves the `return` arm's turn-back in place,
+   T6v's design owes the same for `decide`.
+8. Owed by the next design turn, as tests: an allocation count around
+   the reads of `a_statement_of_a_list_in_flight_is_read_where_it_is`
+   (the doc comment of `with_stmt_at` says it allocates nothing, and no
+   test would see an allocation); a `return` without a value among the
+   shapes of `a_statement_reads_the_expression_it_evaluates_first`.
+9. Accepted as it is: in `tail.rs` the test
+   `a_block_wider_than_the_operand_stack_is_unblocked_without_growing_it`
+   is renamed `a_body_wider_than_the_operand_stack_is_moved_without_growing_it`
+   and its assertion message reworded; its condition is unchanged.
 
 ### 11.5 Worker prompt for T4b
 
@@ -6854,6 +7263,445 @@ allocation tests fail); `take_list` for an action list (it closes a
 list that has nothing to decide); the clause runs of untagged.rs
 taken in another order; a hole left unfilled; a signature of cond.rs
 or of another file changed.
+```
+
+T6x-b3b (with the common block of phase C and the common block of
+T6x-a1 to T6x-a4, read with "T6x-b3b" for the four slices; the
+paragraph "The probe" of that block is replaced by the one in the task;
+read also 11.4 "T6x-b: an output's value, as built"):
+
+```text
+Task T6x-b3b: the close of a list and the unit's finish go through the
+lowering's interface. One slice, one pull request against
+ocaml-to-rust-rewrite.
+
+Precondition, check it first and stop with a report if it fails: `rg -n
+'fn with_stmt_at' compiler-rust/src/bir/lower/js_stmt.rs` shows one
+line (the design turn of T6x-b is merged); `cargo test --manifest-path
+compiler-rust/Cargo.toml --lib bir::lower` reads 572 passed, `--lib
+bir::j` 58, `--lib emit::builder` 28, none ignored; from compiler-rust,
+`python3 ../scripts/count_lowering_ids.py | grep '^| total' | head -1`
+prints `| total | 15834 | 174 | 87 | 437 | 241 | 126 | 57 | 5 | 3 | 2 |
+3 | 0 | 5 | 162 |` (the first number may differ by lines trunk added;
+the fourth must be 437).
+
+Yours: src/bir/lower/close.rs whole; in src/bir/lower/out.rs
+`StatementStack::take_list` (one line), `StatementStack::close`,
+`FreePool::probe`, the field `FreePool::probes`, the imports and the
+tests named below; in src/bir/lower/mod.rs `complete_unit`, `complete`,
+`finish` (the one that takes `list`), the enum `ProbeInput` and one
+number in the doc comment of `realize`; in src/bir/lower/export.rs
+`extract_exports` and the one test line that calls it; in
+src/bir/node.rs the deletion of `set_block_info`; the changelog
+fragment. Nothing else. You add no function to a trait: the one this
+slice needs, `JsStmt::with_stmt_at`, is on trunk.
+
+The probe. This part was converted once as a throw-away (branch
+`bir-lower-statement-probe`; `git fetch origin
+bir-lower-statement-probe`). You may read `git show e1e5175130` and
+`git show 6b6be5b6e2 -- compiler-rust/src/bir/lower/mod.rs` as a
+starting point. They are unreviewed, they have no cost notes, and they
+leave four places marked `// PROBE-GAP`: where this task gives code,
+the task is right and the probe is not. Merge nothing and cherry-pick
+nothing from that branch.
+
+Commits, in this order, each compiling and passing the three filters on
+its own (the design turn built them in this order), each pushed when
+made:
+
+1. The close. close.rs, with these imports in place of the three it
+   has (`super::scope`, `strictly_pure`, `crate::bir::{..}`):
+
+       use super::js::{Js, Pools};
+       use super::js_stmt::JsStmt;
+       use super::scope::{Decision, VarFacts};
+       use crate::bir::{FuncHeader, NodeId};
+       use crate::emit::row::{Kind, flag};
+
+   and this body (the doc comment of `decide` stays; add to its cost
+   paragraph, after "have their capacity.": "A statement is read where
+   it is (`JsStmt::with_stmt_at`, O(1)): the list is not turned into
+   rows and no statement leaves it."):
+
+       pub(super) fn decide<B: JsStmt>(js: &B, bir: &mut Pools, list: B::L) {
+           let count = js.len(bir, list);
+           let mut steps = 0;
+           for at in (0..count).rev() {
+               steps += 1;
+               match js.kind_at(bir, list, at) {
+                   Kind::Return => {
+                       // `scope::return_sites` takes a row until T6r: the returned
+                       // value is named by its id.
+                       let value = js.with_stmt_at(bir, list, at, |statement| js.value_of(bir, statement).map(|value| js.id(bir, value)));
+                       let value = NodeId(value.expect("a return has a value"));
+                       super::scope::return_sites(bir, value, at + 1 == count)
+                   }
+                   Kind::Declare => {
+                       let decision = js.with_stmt_at(bir, list, at, |statement| {
+                           let var = js.declared(bir, statement).expect("a declaration declares");
+                           let kind = u16::from(js.stmt_aux(bir, statement));
+                           let value = js.value_of(bir, statement);
+                           // From here to `inline`: the lines of trunk, with
+                           // `js.has(bir, value, flag::STRICT)` for
+                           // `strictly_pure(bir, value)` and
+                           // `inlinable_function(js, bir, value)`.
+                           Decision::new(var, status, inline, built)
+                       });
+                       bir.js_scope.as_mut().expect("lowering scope").decisions.push(decision);
+                   }
+                   _ => {}
+               }
+           }
+           bir.js_scope.as_mut().expect("lowering scope").close_steps += steps;
+       }
+
+       /// `inline_function_decl_from_variable` of the legacy pass: a function
+       /// literal that is not a method, not `async` and has no directive. O(1):
+       /// the header of the literal and its attributes, two reads.
+       fn inlinable_function<B: Js>(js: &B, bir: &Pools, value: B::Ref<'_>) -> bool {
+           let Some(header) = js.function_of(bir, value) else { return false };
+           // the two lines of trunk
+       }
+
+   The decision is computed inside the closure, which only reads, and
+   pushed after it: a reference into the statement (`value_of`) does
+   not leave the closure. `inlinable_function` stays behind the three
+   tests of `inline` that come before it, as on trunk: it is not
+   called for every declaration.
+   out.rs: `close(&mut self, js: &B, a: &mut Pools, list: B::L)`,
+   calling `super::close::decide(js, a, list)` under `a.js_scope
+   .is_some()`; in `take_list` the two lines of the close become
+   `self.close(js, a, list);`; `use crate::bir::{Bir, ListId};` goes
+   from the head of the file and the tests import `crate::bir::{Bir,
+   NodeId}`. mod.rs, `complete_unit`: the close of the coerced list
+   becomes
+
+       let list = self.coerced_list(run);
+       // `coerced_list` gives a pool list until T6x-e.
+       self.statements.close(&self.js, &mut self.arena, B::list_from(list));
+
+   The test of close.rs: make `let rows = Rows::default();` before the
+   first `decide`, pass `&rows` to both calls, and import
+   `crate::bir::j::rows::Rows` and `crate::bir::{Bir, ListId, View}` in
+   the test module. It reads what it read: 10,004 steps (`10_001 + 3`),
+   20,000 decisions, no allocation in the second close. Those numbers
+   do not change; if one does, stop and report.
+
+2. The export block's payload. export.rs, `extract_exports`: the
+   parameter is `value: Option<B::E>` and the first line `let mut value
+   = value?;`; the filter of the block literal is `.filter(|&info|
+   matches!(self.arena.block_tag(info), TagInfo::ModuleExport(_)))`;
+   the identifiers are copied where they were taken out:
+
+       let TagInfo::ModuleExport(exports) = self.arena.block_tag(info) else { unreachable!("checked above") };
+       let exports = exports.clone();
+
+   In its doc comment, "No allocation: the identifiers are moved out
+   of the block's payload." becomes "One allocation: the identifiers
+   are copied out of the block's payload, which is the shape's and is
+   shared with every other block of that shape and with the source
+   (`Bir::block_info`)." `use crate::bir::JsPayload;` goes. The test
+   `rows_and_references_are_read_without_allocation_once_the_tables_
+   are_warm` calls `state.extract_exports(out.value, out.finished)`.
+   mod.rs, `complete_unit`: from `let value = out.value.map(B::node);`
+   to the call of `extract_exports` (the comment, the walk of the
+   comma spine, the copy of the payload and the write) becomes one
+   line, `let exports = self.extract_exports(out.value,
+   out.finished);`. src/bir/node.rs: `Node::set_block_info` and its
+   doc comment are deleted (`rg -n 'set_block_info' compiler-rust/src`
+   must then be empty; no test calls it).
+
+3. The finish. mod.rs: `fn finish(mut self, list: B::L, _finished:
+   Finished, coerced: export::Coerced) -> Lowered`, its doc comment
+   "The root block over the top-level list in flight, which is
+   consumed. One step per statement of the list and one write per
+   catch of the unit.", and the root made so:
+
+       // The rest of the unit's finish reads the root by its id: the bulk
+       // finish and the importer take a row until T6s, the replay of the
+       // names until T6r.
+       let root = self.js.block_of(&mut self.arena, list);
+       let root = NodeId(self.js.stmt_id(&self.arena, &root));
+
+   `complete_unit` gives `finish` a `B::L`: `let list =
+   B::list_from(self.coerced_list(run));` under the comment of commit
+   1, then `self.statements.close(&self.js, &mut self.arena, list);`,
+   and the other arm is `self.statements.take_list(&mut self.js, &mut
+   self.arena, run)` without `B::list_id`. `complete` (tests only):
+
+       let value = out.value.unwrap_or_else(|| {
+           let mut undefined = self.js.undefined(&mut self.arena, false);
+           self.js.assume_strict(&mut self.arena, &mut undefined);
+           undefined
+       });
+       let statement = self.js.exp(&mut self.arena, value);
+       self.statements.push(statement);
+
+   and its list is the result of `take_list` as it is.
+   `State::pure_expression` stays `#[cfg(test)]`: tests of args.rs,
+   call.rs and cond.rs call it.
+
+4. The probe function that nothing calls. out.rs: delete
+   `FreePool::probe` with its doc comment, the field `probes` with its
+   doc comment (and `probes: 0` in `Default`), and `ProbeInput` from
+   the import. mod.rs: delete the enum `ProbeInput` with its doc
+   comment; in the doc comment of `realize`, "two moves of its 88
+   bytes" becomes "two moves of its 80 bytes". out.rs tests:
+   `size_of::<FreePool<Rows>>()` is 80 (the field is gone: the one
+   size this slice moves), and the last two tests of the file
+   (`ten_thousand_deferred_nodes_are_probed_and_realized_once`,
+   `nonfree_child_is_kept_without_reprobing`) are replaced by these
+   two, verbatim:
+
+       /// A chain of 10,000 deferred sequences over one leaf, pushed as the
+       /// lowering pushes them (`Free` records, the tail first), is realized
+       /// once per record on the explicit stack: the leaf, then each head.
+       #[test]
+       fn ten_thousand_deferred_nodes_are_realized_once() {
+           let mut pool = FreePool::default();
+           let mut oracle = Oracle::default();
+           let cx = Cx::value();
+           let mut free = pool.push(Free::Leaf(Rows::from_node(NodeId(0))));
+           for n in 1..=10_000 {
+               free = pool.push(Free::Seq { first: Rows::from_node(NodeId(n)), second: free });
+           }
+           assert!(oracle.visits.is_empty());
+           let out = pool.realize(cx, Probed::Free(free), &mut oracle);
+           assert_eq!(out.value.map(Rows::node), Some(NodeId(0)));
+           assert_eq!(pool.realized, 10_001);
+           assert_eq!(oracle.visits, (0..=10_000).collect::<Vec<_>>());
+       }
+       /// A deferred conditional is realized after its branches, the then
+       /// branch first; an output that is not deferred is returned as it is
+       /// and realizes nothing.
+       #[test]
+       fn a_deferred_conditional_is_realized_after_its_branches() {
+           let mut pool = FreePool::default();
+           let mut oracle = Oracle::default();
+           let cx = Cx::returning();
+           let then_ = pool.push(Free::Leaf(Rows::from_node(NodeId(1))));
+           let else_ = pool.push(Free::Leaf(Rows::from_node(NodeId(3))));
+           let free = pool.push(Free::Cond { test: Rows::from_node(NodeId(2)), then_, else_ });
+           let out = pool.realize(cx, Probed::Free(free), &mut oracle);
+           assert_eq!(out.value.map(Rows::node), Some(NodeId(1)));
+           assert_eq!(pool.realized, 3);
+           assert_eq!(oracle.visits, vec![1, 3, 2]);
+           let kept = pool.realize(cx, Probed::Out(output(Span { start: 0, len: 1 }, None, Finished::True)), &mut oracle);
+           assert_eq!(kept.finished, Finished::True);
+           assert_eq!(pool.realized, 3);
+       }
+
+The fragment changes/three-trees-t6x-b3b.internal.md, one bullet, is
+part of commit 4: the slice is four commits.
+
+Tests. You edit only what is named above: the two calls and the
+imports of the test of close.rs, the import line of the tests of
+out.rs, one line of a test of export.rs, the size of `FreePool<Rows>`,
+and the two replaced tests. No other expected value changes; the
+replaced tests keep every assertion that does not name the deleted
+counter. `--lib bir::lower` reads 572 passed after every commit (two
+tests replaced by two), `--lib bir::j` 58, `--lib emit::builder` 28.
+The tests that guard commit 2 exist and you do not edit them:
+unit.rs `export_consumption_does_not_empty_shared_block_metadata`,
+`supported_unit_exercises_both_texts_and_shared_export_coercion` and
+the four `full_unit_allocation_boundary_*` (86, 103, 86, 156).
+
+End state, each command run from compiler-rust and pasted with its
+output. A command is one line, however long. The design turn ran each
+on trunk and on its own build of this slice; "now" is what trunk
+prints, "then" what you must print:
+
+    rg -n 'B::(from_node|node|at|stmt_from_node|stmt_node|list_from|list_id)\(|\.map\(B::node\)' src/bir/lower/close.rs src/bir/lower/out.rs src/bir/lower/mod.rs
+
+  Now seven lines: out.rs `take_list` (`B::list_id`); mod.rs
+  `complete_unit` 2, `complete` 3, `enter` 1. Then two: mod.rs
+  `complete_unit` (`B::list_from(self.coerced_list(run))`, T6x-e) and
+  `enter` (`B::from_node(self.constant(value))`, T6x-d).
+
+    rg -n 'fn decide|fn close\(|fn finish\(mut self|fn inlinable_function' src/bir/lower/close.rs src/bir/lower/out.rs src/bir/lower/mod.rs
+
+  Then: `pub(super) fn decide<B: JsStmt>(js: &B, bir: &mut Pools,
+  list: B::L)`; `fn inlinable_function<B: Js>(js: &B, bir: &Pools,
+  value: B::Ref<'_>) -> bool`; `pub(super) fn close(&mut self, js: &B,
+  a: &mut Pools, list: B::L)`; `fn finish(mut self, list: B::L,
+  _finished: Finished, coerced: export::Coerced) -> Lowered`.
+
+    rg -n -A2 'pub\(super\) fn extract_exports' src/bir/lower/export.rs
+
+  Then the second line after it reads `value: Option<B::E>,`.
+
+    rg -n 'set_block_info|ProbeInput|\.probes\b|pub probes' src/bir
+
+  Now 16 lines; then empty.
+
+    rg -n 'View::|\.view\(|lists\.get|strictly_pure' src/bir/lower/close.rs
+
+  Now 13 lines; then five, all inside `mod tests` (the rows the test
+  builds).
+
+    rg -n 'with_stmt_at\(' src/bir/lower --glob '!*_tests.rs' --glob '!js_stmt.rs'
+
+  Now empty; then two lines, both in close.rs.
+
+    rg -n 'js_info\(|block_from_list|new_node\(|pure_expression\(' src/bir/lower/mod.rs
+
+  Now nine lines; then five: the definition of `pure_expression` (two
+  lines) and three `source.new_node` of a test.
+
+    rg -n 'mem::take\(exports\)|block_tag\(' src/bir/lower/export.rs src/bir/lower/mod.rs
+
+  Now two lines (the take in export.rs, `block_tag` in mod.rs); then
+  two, both `block_tag` in export.rs.
+
+    python3 ../scripts/count_lowering_ids.py | grep '^| total' | head -1
+
+  The design turn's build read `| total | 15775 | 169 | 86 | 433 | 240
+  | 126 | 57 | 4 | 3 | 3 | 0 | 0 | 5 | 148 |`: `from_node` 241 to 240
+  (export.rs), `stmt_from_node` 5 to 4 and `list_id` 3 to 0 (mod.rs
+  and out.rs), `list_from` 2 to 3 (mod.rs, until T6x-e). Paste yours
+  beside it and explain any difference in columns four to thirteen.
+
+Cost notes. From compiler-rust: `python3
+../scripts/check_lowering_cost_docs.py --base
+origin/ocaml-to-rust-rewrite`. It reports every function whose
+signature or body changed (the design turn's build: `changed/new=8;
+missing/generic=0; removed=0`) and its last line must read
+`missing/generic=0`. The notes this task gives (`decide`,
+`inlinable_function`, `extract_exports`, `finish`) are the ones to
+write; `close`, `take_list`, `complete_unit` and `complete` keep
+theirs, which still say what a call costs.
+
+Gates of the pull request, beside those of the common blocks: the
+three filters with the counts above; clippy with `-D warnings`; `cargo
+doc` with warnings denied; CI `Backend bridge coverage` at zero
+differences and the parity jobs for JavaScript, the standard library
+and genType green, read before the pull request is marked ready (after
+commit 2 the payloads made after the export fold have ids one lower on
+rows, which no decision reads: these jobs are the check, and if one is
+not clean you stop and report the first difference); the four
+allocation counts; CI `Instruction count` read and reported, with one
+rerun and both figures. For this slice that replaces the limit of the
+common block: the default build does not reach the lowering, so the
+figure is the job's spread (the three parts of this row on trunk read
++0.014%, -0.039% and +0.023%). If both runs read above +0.05%, stop and
+report the functions the job lists.
+
+Run by the design turn, in a copy that was not pushed: these four
+commits one after the other; after each, the three filters passed; on
+the last, rebased on the design turn's final head, they read 572, 58
+and 28, with clippy and `cargo doc` clean, the cost-note check
+at zero, the allocation counts and the close test unchanged; 117 lines
+added and 188 removed in five files. Not run: `Backend bridge
+coverage`, the parity suites, `Instruction count`, check mode.
+
+Shortcuts that count as failure, beside the common lists: `B::list_id`,
+`B::stmt_from_node` or `B::stmt_node` in close.rs; `take_at` in
+`decide` (it moves the statement out); a `Vec` of the statements or of
+their ids; `inlinable_function` called before the tests that precede
+it on trunk; a second `with_stmt_at` for the same statement; the
+payload copied in `complete_unit` or written into a node
+(`set_block_info`, `js_info` in mod.rs); `std::mem::take` of the
+identifiers (it empties a payload other blocks share: six tests fail);
+the root turned back with `B::stmt_node`; `FreePool::probe` or
+`ProbeInput` kept under `#[cfg(test)]`; an edit of scope.rs, of
+`coerced_list`, of `coerce_exports` or of any function of export.rs
+other than `extract_exports`; an edit of js.rs, js_stmt.rs, rows.rs,
+rows_stmt.rs or src/emit.
+```
+
+
+Probe of T6x-c1 (a throw-away conversion; issued verbatim, with the
+common block of phase C; no build prompt for T6x-c1 to f exists until
+each has its probe and its design turn):
+
+```text
+Task: probe row T6x-c1 of the cut of T6x (compiler-rust/docs/
+THREE_TREES.md 11.4, "T6x: the cut" and "T6x-b: an output's value, as
+built" (i)). This is a measurement, not a slice: its pull request is a
+draft that is never merged, and its body is the report.
+
+Start from trunk with T6x-b3b merged (`rg -n 'fn decide<B: JsStmt>'
+compiler-rust/src/bir/lower/close.rs` shows one line). Branch from it;
+open the draft pull request against ocaml-to-rust-rewrite after the
+first push, titled "Probe: T6x-c1 (not for merge)".
+
+Convert the row: in prim.rs, prim_cmp.rs, prim_block.rs, konst.rs,
+record.rs, import.rs, args.rs and call.rs a value is a `B::E` from the
+place it is made to the place it is consumed. `values` holds handles
+from `sequence_arguments` on. A function of these files that only
+these files call takes and returns handles. A function another file
+calls keeps its signature (it is T6x-d's) and you wrap at the call,
+unless keeping it forces a turn-back and a wrap of the same value in
+one function: then change it, with its callers, and list it in (3).
+
+Rules of a probe:
+- You add nothing to the traits `Js` and `JsStmt` and nothing to
+  src/bir/j or src/emit. Where the conversion needs something the
+  interface does not give, write the turn-back that works today under
+  a comment `// PROBE-GAP n: <what is needed, in one line>` and go on.
+  Number the gaps in order of appearance.
+- No cost notes, no changelog discipline beyond one fragment, no `allow`
+  attribute. A test is edited only so that it compiles; no expected
+  value changes. If one would, leave the test failing and report it.
+- One commit per step below, pushed when made. After each: `cargo
+  check --all-targets --manifest-path compiler-rust/Cargo.toml`, and
+  `cargo test --manifest-path compiler-rust/Cargo.toml --lib
+  bir::lower` and `--lib bir::j` (never the whole suite). A step that
+  does not compile alone is merged with the next and the report says
+  so.
+- Do not run `Instruction count`, check mode or the parity suites, and
+  do not wait for CI.
+
+Steps:
+1. The storage: `State::argument_values` and the `values` parameter of
+   `sequence_arguments` and of `finish_primitive_values` hold `B::E`
+   (`Vec<Option<B::E>>` if a value is moved out of the middle, `Vec<
+   B::E>` if not: say which and why). The field is taken and given
+   back in call.rs and prim.rs only; the other files read its capacity
+   in a test. What is made from it leaves the row (the `values` slice
+   `finish_self_call` of tail.rs takes, the pool list `compile_js_call`
+   and the iterator `compile_jsx` take): wrap at those calls and count
+   the wraps by file.
+2. prim.rs: the reads `B::from_node(values[i])` become moves or reads
+   in place; `push_values`, `bin_of`, `first_value`.
+3. konst.rs (`constant_children`, `constant_values`), record.rs,
+   import.rs, prim_cmp.rs, prim_block.rs.
+4. args.rs (`Evaluation::values`, `evaluate_now`) and call.rs
+   (`call_reversed`, `eta_arguments`, the wrap of `values[0]`).
+
+The report (the body of the draft pull request), with these sections:
+(1) Size: `git diff --stat` against trunk; changed lines per commit,
+    production and test apart; whether the row is under 600 lines and,
+    if not, the cut the commits give, each part compiling and passing
+    at its place.
+(2) PROBE-GAPs: for each, the file, function and line, what is needed,
+    what you wrote instead, and the signature you would propose with
+    its cost on rows and on a builder that owns its nodes.
+(3) Signatures: every function whose signature changed, before and
+    after, with its callers in other files; which changes the row
+    could not avoid and which you made to remove a turn-back.
+(4) `values`: what its element type became and why; every place a
+    value is read from it more than once (an index read twice, a value
+    read and then moved, a slice passed on while an element is used),
+    with the line on trunk and what you did there. This is the table
+    of "one value, two consumers" for this row.
+(5) The shared field: for `argument_values`, `external_values`,
+    `constant_values` and `scratch`, the files that use each and
+    whether step 1 could change the type without editing a function of
+    a file that is not of this row. Say plainly whether c1 can be
+    built beside c2 to c4, or what must come before them.
+(6) Counts: `python3 ../scripts/count_lowering_ids.py | grep '^|
+    total' | head -1` from compiler-rust before and after, and the row
+    of each file of this row before and after; the marks
+    `assume_strict` after `Js::var` in args.rs, call.rs and import.rs
+    that you deleted (they write a flag the node has).
+(7) Tests: the counts of the two filters on trunk and after each
+    commit; every test edited to compile, with what changed; the four
+    allocation counts of unit.rs and every `size_of` assertion, held
+    or not.
+(8) What surprised you: anything the row's description or this prompt
+    says that the code contradicts.
+(9) What you did not run.
 ```
 
 

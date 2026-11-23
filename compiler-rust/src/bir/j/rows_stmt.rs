@@ -17,6 +17,7 @@
 //! | `list` | `Lists::push_iter(len, ..)` with the nodes of the statements |
 //! | `len`, `kind_at` | `Lists::get(list)`: its length; `rows::kind_of` of the operation of entry `index` |
 //! | `take_at` | entry `index` of `Lists::get(list)` (the entry stays: a pool list that no node holds is not read again) |
+//! | `with_stmt_at` | `read` on entry `index` of `Lists::get(list)` as a statement: the row is named for the length of the call and stays the list's; no row is read to find it |
 //! | `exp` | `Bir::new_node(View::SExp { value }, 0)` |
 //! | `assign` | `bir::j::assign` |
 //! | `declare` | with a value `bir::j::declare`; without one `plain::node(View::SDecl { var, value: None }, aux)` with the `aux` `bir::j::declare` computes |
@@ -151,6 +152,11 @@ impl JsStmt for Rows {
     fn take_at(&mut self, a: &mut Pools, list: ListId, index: u32) -> S {
         self.steps += 1;
         S(a.lists.get(list)[index as usize])
+    }
+
+    #[inline]
+    fn with_stmt_at<R>(&self, a: &Pools, list: ListId, index: u32, read: impl FnOnce(&S) -> R) -> R {
+        read(&S(a.lists.get(list)[index as usize]))
     }
 
     #[inline]

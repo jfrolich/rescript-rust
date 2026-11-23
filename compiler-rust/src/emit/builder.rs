@@ -175,6 +175,28 @@ pub(crate) struct S<'a> {
     pub row: Row,
 }
 
+impl<'a> S<'a> {
+    /// The expression the statement evaluates first, read in place: the
+    /// value of an expression statement, of a `return`, of a `throw` and of
+    /// a declaration that has one; the test of an `if` and of a `while`.
+    /// `None` for every other statement. (The lowering's `JsStmt::value_of`
+    /// also gives the scrutinee of a `switch`: the builder makes no
+    /// `switch` yet, and the slice that adds one adds its scrutinee here.)
+    /// Its row is [`Builder::row`] of it.
+    /// O(1): the statement's node and one field of it.
+    pub fn value(&self) -> Option<&Expression<'a>> {
+        match &self.stmt {
+            Statement::ExpressionStatement(statement) => Some(&statement.expression),
+            Statement::ReturnStatement(statement) => statement.argument.as_ref(),
+            Statement::ThrowStatement(statement) => Some(&statement.argument),
+            Statement::VariableDeclaration(declaration) => declaration.declarations.first()?.init.as_ref(),
+            Statement::IfStatement(statement) => Some(&statement.test),
+            Statement::WhileStatement(statement) => Some(&statement.test),
+            _ => None,
+        }
+    }
+}
+
 /// A statement list in flight: a run of [`Builder::pool`]. 8 bytes, `Copy`;
 /// a statement is taken out of it at most once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -866,7 +888,11 @@ impl<'a> Builder<'a> {
         (!list.is_empty()).then(|| self.row_at(list, list.len() - 1))
     }
 
-    /// Statement `index` of `list`, by reference. O(1).
+    /// Statement `index` of `list`, by reference: the statement stays in
+    /// the list, and no other statement of it is read. It is what the
+    /// lowering's `JsStmt::with_stmt_at` gives its reader on the builder.
+    /// O(1): one indexed read of the pool; counts no step. Panics when the
+    /// statement was taken.
     pub fn statement_at(&self, list: List, index: usize) -> &S<'a> {
         self.slot(list, index).as_ref().expect("a statement taken twice")
     }
