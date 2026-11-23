@@ -382,9 +382,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// C:1144 compile_apply_call_inner: the call constructor performs no rewrite.
     /// Cost: O(A): one move and one step per argument.
-    /// The row form of `call_values`, kept until T6x-d for `ffi_args.rs`,
-    /// which holds rows: it wraps the callee and each argument and turns
+    /// The row form of `call_values`, for a test that builds its
+    /// arguments as rows: it wraps the callee and each argument and turns
     /// the call back.
+    #[cfg(test)]
     pub(super) fn call_node(
         &mut self,
         callee: NodeId,
