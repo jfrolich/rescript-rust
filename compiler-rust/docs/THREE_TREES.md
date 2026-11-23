@@ -4642,14 +4642,20 @@ called `bir::j` directly: `Js::var`, `Js::qualified`, `JsStmt::declare`,
 `assign`, `return_`, `Js::release`, `Js::seq_rule` and `JsStmt::effect`
 count a step on rows (`Rows::steps`) where `pure_expression`,
 `j::declare`, `Bir::release` and `jm1_js_seq` counted none. No node
-differs. No test of the lowering reads that count across these calls:
-`rg -n '\.steps\(\)' src/bir/lower src/bir/shadow.rs src/lambda` matches
-`js_tests.rs` and `js_stmt_tests.rs` (the interface's own tests, which
-build through the interface on both sides of every comparison) and
-`names.rs` (`Replayed::steps`, another counter) and nothing else. The
-counters the lowering's tests do read (`SwitchStats`, `close_steps`,
+differs. One test of the lowering reads that count across these calls,
+and it reads a relation, not a number: `tail.rs`,
+`a_chain_of_merged_guards_moves_each_statement_once`, requires the
+interface's steps to grow linearly from 1,000 to 2,000 to 10,000
+levels, which holds with a constant more per level as it did without.
+Found with `rg -n 'steps\(&|\.steps\(\)' src/bir/lower src/bir/shadow.rs
+src/lambda`: beside it the search matches `js_tests.rs` and
+`js_stmt_tests.rs` (the interface's own tests, which build through the
+interface on both sides of every comparison), `names.rs`
+(`Replayed::steps`) and `globals.rs` (a local counter of its tests).
+The counters the other tests read (`SwitchStats`, `close_steps`,
 `StatementStack::copied` and `scanned`, `Coerced::steps`) are not
-`Rows::steps`.
+`Rows::steps`. The row of the table said "no lowering test reads the
+count across them"; it is corrected by this paragraph.
 
 **(b) What b3b lacked, and what this turn added.** Two places of the
 probe could not be written through the interface. One gets a function;
