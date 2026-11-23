@@ -3609,7 +3609,7 @@ mod tests {
     #[test]
     fn ignored_tests_name_the_slices_they_reach() {
         let before: [(&str, &[&str]); 12] = [
-            ("R3q", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
+            ("R3q", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3h", "R3r"]),
             ("R3r", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3h"]),
             ("R3p", &["R3m", "R3e"]),
             ("R3k", &[]),
@@ -3867,24 +3867,68 @@ mod tests {
         );
     }
 
-    /// O(text): whether a form prints a fixed row with a `Reither` field
-    /// that is not matched (`#A?^`, `#A?c^`, `#A?(`, `#A?c(` inside
-    /// `[fixed ...]` or `[closed fixed ...]`).
+    /// O(text): whether a form prints a row that a copy reads as fixed
+    /// with a `Reither` field that is not matched (`#A?^`, `#A?c^`,
+    /// `#A?(`, `#A?c(`): a row printed `[fixed ...]` or `[closed fixed
+    /// ...]`, or a row over a constructor, which a copy makes fixed
+    /// (PR#6163, compiler/ml/ctype.ml:826-830: `| {desc = Tconstr _} when
+    /// not row.row_fixed -> {row with row_fixed = true}`). The tail of a
+    /// row is what follows `| `: a node printed in full (`&7[1]` and its
+    /// form) or a reference to one printed before (`@7`). A tail is a
+    /// constructor when its form is none of the three others a row can
+    /// end in (`'` a variable, `!` a universal variable, `nil`:
+    /// `row_fixed`, btype.ml:153-160).
     fn fixed_row_with_an_unmatched_field(form: &str) -> bool {
         let bytes = form.as_bytes();
-        let mut fixed: Vec<bool> = Vec::new();
+        // Per printed node, whether its form is a constructor's.
+        let mut constructors: Vec<bool> = Vec::new();
+        let is_constructor = |rest: &str| !(rest.starts_with('\'') || rest.starts_with('!') || rest.starts_with("nil"));
+        // Per open bracket: (a fixed row, a row with an unmatched field).
+        let mut open: Vec<(bool, bool)> = Vec::new();
         for (at, &byte) in bytes.iter().enumerate() {
             match byte {
+                b'&' => {
+                    let digits = form[at + 1..].bytes().take_while(u8::is_ascii_digit).count();
+                    let number: usize = form[at + 1..at + 1 + digits].parse().unwrap();
+                    let rest = &form[at + 1 + digits..];
+                    let rest = &rest[rest.find(']').map_or(0, |close| close + 1)..];
+                    if constructors.len() <= number {
+                        constructors.resize(number + 1, false);
+                    }
+                    constructors[number] = is_constructor(rest);
+                }
                 b'[' => {
                     let rest = &form[at + 1..];
-                    fixed.push(rest.starts_with("fixed ") || rest.starts_with("closed fixed "));
+                    open.push((rest.starts_with("fixed ") || rest.starts_with("closed fixed "), false));
                 }
                 b']' => {
-                    fixed.pop();
+                    open.pop();
                 }
-                b'?' if fixed.last() == Some(&true) => {
+                b'?' => {
                     let rest = form[at + 1..].trim_start_matches('c');
                     if rest.starts_with('^') || rest.starts_with('(') {
+                        match open.last_mut() {
+                            Some((true, _)) => return true,
+                            Some((false, unmatched)) => *unmatched = true,
+                            None => {}
+                        }
+                    }
+                }
+                b'|' if open.last() == Some(&(false, true)) && form[at..].starts_with("| ") => {
+                    let rest = &form[at + 2..];
+                    let over_constructor = match rest.as_bytes().first() {
+                        Some(b'@') => {
+                            let digits = rest[1..].bytes().take_while(u8::is_ascii_digit).count();
+                            let number: usize = rest[1..1 + digits].parse().unwrap();
+                            constructors.get(number) == Some(&true)
+                        }
+                        Some(b'&') => {
+                            let rest = &rest[rest.find(']').map_or(0, |close| close + 1)..];
+                            is_constructor(rest)
+                        }
+                        _ => false,
+                    };
+                    if over_constructor {
                         return true;
                     }
                 }
@@ -3904,11 +3948,29 @@ mod tests {
     /// ~fixed:false` copies it (ctype.ml:1061-1069). The scanner is
     /// checked on the hand-built row of the test above. Observed: 546 of
     /// the 4,000 cases print a fixed row.
+    ///
+    /// A row over a constructor is watched too (eighth skeleton turn;
+    /// the first of "Corrections after the review of the seventh turn",
+    /// item 5): `copy_refs` reads it as fixed (PR#6163, ctype.ml:826-830)
+    /// whatever its flag, so such a row with an unmatched field would
+    /// reach `match_unmatched` from a plan without patterns. The scanner
+    /// is checked on four hand-written forms: a row over a constructor
+    /// printed in full and one printed as a reference, each with an
+    /// unmatched field (found), and the same rows over a variable and
+    /// with matched fields (not found).
     #[test]
     fn no_generated_case_has_a_fixed_row_with_an_unmatched_field() {
         assert!(fixed_row_with_an_unmatched_field(
             "0 = &0[G][closed fixed #A?^0(&1[G]' ) #B?c^1() | &2[G]']\n"
         ));
+        assert!(fixed_row_with_an_unmatched_field("0 = &0[1][#A?^0(&1[1]' ) | &2[1]n0]\n"));
+        assert!(fixed_row_with_an_unmatched_field(
+            "0 = &0[1]n0\n1 = &1[1][closed #A?c^0() | @0]\n"
+        ));
+        assert!(!fixed_row_with_an_unmatched_field(
+            "0 = &0[1]'\n1 = &1[1][closed #A?c^0() | @0] &2[1][#A?^1() | &3[1]nil] &4[1][#A?^2() | &5[G]!a]\n"
+        ));
+        assert!(!fixed_row_with_an_unmatched_field("0 = &0[1][#A?m^0(&1[1]' ) #B | &2[1]n0]\n"));
         assert!(!fixed_row_with_an_unmatched_field(
             "1 = &3[0][closed fixed #A?m^2(&4[0]' ) #B?cm^3() | &5[0]'] &6[0][closed #A?^4() | &7[0]']\n"
         ));
@@ -4532,7 +4594,7 @@ mod tests {
     /// that is no longer the name of the innermost row (section 8.6,
     /// decision 60; observed). `[> #B]` is unified with `[> #A] as p<y>`:
     /// the named row gains `#B` through a new variant node its row
-    /// variable is linked to (`set_more`, compiler/ml/ctype.ml:2596-2616)
+    /// variable is linked to (`set_more`, compiler/ml/ctype.ml:2597-2619)
     /// and the merged row has no name (ctype.ml:2574-2586), so `p<y>` is
     /// the name of a row whose `more` is a variant. `iter_row` visits a
     /// name's arguments only for the row a chain ends in

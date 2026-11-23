@@ -2178,10 +2178,10 @@ it stops and reports a reproduction.
 | R3n | The references of a copied variant row: shared when the row variable is, new otherwise (8.6, decision 34) | `rows.rs`, `expand.rs` | R3e, R3f | R3g | 150 |
 | R3g | Universal variables and polymorphic types with variables: the scopes, `unify_univar`, `enter_poly`, the escape test, `occur_univar`, PR#6744 in `unify_row_field` (8.6, decisions 49 to 51; 8.8) | `rows.rs` | R3e, R3f, R3n | R3p | 600 |
 | R3p | Packages: the merge of two name lists, completed through `PackageDecls` (8.6, decision 52; 8.8) | `rows.rs` | R3e | R3g | 150 |
-| R3h | Pattern mode: state, equations, `reify`, the binding walk of pattern mode, the arms without a backtrack, the fixed-row rule of `copy_refs` (8.9). Designed; its twelve tests passed against a prototype in the seventh turn; not built | `rows.rs`, `unify.rs`, `expand.rs` | R3n, R3g | R3i, R3j, R3q | 700 |
-| R3r | Pattern mode: `mcomp`, the two arms that try and fall back, the package fallback (8.9). Designed; its seven tests passed against a prototype; not built | `rows.rs`, `unify.rs` | R3h | R3i, R3j, R3q | 450 |
-| R3q | `instance_poly` and `instance_label`: the copy that goes through free universal variables without sharing (`copy_sep`), and the fixed-row rule of `copy_row` only it reaches (8.6, decision 47; 8.10). Designed as text in the seventh turn; no skeleton, no test | `rows.rs`, `expand.rs` | R3n, R3g | R3h, R3i, R3j | 300 |
-| R3s | The ambiguity of GADT instances: tracing, the instance sets and the three places of the kernel that read them; a nullary constructor's own memo while tracing (8.6, decision 72; 8.11). Designed as text in the seventh turn; no skeleton, no test | `unify.rs`, `expand.rs` | R3r | R3i, R3j, R3q | 300 |
+| R3h | Pattern mode: state, equations, `reify`, the binding walk of pattern mode, the arms without a backtrack, the fixed-row rule of `copy_refs` (8.9). Merged (pull request 356; `tc::` 298 passed, 7 ignored for R3r) | `rows.rs`, `unify.rs`, `expand.rs` | R3n, R3g | R3i, R3j, R3q | 700 |
+| R3r | Pattern mode: `mcomp`, the two arms that try and fall back, the package fallback, a total `duplicate` (8.9). Merged (pull request 361; `tc::` 306 passed, none ignored) | `rows.rs`, `unify.rs` | R3h | R3i, R3j, R3q | 450 |
+| R3q | `instance_poly` and `instance_label`: the copy that goes through free universal variables without sharing (`copy_sep`), and the fixed-row rule of `copy_row` only it reaches (8.6, decision 47; 8.10). State: see "State after the eighth skeleton turn" below | `rows.rs` | R3n, R3g | R3h, R3i, R3j | 500 |
+| R3s | The ambiguity of GADT instances: tracing, the instance sets and the three places of the kernel that read them; a nullary constructor's own memo while tracing (8.6, decision 72; 8.11). State: see "State after the eighth skeleton turn" below | `unify.rs`, `expand.rs` | R3r | R3i, R3j, R3q | 300 |
 | R3i | `moregeneral`, `equal`, `matches` | `relate.rs` | R3n, R3g | R3h, R3j | 600 |
 | R3j | Subtyping without the declaration-directed coercions | `relate.rs` | R3n, R3g | R3h, R3i | 600 |
 | K2 | The hot paths of unification, no behaviour change (8.7) | `unify.rs` | R3c | every slice above | 150 |
@@ -2292,6 +2292,20 @@ The prototype (about 1,090 lines: 700 in `rows.rs`, 380 in `unify.rs`,
 would have been committed as a patch. Built in the seventh turn, as a
 correction of built code: the name of a row below its scope (decision
 75).
+
+State after the eighth skeleton turn (trunk `aad575e98d`). Merged
+between the two turns: R3h (pull request 356) and R3r (pull request
+361), so pattern mode of unification is built. `cargo test --lib tc::`
+before: 306 passed, none ignored. The only `todo!` bodies under
+`src/tc` before the turn are the six of `relate.rs` (R3i, R3j). What
+the eighth turn did is listed in 8.6 ("Decided in the eighth skeleton
+turn"); the state of R3q and R3s, and the count after, are at the end
+of that list.
+
+| Slice | Decisions | Tests | Run in this turn |
+|---|---|---|---|
+| R3q | 91 to 96; 8.10 | ten ignored in `r3_tests.rs`: nine hand-built and the step test `instance_poly_at_ten_thousand`; two that run today (`rows::tests::sizes_of_the_instance_of_a_polymorphic_type`, `template::tests::a_session_of_two_roots_shares_between_them`) | all ten passed against a prototype of the twelve bodies (429 lines), which is not in the tree; three of the four shapes of the step test were seen to fail with their structure broken. No generated case: the harness has no operation for it |
+| R3s | 97 to 104; 8.11 | none | nothing: the section is corrected in place and its decisions are written; no skeleton, no test, no prototype, no prompt. NOT issued |
 
 The ignored tests are checked mechanically
 (`differential::tests::ignored_tests_name_the_slices_they_reach`): each
@@ -3287,10 +3301,125 @@ in graph.rs, level.rs, template.rs or expand.rs, or under src/types.
 At most 500 lines.
 ```
 
+The prompt of R3q, written in the eighth skeleton turn. Both searches
+and the commit order were run on the head that holds the skeleton: the
+searches print what the prompt says, and with the bodies of commit 1
+present six of the ten tests pass, with those of commit 2 nine, with
+all three ten.
+
+```text
+R3q. R3h and R3r are merged. Read section 8.10 whole and section 8.6,
+decisions 47 and 91 to 96; compiler/ml/ctype.ml 676-713, 1016-1028
+(diff_list, conflicts, delayed_copy) and 1030-1105;
+compiler/ml/btype.ml 126-135, 366-392, 421-470 and 478-532; in
+src/tc/rows.rs the doc comments of PolySlot, PolyEdge, PolyCopy and of
+the twelve functions from Checker::instance_poly to Checker::poly_pass,
+and the doc comments and bodies of field_repr, each_field_types,
+Checker::{open_row, hold, dup_cell, copy_refs}; in src/tc/template.rs
+Graph::{copy_begin, copy_ref, copy_drain}; in src/tc/expand.rs
+Checker::{memorized_node, link_memorized, copy}; in src/tc/unify.rs
+Frame, FrameKind and Checker::child.
+
+A prototype of this slice was written in the design turn and every
+test of the slice passed against it. It is not in the repository; it
+is a comment on the pull request of the eighth skeleton turn (one
+fenced diff, each body under a marker line). You MAY read it. It meets
+the doc comments, and it is not the standard: it has no commit
+structure and its step counts were chosen for the tests. Nothing it
+does is forbidden by this prompt; where your code differs from it, the
+doc comment decides.
+
+Before your first commit the first search prints rows.rs:12 and the
+second r3_tests.rs:10:
+  grep -c 'todo!("R3q")' compiler-rust/src/tc/*.rs | grep -v ':0$'
+  grep -c '#\[ignore = "R3q build"\]' compiler-rust/src/tc/*.rs | grep -v ':0$'
+When you end, both print nothing.
+
+Commits, in this order, each pushed with the tc:: tests seen to pass
+(the tests of this slice are ignored until commit 4; after each commit
+run them with `-- --ignored tc::r3_tests` and say which pass):
+1. Checker::{instance_poly, poly_begin, poly_walk, mark_holders,
+   copy_sep, sep_child, sep_conflicts, sep_fill, poly_session,
+   poly_pass} in rows.rs. Six tests pass: the first five of the
+   section of R3q in r3_tests.rs and
+   a_field_that_holds_a_universal_variable_gets_its_cell_by_its_row.
+   The two tests of rows, the step test and the test of a label reach
+   a body of a later commit.
+2. Checker::copy_sep_row. Nine pass: also the two tests of rows and
+   instance_poly_at_ten_thousand.
+3. Checker::instance_label. All ten pass.
+4. The `#[ignore = "R3q build"]` lines of src/tc/r3_tests.rs removed
+   and the `#[allow(unused_variables, dead_code)]` above the `impl`
+   block of this slice in rows.rs with its comment; nothing else in
+   the tests changed.
+End your turn after the fourth commit is pushed.
+
+Not yours, and not to be edited: Graph::{copy, copy_begin, copy_ref,
+copy_drain}, Checker::{memorized_node, link_memorized, copy, instance,
+copy_refs, match_fixed_fields, match_unmatched, open_row, dup_cell,
+free_univar}, and everything of R3h and R3r. If one of them is wrong
+for a test of yours, stop and report it. The relations (R3i, R3j) are
+not started; the six bodies of relate.rs stay as they are.
+
+Steps: one tick a node the first walk of mark_holders takes off its
+stack and one a node a propagation takes off; one a node sep_fill
+fills; one a field copy_sep_row reads; one a frame and one a node
+sep_conflicts reads.
+
+Relations to hold: every tc:: test that passed before passes
+unchanged; instance_poly_at_ten_thousand as written; after either
+function returns `Checker::frames` has the length it had, no
+`PolySlot::copy` is set and `PolyCopy::depth` is 0 (the tests assert
+it); no node that existed before the call is written, except a source
+row that `copy_sep_row` opens for `keep` and the references and cells
+the pass of a copy writes.
+
+The hand-built tests are the judge. If a test fails where your code
+does what the ctype.ml lines say, stop and report the test with the
+lines: do not change the test. Witness 2 of
+a_node_on_the_way_is_copied_again_when_a_new_binding_is_free_in_it was
+followed through OCaml's lines by hand and has no source program: if
+you read the lines differently, stop and say how.
+
+Report, before and after, the five unification operations of tc_kernel
+(unify_vars, unify_ground1, unify_ground3, unify_datatype2,
+unify_abbrev2, each minus its build_ twin) and instance7, copy7 and
+checker_instance7. No target is set (decision 46); the slice adds no
+line to a function they run.
+
+Before each push, from compiler-rust, both print no warning:
+  cargo clippy --all-targets -- -D warnings
+  RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+(a public doc comment must not link a private item; a list in a doc
+comment is indented as clippy asks). Every loop a body of yours has
+ticks as the list of steps above says. In your report, name each loop
+with the shape of instance_poly_at_ten_thousand that runs it 10,000
+times; a loop that no shape runs that often is named as such (the
+reviewer adds its test: you do not add or change a test).
+
+Shortcuts that count as failure: a recursion in copy_sep, sep_fill or
+mark_holders (the stack is `frames` or `g.work`); a `Vec`, a hash map
+or a hash set made in a call (the pools are PolyCopy's; the set OCaml
+keeps a node is not kept); sharing the copy of a node that holds a
+universal variable between two places, or a memo of such copies;
+calling Graph::copy or Checker::copy once a delayed node (it is one
+session: copy_begin, a copy_ref a root, copy_drain); running the
+session before the walk has ended, or making a node between copy_begin
+and copy_drain other than through copy_ref; a parameter added to
+copy_refs or link_memorized; opening a source row when `keep` is
+false; reading `is_Tvar` of the copy of `more` after the stub is
+linked; a stub or a table of this slice touched by instance_label for
+a label whose argument is not a polymorphic type; a new FrameKind
+(the walk reads Pair, Linked and LeavePoly as its doc comments say);
+a change in graph.rs, level.rs, template.rs, expand.rs, unify.rs or
+under src/types. At most 500 lines added to rows.rs (the prototype's
+bodies are 429).
+```
+
 The prompt of K2 is in section 8.7. The last prompt below is superseded by
 decision 5 of 8.6: no builder starts a slice from it. R3e, R3f, R3n, R3g
-and R3p, R3h and R3r have their own prompts above it; R3q, R3s, R3i and
-R3j have none yet (R3q and R3s are designed as text, 8.10 and 8.11).
+and R3p, R3h, R3r and R3q have their own prompts above it; R3s, R3i and
+R3j have none (the state of R3s is in 8.11).
 
 ```text
 R3e..R3j. First commit, before any body: extend
@@ -3451,7 +3580,7 @@ skeleton; all three were the skeleton's, not the builder's.
       `fixture_10_two_abbreviations_stay_two_nodes` and the relation in the
       R3c prompt said otherwise and were wrong; both are corrected.
     - The cached-expansion test of the nullary shortcut reads the node's
-      own memo (ctype.ml:2251), which a nullary constructor never gets
+      own memo (ctype.ml:2254), which a nullary constructor never gets
       outside GADT instance tracing: its expansions go to the nullary memo
       (`proper_abbrevs`, ctype.ml:200-202). R3a read the nullary memo
       there; the test is gone until R3h needs the node's own memo.
@@ -3949,7 +4078,7 @@ from this turn.
       r1` then `set_more row1 r2`, each of which filters the other side's
       fields when `closed`, clashes when a closed or fixed row would gain
       a field, and links the row's `more` to a **new generic variant
-      node** holding the fields it lacked (ctype.ml:2596-2616); then
+      node** holding the fields it lacked (ctype.ml:2597-2619); then
       `unify_row_field` per common tag in merged order; then a static row
       1 gets `Tnil` as its `more`. On any failure `rm1` and `rm2` get
       their descriptors back.
@@ -4750,7 +4879,7 @@ the reviews above left owed; every test named runs today.
     a phantom parameter of a named open row, after the row gained a tag.
     Corrected on the write side, so that no walk pays a descriptor load
     per variant node: when `unify_row` has run both `set_more`, each row
-    that is not fixed has a variant node as its `more` (ctype.ml:2616),
+    that is not fixed has a variant node as its `more` (ctype.ml:2619),
     and when such a row has a name with arguments its home node is
     written with a new list in which the slots of those arguments hold
     what the `more` slot holds (`Checker::drop_name_children`; in the
@@ -5081,9 +5210,326 @@ questions of the sixth turn are decisions 72 to 76.
     under `PATTERN` without `SCOPED` lowers without scopes on the new
     side (`Graph::lower`): the old side lowers without an environment
     there, and the locally abstract types and the types `reify` makes
-    have scopes on the new side. (c) The equations are printed from
+    have scopes on the new side. (Eighth turn: this holds for every
+    plan without `SCOPED`, not only under `PATTERN`: for a plan
+    without scoped types `Checker::lower` is `Graph::lower`, so nothing
+    changed for those plans.) (c) The equations are printed from
     `manifest.body`, which is a node of the graph. (d) The predefined
     types of the program are marked (`TypeTable::set_predefined`).
+
+**Decided in the eighth skeleton turn.**
+
+*What the reviews of pull requests 354, 356 and 361 decided* (81 to
+85), *what today's checker learned about GADT instances* (86 to 88),
+then what the turn itself decided, each with what was run.
+
+81. **R3h and R3r are accepted as built**, with their builders' own
+    decisions, each read in the final review of its pull request:
+    `unify_newtypes` reads `umode` once (the table of assumed pairs,
+    which its doc comment asks for; behind two nullary constructors of
+    different types, an equation, and both types locally abstract);
+    `match_unmatched` copies a shared chain from its first shared node,
+    so that no slot of the source's chain is written; `reify` reads a
+    row over a constructor as fixed, as `copy_refs` reads it; in
+    `mcomp` the checks of one pair run before its child pairs are
+    compared; two variables after expansion are `unreachable!`
+    (OCaml's `assert false`); `mcomp_row` opens both rows
+    (`open_row`: a write of the node's list that changes no type);
+    `recover` puts the flags back before it reifies (`reify` reads no
+    flag); `mcomp_fields` has no assertion for OCaml's
+    `concrete_object` (OCaml reifies both sides before every `mcomp`,
+    so the assertion cannot fail there; here a variable rest is
+    compatible).
+82. **`duplicate` is total** (R3r's first commit): the walk that makes
+    the destination generic goes through generic nodes, and makes a
+    node of level 0 generic. Test:
+    `r3_tests::duplicate_copies_below_a_generic_node`.
+83. **Decisions 64 and 70 were read against OCaml arm by arm**: the
+    pattern arm of unify3 against ctype.ml 2333-2425 in the final
+    review of pull request 356, and `mcomp`, `mcomp_type_decl`,
+    `mcomp_fields` and `mcomp_row` against 1905-2039 in the final
+    review of pull request 361. That pays item 9 of "Corrections after
+    the review of the seventh turn".
+84. **The `type_changed` loop of `occur_full` is not built; what it
+    could show is recorded.** The loop (ctype.ml:1470-1476, pasted in
+    decision 69) runs the walk again while `type_changed` was set
+    during it. The flag is set in one place, the top of `unify`
+    (`type_changed () := true`, ctype.ml:2238). The review of R3h
+    wrote that the walk does not call `unify`. Read in this turn: it
+    does, through an expansion. `occur_rec` calls `try_expand_head
+    try_expand_once` in its handler (1400), an expansion that is not
+    memorized is `subst` (1210), and `subst` unifies the stub with the
+    body and the parameters with the arguments:
+
+    ```text
+    (* compiler/ml/ctype.ml:1129-1130 *)
+        !unify' env body0 body';
+        List.iter2 (!unify' env) params' args;
+    ```
+
+    So OCaml's loop runs a SECOND pass exactly when the first pass
+    made a new expansion and did not raise. The second pass finds
+    that expansion memorized (`find_expans`, 1194: no `subst`, no
+    flag) and ends the loop. It can answer differently from the first
+    only if the expansion changed a part the first pass had walked
+    already, and that needs arguments that do not satisfy the
+    declaration's constraint yet. (Corrected in the review of this
+    turn. The turn wrote that a constrained parameter is bound "to a
+    new instance of the constraint, which holds new variables and no
+    node of the walked type". A constraint that makes two parameters
+    one variable, `type t<'a, 'b> = int constraint 'a = 'b`, binds
+    one ARGUMENT to the other: on `c<x, t<x, k<v>>>` with `c` and `k`
+    abstract and `x` not bound, OCaml's first pass expands `t`, which
+    binds `x` to `k<v>`, and finds nothing; its second pass finds `v`
+    below `x`.) No type made from a source program is in that state:
+    a type expression is unified with an instance of the declared
+    parameters when it is made (`unify_param`,
+    compiler/ml/typetexp.ml:374-382), so the annotation
+    `c<'x, t<'x, k<'v>>>` is `c<k<'v>, t<k<'v>, k<'v>>>` from the
+    start (run through OCaml in the review: that is the type its
+    error message prints), and a copy keeps it. The kernel walks once
+    and RESTS ON THAT INVARIANT: every constructor node satisfies the
+    constraint of its declaration when it is made. The walk that
+    lowers type expressions (R6) owes it; a hand-built graph that
+    breaks it is outside the contract. What the next turn owes for it
+    is in "Corrections after the review of the eighth turn" at the
+    end of 8.11. The sentence of the review of R3h is corrected here
+    and in decision 69.
+85. **The types `reify` makes and the existential types of a
+    constructor pattern ARE local constraints.** Both design turns
+    before this one had it wrong. `Env.add_local_type` fills the map
+    that `has_local_constraints` tests:
+
+    ```text
+    (* compiler/ml/env.ml:1047 *)
+    let has_local_constraints env = not (Path_map.is_empty env.local_constraints)
+    (* compiler/ml/env.ml:1802-1803 *)
+    let add_local_type path info env =
+      {env with local_constraints = Path_map.add path info env.local_constraints}
+    (* compiler/ml/ctype.ml:970, an existential type of a constructor *)
+          let new_env = Env.add_local_type path decl !env in
+    (* compiler/ml/ctype.ml:1823, a type reify makes *)
+        let new_env = Env.add_local_type path decl !env in
+    ```
+
+    So "the environment has a local constraint" is wider than "an
+    equation exists": it holds from the first existential type or the
+    first reified type on, until the environment of the case is
+    dropped. Every sentence of 8.11 that turned on the difference is
+    rewritten there against these lines (8.11, "When tracing is on").
+86. **The mechanism of GADT instances, as today's checker had to
+    build it** (pull requests 350 and 352; 71 and 48 programs through
+    both compilers; CHECKER_DEPARTURES.md, place A1 and its "Second
+    part"). It binds 8.11:
+    (a) *the sets*: one per scope (`Env.add_gadt_instance_level`,
+    env.ml:1307-1308); a member is compared by its representative
+    (1314-1323); an addition is LOGGED and undone by a backtrack
+    (`set_typeset`, btype.ml:749; unlike an equation, decision 68);
+    (b) *the first member* of a set comes only from the expansion of
+    an abbreviation under tracing (`expand_abbrev_gen`, ctype.ml:
+    1215-1227); tracing is on inside `unify` under local constraints
+    (176-191) and inside the wrappers `wrap_trace_gadt_instances`
+    (typecore's `lower_args`; `unify_var`; `expand_head_trace`;
+    `local_non_recursive_abbrev`); turning it on forgets the memorized
+    expansions (`cleanup_abbrev`), and while tracing `proper_abbrevs`
+    keeps a constructor's own memo (200-202);
+    (c) *the readers*: `update_level` (587-589), the copy WITH the
+    environment (770-774), `try_expand_head` (1270-1276), unify2
+    (2289-2298), and the arm of `unify` for two locally abstract types
+    (2258-2270: decision 65, built as `unify_newtypes`).
+    In the Rust port of today's checker a unit that never adds a
+    member pays one load and one branch at each of these sites, on a
+    flag set where the first member is pushed: 7 of 788 units of the
+    test suite ever set it, while 434 open an instance scope. The new
+    checker pays no more (8.11, "The one read").
+87. **A guard for a ported mechanism is chosen from where its STATE
+    first becomes non-empty**, not from where its scope is created
+    (lesson of pull request 350; the figures of 86).
+88. **Where today's checker is still open without a program** (the
+    list at the end of A1 in CHECKER_DEPARTURES.md) the new checker
+    follows OCaml and the old side is not a judge. 8.11 names each.
+
+*What the eighth turn decided itself*, each with what was run.
+
+89. **A scoped lowering walks a chain of variant nodes in line**
+    (G1 (c); a correction of built code). OCaml's `update_level` hands
+    a variant to `iter_type_expr`, and `iter_row` goes on in a `more`
+    that is a variant without handing that node back
+    (compiler/ml/btype.ml:229-241):
+
+    ```text
+    let rec iter_row f row =
+      List.iter
+        (fun (_, fi) ->
+          match row_field_repr fi with
+          | Rpresent (Some ty) -> f ty
+          | Reither (_, tl, _, _) -> List.iter f tl
+          | _ -> ())
+        row.row_fields;
+      match (repr row.row_more).desc with
+      | Tvariant row -> iter_row f row
+      | Tvar _ | Tunivar _ | Tsubst _ | Tconstr _ | Tnil ->
+        Misc.may (fun (_, l) -> List.iter f l) row.row_name
+      | _ -> assert false
+    ```
+
+    As built, `lower_scoped` pushed every slot of a variant node, the
+    `more` slot included, so each inner node of a chain was visited as
+    a node of its own, and `lower_row_name` read the chain to its end
+    from each: for a chain of n nodes whose name does not escape,
+    1,002,000 steps at n = 1,000 and 100,020,000 at 10,000 (counted
+    once the chain loop had a step; before, the loop was not counted
+    at all). Now `Checker::push_row_children` pushes a `more` slot
+    whose representative is a variant with the mark `IN_LINE`, and the
+    walk pushes that node's children without a level test, a write or a
+    name test. What changes besides the cost: an inner node of a chain
+    KEEPS its level when the first node is lowered, as in OCaml (the
+    fields and the row variable at the end are lowered through the
+    first node). `Graph::lower`, the walk of a unit without a scoped
+    type, still lowers the inner nodes (it pushes every slot); no walk
+    of the kernel reads the level of an inner node except through a
+    handle to it, and no generated case differs
+    (`scoped_plan_agrees_on_generated_cases` and the pattern plans ran
+    unchanged). Not chosen: bounding the walk of `lower_row_name` with
+    marks (it keeps the visit of the inner nodes, which OCaml does not
+    make). Cost for a unit that never lowers a variant with scopes:
+    nothing (the arm is behind `types.scoped != 0` and the variant
+    test that was there). Cost of the arm: `lower_row_name` reads the
+    chain once for the name and the walk reads it once in line, 2n
+    loads for n chain nodes; the first read cannot push children,
+    because the name decides whether the node is rewritten as one row
+    before its children are known. Step tests (rows.rs): the chain
+    without a name, with a name that does not escape and with one that
+    does (`unname_row`: one row of n fields), each linear between 1,000
+    and 10,000; `match_fixed_fields` over a fixed row of n matched
+    `Reither` fields (one step a field, which the loop did not count
+    before). Lines added to a function expression mode runs:
+    `lower_scoped_loop` gets one compare of `frame.extra`, a field of
+    the frame it has popped (no load), per entry.
+
+90. **The step tests the review of R3r asked for** (G1 (e)).
+    `mcomp_fields` counted its merge steps; `mcomp_row` had two loops
+    without a step (the tags only one row has, read when the other row
+    is closed; the common tags) and now counts both (test-only code).
+    Tests, relations between 1,000 and 10,000, each seen to fail with
+    its structure broken:
+    `r3_tests::mcomp_on_ten_thousand_fields_and_tags_is_linear` (two
+    closed objects of n fields and two closed rows of n present tags
+    whose types are one n-deep chain a side; with the table's test
+    taken out: 4,007,006 against 400,070,006 steps for the objects and
+    4,005,003 against 400,050,003 for the rows) and
+    `r3_tests::recovering_inside_ten_thousand_nested_attempts_is_
+    linear` (with a `recover` that reads every open record: 520,501
+    against 50,205,001). The witness of the second is made of rows
+    and not of arguments: the attempt of an argument cannot be nested
+    in another, because inside one `generate_equations` is off and the
+    arguments of a constructor go to `unify_list` (ctype.ml:2349-2350);
+    the attempt of two variants is taken in pattern mode whatever the
+    flags (2402-2411).
+
+91. **`instance_poly` takes the polymorphic type node, and its copy is
+    a tree walk on `frames` with the way in a dense table** (R3q;
+    8.10). Signatures: `instance_poly(fixed, keep_names, poly, vars)`,
+    `instance_label(fixed, argument, result, vars)`; the new variables
+    are pushed on the caller's `Vec`. The way (`visited`) is
+    `PolySlot::copy`, one load a child, set when a node is filled and
+    put back by a `Linked` frame below its children. Not chosen:
+    `Graph::copy`'s walk with a second memo (8.10 as written in the
+    seventh turn): `copy_sep` has no memo across places, so a queue
+    that fills each node once cannot be its walk; a recursion (the
+    prototype of R3h recursed and its prompt forbade it: this
+    prototype runs on `frames`, so the walk the prompt asks for was
+    run).
+92. **Whether a universal variable is free below a node is computed
+    as OCaml computes it, one class at a time.** `mark_holders`: the
+    inverse graph as a pool of 8-byte edges, then one propagation a
+    class (the bound variables of the type; then each polymorphic type
+    below the body), stopped at the class's binder, with one
+    generation of `marks` a class. A node another class marked is not
+    a place to stop: seen on `instance_poly_at_ten_thousand`, third
+    shape, and on `a_polymorphic_type_inside_gets_new_universal_
+    variables` (`r`, whose own variable must not make it a holder).
+    Not chosen: a bottom-up pass with one bit (wrong on a type that
+    reaches itself, and on two binders); OCaml's set of variables a
+    node (a hash set a node).
+93. **`conflicts` is asked by a walk, when it arises.** A node on the
+    way met again after a binder was entered is copied again when a
+    variable bound since is free in it (ctype.ml:1046). The kernel has
+    no set a node, so `sep_conflicts` walks up from the binder's
+    variables. It arises only for a type that reaches itself through a
+    polymorphic type. Both answers have a hand-built witness; the
+    second witness (`p = 'u. ('u, k2<p, 'a>)`) cannot be written as a
+    source program and was followed through OCaml's lines by hand: a
+    review should read it. Where a node is its own way back to the
+    binder with nothing between, OCaml does not end; the kernel does
+    not either, and no check is made for it.
+94. **The delayed copies are one session after the walk, from a
+    list.** `Graph::copy` is cut into `copy_begin`, `copy_ref`,
+    `copy_drain` (built in the eighth turn; `copy` is the three in a
+    row), and the loop body of `Checker::link_memorized` is
+    `Checker::memorized_node`, so that `poly_pass` runs the same pass
+    inside a cell session that also covers the fields the walk made.
+    For a label the walk comes before the copy of the record type
+    where OCaml's comes after; the two meet only through the session.
+    One difference that follows is recorded and not built around:
+    OCaml reads whether a row ends in a generic variable on the
+    SOURCE, where a variable the record type's copy already reached is
+    a `Tsubst` to a copy that is not generic (btype.ml:496-500), so a
+    field of the argument whose row ends in a variable shared with the
+    record type keeps its cell; the kernel, which has not copied the
+    record type yet, duplicates it. No program is known (an object
+    type whose row variable is a parameter of the record).
+95. **A row with a universal variable below it is copied flat by
+    `copy_sep_row`, and `copy_refs` does not change.** The row is read
+    through its chain without opening it. Without `keep` the copy is
+    an unopened node whose `RowFieldRow`s hold what each field reads
+    now, with `m` and the flag by `fixed'`; with `keep` the homes are
+    opened and the copy is built opened onto their references.
+    `fixed'` reads whether the copy of `more` is a variable node at
+    that moment, a stub included, as OCaml's `is_Tvar (repr more')`
+    runs before the delayed copy is linked.
+96. **`instance_label` of a label without a polymorphic type is a
+    session of two roots and no stub.** It is the label of every
+    record field access; it must not pay for the walk.
+
+97. **Tracing is turned on by OCaml's test: the environment has a
+    local constraint** (R3s; 8.11, (i)). Not chosen: "an equation
+    exists" (the seventh turn): it cannot add a member either way, but
+    it would keep memorized expansions that OCaml forgets and send the
+    expansion of a constructor without arguments to the shared memo in
+    a case that has an existential type and no equation. The bit is
+    `LOCAL` of `Checker::gadt`.
+98. **A set of instances is a list headed in a node of the graph, so
+    that a restore undoes an addition** (8.11). An addition is one
+    pool row and one `Graph::write` of the scope's head node. `Try`,
+    `recover` and `Checker::restore` do not change. Not chosen: the
+    pool's length in `Try` and in a mark of the walk.
+99. **One byte, three bits, and one read a site** (8.11, the table):
+    `LOCAL` decides tracing at the four entries, `TRACING` the
+    expansion, unify2 and the two lowerings, `MEMBER` every read of a
+    set. `MEMBER` is set where a pool row is pushed (decision 87), not
+    where a scope is entered.
+100. **While tracing, the memo of a constructor without arguments is
+    a row of a dense table indexed by the node**, not a head bit
+    (8.11). `has_cached_expansion` reads it behind `own_live != 0`.
+101. **What the walk owes** (8.11, the contract): the scope and
+    `leave_case`, a call for each existential type, `traced` around the
+    four uses of `expand_head_trace`, `instance_in` and `copy_in` at
+    the sites of `instance env`. `lower_args`, `unify_var` and
+    `non_recursive_abbrev` trace themselves.
+102. **The refusal is the escape pair** (8.11): no new kind of clash,
+    no text in the kernel.
+103. **The harness gets `Op::Scope` and environment-taking instance
+    and lowering; R3s empties `UNTIL_R3S` and `EXPLAINED_UNTIL_R3S`
+    and nothing else** (8.11).
+104. **R3s is not issued in the eighth turn**, and three things are
+    left to the turn that makes its skeleton (8.11, the last
+    paragraph).
+
+State at the end of the eighth turn: R3q is issued (8.10; its prompt is
+in 8.4), R3s is not (8.11). `cargo test --lib tc::` after, with trunk
+`b8b78d7d5` merged: 314 passed, none failed, 10 ignored, the ten tests
+of R3q.
 
 
 ### 8.7 The hot paths of unification (K2)
@@ -5808,13 +6254,36 @@ A structure pair is not tested (`occur` is in the `Expression` branch,
 ctype.ml:2329-2331): nothing is linked, so no cycle is made.
 `add_gadt_equation` has its own test (step 1 of decision 67).
 
+(Eighth turn; decision 84) `occur_full` wraps the walk in a loop
+(ctype.ml:1470-1476):
+
+```text
+    while
+      type_changed () := false;
+      occur_rec env allow_recursive Type_set.empty ty0 ty;
+      !(type_changed ())
+    do
+      () (* prerr_endline "changed" *)
+    done;
+```
+
+The kernel has no such loop. `type_changed` is set only at the top of
+`unify` (`type_changed () := true`, ctype.ml:2238); the walk reaches
+it through an expansion that is not memorized (`subst`, 1129-1130), so
+OCaml runs a second pass after such an expansion, which finds it
+memorized and stops. Decision 84 says why the second pass answers as
+the first; no case is known where it does not.
+
 Test: `r3_tests::a_variable_is_bound_to_a_type_that_holds_it_below_a_
 structure`: `'v` against `('v, int)` in pattern mode is a success and
 the variable a link to the tuple; in expression mode a clash; `'v`
 against `k<'v>`, `k` abstract and not contractive, a clash in both; the
 levels below the tuple are lowered.
 
-**70. `mcomp(left, right)`** (ctype.ml:1905-1984). Never links, never
+**70. `mcomp(left, right)`** (ctype.ml:1905-2009; the citations of
+this decision were pasted from the file in the eighth turn: `mcomp`
+1905-1965, `mcomp_list` 1967-1969, `mcomp_fields` 1971-1981,
+`mcomp_row` 1983-2009, `mcomp_type_decl` from 2011). Never links, never
 lowers; it expands (`expand_head(·, ExpandMode::Opt)`), which
 memorizes. Its own table `Checker::compatible` (a second `PairSet`;
 ORDERED pairs, `Type_pairs.find type_pairs (t1', t2')`), emptied when
@@ -5840,8 +6309,8 @@ and, by the heads:
 - a constructor against anything else: a clash when its row is
   `non_aliasable` or `DATATYPE`, else compatible;
 - packages, `nil`: compatible. Objects: `mcomp_fields`
-  (ctype.ml:1969-1981) over `flatten_fields` and the merge
-  `unify_fields` uses. Variants: `mcomp_row` (ctype.ml:1985-2009) over
+  (ctype.ml:1971-1981) over `flatten_fields` and the merge
+  `unify_fields` uses. Variants: `mcomp_row` (ctype.ml:1983-2009) over
   `flatten_row` and `merge_rows`, the table of ctype.ml:1996-2008;
 - polymorphic types without variables: the bodies. With variables:
   `enter_poly(left, right)`, which pushes a `LeavePoly` frame and the
@@ -6011,7 +6480,8 @@ of GADT instances (R3s) is section 8.11.
 
 **Corrections after the review of the seventh turn.** Made in place by
 the reviewer: 1 to 4. Owed by the next design turn, which makes the
-skeletons of R3q and R3s: 5 to 10.
+skeletons of R3q and R3s: 5 to 10. The state of each item after the
+eighth skeleton turn is the line "State:" below it.
 
 1. Decision 65 said the types `reify` makes are not local constraints.
    They are. The arm's guard is right for another reason, now given
@@ -6029,6 +6499,8 @@ skeletons of R3q and R3s: 5 to 10.
    recurses, so the walk on `Checker::frames` the prompt asks for was
    never run; `match_unmatched` and `occur_pattern` had no step test,
    and the builder adds them.
+   State of 1 to 4: paid by the reviewer commit of pull request 354
+   and by R3h (pull request 356).
 5. `copy_refs` treats a row over a constructor as a fixed one (PR#6163,
    ctype.ml:826-830). That is OCaml's rule and it is built code, but it
    widens what reaches `match_unmatched` beyond the argument of
@@ -6037,6 +6509,12 @@ skeletons of R3q and R3s: 5 to 10.
    the printed `fixed` only: it does not watch such a row. Nothing that
    runs reaches it. R3h builds the body with a test of such a row; the
    scanner is widened or the decision says why it need not be.
+   State: paid in the eighth turn (G1 (d)): the scanner is widened.
+   It now finds a row over a constructor with an unmatched field,
+   whether the tail is printed in full or as a reference to a node
+   printed before; checked on four hand-written forms; none of the
+   4,000 cases of the two plans without patterns has one. (A plan with
+   patterns reaches `match_unmatched` on purpose, since R3h.)
 6. Step tests are missing for three loops that are built:
    `lower_row_name`, `unname_row` and `match_fixed_fields`. For
    `lower_row_name` the cost line is also short of the truth: a chain
@@ -6046,6 +6524,11 @@ skeletons of R3q and R3s: 5 to 10.
    not visit the inner nodes of a chain (`iter_row` walks a `more` that
    is a variant in line, btype.ml:229-241). Decide with a step test at
    1,000 and 10,000: skip the inner nodes, or bound the chain.
+   State: paid in the eighth turn (G1 (c)); decision 89 of 8.6. The
+   inner nodes are skipped as OCaml skips them. Tests in `rows.rs`:
+   `lowering_a_chain_of_ten_thousand_rows_is_linear` (`lower_row_name`
+   with and without a name, and `unname_row` when the name escapes)
+   and `matching_the_fields_of_a_fixed_row_is_one_step_a_field`.
 7. Section 8.11 turns tracing on when `equations` is not empty. OCaml
    turns it on when the environment has a local constraint
    (`check_trace_gadt_instances`, ctype.ml:178-184), and the types of
@@ -6059,13 +6542,23 @@ skeletons of R3q and R3s: 5 to 10.
    environment has an instance scope (1271-1276); the wrapper
    `expand_head_trace` (2781-2784); an equation whose level has no
    instance scope.
+   State: paid as text in the eighth turn: 8.11 is rewritten in place,
+   (i) to (v), each with the lines pasted; decisions 97 to 104. The
+   skeleton of R3s is still owed (8.11, its first paragraph).
 8. Decision 69 does not mention the `type_changed` loop of
    `occur_full` (ctype.ml:1470-1476): say why the kernel needs none,
    or build it.
+   State: paid in the eighth turn, by decision 84 of 8.6 and the
+   paragraph added to decision 69: not built; the walk can reach
+   `unify` through an expansion, and why the second pass answers as
+   the first is argued there, without a case.
 9. Decisions 64 and 70 were not compared with OCaml arm by arm in
    either review. Their evidence is the hand-built tests and the run
    of the prototype; the builders stop and report where a test and the
    cited lines disagree.
+   State: paid by the final reviews of pull requests 356 (decision 64
+   against ctype.ml 2333-2425) and 361 (decision 70 against
+   1905-2039); decision 83 of 8.6.
 10. Citations: `link_type rm ty` is ctype.ml:2619, not 2616 (decision
     60 and the comment in `unify_row`); `has_cached_expansion` is 2254,
     not 2251 (8.11); the ranges of `mcomp_fields` and `mcomp_row` in
@@ -6073,6 +6566,14 @@ skeletons of R3q and R3s: 5 to 10.
     without `SCOPED`, not only under `PATTERN` (for a plan without
     scoped types `Checker::lower` is `Graph::lower`, so nothing
     changed there).
+    State: paid in the eighth turn (G1 (f)). Each range was pasted
+    from the file: `link_type rm ty` is ctype.ml:2619 and `set_more`
+    2597-2619 (decision 60, the comment in `unify_row`, the doc of
+    `set_more` and three tests); `has_cached_expansion` is called at
+    2254 (the comment in `unify_pair`; 8.11 is rewritten in this
+    turn); `mcomp` 1905-1965, `mcomp_fields` 1971-1981, `mcomp_row`
+    1983-2009 with its table at 1996-2008 (decision 70 and the doc
+    comments of the three functions); decision 80 (b).
 
 **Corrections after the review of R3h** (pull request 356). Item 1 is
 decided here and built by R3r; 2 to 4 and 6 are owed by the next
@@ -6093,6 +6594,8 @@ words.
    (a walk in `rows.rs` with marks; the cost stays three passes over
    the destination). It is the first commit of R3r, with a hand-built
    destination that fails without it.
+   State: paid by R3r (pull request 361, its first commit;
+   `r3_tests::duplicate_copies_below_a_generic_node`); decision 82.
 2. `occur_pattern` remembers what it decided for a constructor across
    the paths of one walk, where OCaml's `visited` is the set of the
    path (ctype.ml:1393-1394). On a graph without a cycle the two agree.
@@ -6106,13 +6609,52 @@ words.
    `type_changed` loop (item 8 above) needs nothing: its flag is set
    only at the top of `unify` (ctype.ml:2238), which the walk does not
    call.
+   State: paid in the eighth turn (G1 (b)): the set is kept per path
+   where it matters. The argument above does not hold: a hand-built
+   case differs (`e<'x> = int`, `c = k<e<x>>`, `x = k2<c, ('u, int)>`,
+   `'u` against `k2<c, x>`: OCaml binds, the walk as built clashed,
+   because it remembered "`x` holds it" from a path on which `c` was
+   on the way). Now an answer is remembered across paths only for a
+   constructor whose visit met no constructor on the way; below one
+   that was met the walk is OCaml's, once per path. Test:
+   `r3_tests::the_occurrence_test_of_pattern_mode_keeps_its_set_per_
+   path`, seen to fail on the walk as built; the depth test at 100,000
+   holds. STILL OWED, found while writing it: the walk tests the
+   expansion of a constructor while that constructor's own frame is
+   on the stack and its mark says "on the way"; OCaml's handler tests
+   the expansion with the OUTER set, without the constructor
+   (`occur_rec env allow_recursive visited ty0 ty'`, ctype.ml:1401,
+   where `visited` is the function's argument, not the set extended
+   at 1394). The two differ only when the expansion reaches the
+   constructor's own node again; no case was built. The sentence about `type_changed` is corrected by
+   decision 84: the walk does reach `unify`, through an expansion.
 3. `local_non_recursive_abbrev` runs under `wrap_trace_gadt_instances`
    (ctype.ml:1534). `non_recursive_abbrev` does not trace: R3s (item 7
    above names the wrappers 8.11 leaves out; this is the fourth).
+   State: paid as text in the eighth turn: 8.11, (iv), and the table
+   of decision 99: `non_recursive_abbrev` turns tracing on at its
+   entry. Built by R3s.
 4. Decision 65 writes the guard of the arm as `l.head == CONSTR &&
    r.head == CONSTR`; the arm as built tests tags and arities
    (decision 71, corrected above). One of the two texts is made the
    other's at R5c, when the arm is measured.
+   State: recorded in the eighth turn (G1 (f)); R5c settles it. The
+   two texts, pasted: decision 65 has `l.head == CONSTR && r.head ==
+   CONSTR && !self.equations.is_empty()`; `unify_pair` as built has
+   `l.tag() == CONSTR && r.tag() == CONSTR && l.arity() == 0 &&
+   r.arity() == 0`, then the arm of one type (`l.a == r.a`), then
+   `!self.equations.is_empty()` and the call. They differ in one
+   thing: `head == CONSTR` is also false for a nullary constructor
+   node with a flag bit set in its head (bits 4 to 8), which the
+   tag-and-arity form accepts. What R5c must measure and decide: (1)
+   whether any nullary constructor node of a checked unit carries a
+   head flag (if one can, the one-compare form is wrong and the text
+   of decision 65 is made the code's); (2) if none can, the
+   instructions of the five unification operations of `tc_kernel`
+   with each form of the guard, and the cheaper form is made both
+   texts; (3) the one load of `equations.len()` for a pair of two
+   nullary constructors of different types on the application, with
+   the byte load of `umode` in `unify_expanded` (decision 71).
 5. Doc comments of the skeleton the builder changed, each read and
    accepted: `match_unmatched` (a shared chain longer than one node is
    copied from its first shared node, so that no slot of the source's
@@ -6124,6 +6666,7 @@ words.
    `push_children` (`#[inline(always)]`, kept by measurement: out of
    line it cost `unify_ground3` and `unify_datatype2` 28 instructions
    an operation).
+   State: a record; nothing owed.
 6. Owed by the next design turn, found in the final review:
    `non_recursive_abbrev` enters a constructor again when it meets it
    strictly after a visit that was not strict, also when the first
@@ -6140,271 +6683,652 @@ words.
    the case by hand and follow OCaml (a mark for "on the path", taken
    off when the node's frame is left), or say why the kernel's answer
    is kept.
+   State: paid in the eighth turn (G1 (a)). OCaml is followed: a mark
+   for "on the way" in three kinds (entered strictly, entered
+   otherwise, entered otherwise and met again strictly), taken off by a
+   LEAVE entry of the stack. The review's remedy alone was not enough:
+   a node left below a node that was on the way, entered otherwise and
+   met strictly, must not be remembered as done, or a later path that
+   no longer holds that node skips what OCaml enters. Test:
+   `r3_tests::a_type_on_the_way_is_skipped_whatever_its_strictness`,
+   two witnesses (`y = k2<(n0, int), (y)>`: "not recursive"; `r =
+   k2<y, x>` with `x = (y)`: "recursive"), the first seen to fail on
+   the walk as built (it answered "recursive"), the second seen to
+   fail with the on-the-way mark alone (it answered "not recursive").
+   The step test at 1,000 and 10,000 holds
+   (`an_equation_over_ten_thousand_shared_nodes_is_linear`). No source
+   program was found for either witness.
 
 ### 8.10 `instance_poly` and `instance_label` (R3q)
 
-Designed as text in the seventh skeleton turn. NOT done: no skeleton,
-no test, no prototype run, no build prompt. A design turn makes those
-before a builder starts; what follows is what that turn starts from,
-and nothing here was run.
+Designed as text in the seventh skeleton turn; read against the source
+and corrected in place in the eighth, which also made the skeleton
+(`src/tc/rows.rs`, twelve bodies `todo!("R3q")`), ten acceptance tests
+(`src/tc/r3_tests.rs`, `#[ignore = "R3q build"]`) and the build prompt
+(8.4), and ran every test against a prototype of the bodies (429 lines,
+posted as a comment on the pull request of the eighth turn; not in the
+tree). The decisions are 91 to 96 of 8.6. What the seventh turn's text
+had wrong is listed at the end of this section.
 
-**What OCaml does** (compiler/ml/ctype.ml:1033-1106, read at this
-trunk). `instance_poly ~fixed univars sch` makes one new variable for
-each universal variable of `univars` (named when `keep_names`) and
-copies `sch` with `copy_sep`, which differs from `copy` in three ways:
+**What OCaml does** (compiler/ml/ctype.ml:1033-1106, pasted from the
+file). `instance_poly ~fixed univars sch` makes one new variable for
+each universal variable of `univars` (named when `keep_names`), and
+copies `sch` with `copy_sep`:
 
-1. *It copies through nodes that are not generic.* `copy` returns a
-   node below the generic level as it is. `copy_sep` asks, per node,
-   which of the free universal variables of `sch` occur in it
-   (`compute_univars`, a table from node to the set of universal
-   variables free below it). A node with none is `copy`'s business: it
-   is returned as it is when it is not generic, and otherwise copied
-   LATER, after the walk, by `copy` in the same copy session
-   (`delayed_copy`, 1040, 1093), so that the generic parts keep their
-   sharing among themselves. A node with a free universal variable is
-   copied whatever its level.
-2. *It does not share where sharing would capture.* `visited` pairs a
-   node with its copy and the list of bound variables at the time
-   (1044-1047). A node met again reuses its copy unless a universal
-   variable bound since then (`diff_list bound bound_t`) is one of the
-   node's free ones (`conflicts`); then it is copied again. A universal
-   variable itself is always its pair's copy.
-3. *A polymorphic type* (1070-1077) gets new universal variables for
-   its own (`newty t.desc`), which are pushed on `bound` and on
-   `visited`.
+```text
+let rec copy_sep fixed free bound visited ty =
+  let ty = repr ty in
+  let univars = free ty in
+  if Type_set.is_empty univars then (
+    if ty.level <> generic_level then ty
+    else
+      let t = newvar () in
+      delayed_copy () := lazy (t.desc <- Tlink (copy ty)) :: !(delayed_copy ());
+      t)
+  else
+    try
+      let t, bound_t = List.assq ty visited in
+      let dl = if is_Tunivar ty then [] else diff_list bound bound_t in
+      if dl <> [] && conflicts univars dl then raise Not_found;
+      t
+    with Not_found ->
+      let t = newvar () in
+      (* Stub *)
+      let visited =
+        match ty.desc with
+        | Tarrow _ | Ttuple _ | Tvariant _ | Tconstr _ | Tobject _ | Tpackage _
+          ->
+          (ty, (t, bound)) :: visited
+        | _ -> visited
+      in
+      let copy_rec = copy_sep fixed free bound visited in
+      t.desc <-
+        (match ty.desc with
+        | Tvariant row0 ->
+          let row = row_repr row0 in
+          let more = repr row.row_more in
+          (* We shall really check the level on the row variable *)
+          let keep = is_Tvar more && more.level <> generic_level in
+          let more' = copy_rec more in
+          let fixed' = fixed && is_Tvar (repr more') in
+          let row = copy_row copy_rec fixed' row keep more' in
+          Tvariant row
+        | Tpoly (t1, tl) ->
+          let tl = List.map repr tl in
+          let tl' = List.map (fun t -> newty t.desc) tl in
+          let bound = tl @ bound in
+          let visited =
+            List.map2 (fun ty t -> (ty, (t, bound))) tl tl' @ visited
+          in
+          Tpoly (copy_sep fixed free bound visited t1, tl')
+        | _ -> copy_type_desc copy_rec ty.desc);
+      t
+```
 
-A variant (1061-1069) is copied by `copy_row` with `fixed' = fixed &&
-is_Tvar (repr more')`: the second line of decision 47's table, the
-fixed-row rule only this slice reaches. `instance_label fixed lbl`
-(1097-1105) is one copy session over the label's result (`copy`) and
-its argument: `instance_poly ~fixed tl ty` when the argument is a
-polymorphic type, else `copy`.
+1. *`free ty`* (`compute_univars sch`, 693-713) is the set of universal
+   variables FREE below `ty`: the propagation up the inverse graph
+   stops at the polymorphic type that binds the variable (699). A node
+   with none is `copy`'s business: it is returned as it is when it is
+   not generic, and otherwise a new variable stands for it that is
+   made a link to its copy AFTER the walk (`delayed_copy`, 1040, 1093),
+   all in one copy session, so the parts without a universal variable
+   keep their sharing among themselves.
+2. *A node with a free universal variable is copied whatever its
+   level, and it is NOT shared between two places.* `visited` is an
+   argument of the function: what the walk of one child adds, its
+   sibling does not see. It holds the nodes ON THE WAY from the root
+   (and the bound variables with their copies), so it only closes a
+   type that reaches itself. A node reached by two paths is copied
+   twice ("Copy without sharing until there are no free univars left",
+   1030).
+3. *A node on the way that is met again* is its copy, unless a
+   variable bound since it was entered is free in it (`conflicts`,
+   1023-1025): then it is copied again with the new binding. A universal
+   variable is always its pair's copy.
+4. *A polymorphic type* gets new universal variables for its own
+   (`newty t.desc`), which are bound for its body. It is not put in
+   `visited`, and neither is a field.
+5. *A variant* is copied as ONE row (`row_repr`), by `copy_row` with
+   `fixed' = fixed && is_Tvar (repr more')` and `keep = is_Tvar more &&
+   more.level <> generic_level`: the fixed-row rule only this slice
+   reaches (btype.ml:375, 389; decision 47).
 
-**The kernel's form.** One function, `Checker::instance_poly(fixed,
-keep_names, univars: &[Ty], scheme: Ty) -> Ty` (the new variables are
-written to `g.work` or returned through a caller's `Vec`; the design
-turn chooses), and `Checker::instance_label(fixed, argument, result)
--> (Ty, Ty)`.
+`instance_label fixed lbl` (1097-1105) is one copy session over the
+label's record type (`copy`, first) and its argument: `instance_poly
+~fixed tl ty` when the argument is a polymorphic type, else `copy`.
+Every caller of `instance_poly` passes the two parts of one `Tpoly`
+(typecore.ml 1430, 2554, 4289, 4986, 5098; typedecl.ml 819, 1049).
 
-- *The free-variable question* is `Checker::free_univar`'s (R3g): it
-  answers, for one node and one set of universal variables, whether
-  one is free below it, with marks per context (decision 56).
-  `copy_sep` asks it of EVERY node of the scheme, so it needs the
-  answer per node, computed once: one bottom-up pass over the scheme
-  that gives each node a bit "a universal variable of `univars`, or of
-  an enclosing polymorphic type of this scheme, is free below" in a
-  mark generation, and a second generation for "none". With the
-  kernel's one-context-per-polymorphic-type rule (decision 59) the
-  pass is linear in the scheme for a scheme without nested polymorphic
-  types that share nodes, and as OCaml's otherwise (decision 74).
-- *The copy* is `Graph::copy`'s walk with two changes behind one
-  parameter: a node whose bit is set is copied whatever its level, and
-  the memo of copies is keyed by (node, the length of `bound` when it
-  was copied); a hit is used unless a variable bound since is free
-  below the node. For the common scheme (no polymorphic type inside
-  the body) `bound` never grows and the memo is `Graph::copy`'s own
-  slot. The rule of step 2 costs a second table only for a scheme with
-  a polymorphic type inside; that table is a `Vec` on `Checker`,
-  truncated after the call.
-- *The delayed copies* are the nodes without the bit that are generic:
-  they are copied in the same session by the ordinary arm, which is
-  what the kernel's copy does already when it reaches them; no list is
-  needed, because the kernel's copy session shares by slot, not by
-  call order. This is the one place the design is NOT OCaml's
-  mechanism, and it must be shown equal on generated cases before it
-  is built.
-- *The fixed-row rule*: `copy_refs` gets `fixed: bool` from the caller
-  (true for `copy` and `instance`, the caller's `fixed && the copied
-  `more` is a variable` for this slice): with false, every `Reither`
-  field of the copy reads unmatched and the copy's row is not fixed
-  (btype.ml:375, 389). `match_fixed_fields` (built in the seventh
-  turn) is the place.
+**The kernel's form** (decisions 91 to 96; the doc comments in
+`rows.rs` are the specification, this is the map).
 
-**Cost to state and prove in the design turn:** nothing for `instance`
-and `copy` (the parameter is a constant in their callers, and
-`copy_refs` reads one more register); `instance_poly` linear in the
-scheme for a scheme without a nested polymorphic type; a step test at
-1,000 and 10,000 of a field `'a. (t, 'a) => 'a` over a body of n
-nodes, and one of n nested polymorphic types.
+- `Checker::instance_poly(fixed, keep_names, poly, vars) -> Ty` takes
+  the polymorphic type node; `Checker::instance_label(fixed, argument,
+  result, vars) -> (Ty, Ty)`. A label whose argument is not a
+  polymorphic type is a plain copy session of two roots and touches no
+  table of this slice.
+- *Whether a universal variable is free below a node*
+  (`Checker::mark_holders`) is OCaml's algorithm with dense tables: one
+  walk that builds the inverse graph as a pool of edges, then a
+  propagation one class of variables at a time (the bound variables of
+  the type, then those of each polymorphic type inside), each stopped
+  at its own binder. The answer is one stamp in a 16-byte row a node
+  (`PolySlot`). OCaml keeps the SET a node; the kernel keeps "not
+  empty", which is all the copy reads, and asks the one question that
+  needs the set (`conflicts`) by a walk of its own when it arises.
+- *The copy* (`Checker::copy_sep`, `sep_child`, `sep_fill`) is a walk
+  on `Checker::frames`: a child that holds no universal variable is
+  shared or gets a stub that is listed for the session; a child that
+  holds one gets a stub and a frame, and is filled when the frame is
+  taken off. A node being filled puts its copy in its `PolySlot` and a
+  frame below its children takes it off again: the slot is OCaml's
+  `visited`, read with one load where OCaml reads a list.
+- *The delayed copies* (`Checker::poly_session`) are ONE session after
+  the walk: `Graph::copy_begin`, a `copy_ref` a root, `Graph::copy_
+  drain`, then the pass every copy runs (`Checker::memorized_node` a
+  node). The stubs become links, as in OCaml.
+- *A row* (`Checker::copy_sep_row`) is copied flat, read through its
+  chain without opening it; without `keep` the copy is an unopened
+  node, with `keep` it is built opened onto the references of its
+  source.
+- *The cells of copied fields* are duplicated by `Checker::dup_cell`
+  after the session's pass and inside its cell session.
 
-**The old side** (the judge, and where it is known to differ: pull
-requests 302 and 304 changed its `instance_poly`; their bodies were
-not read in this turn, which is the first thing the design turn does).
-The harness needs an operation `Op::InstancePoly(operand, fixed)` on a
-polymorphic type of a value's type, on the `UNIVARS` plan.
+**Cost.** Nothing for a unit that never calls either. `instance` and
+`copy` are not changed (`Graph::copy` is `copy_begin`, `copy_ref`,
+`copy_drain`, the same code in three functions; the pass of
+`link_memorized` calls `memorized_node`, its own loop body). The five
+unification operations and the copy and instance operations of
+`tc_kernel` were measured before and after the refactor: see the pull
+request. `instance_poly`: linear in the nodes below the body when no
+node that holds a universal variable is reached by two paths (as
+OCaml, a node that is is copied once a path), plus, with polymorphic
+types inside each other, one step a node for each class free below it.
 
-**Tests the design turn writes** (`#[ignore = "R3q build"]`): the copy
-of a node that is not generic but holds a universal variable is a new
-node, and a sibling without one is the same node; two occurrences of
-one node under different binders are two copies when the binder's
-variable is free in it and one otherwise; a row copied with `fixed`
-false loses `m` and the flag, with `fixed` true keeps both;
-`instance_label` shares between argument and result; the two step
-tests; the generated cases.
+**The old side** (types/ctype.rs, `instance_poly`, `instance_label`,
+`copy_sep_inner`, `compute_univars_per_node`) is a line-by-line port of
+the OCaml above, with `visited` a slice and the univars a hash map a
+node; pull request 302 made `instance_label` one copy session for the
+label's type and its record type. It is a judge of this slice. The
+harness has NO operation for it yet (8.10 of the seventh turn asked
+for `Op::InstancePoly`): the generated cases have polymorphic types
+only as the type of an object's field (the `UNIVARS` plan), and an
+operation needs a way to name that node on both sides. Not done in the
+eighth turn; the hand-built tests alone judge R3q, and open question 1
+of the pull request asks whether the operation is made before the
+slice is issued.
+
+**Tests** (`r3_tests.rs`, all ten passed against the prototype):
+`a_node_that_holds_a_universal_variable_is_copied_whatever_its_level`,
+`two_places_of_a_holder_are_two_copies_and_of_a_generic_node_one`,
+`a_type_that_reaches_itself_is_copied_once`,
+`a_polymorphic_type_inside_gets_new_universal_variables`,
+`a_node_on_the_way_is_copied_again_when_a_new_binding_is_free_in_it`,
+`a_row_copied_without_fixed_loses_its_matched_tags_and_the_flag`,
+`a_row_over_a_variable_that_is_not_generic_shares_its_references`,
+`a_label_shares_its_record_parameters_with_its_argument`,
+`a_field_that_holds_a_universal_variable_gets_its_cell_by_its_row`,
+and the step test `instance_poly_at_ten_thousand` (four shapes; three
+seen to fail with their structure broken, the numbers in its doc
+comment). No source program was run through the two compilers for
+them: what they pin is the identity of nodes after a copy, which no
+program shows directly; each expectation is followed through the
+pasted lines in its doc comment.
+
+**Arms no hand-built test reaches**: a package and an arrow parameter
+with a label in `sep_fill` (the arrow arm is reached, labels are not
+checked); a universal variable that no binder on the way binds
+(ill-scoped; `sep_fill`'s last arm copies its node); `copy_sep_row`
+with `keep` on a home that is opened already, on a row with a name
+that has arguments, and with a field whose reference is resolved;
+`poly_begin`'s clearing of the stamps; `instance_label` with a live
+memo of constructors without arguments; a row whose `more` is a
+generic constructor or `nil` (the stub is a variable when `fixed'` is
+computed, as in OCaml; the test of `fixed` reads rows over universal
+variables only).
+
+**What the seventh turn's text had wrong**, each read from the lines
+above:
+- "the memo of copies is keyed by (node, the length of `bound`)":
+  there is no memo. `visited` is the way, and a holder met in two
+  places is two copies.
+- "no list is needed [for the delayed copies]": one is. `Checker::
+  copy_refs` reads the source of a copied row as `g.work[copy -
+  first]`, so the nodes of a session must be contiguous and in the
+  order of its queue; the walk makes nodes of its own, so the session
+  runs after it, from a list, as OCaml's does.
+- "`copy_refs` gets `fixed: bool` from the caller": it does not change.
+  A session copy is always `copy_row copy true` (ctype.ml:868); the
+  rows of the walk are built by `copy_sep_row`, which holds the lines
+  of `copy_row` only this slice reaches.
+- "one bottom-up pass ... a bit in a mark generation": a bottom-up
+  pass is wrong for a type that reaches itself; it is OCaml's inverse
+  graph and propagation, and one bit is not enough to stop a class at
+  a node another class marked (decision 92).
 
 ### 8.11 The ambiguity of GADT instances (R3s)
 
-Designed as text in the seventh skeleton turn, after R3r in build
-order (decision 72). NOT done: no skeleton, no test, no build prompt.
-Since pull requests 350 and 352 the old checker has this mechanism
-(types/context.rs, "GADT Tracking"; types/ctype.rs
-`gadt_instance_level`, `wrap_trace_gadt_instances`), so it is a judge
-where it traces; CHECKER_DEPARTURES.md, place A1 with its "Second
-part", is the record of what it took to make the old checker agree
-with OCaml, and names the tracing wrappers that are still open there.
+**State after the eighth skeleton turn: R3s is NOT issued.** This
+section was designed as text in the seventh turn and is corrected in
+place in the eighth against the source and against what pull requests
+350 and 352 learned (8.6, decisions 85 to 88). The decisions are 97 to
+104 of 8.6. There is still no skeleton, no test, no prototype and no
+build prompt: the eighth turn ended before them. Nothing here was run.
+The next design turn makes the skeleton from this section and runs its
+tests against a prototype before a builder starts.
 
-**What OCaml does**, by line (compiler/ml/ctype.ml, env.ml):
+**What OCaml does**, each range pasted from compiler/ml at this trunk.
 
-- *Tracing* is a flag (`trace_gadt_instances`, ctype.ml:176-192).
-  `check_trace_gadt_instances env` turns it on when it is off and the
-  environment has a local constraint, and then cleans the memos
-  (`cleanup_abbrev`); the caller turns it off again if it turned it
-  on. Callers: `unify` (2235, 2271, 2273), `unify_var` and its sibling
-  (2759-2766, 2782-2784), `local_non_recursive_abbrev` (1534), and
-  typecore's `lower_args` (typecore.ml:2828).
-- *A set per scope*: `Env.add_gadt_instance_level lv env` (env.ml:
-  1307-1308) pushes an empty set at level `lv`; typecore calls it at
-  typecore.ml:4040 (`type_function`) and 4826 (`type_cases`), before
-  the patterns that add equations.
-- *Reads and additions*: an expansion under tracing (1220-1227: the
-  level is the greater of the equation's expansion level and the set
-  that holds the node; `level < lv` is a clash `Unify [(ty, newvar2
-  level)]`; else the node and its expansion join the set of `lv`);
-  `try_expand_head` (1271-1276: when the expanded head is in a set,
-  the node and its memo chain join it); unify2 (2289-2298: of the two
-  nodes the one in the lower set joins the chain of the higher);
-  `update_level` (587-589: a node in a set of a level above the target
-  is a clash with the same pair); `copy` with an environment that has
-  local constraints (770-775: the copy of a member joins the member's
-  set); and two lowerings made only under tracing (2490: a field's
-  type against the row variable's level in `unify_fields`; 2610-2611:
-  a new row against `rm`'s level in `set_more`).
-- *Membership is by representative*: a set is re-read through `repr`
-  when it holds a link (env.ml:1314-1323).
-- *Undo*: every addition is `set_typeset`, which is logged, so
-  `backtrack` undoes it; the environment itself is dropped by the
-  caller at the end of a case.
-- *The memo*: under tracing every constructor has its own memo
-  (`proper_abbrevs`, 200-202), which decision 79 shows on generated
-  cases, and the arm of `unify` for two nullary constructors of one
-  type is taken only when neither has a cached expansion (2251).
+*Tracing* (ctype.ml:176-192):
 
-**(i) Where the sets live and how an addition is undone.** On
-`Checker`: `instance_scopes: Vec<InstanceScope>` (`level: u32`,
-`parent: u32`; 8 bytes), `instance_scope: u32` (the innermost scope of
-the environment the caller is in, `NONE` outside), and ONE pool
-`instance_members: Vec<InstanceMember>` (`ty: Ty`, `scope: u32`; 8
-bytes) in the order they were added. A set is the members of one
-scope. An addition is a push; nothing else is written. Undo: the pool
-is append-only and speculations nest, so the members added since a
-snapshot are exactly those above the length the pool had: the `Try`
-record of decision 68 gets the pool's length (44 bytes, pinned) and
-`recover` truncates to it; an owner's restore (R5b, which holds its
-own mark) truncates to the length it kept, as it cuts `equations`.
-`Graph::restore` knows nothing of it, as it knows nothing of
-equations. An equation is not cut where a set member is: `cut_
-equations` cuts rows, and the caller that cuts also truncates the pool
-and sets `instance_scope` back; the two are one call for R5b
-(`Checker::leave_case(mark)`), so that one cannot be done without the
-other.
+```text
+let trace_gadt_instances_key = Request_local.new_key (fun () -> ref false)
+let trace_gadt_instances () = Domain.DLS.get trace_gadt_instances_key
+let check_trace_gadt_instances env =
+  (not !(trace_gadt_instances ()))
+  && Env.has_local_constraints env
+  &&
+  (trace_gadt_instances () := true;
+   cleanup_abbrev ();
+   true)
 
-**(ii) The one read for a unit without a member.** The first member
-ever pushed increments `types.scoped` (once; a flag on `Checker` says
-it was done). Then:
+let reset_trace_gadt_instances b = if b then trace_gadt_instances () := false
 
-| Kernel operation | Unit without a member | With a member |
-|---|---|---|
-| lowering | nothing new: `types.scoped == 0` takes `Graph::lower` as today | `lower_scoped`: per node above the level, `instance_level(node)` |
-| expansion (`expand_once`) | one load of `tracing` (a byte of `Checker`, beside `umode`) | under tracing, `instance_level(node)` and at most two pushes |
-| `expand_head` | the same byte | `instance_level(head)`, then the chain |
-| unify2 (`unify_expanded`) | the same byte, loaded with `umode` in one read of the two adjacent bytes | two `instance_level` and a chain |
-| copy, instance | nothing: the caller that has an environment with equations calls another entry (`instance_traced`); `Graph::copy` is not touched | per copied node, `instance_level(source)` |
-| `unify_fields`, `set_more` | the same byte, on arms that already load `umode` or are per field | one lowering |
+let wrap_trace_gadt_instances env f x =
+  let b = check_trace_gadt_instances env in
+  let y = f x in
+  reset_trace_gadt_instances b;
+  y
+```
+
+It is turned on when it is off and the environment HAS A LOCAL
+CONSTRAINT, which is wider than "an equation exists" (decision 85: an
+existential type of a constructor pattern and a type `reify` made are
+local constraints too). Turning it on forgets the memorized expansions.
+Who turns it on: `unify` at its top (2235; pasted in decision 65's
+range, 2227-2273); `unify_var` in its variable arm (2759-2766);
+`expand_head_trace` (2781-2784); `local_non_recursive_abbrev` (1534);
+and typecore's application around `lower_args` (typecore.ml:2828):
+
+```text
+(* compiler/ml/ctype.ml:2759-2764, in unify_var *)
+      let reset_tracing = check_trace_gadt_instances env in
+      try
+        occur env t1 t2;
+        update_level env t1.level t2;
+        link_type t1 t2;
+        reset_trace_gadt_instances reset_tracing
+(* compiler/ml/ctype.ml:2781-2785 *)
+let expand_head_trace env t =
+  let reset_tracing = check_trace_gadt_instances env in
+  let t = expand_head_unif env t in
+  reset_trace_gadt_instances reset_tracing;
+  t
+(* compiler/ml/ctype.ml:1534 *)
+    wrap_trace_gadt_instances env (local_non_recursive_abbrev false [] env p) ty;
+(* compiler/ml/typecore.ml:2828 *)
+    wrap_trace_gadt_instances env (lower_args env []) ty;
+```
+
+*A set per scope* (env.ml:1307-1308, pasted in decision 85's
+neighbourhood): `Env.add_gadt_instance_level lv env` pushes an empty
+set at level `lv`. typecore adds one in the `init_env` of `type_cases`
+(typecore.ml:4819-4826) and of the function with patterns, when a
+pattern has a generalized constructor, and also where an
+exhaustiveness check is made without one (typecore.ml:4196-4197 and
+4913-4914: `let lev, env = if do_init && not has_gadts then init_env ()
+else (lev, env) in`). The seventh turn cited 4040 and 4826: both are
+the `add_gadt_instance_level` line of an `init_env`, 4826 the one of
+`type_cases` and 4040 the one of `type_function` (typecore.ml:4034-4043:
+`let lev, env = if has_gadts then init_env () else
+(get_current_level (), env)`), which this section left out (corrected
+in review).
+
+*The first member of a set* comes from one place only, the expansion
+of an abbreviation that was not memorized, under tracing
+(`expand_abbrev_gen`, ctype.ml:1215-1227):
+
+```text
+        let ty' = subst env level kind abbrev (Some ty) params args body in
+        (* For gadts, remember type as non exportable *)
+        (* The ambiguous level registered for ty' should be the highest *)
+        (if !(trace_gadt_instances ()) then
+           match
+             Ext_pervasives.max_int_option lv (Env.gadt_instance_level env ty)
+           with
+           | None -> ()
+           | Some lv ->
+             if level < lv then raise (Unify [(ty, newvar2 level)]);
+             Env.add_gadt_instances env lv [ty; ty']);
+        ty'))
+```
+
+`lv` is the expansion level of the declaration, which only an equation
+has (`find_type_expansion`, the third component), or the level of a set
+that holds the node already. So without an equation no set ever gets a
+member, whatever tracing is.
+
+*The readers and the other additions.* `try_expand_head` adds the chain
+of memorized expansions WHATEVER the tracing flag, when the expanded
+head is in a set (1270-1276, pasted in decision 84's neighbourhood:
+`match Env.gadt_instance_level env ty' with ... Some lv ->
+Env.add_gadt_instance_chain env lv ty`); `update_level` refuses to
+lower a member below its set's level (587-589, pasted in decision 89's
+neighbourhood); the copy WITH an environment that has local
+constraints adds the copy of a member to the member's set (770-774);
+unify2, under tracing, adds the chain of the node in the lower set to
+the higher set (2289-2298); and two lowerings are made only under
+tracing (`unify_fields`, 2490: `if !(trace_gadt_instances ()) then
+update_level !env va.level f1.f_typ`; `set_more`, 2610-2611).
+Membership is by representative (env.ml:1314-1323). Every addition is
+`set_typeset`, which is logged and so undone by a backtrack
+(btype.ml:749-751), unlike an equation (decision 68):
+
+```text
+let set_typeset rs s =
+  log_change (Ctypeset (rs, !rs));
+  rs := s
+```
+
+*The memo.* Under tracing every constructor has its own memo
+(`proper_abbrevs`, 200-202, pasted in decision 79), and the arm of
+`unify` for two nullary constructors of one type is taken only when
+neither has a cached expansion (`has_cached_expansion`, called at
+2254).
+
+*The refusal* is `Unify [(ty, newvar2 level)]` in both places (589 and
+1226). The printer tells it from an escaping constructor by the pair
+(printtyp.ml:1342-1359):
+
+```text
+  | Tconstr (p, _, _), Tvar _ when unif && t4.level < Path.binding_time p ->
+    escape_explanation ppf p
+  | Tvar _, Tconstr (p, _, _) when unif && t3.level < Path.binding_time p ->
+    escape_explanation ppf p
+...
+  | Tvar _, _ | _, Tvar _ ->
+    let t, t' = if is_Tvar t3 then (t3, t4) else (t4, t3) in
+    if occur_in Env.empty t t' then
+      fprintf ppf "@,@[<hov>The type variable %a occurs inside@ %a@]" type_expr
+        t type_expr t'
+    else
+      fprintf ppf "@,@[<hov>This instance of %a is ambiguous:@ %s@]" type_expr
+        t' "it would escape the scope of its equation"
+```
+
+**The five corrections of the seventh turn's text** (first list of
+8.9, item 7; second list, item 3).
+
+(i) *When tracing is on.* The seventh turn turned it on when
+`equations` is not empty. OCaml's test is taken instead (decision 97).
+The narrower test is not equal: without an equation no member can be
+added (above), but turning tracing on forgets every memorized
+expansion (`cleanup_abbrev`) and, while it is on, the expansion of a
+constructor without arguments goes to the node's own memo and not to
+`simple_abbrevs`, so a later copy of such a constructor does not link
+to the node that was expanded (O11). A case with an existential type
+and no equation shows both in OCaml; the narrower test would show
+neither.
+
+(ii) *A set gets its first member only from an expansion under
+tracing* (the lines above). It is what the guard is chosen from
+(decision 87): the flag "a member was pushed in this unit" is set in
+that one place and in the three that add to a set that has a member
+already.
+
+(iii) *`try_expand_head` adds the chain whatever the tracing flag.* It
+reads `gadt_instance_level` of the expanded head on every call. In the
+kernel that read is behind the member flag, not behind the tracing
+flag.
+
+(iv) *The wrappers.* `expand_head_trace` is used by typecore's
+`filter_arrow_n`, `filter_method`, `filter_method_field` and
+`filter_object_field_for_write`: it is the walk's, through
+`Checker::traced`. `unify_var` and `local_non_recursive_abbrev` are the
+kernel's own (`Checker::unify_var`; `Checker::non_recursive_abbrev`,
+which as built does not trace): each turns tracing on at its entry by
+the same one read. `lower_args` is the kernel's function too
+(`Checker::lower_args`, R3d) though OCaml's wrapper is at its caller:
+the kernel's turns tracing on itself, so the walk cannot forget it; it
+is the one wrapper with a witness program (CHECKER_DEPARTURES A1,
+"Second part").
+
+(v) *An equation whose level has no instance scope adds nothing.*
+OCaml asserts that the scope exists (`List.assoc lv env.gadt_instances
+with Not_found -> assert false`, env.ml:1326-1328); typing never
+builds an equation without one, the tests of `src/tc` do. The kernel
+adds nothing there, as today's checker does since pull request 350.
+
+**Where the sets live and how an addition is undone** (decision 98).
+A scope is a row of `Checker::instance_scopes` (`level: u32`, `parent:
+u32`, `head: Ty`; 12 bytes); `Checker::instance_scope: u32` is the
+innermost scope of the environment the caller is in, `NONE` outside.
+`head` is a node of the graph, a variable with no name whose `b` is
+the index of the scope's newest member in the pool
+`Checker::instance_members` (`ty: Ty`, `next: u32`; 8 bytes), or
+`NONE`. An addition pushes one pool row and WRITES THE HEAD NODE with
+`Graph::write`: logged inside a speculation and put back by its
+restore, as `set_typeset` logs `Ctypeset`. So the restore of an
+attempt of pattern mode (`recover`) and an owner's restore undo a set
+addition with no line of their own, and `Try` does not change
+(`undo_compress` undoes none, here as in OCaml: it puts back links
+only, as `Btype.undo_compress` puts back `Ccompress` only,
+btype.ml:792-804; corrected in review); the pool row an undone addition pushed is not
+reached again. This is the design of the references of a variant row
+(decision 34). Not chosen: the pool's length in the `Try` record and
+in a mark the walk holds (the seventh turn's text): an owner's restore
+that forgets to cut would leave members, and an addition outside any
+`Try` but inside an owner's speculation needs the owner to know of the
+pool.
 
 `instance_level(ty)` walks the scopes from `instance_scope` outwards
-and, per scope, its members, comparing `repr(member)` with the node:
-linear in the members of the scopes visited, as the old checker's
-(types/context.rs, `gadt_instance_level`, whose step test at 10,000
-members is the model) and as OCaml's rebuild of a set that holds a
-link. Members of one scope are not contiguous in the pool; the walk
-reads the whole pool once and keeps the innermost level found (a
-member's scope is on the path from `instance_scope` when its level is
-one of the path's, read from a small array of the path's levels built
-per call: the depth of nested cases). A per-node index (a side table
-from node to its newest membership) would make the read O(1) but
-needs every link to carry memberships to the representative, which is
-a read on the hottest write of the kernel; not proposed.
+and, per scope, its list, comparing `repr(member)` with the node; the
+first scope that holds it gives the level. Linear in the additions of
+the scopes visited (a member added twice is listed twice, as in
+today's checker; OCaml's set holds it once). A unit reaches it only
+behind the member flag.
 
-Tracing: `Checker::tracing: bool`. `unify` turns it on at its entry
-when it is off and `equations` is not empty (the load decision 65
-already makes for two nullary constructors moves to the entry of
-`unify` for every call: ONE load of `equations.len()` per top-level
-unification, which is the cost a unit without equations pays for this
-slice and must be measured on the five bench operations) and then
-calls `cleanup_abbrev`; the same in `unify_var`'s entry, in
-`non_recursive_abbrev` and in `Checker::traced(f)` for R5b.
+**The one read that decides** (decision 99). One byte of `Checker`,
+`gadt`, beside `umode`, with three bits: `LOCAL` (the environment has
+a local constraint: kept by `add_gadt_equation`, by `reify`'s fresh
+types, by `Checker::add_local_type` for an existential type, and put
+back by `leave_case`), `TRACING`, and `MEMBER` (a member was pushed in
+this unit; set where a pool row is pushed; never cleared). Per site,
+for a unit without a member:
 
-The memo under tracing: a nullary constructor node has no slot 0 (its
-`b` is 0). Under tracing `memorize` of a nullary node writes the
-expansion with no table: into the node's own `b`, which
-nothing reads for a nullary constructor, with a head bit `OWN_MEMO`
-that says `b` is an expansion; `find_expansion` tests the bit before
-the `simple` table (a bit of the head it has loaded), and
-`cleanup_abbrev` clears the nodes it listed. The prototype of the
-seventh turn wrote the expansion to `lists[b]` and corrupted slot 0 of
-another node; the head-bit form was not run. `has_cached_expansion`
-(2251) is that bit.
+| Site (kernel) | OCaml | The read | With the bit set |
+|---|---|---|---|
+| `unify_distinct`, at depth 0 | 2235 | `gadt & LOCAL`: one load, one branch a top-level unification of two distinct types | `TRACING` on, `cleanup_abbrev`; off again at the end if this call turned it on |
+| `unify_var`, `lower_args`, `non_recursive_abbrev`, `Checker::traced` | 2759, typecore 2828, 1534, 2782 | the same read at the entry | the same |
+| `subst`, the arm of an equation (an expansion that was not memorized) | 1220-1227 | `gadt & TRACING`: one load, behind the test for an equation, which a unit without one does not pass | `instance_level(ty)`, the level test, two pushes |
+| `memorize` and `find_expansion` of a constructor without arguments | 200-202 | `gadt & TRACING` in `memorize`; in `find_expansion` one load of `memo.own_live` (0 when no own memo is live) | the own memo (decision 100) |
+| `expand_head` (the chain) | 1271-1276 | `gadt & MEMBER`: one load a call | `instance_level(head)`, then the chain |
+| `lower` | 587-589 | none new: `types.scoped == 0` is `Graph::lower` as today; the first member increments `types.scoped`, so a unit with a member takes `lower_scoped`, which reads `gadt & MEMBER` once a call | `instance_level` a node above the level |
+| the binding walk | 587-589 through `update_level` | none new: it lowers through `lower_to`, behind the same test | as `lower` |
+| `instance`, `copy` | 770-774 | none: they do not change. The walk calls `Checker::instance_in` and `copy_in` where typecore passes the environment; each reads `gadt & MEMBER` once and is `instance` or `copy` when it is clear | one `instance_level(source)` a copied node, a push a member |
+| `unify_expanded` (unify2) | 2289-2298 | `gadt & TRACING`: one load a call that reaches the comparison, to be folded with the load of `umode` at R5c | two `instance_level` and a chain |
+| `unify_fields`, `set_more` | 2490, 2610-2611 | `gadt & TRACING`, one load a call | one lowering a field, one a new row |
+| `unify_pair`, two nullary constructors of one type | 2254 | one load of `memo.own_live` on that arm | the two own memos |
+| `unify_newtypes` | 2258-2270 | nothing new: `equations` is not empty, as built | its expansion is a traced one (below) |
 
-**(iii) The contract R5b receives.**
+So a unit that never has a local constraint pays one load and one
+branch at each of: a top-level unification of distinct types, an
+entry of the three kernel wrappers, an `expand_head`, a
+`unify_expanded` past its equality test, a `unify_fields`, a
+`set_more`, an `instance_in` or `copy_in`, and the arm of two nullary
+constructors of one type. Each is listed to be measured on the five
+unification operations and the copy and instance operations of
+`tc_kernel` by the builder, without a target.
 
-- *A scope is added* where typecore calls `Env.add_gadt_instance_level`
-  (typecore.ml:4040, the `init_env` of `type_function`, and 4826, the
-  `init_env` of `type_cases`, each when a pattern has a GADT
-  constructor): `Checker::enter_instance_scope(level) -> Mark` before the
-  patterns are typed; `Checker::leave_case(mark)` where the
-  environment of the case is dropped.
-- *Tracing wrappers*: typecore.ml:2828 (`lower_args`), and the three
-  that CHECKER_DEPARTURES A1 lists as still open on the old side;
-  each is `Checker::traced(|c| ...)`. The kernel's own entries trace
-  themselves.
-- *Copy sites that pass the environment*: `Ctype.instance env` and
-  `instance_list` (ctype.ml:879-894) pass it when it has local
-  constraints (`gadt_env`); `instance_def` and `instance_poly` never
-  do. R5b calls `instance_traced` exactly where typecore calls
-  `instance env` or `instance_list env` and `equations` is not empty,
-  and `instance` elsewhere.
+**The arm of two locally abstract types** (place G5 of the
+pattern-mode search; decision 65; built as `unify_newtypes`). It and
+this slice meet in one place: the arm expands the NEWER type once
+(`try_expand_once`) and lowers nothing first, and that expansion is
+the one that, under tracing, gives the equation's set its first
+members at the node's own level. Without the arm the pair goes to
+unify2, which lowers both nodes to the lower level before expanding,
+and the expansion is then refused (the program `eq<a, b>`, `Refl => if
+true { x } else { y }`, which OCaml accepts: CHECKER_DEPARTURES A1,
+p11). The arm's guard stays `equations` not empty (decision 65: without
+an equation neither side expands); tracing is on when it runs because
+`unify_distinct` turned it on.
 
-**(iv) How the refusal is reported.** The clash is `Unify [(ty,
-newvar2 level)]` in both places (587-589 and 1226). In `Mode::Success`
-it is a `Clash` like any other. In `Mode::Explain` the pair is pushed
-on `Checker::trace` by `escape_pair`, which `lower` already uses for a
-constructor below its scope (decision 14): the node and one new
-variable at the level. The text is the printer's
-(compiler/ml/printtyp.ml:1341-1359): for a pair of a variable and a
-type that the variable does not occur in, "This instance of T is
-ambiguous: it would escape the scope of its equation"; the kernel
-reports the pair and no text. What tells an ambiguity from an escaping
-constructor is the pair's shape, as in OCaml (1345-1348 against
-1352-1359), so no new kind of clash is needed.
+**The memo of a constructor without arguments while tracing**
+(decision 100). A dense table `Memo::own`, indexed by the NODE's
+handle (8 bytes a row: the generation of the memos and the expansion;
+the private bit in the generation's low bit), grown to the node when
+one is memorized under tracing, and `Memo::own_live`, how many rows
+are of the current generation. `cleanup_abbrev` already makes a new
+generation, which empties it. `has_cached_expansion` (2254) is one row
+load behind `own_live != 0`. Not chosen: the head bit `OWN_MEMO` with
+the expansion in the node's `b` (the seventh turn's text; bit 6 of the
+head is free): a copy of the node (`Node { level, ..node }` in
+`Graph::copy_ref`) would carry the bit, and every test `head ==
+CONSTR` for a nullary constructor (`mcomp_frames`; the guard text of
+decision 65) would read a memorized node as something else. The
+prototype of the seventh turn wrote the expansion to `lists[b]` and
+corrupted slot 0 of another node.
 
-**(v) The harness.** It gets both: `Op::Scope` (the old side:
-`Env::add_gadt_instance_level` at the current level; the new side:
-`enter_instance_scope`) generated before an `Op::Gadt`, and the
-existing `Op::Instance` and `Op::Lower` run with the environment when
-a scope is open. The seeds of decision 79 are the first acceptance:
-both lists empty. Hand-built tests judge what the generated cases
-cannot reach on purpose: the clash of an expansion below its set's
-level, the chain of unify2 in both directions, a member that is a
-link, the undo inside a `Try`, and the step tests (a lookup at 1,000
-and 10,000 members; a unit without a member takes the same steps as
-before the slice on the pattern step tests).
+**The contract R5b receives** (decision 101).
 
-**Not decided here, for the design turn:** whether the load of
-`equations.len()` at the entry of `unify` is acceptable on the bench
-(the alternative is a flag `tracing_possible` set by
-`add_gadt_equation` and cleared by `cut_equations`, read in the same
-byte pair as `umode`); whether the head bit `OWN_MEMO` is free in the
-head's layout; the exact list of the open wrappers of A1.
+- *A scope*: `Checker::enter_instance_scope(level) -> CaseMark` where
+  typecore calls `init_env` (typecore.ml:4819-4826 for `type_cases`
+  with a generalized constructor, 4034-4043 for `type_function` with
+  one, 4913-4914 for its exhaustiveness
+  check without one, 4196-4197 for the function with a pattern that is
+  not a variable), before the patterns are typed;
+  `Checker::leave_case(mark)` where the environment of the case is
+  dropped: it puts back `instance_scope`, cuts `equations` and puts
+  back the `LOCAL` bit. One call, so that one cannot be done without
+  the others. (Today's checker adds no scope at 4913-4914; no program
+  shows it: A1, "Open".)
+- *A local type*: `Checker::add_local_type()` for each existential
+  type of a constructor pattern (ctype.ml:970).
+- *Tracing*: `Checker::traced(|c| ...)` around each use of
+  `expand_head_trace` (`filter_arrow_n`, `filter_method`,
+  `filter_method_field`, `filter_object_field_for_write`). The kernel's
+  own entries trace themselves, `lower_args` included.
+- *Copies*: `Checker::instance_in` and `copy_in` exactly where
+  typecore calls `instance env` or `instance_list env` (61 of the 84
+  copy sites of the expression walk, listed by OCaml line in the body
+  of pull request 350), `instance` and `copy` at the 19 sites of
+  `instance_def` and typetexp's `instance_list`; `instance_poly` and
+  `instance_label` never take the environment (ctype.ml:1081, 1097).
+- *A restore* is `Checker::restore`, as today: it undoes set additions
+  through the trail.
+
+**How the refusal is reported** (decision 102). The clash is `Unify
+[(ty, newvar2 level)]` at both places. In `Mode::Success` it is a
+`Clash`. In `Mode::Explain` the pair is pushed on `Checker::trace` by
+`escape_pair`, which `lower` already uses for a constructor below its
+scope (decision 14): the node and one new variable at the level. The
+kernel reports the pair and no text; what tells "This instance of T is
+ambiguous: it would escape the scope of its equation" from "The type
+constructor would escape its scope" is the pair's shape and the level
+of the variable against the binding time of the path (the lines
+above), which the printer reads; no new kind of clash.
+
+**The harness** (decision 103). The generated cases get both: an
+operation `Op::Scope` (old side: `Env::add_gadt_instance_level` at the
+current level; new side: `enter_instance_scope`) generated before the
+first `Op::Gadt` of a case under `PATTERN`, and `Op::Instance` and
+`Op::Lower` run with the environment while a scope is open
+(`instance_in`; the scoped lowering). Without a scope the old side
+adds nothing and judges nothing of this slice. The slice must make
+agree, and its builder empties, exactly two lists: `UNTIL_R3S` (seven
+seeds of the pattern plan) and `EXPLAINED_UNTIL_R3S` (five explained
+ones); `EXPLAINED_OLD_DIFFERS` stays as it is (decisions 77 and 78).
+The test of the lists fails when a listed seed agrees, so a builder
+cannot leave a seed listed. The old side is NOT a judge at the sites
+today's checker left open without a program (decision 88): the chain
+of unify2 after expansion (2293-2298), the lowerings of `unify_fields`
+and `set_more`, the wrappers of `unify_var`, `expand_head_trace` and
+`local_non_recursive_abbrev`, `copy ?env ~partial`, and the scope of
+4913-4914. There the hand-built tests judge, each written from the
+pasted lines: the clash of an expansion below its set's level; the
+chain of unify2 in both directions; a member that is a link; an
+addition undone by `recover` and by an owner's restore; a set with a
+level and no equation; tracing turned on by an existential type alone
+(its memo effects); the three kernel wrappers; and the step tests (a
+lookup at 1,000 and 10,000 members; a unit without a member takes the
+same steps as before the slice on the pattern step tests).
+
+**Not decided, for the turn that makes the skeleton** (decision 104):
+whether the read of `LOCAL` at the top of `unify_distinct` and the read
+of `TRACING` in `unify_expanded` are one load with `umode` (a 16-bit
+read of two adjacent bytes) or two, which the prototype measures on
+the five operations; whether `instance_level` needs the per-scope list
+or one pool scanned once (the seventh turn's form), which the step
+test at 10,000 members decides; the size of the slice (the seventh
+turn said 300 lines on paper; a size is taken from the prototype).
+
+**Corrections after the review of the eighth turn.** Made in place by
+the reviewer where no design decision was needed (1 to 4); owed by the
+turn that makes the skeleton of R3s (5 to 11); accepted as they are
+(12).
+
+1. Decision 84: the argument was wrong for a constraint that makes two
+   parameters one variable; the decision now rests on the invariant
+   that a constructor node satisfies its declaration's constraint when
+   it is made.
+2. This section: `type_function`'s `init_env` (typecore.ml:4034-4043)
+   is a place where a scope is added, in the text and in the contract
+   of decision 101; `undo_compress` undoes no set addition.
+3. The build prompt of R3q: the clippy and `cargo doc` gates, the rule
+   on loops, and the reading ranges (`diff_list`, `conflicts`,
+   `delayed_copy` are ctype.ml 1016-1028; the copy sessions and the
+   duplication of a mutability cell are btype.ml 421-470). The row of
+   R3q in 8.1 says `rows.rs` and 500 lines, as its prompt does.
+4. Citations: `conflicts` is ctype.ml 1023-1025, `delayed_copy`
+   1027-1028, the `Tpoly` stop of `add_univar` 699, `inv_parents`
+   678-681.
+5. OWED, decision 84: say how the kernel expands a declaration with a
+   constrained parameter (whether a unification runs inside the
+   occurrence walk at all); if one does, build OCaml's loop behind the
+   flag that unification sets; if none does, pin the invariant with a
+   debug assertion where a constructor node is made and a test that a
+   constrained declaration's arguments arrive unified.
+6. OWED, G1 (a) and (b): below a node that was met again on the way,
+   `non_recursive_abbrev` and `occur_pattern` remember nothing and
+   enter a node once a path, as OCaml does everywhere (its set is the
+   path). On `y = k2<a, D0>`, `D_i = (D_{i+1}, D_{i+1})`, `D_n = (y)`
+   with only the second parameter of `k2` constrained, that is 2^n
+   entries. No test covers that regime: a test that pins the count as
+   a relation between two depths, and cost sentences that say
+   "exponential in the depth of sharing below a met node, as OCaml on
+   every shared type".
+7. OWED, G1 (c): the in-line walk of `lower_scoped` pushes the name
+   arguments of every inner node of a chain; OCaml's `iter_row`
+   visits only the name of the row whose `more` is not a variant
+   (btype.ml:237-240). The code before this turn lowered them too. A
+   case with a named inner node, or the reason none exists.
+8. OWED, G1 (b), as the turn recorded: the expansion of a constructor
+   is tested with its own frame on the way, where OCaml's handler
+   uses the outer set (ctype.ml:1401).
+9. OWED, R3q: OCaml's `instance_label` calls `instance_poly`, which
+   opens a copy session inside the label's, and a mutability cell is
+   duplicated once a session (btype.ml:421-425, 465); the kernel runs
+   one session (decision 94, which records one difference already).
+   Both with a hand-built case, or as recorded differences with the
+   reason no source type reaches them. The builder of R3q builds
+   decision 94 as written. OCaml forces the delayed copies most recent
+   first (ctype.ml:1040, 1093) and `poly_session` runs them in order:
+   node identity does not depend on it; the doc comment says so.
+10. OWED, tests: two step tests were not seen to fail
+    (`matching_the_fields_of_a_fixed_row_is_one_step_a_field`; shape 3
+    of `instance_poly_at_ten_thousand`); `Op::InstancePoly` in the
+    harness, judged by today's checker, as the first commit after R3q
+    is built.
+11. OWED, R3s: the skeleton, tests, prototype and prompt; the three
+    points of decision 104. The guard of the arm of two locally
+    abstract types stays as decision 65 left it for R5c.
+12. Accepted: the R3q entry of
+    `ignored_tests_name_the_slices_they_reach` names R3h and R3r (its
+    tests build on the checker of pattern mode); `#[inline(always)]`
+    on `memorized_node`, the loop body of `link_memorized` cut out
+    (the five unification operations read the same to the instruction
+    before and after); `PolyCopy` without a size test (one a checker,
+    not one a node).
 
 ## 9. R4 as designed
 
