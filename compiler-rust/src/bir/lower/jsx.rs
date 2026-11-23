@@ -150,10 +150,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn compile_jsx(
         &mut self,
         jsx: &JsxElement,
-        args: impl IntoIterator<Item = NodeId>,
-    ) -> NodeId {
-        // T6x-d: this function is given rows and gives a row.
-        let mut args = args.into_iter().map(B::from_node);
+        args: impl IntoIterator<Item = B::E>,
+    ) -> B::E {
+        let mut args = args.into_iter();
         let tag = args.next().expect("JSX tag");
         let spread = jsx.jsx_spread.then(|| args.next().expect("JSX spread"));
         let mut props = PropertySpan {
@@ -204,7 +203,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.js.push(value);
         }
         self.external_values = values;
-        B::node(self.js.jsx(&mut self.arena, mark, info, jsx.jsx_children.is_some()))
+        self.js.jsx(&mut self.arena, mark, info, jsx.jsx_children.is_some())
     }
 
     /// X: external_optional_to_undefined_expr. O(member-spine depth) for a

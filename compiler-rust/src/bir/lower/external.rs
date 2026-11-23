@@ -69,10 +69,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         specs: &[crate::lambda::lam_primitive::ObjParam],
-        args: crate::bir::ListId,
-    ) -> NodeId {
+        args: &mut std::vec::Drain<'_, B::E>,
+    ) -> B::E {
         use crate::lambda::lam_primitive::{Attr, Label, LabelNoname};
-        let argc = self.arena.lists.get(args).len();
+        let argc = args.len();
         let mut at = 0;
         let mut keys = crate::bir::PropertySpan {
             start: u32::try_from(self.arena.pools.property_keys.len())
@@ -93,8 +93,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 Label::ObjEmpty => {
                     if !matches!(spec.obj_arg_type, Attr::ArgCst(_)) {
                         let arg = if at < argc {
-                            // T6x-d: this function is given a pool list of rows.
-                            let value = B::from_node(self.arena.lists.get(args)[at]);
+                            let value = args.next().expect("an argument");
                             at += 1;
                             value
                         } else {
@@ -111,8 +110,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         self.compile_external_arg_const(cx, cst)
                     } else {
                         let arg = if at < argc {
-                            // T6x-d: this function is given a pool list of rows.
-                            let value = B::from_node(self.arena.lists.get(args)[at]);
+                            let value = args.next().expect("an argument");
                             at += 1;
                             value
                         } else {
@@ -136,8 +134,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 }
                 Label::ObjOptional { name, .. } => {
                     let arg = if at < argc {
-                        // T6x-d: this function is given a pool list of rows.
-                        let value = B::from_node(self.arena.lists.get(args)[at]);
+                        let value = args.next().expect("an argument");
                         at += 1;
                         value
                     } else {
@@ -176,7 +173,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let object = self.add_external_effect(cx, effect, object);
         if pending.is_empty() {
             self.external_pending = pending;
-            return B::node(object);
+            return object;
         }
         let obj = self.fresh_variable("tmp");
         let declaration =
@@ -232,7 +229,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.statements.push(branch);
         }
         self.external_pending = pending;
-        B::node(self.js.var(&mut self.arena, obj))
+        self.js.var(&mut self.arena, obj)
     }
 
     /// X:581 external_module_id. O(1) for a previously seen primitive; the
@@ -348,8 +345,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         cx: Cx,
         primitive: PrimId,
         call: &JsCall,
-        args: crate::bir::ListId,
-    ) -> NodeId {
+        args: &mut std::vec::Drain<'_, B::E>,
+    ) -> B::E {
         let decl = &call.ffi;
         let specs = &call.arg_types;
         let itself = matches!(decl.module_, Some(ModuleSource::ModuleItself));
@@ -357,11 +354,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Some(ModuleSource::ModuleNamed(module)) => Some(module),
             _ => None,
         };
-        // T6x-d: this function is given a pool list of rows and gives a row.
-        let value = match &decl.kind {
+        match &decl.kind {
             DeclKind::DeclVal { .. } if itself && decl.effective_arity == 0 => {
-                for i in 0..self.arena.lists.get(args).len() {
-                    let value = B::from_node(self.arena.lists.get(args)[i]);
+                for value in args.by_ref() {
                     self.js.release(&mut self.arena, value);
                 }
                 self.external_module_binding(cx, primitive, &call.prim_name)
@@ -384,11 +379,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             DeclKind::DeclVal { name } if decl.effective_arity == 0 => {
                 let target =
                     self.translate_scoped_module_value(cx, primitive, module, name, &decl.scopes);
-                if self.arena.lists.get(args).is_empty() {
+                if args.len() == 0 {
                     target
                 } else {
                     let mark = self.js.mark();
-                    self.js.push_list(&self.arena, args);
+                    for value in args.by_ref() {
+                        self.js.push(value);
+                    }
                     self.external_call(target, mark)
                 }
             }
@@ -409,9 +406,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.add_external_effect(cx, effect, value)
             }
             DeclKind::DeclSend { name } => {
-                let receiver = B::from_node(self.arena.lists.get(args)[0]);
-                let len = self.arena.lists.get(args).len();
-                let args = self.arena.lists.slice(args, 1, len - 1);
+                let receiver = args.next().expect("a receiver");
                 let mark = self.js.mark();
                 let (_, effect) = self.assemble_external_args(
                     cx,
@@ -465,8 +460,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 };
                 self.add_external_effect(cx, effect, value)
             }
-        };
-        B::node(value)
+        }
     }
 }
 
