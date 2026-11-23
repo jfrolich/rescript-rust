@@ -4124,7 +4124,21 @@ impl Checker {
     /// through a parameter that is not constrained and again through
     /// one that is: only pattern mode makes one). (R3h; corrected in
     /// the eighth skeleton turn; CHECKER_REWRITE 8.9, decision 67)
+    ///
+    /// It traces GADT instances while it runs (`wrap_trace_gadt_instances
+    /// env (local_non_recursive_abbrev false [] env p) ty`, compiler/ml/
+    /// ctype.ml:1534, PR#7397): one load of `Checker::gadt` and one
+    /// branch a call. (R3s; CHECKER_REWRITE 8.11, (iv))
     pub fn non_recursive_abbrev(&mut self, source: u32, ty: Ty) -> Result<bool, Clash> {
+        let turned_on = self.gadt & super::unify::GADT_LOCAL != 0 && self.trace_on();
+        let result = self.non_recursive_abbrev_walk(source, ty);
+        self.trace_off(turned_on);
+        result
+    }
+
+    /// The walk of [`Checker::non_recursive_abbrev`], whose text
+    /// describes it.
+    fn non_recursive_abbrev_walk(&mut self, source: u32, ty: Ty) -> Result<bool, Clash> {
         /// The bit of `extra` that makes an entry a LEAVE entry.
         const LEAVE: u32 = 2;
         let lax = self.fresh_marks();

@@ -135,6 +135,15 @@ pub enum FrameKind {
     /// [`Checker::recover`] says what a clash above a started frame
     /// does. (R3r; CHECKER_REWRITE 8.9, decision 68)
     Try,
+    /// Pattern mode: the pair popped just above this frame turned the
+    /// tracing of GADT instances on (`check_trace_gadt_instances` at the
+    /// top of `unify`, compiler/ml/ctype.ml:2235), and everything that
+    /// pair pushed has run. Popped: tracing is off again
+    /// (`reset_trace_gadt_instances reset_tracing`, ctype.ml:2269).
+    /// `left`, `right` and `extra` hold nothing. Pushed by
+    /// `Checker::late_pair` only. (R3s; CHECKER_REWRITE 8.11, decision
+    /// 105)
+    Untrace,
 }
 
 /// One STARTED attempt of pattern mode that falls back on a clash (`let
@@ -155,7 +164,8 @@ pub struct Try {
     pub scopes: u32,
     /// Bit 0 `generate_equations`, bit 1 `assume_injective`, as they
     /// were; bit 2: `mcomp` follows the reification when
-    /// `generate_equations` is on after the flags are put back.
+    /// `generate_equations` is on after the flags are put back; bit 3:
+    /// GADT instances were traced ([`GADT_TRACING`]; R3s).
     pub flags: u8,
 }
 
@@ -213,6 +223,57 @@ impl PairSet {
     }
 }
 
+/// [`Checker::gadt`]: the environment has a local constraint
+/// (`Env.has_local_constraints`, compiler/ml/env.ml:1047): an equation, a
+/// type `reify` made or an existential type of a constructor pattern.
+pub const GADT_LOCAL: u8 = 1;
+/// [`Checker::gadt`]: GADT instances are traced (`trace_gadt_instances`,
+/// compiler/ml/ctype.ml:176-177).
+pub const GADT_TRACING: u8 = 2;
+/// [`Checker::gadt`]: a member was pushed on an instance set in this
+/// unit. Never cleared: an addition that was undone leaves it set.
+pub const GADT_MEMBER: u8 = 4;
+/// [`Checker::gadt`]: `umode` is [`UnifyMode::Pattern`]. Kept by
+/// [`Checker::unify_pattern`], the one writer of `umode`.
+pub const GADT_PATTERN: u8 = 8;
+
+/// One scope of GADT instances (`Env.add_gadt_instance_level`,
+/// compiler/ml/env.ml:1307-1308: `(lv, ref Type_set.empty) ::
+/// env.gadt_instances`). 12 bytes; one per scope entered in the unit.
+/// (R3s; CHECKER_REWRITE 8.11, decision 98)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct InstanceScope {
+    pub level: u32,
+    /// The scope around this one, or `NONE`.
+    pub parent: u32,
+    /// A variable node of the graph whose `b` is the index of the
+    /// scope's newest [`InstanceMember`], or `NONE`: written with
+    /// `Graph::write`, so that a restore undoes an addition.
+    pub head: Ty,
+}
+
+/// One member of a set of instances. 8 bytes; one per addition, also
+/// one a restore undid (its row is not reached again).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct InstanceMember {
+    pub ty: Ty,
+    /// The member added before this one, or `NONE`.
+    pub next: u32,
+}
+
+/// What [`Checker::leave_case`] puts back: the environment of a case as
+/// it was. 12 bytes, held by the walk on its own stack, one a case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct CaseMark {
+    pub equations: u32,
+    pub scope: u32,
+    /// `Checker::gadt & GADT_LOCAL` as it was.
+    pub local: u8,
+}
+
 /// One checker context: the graph and everything unification reads.
 /// A worker owns one and resets it between units.
 pub struct Checker {
@@ -221,6 +282,11 @@ pub struct Checker {
     pub memo: Memo,
     pub extras: Extras,
     pub umode: UnifyMode,
+    /// [`GADT_LOCAL`], [`GADT_TRACING`], [`GADT_MEMBER`],
+    /// [`GADT_PATTERN`]: 0 for a unit that never had a local constraint
+    /// outside a pattern unification. The one byte every site of GADT
+    /// instances reads (CHECKER_REWRITE 8.11, the table of sites). (R3s)
+    pub gadt: u8,
     /// `generate_equations` and `assume_injective`
     /// (compiler/ml/ctype.ml:253).
     pub generate_equations: bool,
@@ -270,6 +336,14 @@ pub struct Checker {
     /// The pairs `mcomp` assumes compatible, ordered (left, right) in
     /// one `u64` each; empty outside a call of it. (R3r)
     pub compatible: PairSet,
+    /// The scopes of GADT instances entered in this unit
+    /// (`env.gadt_instances`, innermost first through `parent`). (R3s)
+    pub instance_scopes: Vec<InstanceScope>,
+    /// The innermost scope of the environment the caller is in: an index
+    /// of `instance_scopes`, or `NONE`. (R3s)
+    pub instance_scope: u32,
+    /// The pool of members; a scope's list starts at its head node. (R3s)
+    pub instance_members: Vec<InstanceMember>,
 }
 
 /// `Frame::extra` of the frame [`Checker::occur_pattern`] pushes for a
@@ -287,6 +361,7 @@ impl Checker {
             memo: Memo::default(),
             extras: Extras::default(),
             umode: UnifyMode::Expression,
+            gadt: 0,
             generate_equations: false,
             assume_injective: false,
             unexplained_failure: false,
@@ -304,6 +379,9 @@ impl Checker {
             locals: None,
             tries: Vec::new(),
             compatible: PairSet::default(),
+            instance_scopes: Vec::new(),
+            instance_scope: NONE,
+            instance_members: Vec::new(),
         }
     }
 
@@ -329,7 +407,25 @@ impl Checker {
     /// to [`Checker::unify_pair`] without a frame; the loop runs only when
     /// that call left frames. Cost: one [`Checker::unify_pair`], then
     /// O(pairs popped), each pair one [`Checker::unify_pair`]. (R3a)
+    ///
+    /// GADT instances (R3s; CHECKER_REWRITE 8.11): one load of
+    /// [`Checker::gadt`] and one branch; with [`GADT_LOCAL`] or
+    /// [`GADT_PATTERN`] the call is [`Checker::unify_distinct_gadt`].
     pub fn unify_distinct(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
+        if self.gadt & (GADT_LOCAL | GADT_PATTERN) != 0 {
+            return self.unify_distinct_gadt(left, right);
+        }
+        self.unify_distinct_from(left, right, false)
+    }
+
+    /// The body of [`Checker::unify_distinct`], whose cost it has. With
+    /// `late` (pattern mode entered without a local constraint) the
+    /// frames are run by [`Checker::late_pair`] and
+    /// [`Checker::resume_frames`], which look at each pair for a local
+    /// constraint added since; without, by `run_frames`. Always inline:
+    /// `late` is a constant at both call sites.
+    #[inline(always)]
+    fn unify_distinct_from(&mut self, left: Ty, right: Ty, late: bool) -> Result<(), Clash> {
         let top = self.depth == 0;
         let explain = self.g.mode == Mode::Explain;
         // `unify_takes_snapshot` (types/context.rs:1609), as decision 5 of
@@ -344,7 +440,11 @@ impl Checker {
         let saved_base = self.saved.len();
         let trace_base = self.trace.len();
         self.depth += 1;
-        let mut result = self.run_frames(base, left, right);
+        let mut result = if late {
+            self.late_pair(left, right).and_then(|()| self.resume_frames(base))
+        } else {
+            self.run_frames(base, left, right)
+        };
         // A clash above a started attempt of pattern mode is the
         // attempt's (8.9, decision 68): one load of `tries.len()`, on
         // the failure path only.
@@ -384,6 +484,79 @@ impl Checker {
         }
     }
 
+    /// [`Checker::unify_distinct`] for a unit that has a local constraint
+    /// or is in pattern mode (`let reset_tracing =
+    /// check_trace_gadt_instances !env`, compiler/ml/ctype.ml:2235, and
+    /// `reset_trace_gadt_instances reset_tracing` on both ways out,
+    /// 2269-2271). With [`GADT_LOCAL`]: [`Checker::trace_on`], the body,
+    /// and tracing off again if this call turned it on. Without (pattern
+    /// mode before its first local constraint): the body with `late`,
+    /// since OCaml makes the test at EVERY `unify`, and a pair that is
+    /// unified after an equation or a reified type was added traces;
+    /// then [`GADT_TRACING`] is put back as it was (a clash leaves
+    /// [`FrameKind::Untrace`] frames unpopped). Cold: O(1) plus the
+    /// body. (R3s; CHECKER_REWRITE 8.11, decisions 97 and 105)
+    #[cold]
+    #[inline(never)]
+    #[allow(unused_variables, dead_code)]
+    fn unify_distinct_gadt(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
+        todo!("R3s")
+    }
+
+    /// `check_trace_gadt_instances env` (compiler/ml/ctype.ml:178-184):
+    /// when tracing is off and the environment has a local constraint,
+    /// tracing is on, the memorized expansions are forgotten
+    /// ([`Checker::cleanup_abbrev`]) and the answer is `true`: the
+    /// caller turns it off again with [`Checker::trace_off`]. A caller
+    /// on a path every unit runs reads `gadt & GADT_LOCAL` itself first
+    /// and calls this only when it is set. O(1) plus the cleanup. (R3s)
+    #[cold]
+    #[inline(never)]
+    #[allow(unused_variables, dead_code)]
+    pub fn trace_on(&mut self) -> bool {
+        todo!("R3s")
+    }
+
+    /// `reset_trace_gadt_instances b` (compiler/ml/ctype.ml:186). O(1).
+    #[inline]
+    pub fn trace_off(&mut self, turned_on: bool) {
+        if turned_on {
+            self.gadt &= !GADT_TRACING;
+        }
+    }
+
+    /// `wrap_trace_gadt_instances env f x` (compiler/ml/ctype.ml:188-192)
+    /// for the walk: `expand_head_trace` is `c.traced(|c|
+    /// c.expand_head(ty, ExpandMode::Unif))` (ctype.ml:2781-2785). One
+    /// load of [`Checker::gadt`] and one branch when no local constraint
+    /// exists. (R3s; CHECKER_REWRITE 8.11, decision 101)
+    #[inline]
+    pub fn traced<T>(&mut self, f: impl FnOnce(&mut Checker) -> T) -> T {
+        let turned_on = self.gadt & GADT_LOCAL != 0 && self.trace_on();
+        let result = f(self);
+        self.trace_off(turned_on);
+        result
+    }
+
+    /// One pair of two distinct representatives of a pattern unification
+    /// that was entered without a local constraint (`late`), as OCaml's
+    /// `unify` treats it (compiler/ml/ctype.ml:2235): when a local
+    /// constraint exists now and tracing is off, a
+    /// [`FrameKind::Untrace`] frame is pushed, tracing is turned on
+    /// ([`Checker::trace_on`]) and the pair with everything it pushes is
+    /// run by `run_frames` above that frame, which the caller's loop
+    /// pops next; otherwise the pair alone is run (`run_frames` with a
+    /// base no stack reaches, so that it returns after its one
+    /// `unify_pair`). `run_frames` keeps its one call site of
+    /// `unify_pair`. A clash leaves the frames as `run_frames` leaves
+    /// them. O(1) plus the callee. (R3s; decision 105)
+    #[cold]
+    #[inline(never)]
+    #[allow(unused_variables, dead_code)]
+    fn late_pair(&mut self, left: Ty, right: Ty) -> Result<(), [Ty; 2]> {
+        todo!("R3s")
+    }
+
     /// One pair of distinct representatives: the first step of `unify`
     /// (compiler/ml/ctype.ml:2239-2268). A variable goes to
     /// [`Checker::bind`]; two nullary constructors of one type with no
@@ -421,7 +594,11 @@ impl Checker {
         // (expand.rs), so the test is always false. With GADT instance
         // tracing the node's own memo is used (R3h).
         if l.tag() == CONSTR && r.tag() == CONSTR && l.arity() == 0 && r.arity() == 0 {
-            if l.a == r.a {
+            // `not (has_cached_expansion p1 !a1 || has_cached_expansion p2
+            // !a2)` (ctype.ml:2254): a constructor without arguments has
+            // an expansion of its own only from a traced one (R3s): one
+            // load of `own_live` on this arm.
+            if l.a == r.a && (self.memo.own_live == 0 || !self.has_own_expansion(left, right)) {
                 // `update_level !env t1.level t2; link_type t1 t2`. `right`
                 // is a representative and `r` its descriptor: the outer test
                 // of `update_level` (`if ty.level > level`, ctype.ml:635)
@@ -436,7 +613,8 @@ impl Checker {
             // Two locally abstract types under equations (ctype.ml:
             // 2258-2269; 8.9, decision 65): for two nullary constructors of
             // different types, one load; nothing for any other pair.
-            if !self.equations.is_empty()
+            if l.a != r.a
+                && !self.equations.is_empty()
                 && let Some(result) = self.unify_newtypes([left, right], l, r)
             {
                 return result;
@@ -1111,6 +1289,12 @@ impl Checker {
         if !unexpanded {
             expanded_left = self.expand_head_unif(left)?;
             expanded_right = self.expand_head_unif(right)?;
+            // `try_expand_head` adds the chain of a type whose head is
+            // in a set (ctype.ml:1271-1276): one load of `gadt` a pair
+            // of which a head expanded. (R3s)
+            if self.gadt & GADT_MEMBER != 0 {
+                self.expanded_instances([left, right], [expanded_left, expanded_right]);
+            }
         }
         let left_level = self.g.nodes[expanded_left.0 as usize].level;
         let right_level = self.g.nodes[expanded_right.0 as usize].level;
@@ -1149,6 +1333,11 @@ impl Checker {
         // pattern mode assumed.
         if pattern && self.assumed_equal(expanded_left, expanded_right) {
             return Ok(());
+        }
+        // `if !(trace_gadt_instances ()) then ...` (ctype.ml:2289-2298):
+        // one load a call that comes here. (R3s)
+        if self.gadt & GADT_TRACING != 0 {
+            self.join_instance_levels(t1, t2);
         }
         // `if unify_eq t1 t1' || not (unify_eq t2 t2') then unify3 env t1
         // t1' t2 t2' else unify3 env t2 t2' t1 t1'` (ctype.ml:2299-2303).
@@ -1509,6 +1698,173 @@ impl Checker {
         }
     }
 
+    /// `has_cached_expansion p1 !a1 || has_cached_expansion p2 !a2`
+    /// (compiler/ml/ctype.ml:2254) for two constructor nodes without
+    /// arguments: whether one of them has a live row of `Memo::own`.
+    /// Called when `Memo::own_live` is not 0. Two row loads. (R3s;
+    /// CHECKER_REWRITE 8.11, decision 100)
+    #[cold]
+    #[inline(never)]
+    #[allow(unused_variables, dead_code)]
+    fn has_own_expansion(&self, left: Ty, right: Ty) -> bool {
+        todo!("R3s")
+    }
+
+    /// The chains of the two sides of unify2 after `expand_head_unif`
+    /// (compiler/ml/ctype.ml:1271-1276, 2278-2281), for the two sides and
+    /// the heads they expanded to: each side whose representative is not
+    /// its head goes to `Checker::expanded_instance`. OCaml adds the
+    /// chain at each of the four expansions; a set holds a node once,
+    /// so once a side after the last is the same set. Called behind
+    /// [`GADT_MEMBER`]. Cold. (R3s; decision 111)
+    #[cold]
+    #[inline(never)]
+    #[allow(unused_variables, dead_code)]
+    fn expanded_instances(&mut self, sides: [Ty; 2], heads: [Ty; 2]) {
+        todo!("R3s")
+    }
+
+    /// unify2 under tracing (compiler/ml/ctype.ml:2289-2298), for `t1`
+    /// and `t2` as unify2 has them after the two lowerings
+    /// (representatives): `lv1 = ilevel t1`, `lv2 = ilevel t2`, 0 for a
+    /// node in no set; `if lv1 > lv2 then add_gadt_instance_chain lv1 t2
+    /// else if lv2 > lv1 then add_gadt_instance_chain lv2 t1`. Nothing,
+    /// on one more load of [`Checker::gadt`], when no member exists (both
+    /// levels are 0 then). Two [`Checker::instance_level`] and at most
+    /// one [`Checker::add_instance_chain`]. Cold. (R3s)
+    #[cold]
+    #[inline(never)]
+    #[allow(unused_variables, dead_code)]
+    fn join_instance_levels(&mut self, t1: Ty, t2: Ty) {
+        todo!("R3s")
+    }
+
+    /// `Env.add_gadt_instance_level lv env` (compiler/ml/env.ml:
+    /// 1307-1308) where the walk calls `init_env` (CHECKER_REWRITE 8.11,
+    /// the contract of R5b): a new scope at `level` inside the current
+    /// one becomes the current one; the mark is what the environment was
+    /// ([`Checker::case_mark`]). Amortized O(1): one node (the head, a
+    /// variable at level 0 with `b = NONE`) and one 12-byte row. (R3s)
+    #[allow(unused_variables, dead_code)]
+    pub fn enter_instance_scope(&mut self, level: u32) -> CaseMark {
+        todo!("R3s")
+    }
+
+    /// O(1): the environment as it is: the number of equations, the
+    /// current scope and whether a local constraint exists. What a
+    /// caller keeps before a pattern is typed (`save_state`,
+    /// compiler/ml/typecore.ml:1299-1305) and before a case. (R3s)
+    #[inline]
+    pub fn case_mark(&self) -> CaseMark {
+        CaseMark {
+            equations: self.equations.len() as u32,
+            scope: self.instance_scope,
+            local: self.gadt & GADT_LOCAL,
+        }
+    }
+
+    /// Drop the environment of a case, or of a pattern unification that
+    /// failed (`set_state`, compiler/ml/typecore.ml:1303-1305):
+    /// [`Checker::cut_equations`] to the mark, the current scope and
+    /// [`GADT_LOCAL`] as the mark has them. The members of a scope that
+    /// was left are not reached again; [`GADT_MEMBER`] stays. One call,
+    /// so that none of the three is forgotten. O(equations cut). (R3s;
+    /// decision 101)
+    #[allow(unused_variables, dead_code)]
+    pub fn leave_case(&mut self, mark: CaseMark) {
+        todo!("R3s")
+    }
+
+    /// `Env.add_local_type path decl env` (compiler/ml/env.ml:1802-1803)
+    /// as far as the kernel keeps it: the environment has a local
+    /// constraint from here to the `leave_case` of a mark taken before.
+    /// The walk calls it for each existential type of a constructor
+    /// pattern (ctype.ml:970); `reify` and `add_gadt_equation` set the
+    /// bit themselves. O(1). (R3s; decisions 85 and 97)
+    #[inline]
+    #[allow(unused_variables, dead_code)]
+    pub fn add_local_type(&mut self) {
+        todo!("R3s")
+    }
+
+    /// `Env.gadt_instance_level env t` (compiler/ml/env.ml:1314-1323)
+    /// for a representative: the level of the innermost scope, from
+    /// [`Checker::instance_scope`] outwards, one of whose members has
+    /// `ty` as its representative; 0 when none has (a scope's level is
+    /// at least 1). One step a scope visited and one step and one `repr`
+    /// a member read: linear in the additions of the scopes visited, as
+    /// OCaml's is in their members (`Type_set.exists is_Tlink` a scope).
+    /// A caller reads [`GADT_MEMBER`] first. (R3s; decision 106)
+    #[allow(unused_variables, dead_code)]
+    pub fn instance_level(&mut self, ty: Ty) -> u32 {
+        todo!("R3s")
+    }
+
+    /// O(scopes visited): the first scope of level `level` from the
+    /// current one outwards (`List.assoc lv env.gadt_instances`,
+    /// compiler/ml/env.ml:1326-1328), or `NONE`: OCaml asserts that it
+    /// exists; an equation whose level has no scope adds nothing
+    /// (CHECKER_REWRITE 8.11, (v)). One step a scope.
+    #[allow(unused_variables, dead_code)]
+    fn instance_scope_at(&self, level: u32) -> u32 {
+        todo!("R3s")
+    }
+
+    /// O(1) amortized: `ty` joins the set of scope `scope` (an index of
+    /// `instance_scopes`): one 8-byte row, and one `Graph::write` of the
+    /// scope's head node, which a restore undoes (`set_typeset`,
+    /// compiler/ml/btype.ml:749-751, logs `Ctypeset`). The first
+    /// addition of a unit sets [`GADT_MEMBER`] and counts one scoped
+    /// type (`TypeTable::scoped`), so that every lowering of the unit is
+    /// the scoped one from here on. No test that `ty` is already a
+    /// member. (R3s; decision 98)
+    #[allow(unused_variables, dead_code)]
+    fn push_instance(&mut self, scope: u32, ty: Ty) {
+        todo!("R3s")
+    }
+
+    /// `Env.add_gadt_instances env lv tl` (compiler/ml/env.ml:1325-1329)
+    /// for the representatives `tys`: each joins the set of the first
+    /// scope of level `level`; nothing when no scope has that level.
+    /// O(scopes visited + tys). (R3s)
+    #[allow(unused_variables, dead_code)]
+    pub fn add_instances(&mut self, level: u32, tys: &[Ty]) {
+        todo!("R3s")
+    }
+
+    /// `Env.add_gadt_instance_chain env lv t` (compiler/ml/env.ml:
+    /// 1332-1345): `t` joins the set of the first scope of level `level`
+    /// unless it is a member of THAT set, and then, when it is a
+    /// constructor whose own memo holds an expansion of either kind
+    /// (`find_expans Private p !memo`: slot 0 and the entries it inherits
+    /// for one with arguments, the row of `Memo::own` for one without;
+    /// never the memo all nullary constructors of a type share), the
+    /// same for that expansion. Nothing when no scope has the level.
+    /// Membership in the set is one mark generation: the set's members
+    /// are marked once (one step each), then each node of the chain is
+    /// one step, one mark and one memo lookup. O(members of the set +
+    /// chain), not their product. (R3s; decision 106)
+    #[allow(unused_variables, dead_code)]
+    pub fn add_instance_chain(&mut self, level: u32, ty: Ty) {
+        todo!("R3s")
+    }
+
+    /// The copy WITH an environment (`copy ?env`, compiler/ml/ctype.ml:
+    /// 770-774; `instance env`, 846-851): [`Checker::copy`], and when a
+    /// member exists ([`GADT_MEMBER`]: one load and one branch otherwise)
+    /// the copy of every member that was copied joins the member's set
+    /// (`Some lv -> Env.add_gadt_instances env lv [t]`). The members of
+    /// the scopes from the current one outwards are read once, innermost
+    /// scope first; a member whose representative has a forwarding row
+    /// of this copy (`Graph::forward`, the copy's generation) gets its
+    /// copy added to the innermost scope that holds it. Cost: the copy,
+    /// then one step a scope and one a member read, instead of one
+    /// lookup a copied node. (R3s; decisions 101 and 107)
+    #[allow(unused_variables, dead_code)]
+    pub fn copy_in(&mut self, root: Ty) -> Ty {
+        todo!("R3s")
+    }
+
     /// `unify_var` (compiler/ml/ctype.ml:2752-2771): unify a variable that
     /// must stay a variable-free binding of expansion, with the trace of
     /// `Mode::Explain`. O(1) plus [`Checker::bind`] or [`Checker::unify`].
@@ -1525,6 +1881,18 @@ impl Checker {
         }
         let before = self.g.nodes[var.0 as usize];
         let target = self.g.nodes[ty.0 as usize];
+        // `Tvar _, Tconstr _ when deep_occur t1 t2 -> unify (ref env) t1
+        // t2` comes before the arm that traces (ctype.ml:2757): with a
+        // local constraint the test is made here, ahead of
+        // `check_trace_gadt_instances` (ctype.ml:2759). One load of
+        // `gadt` and one branch a call. (R3s)
+        let mut turned_on = false;
+        if self.gadt & GADT_LOCAL != 0 {
+            if target.tag() == CONSTR && self.deep_occur(var, ty) {
+                return self.unify(var, ty);
+            }
+            turned_on = self.trace_on();
+        }
         let occur_first = self.occur_first();
         // `occur env t1 t2; update_level env t1.level t2; link_type t1 t2`:
         // here the level is written before the link, so of two variables the
@@ -1536,7 +1904,10 @@ impl Checker {
             match self.binding_occurrence(var, ty, occur_first, target.tag() == CONSTR) {
                 // `Tvar _, Tconstr _ when deep_occur t1 t2 -> unify (ref env)
                 // t1 t2` (ctype.ml:2755).
-                Ok(true) => return self.unify(var, ty),
+                Ok(true) => {
+                    self.trace_off(turned_on);
+                    return self.unify(var, ty);
+                }
                 Ok(false) => {}
                 Err(clash) => result = Err(clash),
             }
@@ -1546,6 +1917,7 @@ impl Checker {
         {
             result = self.lower_to(ty, before.level);
         }
+        self.trace_off(turned_on);
         if result.is_ok() {
             self.g.link(var, ty);
             return Ok(());
@@ -1895,7 +2267,10 @@ impl Checker {
             trace: self.trace.len() as u32,
             saved: self.saved.len() as u32,
             scopes: self.scopes.len() as u32,
-            flags: u8::from(self.generate_equations) | u8::from(self.assume_injective) << 1 | u8::from(rows) << 2,
+            flags: u8::from(self.generate_equations)
+                | u8::from(self.assume_injective) << 1
+                | u8::from(rows) << 2
+                | (self.gadt & GADT_TRACING) << 2,
         };
         self.tries.push(record);
         self.frames.push(Frame { extra: index, ..frame });
@@ -1940,6 +2315,10 @@ impl Checker {
         self.trace.truncate(record.trace as usize);
         self.saved.truncate(record.saved as usize);
         self.put_flags(u32::from(record.flags));
+        // Tracing is what it was where the attempt started: every
+        // `unify` between the clash and the handler put its own back
+        // (`reset_trace_gadt_instances`, ctype.ml:2270). (R3s)
+        self.gadt = self.gadt & !GADT_TRACING | (record.flags >> 2 & GADT_TRACING);
         // `backtrack snap; reify env t1; reify env t2` and, for two
         // variants, `if generate_equations then mcomp` (ctype.ml:
         // 2370-2374, 2407-2411).
@@ -1994,9 +2373,16 @@ impl Checker {
                 FrameKind::Pair => {
                     let (left, right) = (self.g.repr(frame.left), self.g.repr(frame.right));
                     if left != right {
-                        return self.run_frames(base, left, right);
+                        // Until R3s sets `GADT_PATTERN` the rest is
+                        // run as before; its last commit deletes this
+                        // test and the `return` (8.4, the prompt).
+                        if self.gadt & GADT_PATTERN == 0 {
+                            return self.run_frames(base, left, right);
+                        }
+                        self.late_pair(left, right)?;
                     }
                 }
+                FrameKind::Untrace => self.gadt &= !GADT_TRACING,
                 FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
                 FrameKind::LeavePoly => self.scopes.truncate(frame.extra as usize),
                 FrameKind::Fields => self.saved.truncate(frame.extra as usize),
@@ -2247,6 +2633,9 @@ impl Checker {
                     // The two flags go back (8.9, decision 64).
                     FrameKind::Flags => self.put_flags(frame.extra),
                     FrameKind::Assumed => {}
+                    // Never above the base of this loop: `late_pair`
+                    // runs it above the frame. (R3s)
+                    FrameKind::Untrace => self.gadt &= !GADT_TRACING,
                     // The attempt starts, or it succeeded (8.9, decision
                     // 68). A clash of this loop is offered to the open
                     // attempts by the caller (`Checker::recover_frames`).
@@ -2439,5 +2828,10 @@ mod tests {
         // One per started attempt of pattern mode (CHECKER_REWRITE 8.9,
         // decision 68).
         assert_eq!(std::mem::size_of::<Try>(), 40);
+        // One per scope entered, per addition to a set and per case
+        // (CHECKER_REWRITE 8.11; 8.6, decision 98).
+        assert_eq!(std::mem::size_of::<InstanceScope>(), 12);
+        assert_eq!(std::mem::size_of::<InstanceMember>(), 8);
+        assert_eq!(std::mem::size_of::<CaseMark>(), 12);
     }
 }

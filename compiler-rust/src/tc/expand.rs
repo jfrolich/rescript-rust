@@ -602,7 +602,50 @@ pub struct Memo {
     /// The scope of the last expansion (`previous_env`,
     /// compiler/ml/ctype.ml:1163).
     pub env: u32,
+    /// The memo of a constructor WITHOUT arguments that was expanded
+    /// while GADT instances were traced, indexed by the node's handle
+    /// (`proper_abbrevs` gives it the node's own `abbrev` then,
+    /// compiler/ml/ctype.ml:200-202). Empty, with no allocation, until
+    /// the first such expansion; grown to the node. (R3s;
+    /// CHECKER_REWRITE 8.11, decision 100)
+    pub own: Vec<OwnMemo>,
+    /// The generation of `own`: advanced by [`Checker::cleanup_abbrev`]
+    /// only (a generalization forgets `simple` and not a node's own
+    /// memo), by 2, so that bit 0 of a row is free.
+    pub own_generation: u32,
+    /// Live rows of `own`: when 0, no site reads the table.
+    pub own_live: u32,
 }
+
+/// One row of [`Memo::own`]: the `abbrev` reference of a constructor
+/// node without arguments, as far as tracing uses it
+/// (`abbrev_memo ref`, compiler/ml/types.ml: `Mnil`, `Mcons` or
+/// `Mlink`). 16 bytes; one per node handle up to the highest nullary
+/// constructor that was expanded under tracing or copied by such an
+/// expansion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct OwnMemo {
+    /// [`Memo::own_generation`] when `expansion` is live, with bit 0 set
+    /// for a private expansion (`Mcons (Private, ..)`).
+    pub generation: u32,
+    /// What the node expanded to, or `NONE` for a node that was never
+    /// memorized (`Mlink`) or whose entry was forgotten.
+    pub expansion: Ty,
+    /// The node whose traced expansion copied this one (`Mlink
+    /// !abbreviations`, compiler/ml/ctype.ml:793-799), or `NONE`. A row
+    /// whose `expansion` is of an older generation has none (`abbr :=
+    /// Mnil`, compiler/ml/btype.ml:626).
+    pub parent: Ty,
+    /// The type index the node had when the row was written (the path
+    /// of `Mcons`): a node that was linked since no longer holds it.
+    pub type_index: u32,
+}
+
+/// A row of [`Memo::own`] that holds nothing. (The bodies of R3s read
+/// it; its build removes the `allow`.)
+#[allow(dead_code)]
+const NO_OWN: OwnMemo = OwnMemo { generation: 0, expansion: Ty(NONE), parent: Ty(NONE), type_index: NONE };
 
 impl Default for Memo {
     /// O(1), allocates nothing.
@@ -614,6 +657,9 @@ impl Default for Memo {
             memorized: Vec::new(),
             chains: Chains::default(),
             env: super::graph::NONE,
+            own: Vec::new(),
+            own_generation: 2,
+            own_live: 0,
         }
     }
 }
@@ -675,6 +721,88 @@ impl Checker {
             .checked_add(1)
             .expect("memo generation exhausted");
         self.memo.live = 0;
+        // The own memos of nullary constructors (R3s): one load and one
+        // untaken branch when none is live.
+        if self.memo.own_live != 0 {
+            self.forget_own_memos();
+        }
+    }
+
+    /// O(1): every row of `Memo::own` is dead: a new generation.
+    /// `cleanup_abbrev` empties each registered `abbrev`
+    /// (compiler/ml/btype.ml:623-627), a nullary node's own one
+    /// included. (R3s)
+    #[cold]
+    #[allow(unused_variables, dead_code)]
+    fn forget_own_memos(&mut self) {
+        todo!("R3s")
+    }
+
+    /// O(1): the expansion constructor node `ty` (no arguments) has in
+    /// its own memo, of either kind, or `NONE`: one row load.
+    /// `find_expans Private p !memo` on the node's own `abbrev`
+    /// (compiler/ml/btype.ml:612-619). (R3s; decision 100)
+    #[allow(unused_variables, dead_code)]
+    pub(super) fn own_expansion(&self, ty: Ty) -> Ty {
+        todo!("R3s")
+    }
+
+    /// [`Checker::find_expansion`] for constructor node `ty` WITHOUT
+    /// arguments whose row of `Memo::simple` holds nothing, when
+    /// `Memo::own_live` is not 0: while GADT instances are traced, the
+    /// node's own memo, a private entry only for a private lookup
+    /// (`lookup_abbrev = proper_abbrevs path args abbrev`,
+    /// compiler/ml/ctype.ml:1191-1192, 200-202); otherwise `NONE` (the
+    /// own memo of a node is not read outside tracing). One load of
+    /// `Checker::gadt` and one row load. (R3s)
+    #[cold]
+    #[inline(never)]
+    #[allow(unused_variables, dead_code)]
+    fn find_own_expansion(&self, ty: Ty, private: bool) -> Ty {
+        todo!("R3s")
+    }
+
+    /// [`Checker::memorize`] for constructor node `ty` WITHOUT arguments
+    /// while GADT instances are traced: the row of `Memo::own` at the
+    /// node's handle (the table grows to it, amortized), in place of the
+    /// row of `Memo::simple` (`proper_abbrevs`, compiler/ml/ctype.ml:
+    /// 200-202). Not logged, as slot 0 is not. (R3s)
+    #[cold]
+    #[inline(never)]
+    #[allow(unused_variables, dead_code)]
+    fn memorize_own(&mut self, ty: Ty, expansion: Ty, private: bool) {
+        todo!("R3s")
+    }
+
+    /// `find_repr p !abbrevs` (compiler/ml/ctype.ml:720-724, 778-782) for
+    /// a constructor without arguments of type `type_index` that the
+    /// traced expansion of node `from` (without arguments) has copied:
+    /// the chain of own memos from `from` through `parent`, the first
+    /// live public entry of that type gives its node; `NONE` at the end
+    /// of the chain. A row whose entry is of an older generation ends
+    /// the chain (`Mnil`); a row that was never memorized is passed
+    /// (`Mlink`). One step a row: at most the number of traced
+    /// expansions in progress above this copy. (R3s; decision 109)
+    #[allow(unused_variables, dead_code)]
+    fn own_ancestor(&self, from: Ty, type_index: u32) -> Ty {
+        todo!("R3s")
+    }
+
+    /// The pass of a traced expansion of node `ty` WITHOUT arguments
+    /// over the nodes it made, `first..`: each constructor without
+    /// arguments whose type has [`ABBREV`], [`PRIVATE`], [`ALIAS`] or
+    /// [`NEWTYPE`] (one `TypeInfo` load; any other type never expands)
+    /// becomes a link to the node [`Checker::own_ancestor`] finds for
+    /// its type from `ty` (`Some ty when repr ty != t -> Tlink ty`,
+    /// compiler/ml/ctype.ml:782), or gets a row of `Memo::own` that
+    /// continues with `ty` (`Mlink !abbreviations`, 796-798). It is what
+    /// `Checker::link_memorized` does through `Memo::simple` when
+    /// nothing is traced; without it a type that reaches itself through
+    /// two equations is unfolded without end. One step a node made,
+    /// plus the chain. (R3s; decision 109)
+    #[allow(unused_variables, dead_code)]
+    fn inherit_own(&mut self, ty: Ty, first: usize) {
+        todo!("R3s")
     }
 
     /// O(1): forget the nullary memo and nothing else: no slot-0 memo is
@@ -731,6 +859,10 @@ impl Checker {
                         row.expansion
                     }
                 }
+                // While GADT instances are traced the expansion is in
+                // the node's own memo, and `simple` is empty (turning
+                // tracing on cleaned it): one load of `own_live`. (R3s)
+                _ if self.memo.own_live != 0 => self.find_own_expansion(ty, private),
                 _ => Ty(NONE),
             };
         }
@@ -759,6 +891,10 @@ impl Checker {
     pub fn memorize(&mut self, ty: Ty, expansion: Ty, private: bool) {
         let node = self.g.nodes[ty.0 as usize];
         if node.arity() == 0 {
+            // `proper_abbrevs` (ctype.ml:200-202): one load of `gadt`.
+            if self.gadt & super::unify::GADT_TRACING != 0 {
+                return self.memorize_own(ty, expansion, private);
+            }
             let index = node.a as usize;
             if index >= self.memo.simple.len() {
                 self.memo.simple.resize(index + 1, STALE);
@@ -804,6 +940,17 @@ impl Checker {
         {
             *row = STALE;
             self.memo.live -= 1;
+        }
+        // The node's own memo (R3s): one load when none is live.
+        if self.memo.own_live != 0
+            && let Some(row) = self.memo.own.get_mut(ty.0 as usize)
+            && row.expansion.0 != NONE
+            && row.generation & !1 == self.memo.own_generation
+        {
+            // `mem := rem` (compiler/ml/btype.ml:646-650): the entry
+            // goes, what it continued with stays.
+            row.expansion = Ty(NONE);
+            self.memo.own_live -= 1;
         }
     }
 
@@ -911,7 +1058,66 @@ impl Checker {
     /// [`Checker::copy`]. No row has both [`NEWTYPE`] and a manifest
     /// until `add_gadt_equation` writes one. O(nodes of the
     /// body), the cost of [`Checker::copy`].
+    ///
+    /// GADT instances (R3s; CHECKER_REWRITE 8.11): one load of
+    /// `Checker::gadt` and one branch; while they are traced the call
+    /// is [`Checker::subst_traced`].
     fn subst(&mut self, ty: Ty, node: Node, info: TypeInfo, mode: ExpandMode) -> Result<Ty, Clash> {
+        if self.gadt & super::unify::GADT_TRACING != 0 {
+            return self.subst_traced(ty, node, info, mode);
+        }
+        self.subst_plain(ty, node, info, mode)
+    }
+
+    /// An expansion that was not memorized, while GADT instances are
+    /// traced (compiler/ml/ctype.ml:1215-1227). `lv` is the higher of
+    /// the expansion level of an equation (the `Newtype` row of a type
+    /// with [`NEWTYPE`] and a manifest: `find_type_expansion`'s third
+    /// component) and [`Checker::instance_level`] of `ty` (read behind
+    /// `GADT_MEMBER`); 0 with neither.
+    ///
+    /// - The node is not below `lv`: `subst_plain`; then, for a node
+    ///   without arguments, [`Checker::inherit_own`] over the nodes the
+    ///   expansion made; then, when `lv` is not 0, `ty` and the
+    ///   expansion join the set of `lv` ([`Checker::add_instances`]).
+    /// - The node is below `lv` (`if level < lv then raise (Unify [(ty,
+    ///   newvar2 level)])`): in [`ExpandMode::Unif`] `subst_plain` runs
+    ///   first, as OCaml's `subst` has run when the test is made (the
+    ///   memo it wrote stays), and the clash is
+    ///   [`Checker::instance_clash`]; in the other modes OCaml's handler
+    ///   backtracks to before the expansion (`try_expand_safe`, ctype.ml:
+    ///   1251-1256; `expand_head_opt`, 1330-1335), which leaves nothing
+    ///   but a cleanup of the memos: [`Checker::cleanup_abbrev`], then
+    ///   `Ok(NONE)` in `Safe` and the clash otherwise, with no node made.
+    ///
+    /// Cold. O(1) plus the callees. (R3s; decisions 99 and 108)
+    #[cold]
+    #[inline(never)]
+    #[allow(unused_variables, dead_code)]
+    fn subst_traced(&mut self, ty: Ty, node: Node, info: TypeInfo, mode: ExpandMode) -> Result<Ty, Clash> {
+        todo!("R3s")
+    }
+
+    /// `raise (Unify [(ty, newvar2 level)])` of an expansion below its
+    /// set's level (compiler/ml/ctype.ml:1226): in `Mode::Explain` the
+    /// pair of `ty` and a new variable at `level` goes on
+    /// [`Checker::trace`], the pair [`Checker::lower`] reports for a
+    /// member it may not lower (ctype.ml:589). No text: the printer
+    /// tells it from an escaping constructor by the pair
+    /// (compiler/ml/printtyp.ml:1342-1359). O(1) amortized. (R3s;
+    /// decision 102)
+    #[cold]
+    #[allow(unused_variables, dead_code)]
+    fn instance_clash(&mut self, ty: Ty, level: u32) -> Clash {
+        todo!("R3s")
+    }
+
+    /// The body of [`Checker::subst`], whose text describes it. Always
+    /// inline: it has two call sites, the one every expansion runs and
+    /// one in the cold [`Checker::subst_traced`]; out of line the first
+    /// costs 40 instructions an expansion (measured; decision 111).
+    #[inline(always)]
+    fn subst_plain(&mut self, ty: Ty, node: Node, info: TypeInfo, mode: ExpandMode) -> Result<Ty, Clash> {
         let manifest = self.types.manifests[info.manifest as usize];
         if info.flags & NEWTYPE != 0 {
             // `memorize_abbrev` before the copy of the body (ctype.ml:1124):
@@ -999,10 +1205,14 @@ impl Checker {
     /// type's parameters are constrained. [`ExpandMode::Unif`] is
     /// [`Checker::expand_head_unif`]. (R3b)
     pub fn expand_head(&mut self, ty: Ty, mode: ExpandMode) -> Result<Ty, Clash> {
-        if mode == ExpandMode::Unif {
-            return self.expand_head_unif(ty);
-        }
         let original = self.g.repr(ty);
+        if mode == ExpandMode::Unif {
+            let head = self.expand_head_unif(original)?;
+            if head != original && self.gadt & super::unify::GADT_MEMBER != 0 {
+                self.expanded_instance(original, head);
+            }
+            return Ok(head);
+        }
         let mut head = original;
         loop {
             #[cfg(test)]
@@ -1011,27 +1221,54 @@ impl Checker {
                 Ok(next) => next,
                 // `try_expand_safe` turns a clash into `Cannot_expand`
                 // (compiler/ml/ctype.ml:1251-1256).
-                Err(Clash) if mode == ExpandMode::Safe => return Ok(head),
+                Err(Clash) if mode == ExpandMode::Safe => break,
                 // `expand_head_opt` backtracks and returns the type it was
                 // given (compiler/ml/ctype.ml:1330-1335): `Opt`, `Rigid`.
                 Err(Clash) => return Ok(original),
             };
             if next.0 == NONE {
-                return Ok(head);
+                break;
             }
             let next = self.g.repr(next);
             // A memo naming the node itself (PR#7324, ctype.ml:1202).
             if next == head {
-                return Ok(head);
+                break;
             }
             head = next;
         }
+        // The chain of the expansions (ctype.ml:1271-1276): a compare of
+        // two registers, and one load of `gadt` when the head expanded.
+        if head != original && self.gadt & super::unify::GADT_MEMBER != 0 {
+            self.expanded_instance(original, head);
+        }
+        Ok(head)
+    }
+
+    /// `try_expand_head`'s second half (compiler/ml/ctype.ml:1271-1276):
+    /// `match Env.gadt_instance_level env ty' with None -> () | Some lv
+    /// -> Env.add_gadt_instance_chain env lv ty`, for `ty` that expanded
+    /// to the head `head`, whatever the tracing flag. Called behind
+    /// `GADT_MEMBER`. One [`Checker::instance_level`] and at most one
+    /// [`Checker::add_instance_chain`]. Cold. (R3s)
+    #[cold]
+    #[inline(never)]
+    #[allow(unused_variables, dead_code)]
+    pub(super) fn expanded_instance(&mut self, ty: Ty, head: Ty) {
+        todo!("R3s")
     }
 
     /// [`Checker::expand_head`] in [`ExpandMode::Unif`] (`expand_head_unif`,
     /// compiler/ml/ctype.ml:1279): the same loop of [`Checker::expand_once`]
     /// with a clash of a step returned as the caller's, so no mode is tested
     /// on the way. O(expansions), O(1) machine stack. (K4)
+    ///
+    /// The chain of the expansions (compiler/ml/ctype.ml:1271-1276) is
+    /// NOT added here: the two callers add it, [`Checker::expand_head`]
+    /// for the mode and `Checker::unify_expanded` for its two sides,
+    /// where each already knows whether the head expanded. With the
+    /// test in this loop the function is no longer inlined into unify2
+    /// (measured: 142 instructions an abbreviation pair; CHECKER_REWRITE
+    /// 8.6, decision 111). (R3s)
     pub(super) fn expand_head_unif(&mut self, ty: Ty) -> Result<Ty, Clash> {
         let mut head = self.g.repr(ty);
         loop {
@@ -1227,7 +1464,7 @@ impl Checker {
     /// without [`ENTRY_PRIVATE`] is the node's, and which is public or
     /// looked up privately (`lte_public`, btype.ml:606-610), gives what its
     /// slot holds. One step per row visited. (R3m)
-    fn inherited_expansion(&self, node: Node, private: bool) -> Ty {
+    pub(super) fn inherited_expansion(&self, node: Node, private: bool) -> Ty {
         #[cfg(test)]
         super::steps::tick();
         let chains = &self.memo.chains;
@@ -1377,6 +1614,10 @@ impl Checker {
     /// The loop of [`Checker::lower_scoped`]: pops entries above `base`.
     /// Its cost is the caller's.
     fn lower_scoped_loop(&mut self, base: usize, level: u32, expand: bool) -> Result<(), Ty> {
+        // `Env.gadt_instance_level env ty` (ctype.ml:587-589) is asked
+        // only in a unit that has a member: one load a call, read again
+        // after an expansion, which can add the first. (R3s)
+        let mut members = self.gadt & super::unify::GADT_MEMBER != 0;
         while self.frames.len() > base {
             let frame = self.frames.pop().expect("entry above base");
             let ty = self.g.repr(frame.left);
@@ -1394,6 +1635,11 @@ impl Checker {
             if node.level <= level {
                 continue;
             }
+            // `| Some lv -> if level < lv then raise (Unify [(ty, newvar2
+            // level)])` (ctype.ml:587-589), before the node is looked at.
+            if members && self.instance_escapes(ty, level) {
+                return Err(ty);
+            }
             let node = if node.tag() == CONSTR {
                 // `level < get_level env p` (ctype.ml:590).
                 let escapes = level < self.types.info(node.a).scope;
@@ -1403,6 +1649,7 @@ impl Checker {
                     // (ctype.ml:593-594, 603-604). A `Unify` raised by the
                     // expansion is not caught there: it is this pass's clash.
                     let expansion = self.expand_once(ty, ExpandMode::Unif).map_err(|_| ty)?;
+                    members = self.gadt & super::unify::GADT_MEMBER != 0;
                     let expansion = if expansion.0 == NONE {
                         expansion
                     } else {
@@ -1442,6 +1689,17 @@ impl Checker {
             self.push_lowering_children(node);
         }
         Ok(())
+    }
+
+    /// Whether representative `ty`, above `level`, is a member of a set
+    /// whose level is above `level` (compiler/ml/ctype.ml:587-589). One
+    /// [`Checker::instance_level`]. Cold: called in a unit that has a
+    /// member. (R3s)
+    #[cold]
+    #[inline(never)]
+    #[allow(unused_variables, dead_code)]
+    fn instance_escapes(&mut self, ty: Ty, level: u32) -> bool {
+        todo!("R3s")
     }
 
     /// O(slots): push the children of variant node `node` for
@@ -1527,7 +1785,19 @@ impl Checker {
     /// result chain) expansions plus the lowering. The expansion of a result
     /// that is a nullary abbreviation is what makes that node the nullary
     /// memo's representative (O11). (R3d)
+    ///
+    /// It traces GADT instances itself (`wrap_trace_gadt_instances env
+    /// (lower_args env []) ty`, compiler/ml/typecore.ml:2828), so that
+    /// the walk cannot forget to: one load of `Checker::gadt` and one
+    /// branch a call. (R3s; CHECKER_REWRITE 8.11, (iv))
     pub fn lower_args(&mut self, root: Ty) {
+        let turned_on = self.gadt & super::unify::GADT_LOCAL != 0 && self.trace_on();
+        self.lower_args_walk(root);
+        self.trace_off(turned_on);
+    }
+
+    /// The walk of [`Checker::lower_args`], whose text describes it.
+    fn lower_args_walk(&mut self, root: Ty) {
         // `seen` (typecore.ml:2505) as marks of this call's generation: one
         // load and one store per arrow, no list.
         let generation = self.fresh_marks();
@@ -2205,6 +2475,9 @@ mod tests {
             ((true, true), (false, false))
         );
         assert_eq!(std::mem::size_of::<TypeInfo>(), 16);
+        // One per nullary constructor expanded under tracing or copied
+        // by such an expansion (CHECKER_REWRITE 8.6, decisions 100, 109).
+        assert_eq!(std::mem::size_of::<OwnMemo>(), 16);
         assert_eq!(std::mem::size_of::<Manifest>(), 24);
         assert_eq!(std::mem::size_of::<Newtype>(), 8);
         assert_eq!(std::mem::size_of::<SimpleMemo>(), 16);
