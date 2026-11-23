@@ -22,6 +22,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// encounter order; purity annotations are comments, not purity facts.
     /// O(r + a + text bytes), with r runtime modules (bounded by the primitive
     /// runtime inventory) and a operands; no expression subtree is walked.
+    /// The row form of `runtime_call`, kept until T6x-d for `external.rs`,
+    /// `ffi_args.rs`, `jsx.rs` and `rec.rs`, which hold rows: it wraps each
+    /// operand and turns the call back.
     pub(super) fn primitive_runtime(
         &mut self,
         name: &str,

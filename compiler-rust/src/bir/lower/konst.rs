@@ -298,7 +298,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         self.constant_values = values;
         self.constant_text = text;
         self.constant_encoding = encoding;
-        // T6x-d: `constant` gives a row to `mod.rs` and `switch.rs`.
+        // T6x-d: `constant` gives a row to its one caller, in `mod.rs`.
         B::node(result)
     }
 }

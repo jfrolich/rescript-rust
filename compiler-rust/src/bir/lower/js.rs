@@ -170,6 +170,8 @@ pub trait Js {
     // ---- Leaves (plain; O(1) unless said) ----
 
     /// A reference to `var`. Counts the occurrence and records its site.
+    /// The node is strictly pure (`STRICT`) as built, on every
+    /// implementation: the lowering does not mark it with `assume_strict`.
     fn var(&mut self, a: &mut Pools, var: VarId) -> Self::E;
     /// An imported module, or `member` of it. Counts the import's use and
     /// records the site.
