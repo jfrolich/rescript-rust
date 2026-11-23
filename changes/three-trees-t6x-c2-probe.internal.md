@@ -1,0 +1,1 @@
+- Probe T6x-c2 of the backend lowering: the externals (`external.rs`, `ffi_args.rs`, `jsx.rs`) hold and pass values as handles of the lowering's interface (draft, not for merge).

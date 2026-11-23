@@ -489,8 +489,8 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     import_storage: import::Storage,
     external_references: Vec<Option<crate::bir::ImportId>>,
     external_globals: Vec<Option<VarId>>,
-    external_pending: Vec<(u32, NodeId)>,
-    external_values: Vec<NodeId>,
+    external_pending: Vec<(u32, B::E)>,
+    external_values: Vec<B::E>,
     inline_globals: Vec<Ident>,
     inline_foreign: Vec<Ident>,
     /// Imported export templates are keyed by sparse module/member pairs, which have no existing dense template identity.

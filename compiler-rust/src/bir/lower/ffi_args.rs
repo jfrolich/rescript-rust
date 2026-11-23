@@ -498,7 +498,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         for spec in specs {
             self.primitive_steps += 1;
             if let Attr::ArgCst(cst) = &spec.arg_type {
-                values.push(self.compile_external_arg_const(cx, cst));
+                values.push(B::from_node(self.compile_external_arg_const(cx, cst)));
             } else {
                 let arg = if at < argc {
                     let value = self.arena.lists.get(args)[at];
@@ -513,7 +513,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     spec.arg_label,
                     &spec.arg_type,
                 );
-                values.extend(converted.into_iter().flatten());
+                values.extend(converted.into_iter().flatten().map(B::from_node));
                 if let Some(next) = next_effect {
                     effect = Some(self.add_external_effect(cx, effect, next));
                 }
@@ -526,15 +526,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             .zip(values.iter().rev())
             .take_while(|(spec, value)| {
                 spec.arg_label == LabelNoname::ArgOptional
-                    && self.js.kind(&self.arena, B::at(**value)) == Kind::Undefined
-                    && self.js.aux(&self.arena, B::at(**value)) == 0
+                    && self.js.kind(&self.arena, B::of(value)) == Kind::Undefined
+                    && self.js.aux(&self.arena, B::of(value)) == 0
             })
             .count();
         for value in values.drain(values.len() - trim..) {
-            self.js.release(&mut self.arena, B::from_node(value));
+            self.js.release(&mut self.arena, value);
         }
-        let result = self.arena.lists.push(&values);
-        values.clear();
+        let result = self.arena.lists.push_iter(values.len(), values.drain(..).map(B::node));
         self.external_values = values;
         (result, effect)
     }
@@ -556,7 +555,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         for spec in specs {
             self.primitive_steps += 1;
             if let Attr::ArgCst(cst) = &spec.arg_type {
-                values.push(self.compile_external_arg_const(cx, cst));
+                values.push(B::from_node(self.compile_external_arg_const(cx, cst)));
                 continue;
             }
             let arg = if at < argc {
@@ -571,7 +570,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     let count = self.js.unpack_rev(&mut self.arena, B::from_node(arg));
                     for _ in 0..count {
                         self.primitive_steps += 1;
-                        values.push(B::node(self.js.pop()));
+                        values.push(self.js.pop());
                     }
                     continue;
                 }
@@ -579,7 +578,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             let (converted, next_effect) =
                 self.lower_external_arg_values_and_effect(cx, arg, spec.arg_label, &spec.arg_type);
-            values.extend(converted.into_iter().flatten());
+            values.extend(converted.into_iter().flatten().map(B::from_node));
             if let Some(next) = next_effect {
                 effect = Some(self.add_external_effect(cx, effect, next));
             }
@@ -587,11 +586,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         debug_assert_eq!(at, argc);
         if spread {
             if let Some(value) = values.pop() {
-                values.push(B::node(self.js.spread(&mut self.arena, B::from_node(value))));
+                values.push(self.js.spread(&mut self.arena, value));
             }
         }
-        let result = self.arena.lists.push(&values);
-        values.clear();
+        let result = self.arena.lists.push_iter(values.len(), values.drain(..).map(B::node));
         self.external_values = values;
         (result, effect)
     }

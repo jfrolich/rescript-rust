@@ -159,7 +159,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             self.arena.lists.set(values, keys.len as usize, value);
                             keys.len += 1;
                         }
-                        _ => pending.push((u32::try_from(i).expect("object spec capacity"), arg)),
+                        _ => pending.push((u32::try_from(i).expect("object spec capacity"), B::from_node(arg))),
                     }
                 }
             }
@@ -179,7 +179,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let declaration =
             self.js.declare(&mut self.arena, LetKind::Variable, obj, Some(B::from_node(object)));
         self.statements.push(declaration);
-        for (i, mut arg) in pending.drain(..) {
+        for (i, arg) in pending.drain(..) {
+            let mut arg = B::node(arg);
             self.primitive_steps += 1;
             let spec = &specs[i as usize];
             let Label::ObjOptional {
