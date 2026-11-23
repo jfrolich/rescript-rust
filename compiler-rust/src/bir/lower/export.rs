@@ -6,7 +6,6 @@
 //! of the legacy shake module (S). OCaml references name the file under
 //! `compiler/core` without its prefix: `coercion.ml` and `compile_main.ml`.
 use super::*;
-use crate::bir::JsPayload;
 use crate::emit::row::{self, flag};
 use crate::lambda::TagInfo;
 use crate::name::Name;
@@ -202,14 +201,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// an export block become effect statements; any other value is one
     /// effect and the unit has no export block (`None`). Cost: one step per
     /// comma on the right spine of the value, one per comma operand of a
-    /// head, one per export. No allocation: the identifiers are moved out of
-    /// the block's payload.
+    /// head, one per export. One allocation: the identifiers are copied out
+    /// of the block's payload, which is the shape's and is shared with every
+    /// other block of that shape and with the source (`Bir::block_info`).
     pub(super) fn extract_exports(
         &mut self,
-        value: Option<NodeId>,
+        value: Option<B::E>,
         finished: Finished,
     ) -> Option<Vec<Ident>> {
-        let mut value = B::from_node(value?);
+        let mut value = value?;
         if self.js.kind(&self.arena, B::of(&value)) == row::Kind::Undefined {
             self.js.release(&mut self.arena, value);
             return None;
@@ -220,12 +220,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 end = self.js.operand(&self.arena, end, 1);
             }
             match self.js.kind(&self.arena, end) {
-                row::Kind::BlockLit => self.js.info_of(&self.arena, end).filter(|&info| {
-                    matches!(
-                        self.arena.javascript(info),
-                        JsPayload::Block(TagInfo::ModuleExport(_))
-                    )
-                }),
+                row::Kind::BlockLit => self
+                    .js
+                    .info_of(&self.arena, end)
+                    .filter(|&info| matches!(self.arena.block_tag(info), TagInfo::ModuleExport(_))),
                 _ => None,
             }
         };
@@ -245,12 +243,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         for _ in 0..count {
             values.push(B::node(self.js.pop()));
         }
-        let JsPayload::Block(TagInfo::ModuleExport(exports)) =
-            &mut self.arena.pools.js[info.index()]
-        else {
-            unreachable!("checked above")
-        };
-        let exports = std::mem::take(exports);
+        let TagInfo::ModuleExport(exports) = self.arena.block_tag(info) else { unreachable!("checked above") };
+        let exports = exports.clone();
         debug_assert_eq!(
             exports.len(),
             values.len(),
@@ -2340,7 +2334,7 @@ mod tests {
         let mut state = State::new(input);
         let probed = state.probe(Cx::value(), root).unwrap();
         let out = state.realize(Cx::value(), probed);
-        let exports = state.extract_exports(out.value.map(crate::bir::lower::out::row), out.finished).unwrap();
+        let exports = state.extract_exports(out.value, out.finished).unwrap();
         let run = state.statements.since(Span { start: out.stmts.start, len: 0 });
         let mut vars = Vec::new();
         state.export_variables(&exports, &mut vars);

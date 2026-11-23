@@ -795,21 +795,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// and of `finish`.
     fn complete_unit(mut self, probed: Probed<B>) -> Lowered {
         let out = self.realize(Cx::value(), probed);
-        let value = out.value.map(B::node);
-        // Export coercion takes ownership of the root's identifier vector.
-        // Isolate that output-boundary payload so shared source/block shapes
-        // remain immutable for any other surviving block occurrence.
-        if let Some(mut end) = value {
-            while let View::JSeq { second, .. } = self.arena.view(end) { end = second; }
-            if let View::JBlockLit { info, .. } = self.arena.view(end) {
-                if let crate::lambda::TagInfo::ModuleExport(exports) = self.arena.block_tag(info) {
-                    let tag = crate::lambda::TagInfo::ModuleExport(exports.clone());
-                    let owned = self.arena.js_info(crate::bir::JsPayload::Block(tag));
-                    self.arena.nodes[end.index()].set_block_info(owned);
-                }
-            }
-        }
-        let exports = self.extract_exports(value, out.finished);
+        let exports = self.extract_exports(out.value, out.finished);
         let run = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,
