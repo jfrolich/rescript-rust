@@ -145,7 +145,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let mut out = self.realize(cx, child);
             if let Resume::Prim(prim) = resume {
                 if matches!(self.arena.primitive(prim.primitive).primitive, crate::lambda::lam_primitive::Primitive::Pdebugger) {
-                    if let Some(value) = out.value.take() { self.drop_pure_effect(B::node(value)); }
+                    if let Some(value) = out.value.take() { self.drop_pure_effect(value); }
                     out.value = Some(self.js.undefined(&mut self.arena, true));
                 }
             }
@@ -318,9 +318,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// are removed and comma values are split before statements are emitted.
     /// Cost: O(R): releases the R nodes owned by a discarded strict expression; the purity
     /// decision reads one cached flag.
-    pub(super) fn drop_pure_effect(&mut self, value: NodeId) {
+    pub(super) fn drop_pure_effect(&mut self, value: B::E) {
         let statements = &mut self.statements;
-        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.push(s));
+        self.js.effect(&mut self.arena, value, |s| statements.push(s));
     }
 }
 

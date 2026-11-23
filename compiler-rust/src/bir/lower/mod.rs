@@ -941,8 +941,7 @@ impl<B: js_stmt::JsStmt> ProbeRules for State<'_, B> {
                 self.js.assume_strict(&mut self.arena, &mut value);
                 value
             }
-            // `constant` gives a row until T6x-d.
-            View::Const { value } => B::from_node(self.constant(value)),
+            View::Const { value } => self.constant(value),
             View::Apply { callee, info, .. } => {
                 let args = self.source.node(node).apply_args();
                 let tail = self.self_call(cx, callee);

@@ -1,0 +1,1 @@
+- Backend rewrite, three trees T6x-d: the four functions of the lowering that still took or gave a row between files (`if_statement`, `drop_pure_effect`, `finish_self_call`, `constant`) take and give the interface's handles, with every caller changed in the same step. No turn-back is left between two files of the lowering outside `export.rs`.

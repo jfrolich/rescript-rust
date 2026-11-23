@@ -116,7 +116,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.js.push(target);
             self.js.push(value);
             let call = self.runtime_call("Primitive_object", "updateDummy", mark);
-            self.drop_pure_effect(B::node(call));
+            self.drop_pure_effect(call);
             let dummy = self.recursive_dummy(tag);
             let placeholder = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(dummy));
             self.rec_members[member].placeholder = Some(placeholder);
@@ -145,7 +145,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     }
                     _ => unreachable!("self-init classification"),
                 };
-                let set = B::node(self.primitive_set_field(index as i32, field, target, field_value));
+                let set = self.primitive_set_field(index as i32, field, target, field_value);
                 self.drop_pure_effect(set);
             }
             self.js.release(&mut self.arena, shell);

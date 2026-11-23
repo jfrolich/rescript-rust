@@ -86,7 +86,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn try_child(&mut self, cx: Cx, frame: Try, index: usize, child: Probed<B>) -> Probed<B> {
         let mut out = self.realize(cx, child);
         if let Some(value) = out.value.take() {
-            self.drop_pure_effect(B::node(value));
+            self.drop_pure_effect(value);
         }
         let span = self.statements.since(Span {
             start: out.stmts.start,

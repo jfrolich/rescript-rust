@@ -656,7 +656,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             assert_eq!(action as usize, index - 1);
             p.pc += 1;
             if let Some(value) = out.value.take() {
-                self.drop_pure_effect(B::node(value));
+                self.drop_pure_effect(value);
             }
             self.unnest(out.stmts.start);
             out.stmts = self.statements.since(Span {
@@ -853,7 +853,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// V: untagged_if / normalized_if_block. O(statements consumed by J-S3).
     fn untagged_if(&mut self, p: &mut Plan<B::S, B::E>, test: B::E, yes: Span, no: Span) {
         let start = self.untagged_storage.marks.pop(&mut p.marks);
-        let statement = self.if_statement(B::node(test), yes, no);
+        let statement = self.if_statement(test, yes, no);
         self.place(start.start, statement);
         if matches!(p.cont, Cont::Effect(Tail::Return(_))) {
             self.unnest(start.start);
