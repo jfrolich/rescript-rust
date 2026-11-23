@@ -18,36 +18,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         self.js.int(&self.arena, B::of(value))
     }
 
-    /// C: runtime_call_expr / X: pure_runtime_call_expr. Runtime imports retain
-    /// encounter order; purity annotations are comments, not purity facts.
-    /// O(r + a + text bytes), with r runtime modules (bounded by the primitive
-    /// runtime inventory) and a operands; no expression subtree is walked.
-    /// The row form of `runtime_call`, kept until T6x-d for `external.rs`,
-    /// `ffi_args.rs`, `jsx.rs` and `rec.rs`, which hold rows: it wraps each
-    /// operand and turns the call back.
-    pub(super) fn primitive_runtime(
-        &mut self,
-        name: &str,
-        member: &str,
-        args: &[NodeId],
-    ) -> NodeId {
-        let mark = self.js.mark();
-        for &arg in args {
-            self.js.push(B::from_node(arg));
-        }
-        B::node(self.runtime_call(name, member, mark))
-    }
-
-    /// `primitive_runtime` on handles: the operands of `args` pushed in
+    /// A call of a runtime function: the operands of `args` pushed in
     /// order, then [`Self::runtime_call`]. O(r + a + text bytes), as
-    /// `primitive_runtime`.
+    /// `runtime_call`; no expression subtree is walked.
     fn runtime(&mut self, name: &str, member: &str, args: impl Iterator<Item = B::E>) -> B::E {
         let mark = self.push_values(args);
         self.runtime_call(name, member, mark)
     }
 
-    /// C: runtime_call_expr: `name.member(...)` over the operands pushed
-    /// since `mark`. O(r + a + text bytes), with r runtime modules (bounded
+    /// C: runtime_call_expr / X: pure_runtime_call_expr: `name.member(...)`
+    /// over the operands pushed since `mark`. Runtime imports retain
+    /// encounter order; purity annotations are comments, not purity facts.
+    /// O(r + a + text bytes), with r runtime modules (bounded
     /// by the primitive runtime inventory) and a operands since `mark`.
     pub(super) fn runtime_call(&mut self, name: &str, member: &str, mark: Mark) -> B::E {
         let module = match self
@@ -650,8 +632,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     finished: Finished::True,
                 }));
             }
-            // `compile_jsx` (jsx.rs) takes and gives rows until T6x-d.
-            Primitive::Pjsx(jsx) => B::from_node(self.compile_jsx(jsx, values.map(B::node))),
+            Primitive::Pjsx(jsx) => self.compile_jsx(jsx, values),
             Primitive::Pimport(source) => self.compile_import(source),
             Primitive::Pduprecord => self.duplicate_record(take(&mut values)),
             Primitive::PrecordRest(excluded) => self.record_rest(take(&mut values), excluded),
@@ -663,12 +644,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Primitive::Parraylength => {
                 self.js.length(&mut self.arena, take(&mut values), LengthObject::Array)
             }
-            Primitive::PjsCall(call) => {
-                // `compile_js_call` (external.rs) takes a pool list of rows
-                // and gives a row until T6x-d.
-                let values = self.arena.lists.push_iter(values.len(), values.map(B::node));
-                B::from_node(self.compile_js_call(cx, prim.primitive, call, values))
-            },
+            Primitive::PjsCall(call) => self.compile_js_call(cx, prim.primitive, call, &mut values),
             Primitive::PjsApply => match values.next() {
                 Some(callee) => {
                     let info = self.arena.js_info(crate::bir::JsPayload::Call(Default::default()));
@@ -677,12 +653,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 }
                 None => self.js.undefined(&mut self.arena, false),
             },
-            Primitive::PjsObjectCreate(specs) => {
-                // `compile_js_object_create` (external.rs) takes a pool list
-                // of rows and gives a row until T6x-d.
-                let values = self.arena.lists.push_iter(values.len(), values.map(B::node));
-                B::from_node(self.compile_js_object_create(cx, specs, values))
-            },
+            Primitive::PjsObjectCreate(specs) => self.compile_js_object_create(cx, specs, &mut values),
             Primitive::PjsFnMethod => {
                 let value = self.first_value(&mut values);
                 for unused in values.by_ref() {

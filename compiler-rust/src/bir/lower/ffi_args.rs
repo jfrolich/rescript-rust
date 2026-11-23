@@ -503,9 +503,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         specs: &[Param],
-        args: crate::bir::ListId,
+        args: &mut std::vec::Drain<'_, B::E>,
     ) -> (u32, Option<B::E>) {
-        let argc = self.arena.lists.get(args).len();
+        let argc = args.len();
         let mut at = 0;
         let mut count = 0;
         let mut effect = None;
@@ -517,8 +517,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 count += 1;
             } else {
                 let arg = if at < argc {
-                    // T6x-d: `compile_js_call` is given a pool list of rows.
-                    let value = B::from_node(self.arena.lists.get(args)[at]);
+                    let value = args.next().expect("an argument");
                     at += 1;
                     value
                 } else {
@@ -574,9 +573,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         specs: &[Param],
-        args: crate::bir::ListId,
+        args: &mut std::vec::Drain<'_, B::E>,
     ) -> (u32, Option<B::E>) {
-        let argc = self.arena.lists.get(args).len();
+        let argc = args.len();
         let mut at = 0;
         let mut count = 0;
         let mut effect = None;
@@ -590,8 +589,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 continue;
             }
             let arg = if at < argc {
-                // T6x-d: `compile_js_call` is given a pool list of rows.
-                let value = B::from_node(self.arena.lists.get(args)[at]);
+                let value = args.next().expect("an argument");
                 at += 1;
                 value
             } else {
@@ -640,7 +638,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         specs: &[Param],
-        args: crate::bir::ListId,
+        args: &mut std::vec::Drain<'_, B::E>,
         splice: bool,
     ) -> (u32, Option<B::E>) {
         if splice {
@@ -815,11 +813,10 @@ mod tests {
         let mut held = outputs;
         let mut args = Vec::new();
         let stmts = state.sequence_arguments(false, &mut held, &mut args);
-        let args: Vec<_> = args.into_iter().map(crate::bir::lower::out::row).collect();
-        let args = state.arena.lists.push(&args);
         use crate::bir::lower::js::Js;
         let mark = state.js.mark();
-        let (_, effect) = state.assemble_external_args_no_splice(Cx::value(), specs, args);
+        let (_, effect) =
+            state.assemble_external_args_no_splice(Cx::value(), specs, &mut args.drain(..));
         let value = state.js.array(&mut state.arena, mark, 0);
         let value = state.add_external_effect(Cx::value(), effect, value);
         let lowered = state.complete(
