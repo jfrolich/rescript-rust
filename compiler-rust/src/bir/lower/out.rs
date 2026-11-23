@@ -43,9 +43,14 @@ enum Slot<S> {
     Statement(S),
     Held(Span),
     /// A run consumed below the top: its first slot holds the run's length
-    /// and every other slot 1, so a forward scan crosses the run in one step
-    /// and a backward trim pops it slot by slot.
+    /// and every other slot 1, so a forward scan crosses the run in one
+    /// step.
     Dead(u32),
+    /// The last slot of such a run of more than one slot, with the run's
+    /// length: a read from the end and a trim cross the run in one step.
+    /// A forward scan does not reach it (it enters the run at its first
+    /// slot) and counts it as one slot if it does.
+    DeadEnd(u32),
 }
 /// One stack per lowering. A hole is distinct from any statement. The slots
 /// own the statement handles of the runs (THREE_TREES 11.4, "T6x-a: the
@@ -126,7 +131,7 @@ impl<B: JsStmt> StatementStack<B> {
             match slot {
                 Some(Slot::Statement(s)) => return Some(s),
                 Some(Slot::Held(span)) => (inner, inner_end) = (span.start as usize, span.end()),
-                Some(Slot::Dead(_)) | None => {}
+                Some(Slot::Dead(_) | Slot::DeadEnd(_)) | None => {}
             }
         })
     }
@@ -161,7 +166,8 @@ impl<B: JsStmt> StatementStack<B> {
     /// the statements of a run moved out, last first; a slot or a hold that
     /// gave its statements is left a hole, and the caller kills the run.
     /// Cost: O(slots of the run + held statements), one step per slot and
-    /// per held statement, each statement moved once.
+    /// per held statement, a dead range crossed in one, each statement
+    /// moved once.
     pub(super) fn take_run_rev(&mut self, span: Span) -> impl Iterator<Item = B::S> + '_ {
         let (start, mut at) = (span.start as usize, span.end());
         let (mut inner_start, mut inner) = (0usize, 0usize);
@@ -177,9 +183,21 @@ impl<B: JsStmt> StatementStack<B> {
             match self.slots[at].take() {
                 Some(Slot::Statement(s)) => return Some(s),
                 Some(Slot::Held(span)) => (inner_start, inner) = (span.start as usize, span.end()),
-                other => self.slots[at] = other,
+                other => {
+                    let range = Self::dead_end(&other);
+                    self.slots[at] = other;
+                    at = (at + 1).saturating_sub(range).max(start);
+                }
             }
         })
+    }
+    /// The slots a read from the end crosses at `slot`: the length of the
+    /// dead range that ends there, one for any other slot. O(1).
+    fn dead_end(slot: &Option<Slot<B::S>>) -> usize {
+        match slot {
+            Some(Slot::DeadEnd(len)) => *len as usize,
+            _ => 1,
+        }
     }
     /// The number of statements of one slot: none for a hole, a dead slot or
     /// an empty hold. O(1).
@@ -187,7 +205,7 @@ impl<B: JsStmt> StatementStack<B> {
         match &self.slots[at] {
             Some(Slot::Statement(_)) => 1,
             Some(Slot::Held(span)) => span.len as usize,
-            Some(Slot::Dead(_)) | None => 0,
+            Some(Slot::Dead(_) | Slot::DeadEnd(_)) | None => 0,
         }
     }
     /// Statement `index` of slot `at`, which holds more than `index`
@@ -198,7 +216,7 @@ impl<B: JsStmt> StatementStack<B> {
             Some(Slot::Held(span)) => {
                 self.held[span.start as usize + index].as_ref().expect("held statement")
             }
-            Some(Slot::Dead(_)) | None => unreachable!("a slot without a statement"),
+            Some(Slot::Dead(_) | Slot::DeadEnd(_)) | None => unreachable!("a slot without a statement"),
         }
     }
     /// The first slot of `[at, end)` that holds a statement. One step per
@@ -248,7 +266,7 @@ impl<B: JsStmt> StatementStack<B> {
         match &mut self.slots[slot as usize] {
             Some(Slot::Statement(s)) => s,
             Some(Slot::Held(span)) => self.held[span.start as usize].as_mut().expect("held statement"),
-            Some(Slot::Dead(_)) | None => unreachable!("a slot without a statement"),
+            Some(Slot::Dead(_) | Slot::DeadEnd(_)) | None => unreachable!("a slot without a statement"),
         }
     }
     /// B:1575 simplify_if reads the head of a branch, in place. Costs the
@@ -285,41 +303,46 @@ impl<B: JsStmt> StatementStack<B> {
         Some((at as u32, self.slot_ref(at, 0)))
     }
     /// The slot of the last statement of a run and its index in the slot.
-    /// One step on a trimmed run; otherwise one per trailing hole or dead
-    /// slot, counted in `scanned`.
+    /// One step on a trimmed run; otherwise one per trailing hole, empty
+    /// hold or dead range, counted in `scanned`: a dead range is crossed
+    /// from its last slot in one step, whatever its length.
     fn last_at(&mut self, span: Span) -> Option<(usize, usize)> {
+        let start = span.start as usize;
         let mut at = span.end();
-        while at > span.start as usize {
+        while at > start {
             at -= 1;
             let len = self.slot_len(at);
             if len != 0 {
                 return Some((at, len - 1));
             }
             self.scanned += 1;
+            at = (at + 1).saturating_sub(Self::dead_end(&self.slots[at])).max(start);
         }
         None
     }
     /// B:1575 simplify_if, `block_last_is_return_throw_or_continue`: the last
     /// statement, read in place. One step on a trimmed run; otherwise one
-    /// per trailing hole or dead slot.
+    /// per trailing hole or dead range.
     pub(super) fn last(&mut self, span: Span) -> Option<&B::S> {
         let (at, index) = self.last_at(span)?;
         Some(self.slot_ref(at, index))
     }
     /// The slot of the last statement of a run, as `last` finds it. Cost:
     /// O(1) on a trimmed run; otherwise one step per trailing hole or dead
-    /// slot.
+    /// range.
     pub(super) fn last_slot(&mut self, span: Span) -> Option<u32> {
         self.last_at(span).map(|(at, _)| at as u32)
     }
-    /// K0: C:119 append. Pop the holes and dead slots at the top, down to
+    /// K0: C:119 append. Pop the holes and dead ranges at the top, down to
     /// `floor`, so the run above `floor` ends in a statement or is empty.
-    /// One step per popped slot; each is popped once.
+    /// One step per popped hole and per popped dead range, which goes in
+    /// one truncation whatever its length; each is popped once.
     pub(super) fn trim(&mut self, floor: Span) -> Span {
-        while self.slots.len() > floor.start as usize
-            && self.slot_len(self.slots.len() - 1) == 0
-        {
-            self.slots.pop();
+        let floor_at = floor.start as usize;
+        while self.slots.len() > floor_at && self.slot_len(self.slots.len() - 1) == 0 {
+            let top = self.slots.len();
+            let range = Self::dead_end(&self.slots[top - 1]);
+            self.slots.truncate(top.saturating_sub(range).max(floor_at));
             self.scanned += 1;
         }
         self.since(Span {
@@ -329,7 +352,8 @@ impl<B: JsStmt> StatementStack<B> {
     }
     /// K0: C:119 append. Forget a run whose statements were released or
     /// moved: the top run is popped, a run below the top becomes one dead
-    /// range. One write per slot of the run.
+    /// range, marked at both ends with its length. One write per slot of
+    /// the run.
     pub(super) fn kill(&mut self, span: Span) {
         if span.end() == self.slots.len() {
             self.slots.truncate(span.start as usize);
@@ -340,6 +364,9 @@ impl<B: JsStmt> StatementStack<B> {
         }
         if span.len > 0 {
             self.slots[span.start as usize] = Some(Slot::Dead(span.len));
+        }
+        if span.len > 1 {
+            self.slots[span.end() - 1] = Some(Slot::DeadEnd(span.len));
         }
     }
     /// B:1225 block: record that `slot` holds an explicit empty block whose
@@ -454,7 +481,7 @@ impl<B: JsStmt> StatementStack<B> {
                     1
                 }
                 Some(Slot::Dead(len)) => len as usize,
-                None => 1,
+                Some(Slot::DeadEnd(_)) | None => 1,
             };
         }
         self.slots.truncate(run.start as usize);
@@ -973,9 +1000,10 @@ mod tests {
         // in the statements pushed, and all of it gone with the run.
         assert_eq!((thousand, ten_thousand), (1_000 * per_switch, 10_000 * per_switch));
         // A read from the end crosses the dead ranges of the last switch,
-        // not those of the switches before it.
+        // not those of the switches before it: one step per range (the
+        // runs of its clauses and of its default), whatever their width.
         assert_eq!(scanned, scanned_thousand);
-        assert_eq!(scanned, ((clauses + 1) * width) as usize);
+        assert_eq!(scanned, (clauses + 1) as usize);
     }
     /// One slot that holds `n` statements between two plain slots, read in
     /// place in order (`statement_refs`) and then taken last first
@@ -1015,6 +1043,51 @@ mod tests {
             stack.kill(run);
             assert_eq!(stack.mark(), Span::default());
         }
+    }
+    /// A statement, a dead range of `n` slots and a dead slot above it: a
+    /// read from the end (`last`), a take from the end (`take_run_rev`) and
+    /// a trim each cross the range in one step, at 1,000 and at 10,000
+    /// slots. Walking the range slot by slot costs `n` and fails each.
+    #[test]
+    fn a_dead_range_of_ten_thousand_slots_is_crossed_from_its_end_in_one_step() {
+        let crossed = |n: u32| {
+            let mut stack = StatementStack::<Rows>::default();
+            stack.push(Rows::stmt_from_node(NodeId(0)));
+            let mark = stack.mark();
+            for row in 1..=n {
+                stack.push(Rows::stmt_from_node(NodeId(row)));
+            }
+            let range = stack.since(mark);
+            stack.push(Rows::stmt_from_node(NodeId(n + 1)));
+            // The run below the top is taken and becomes one dead range;
+            // the statement above it is taken and leaves one dead slot.
+            assert_eq!(stack.take_run(range).count(), n as usize);
+            stack.kill(range);
+            assert_eq!(stack.take(n + 1), Rows::stmt_from_node(NodeId(n + 1)));
+            let run = stack.since(Span::default());
+            assert_eq!(run.len, n + 2);
+            let before = stack.scanned;
+            assert_eq!(stack.last(run).map(|statement| statement.row()), Some(NodeId(0)));
+            assert_eq!(stack.last_slot(run), Some(0));
+            let read = stack.scanned - before;
+            // The take puts the dead slots back as it found them.
+            let mut taken = 0;
+            for statement in stack.take_run_rev(run) {
+                assert_eq!(Rows::stmt_node(statement), NodeId(0));
+                taken += 1;
+            }
+            assert_eq!(taken, 1);
+            let before = stack.scanned;
+            let trimmed = stack.trim(Span::default());
+            // The hole the take left goes with the dead slots.
+            assert_eq!(trimmed.len, 0);
+            (read, stack.scanned - before)
+        };
+        // Two reads of the end (`last`, `last_slot`), each one step for the
+        // dead slot and one for the range; the trim pops the dead slot, the
+        // range and the hole of the taken statement.
+        assert_eq!(crossed(1_000), (4, 3));
+        assert_eq!(crossed(10_000), (4, 3));
     }
     #[test]
     fn append_finished_truncates_and_dummy_preserves() {
