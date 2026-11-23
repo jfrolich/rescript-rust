@@ -647,6 +647,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     finished: Finished::True,
                 }));
             }
+            // `compile_jsx` (jsx.rs) takes and gives rows until T6x-d.
             Primitive::Pjsx(jsx) => B::from_node(self.compile_jsx(jsx, values.map(B::node))),
             Primitive::Pimport(source) => self.compile_import(source),
             Primitive::Pduprecord => self.duplicate_record(take(&mut values)),
@@ -660,7 +661,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.js.length(&mut self.arena, take(&mut values), LengthObject::Array)
             }
             Primitive::PjsCall(call) => {
-                // T6x-c2: `compile_js_call` (external.rs) takes a pool list of rows.
+                // `compile_js_call` (external.rs) takes a pool list of rows
+                // and gives a row until T6x-d.
                 let values = self.arena.lists.push_iter(values.len(), values.map(B::node));
                 B::from_node(self.compile_js_call(cx, prim.primitive, call, values))
             },
@@ -673,7 +675,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 None => self.js.undefined(&mut self.arena, false),
             },
             Primitive::PjsObjectCreate(specs) => {
-                // T6x-c2: `compile_js_object_create` (external.rs) takes a pool list of rows.
+                // `compile_js_object_create` (external.rs) takes a pool list
+                // of rows and gives a row until T6x-d.
                 let values = self.arena.lists.push_iter(values.len(), values.map(B::node));
                 B::from_node(self.compile_js_object_create(cx, specs, values))
             },

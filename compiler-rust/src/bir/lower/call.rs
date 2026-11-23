@@ -232,6 +232,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Cost: O(A + H + S + J): consumes A child outputs, pops H dead call slots, sequences S
     /// held/statement slots, then call/eta/tail construction and J JS-normalizer/release
     /// visits. Each argument is appended to retained buffers, not cloned as a subtree.
+    /// The values are moved out of the retained vector once, in order; a
+    /// self call moves each once more into the reused vector `scratch`
+    /// (one move a value, no allocation once it has its capacity).
     pub(super) fn finish_application(
         &mut self,
         cx: Cx,
@@ -253,6 +256,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         outputs.clear();
         self.argument_outputs = outputs;
         let result = (|| {
+        // An inlined call is never a self call, so the order of the two
+        // tests decides nothing: `tail` needs the callee to be the
+        // enclosing function's variable (`self_call`), `inline` a module
+        // field of a global (`module_field_apply_target`).
+        debug_assert!(!(call.inline && call.tail.is_some()));
         if call.inline {
             let value = values.drain(..).next().expect("inlined value");
             return self.primitive_result(cx, statements, value);
