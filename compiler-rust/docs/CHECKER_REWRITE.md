@@ -6244,7 +6244,12 @@ eighth skeleton turn is the line "State:" below it.
    the printed `fixed` only: it does not watch such a row. Nothing that
    runs reaches it. R3h builds the body with a test of such a row; the
    scanner is widened or the decision says why it need not be.
-   State: open at this commit: G1 (d) of the eighth turn.
+   State: paid in the eighth turn (G1 (d)): the scanner is widened.
+   It now finds a row over a constructor with an unmatched field,
+   whether the tail is printed in full or as a reference to a node
+   printed before; checked on four hand-written forms; none of the
+   4,000 cases of the two plans without patterns has one. (A plan with
+   patterns reaches `match_unmatched` on purpose, since R3h.)
 6. Step tests are missing for three loops that are built:
    `lower_row_name`, `unname_row` and `match_fixed_fields`. For
    `lower_row_name` the cost line is also short of the truth: a chain
