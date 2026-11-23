@@ -4636,8 +4636,6 @@ impl Checker {
 // -----------------------------------------------------------------
 // `instance_poly` and `instance_label` (R3q; CHECKER_REWRITE 8.10)
 // -----------------------------------------------------------------
-// R3q removes this `allow` with its last `todo!`.
-#[allow(unused_variables, dead_code)]
 impl Checker {
     /// `instance_poly ?keep_names ~fixed univars sch`
     /// (compiler/ml/ctype.ml:1081-1095) for the polymorphic type node

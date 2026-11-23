@@ -5948,7 +5948,6 @@ fn assert_poly_left(c: &Checker) {
 /// node on the way; `sep_fill` for a tuple and a constructor;
 /// `poly_session` with one delayed copy.
 #[test]
-#[ignore = "R3q build"]
 fn a_node_that_holds_a_universal_variable_is_copied_whatever_its_level() {
     let mut c = poly_checker();
     let u = univar_at(&mut c, 1);
@@ -6023,7 +6022,6 @@ fn a_node_that_holds_a_universal_variable_is_copied_whatever_its_level() {
 /// copy); `poly_session` with two delayed copies of one source; the name
 /// in `instance_poly`.
 #[test]
-#[ignore = "R3q build"]
 fn two_places_of_a_holder_are_two_copies_and_of_a_generic_node_one() {
     for keep_names in [false, true] {
         let mut c = poly_checker();
@@ -6062,7 +6060,6 @@ fn two_places_of_a_holder_are_two_copies_and_of_a_generic_node_one() {
 /// on the way; `sep_child`, a node on the way with no binder entered
 /// since; `copy_sep`, the `Linked` frame.
 #[test]
-#[ignore = "R3q build"]
 fn a_type_that_reaches_itself_is_copied_once() {
     let mut c = poly_checker();
     let u = univar_at(&mut c, 1);
@@ -6117,7 +6114,6 @@ fn a_type_that_reaches_itself_is_copied_once() {
 /// polymorphic type and of an arrow; `copy_sep`, the `LeavePoly` frame
 /// and the `Linked` frame of a bound variable.
 #[test]
-#[ignore = "R3q build"]
 fn a_polymorphic_type_inside_gets_new_universal_variables() {
     let mut c = poly_checker();
     let a = univar_at(&mut c, 1);
@@ -6198,7 +6194,6 @@ fn a_polymorphic_type_inside_gets_new_universal_variables() {
 /// binder entered since, both answers; `sep_conflicts`, both answers and
 /// the scan past a binder that does not conflict.
 #[test]
-#[ignore = "R3q build"]
 fn a_node_on_the_way_is_copied_again_when_a_new_binding_is_free_in_it() {
     // 1: no conflict.
     let mut c = poly_checker();
@@ -6285,7 +6280,6 @@ fn a_node_on_the_way_is_copied_again_when_a_new_binding_is_free_in_it() {
 /// Reaches: R3q, R3f. Bodies and arms: `copy_sep_row` without `keep`,
 /// the three values of `m` and of the flag.
 #[test]
-#[ignore = "R3q build"]
 fn a_row_copied_without_fixed_loses_its_matched_tags_and_the_flag() {
     let row = |c: &mut Checker, more: Ty, fixed: bool, matched: bool| {
         let int = constr_at(c, GENERIC, INT, &[]);
@@ -6379,7 +6373,6 @@ fn a_row_copied_without_fixed_loses_its_matched_tags_and_the_flag() {
 /// home that was not opened, a field with types and one without; the
 /// chain.
 #[test]
-#[ignore = "R3q build"]
 fn a_row_over_a_variable_that_is_not_generic_shares_its_references() {
     let mut c = poly_checker();
     let a = univar_at(&mut c, 1);
@@ -6448,7 +6441,6 @@ fn a_row_over_a_variable_that_is_not_generic_shares_its_references() {
 /// Reaches: R3q. Bodies and arms: both arms of `instance_label`;
 /// `poly_session` with a result.
 #[test]
-#[ignore = "R3q build"]
 fn a_label_shares_its_record_parameters_with_its_argument() {
     let mut c = poly_checker();
     let parameter = var_at(&mut c, GENERIC);
@@ -6504,7 +6496,6 @@ fn a_label_shares_its_record_parameters_with_its_argument() {
 /// field; `poly_pass`, the fields of the walk, both answers of
 /// `dup_cell`.
 #[test]
-#[ignore = "R3q build"]
 fn a_field_that_holds_a_universal_variable_gets_its_cell_by_its_row() {
     for generic in [true, false] {
         let mut c = poly_checker();
@@ -6566,7 +6557,6 @@ fn a_field_that_holds_a_universal_variable_gets_its_cell_by_its_row() {
 ///
 /// Reaches: R3q, R3f.
 #[test]
-#[ignore = "R3q build"]
 fn instance_poly_at_ten_thousand() {
     let run = |shape: u32, n: u32| {
         let mut c = poly_checker();
