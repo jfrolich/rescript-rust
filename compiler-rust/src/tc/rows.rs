@@ -4695,7 +4695,22 @@ impl Checker {
     /// Cost: one copy of the two types, plus [`Checker::instance_poly`]'s
     /// for a polymorphic argument.
     pub fn instance_label(&mut self, fixed: bool, argument: Ty, result: Ty, vars: &mut Vec<Ty>) -> (Ty, Ty) {
-        todo!("R3q")
+        let argument = self.g.repr(argument);
+        let node = self.g.nodes[argument.0 as usize];
+        let poly = node.head & EXTENDED != 0 && self.extras.descriptors[node.a as usize] == ExtraDescriptor::Poly;
+        if !poly {
+            let first = self.g.nodes.len();
+            self.g.copy_begin();
+            let result = self.g.copy_ref(result);
+            let argument = self.g.copy_ref(argument);
+            self.g.copy_drain();
+            self.poly_pass(first);
+            return (argument, result);
+        }
+        self.poly_begin();
+        let argument = self.poly_walk(fixed, false, argument, vars);
+        let result = self.poly_session(result);
+        (argument, result)
     }
 
     /// Start a call: [`PolyCopy::slots`] grown to the graph (new rows
