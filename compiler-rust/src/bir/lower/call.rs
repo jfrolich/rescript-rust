@@ -232,9 +232,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Cost: O(A + H + S + J): consumes A child outputs, pops H dead call slots, sequences S
     /// held/statement slots, then call/eta/tail construction and J JS-normalizer/release
     /// visits. Each argument is appended to retained buffers, not cloned as a subtree.
-    /// The values are moved out of the retained vector once, in order; a
-    /// self call moves each once more into the reused vector `scratch`
-    /// (one move a value, no allocation once it has its capacity).
+    /// The values are moved out of the retained vector once, in order.
     pub(super) fn finish_application(
         &mut self,
         cx: Cx,
@@ -266,15 +264,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             return self.primitive_result(cx, statements, value);
         }
         if let Some(frame) = call.tail {
-            // T6x-d: `finish_self_call` (tail.rs) takes a slice of rows;
-            // the values are turned back into the reused vector `scratch`.
-            let mut rows = std::mem::take(&mut self.scratch);
-            debug_assert!(rows.is_empty());
-            rows.extend(values.drain(..).map(B::node));
-            let result = self.finish_self_call(frame, statements, &rows);
-            rows.clear();
-            self.scratch = rows;
-            return result;
+            return self.finish_self_call(frame, statements, values.drain(..));
         }
         let mut values = values.drain(..);
         let mut value = if let Some((module, member, arity)) = call.external {

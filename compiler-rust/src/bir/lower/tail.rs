@@ -37,14 +37,19 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// the callee, create copies in parameter order, then emit assignments in
     /// reverse order. Table growth and names are paid once per variable/copy.
     /// Arguments read iteration bindings, not the copies being assigned.
-    pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: &[NodeId]) -> Probed<B> {
+    /// The values are taken from `values` once each, in order, and every
+    /// one is consumed (released or assigned).
+    pub(super) fn finish_self_call(
+        &mut self,
+        frame: LoopRef,
+        statements: Span,
+        values: impl Iterator<Item = B::E>,
+    ) -> Probed<B> {
         let params = self.tail_frames[frame.0 as usize].params;
         self.tail_frames[frame.0 as usize].triggered = true;
         self.tail_copies.resize(self.arena.vars.len(), None);
         let mut assignments = std::mem::take(&mut self.tail_assignments);
-        for (i, &value) in values.iter().enumerate() {
-            // The values arrive as rows from call.rs until T6x-d.
-            let value = B::from_node(value);
+        for (i, value) in values.enumerate() {
             self.tail_arguments += 1;
             if i == 0 || i > params.len() { self.js.release(&mut self.arena, value); continue; }
             let param = VarId(params.start + i as u32 - 1);
