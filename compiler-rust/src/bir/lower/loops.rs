@@ -10,12 +10,13 @@ use crate::js_ir::ForDirection;
 pub(super) struct Loop(pub u32);
 
 /// Saved child outputs as lists in flight (`L`, the interface's statement
-/// list), not per-loop owned collections.
-pub(super) struct Plan<L> {
+/// list) and values in flight (`E`, its expression), not per-loop owned
+/// collections.
+pub(super) struct Plan<L, E> {
     node: NodeId,
     nodes: [Option<NodeId>; 3],
     blocks: [Option<L>; 3],
-    values: [Option<NodeId>; 2],
+    values: [Option<E>; 2],
     start: Span,
     var: Option<VarId>,
     direction: u16,
@@ -52,7 +53,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             _ => unreachable!("loop dispatch"),
         };
         let frame = Loop(self.loops.len() as u32);
-        self.loops.push(Plan { node, nodes, blocks: [None; 3], values: [None; 2],
+        self.loops.push(Plan { node, nodes, blocks: [None; 3], values: [None, None],
             start: self.statements.mark(), var, direction, label: None,
             needs_label: self.source.loop_needs_label_in_context(node, cx.switch_depth != 0) });
         frame
@@ -81,7 +82,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if index == body_index {
             if let Some(value) = out.value.take() { self.drop_pure_effect(B::node(value)); }
         } else {
-            self.loops[frame.0 as usize].values[index] = out.value.map(B::node);
+            self.loops[frame.0 as usize].values[index] = out.value;
         }
         let span = self.statements.since(Span { start: out.stmts.start, len: 0 });
         let list = self.statements.take_list(&mut self.js, &mut self.arena, span);
@@ -129,16 +130,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(s) for the saved preludes and (only for statement-valued while
     /// conditions) the body's immediate statements; never walks subtrees.
     pub(super) fn finish_loop(&mut self, cx: Cx, frame: Loop) -> Probed<B> {
-        let plan = &self.loops[frame.0 as usize];
+        let plan = &mut self.loops[frame.0 as usize];
         let start = plan.start;
         let blocks = plan.blocks;
-        let values = plan.values;
+        let [end, init] = std::mem::take(&mut plan.values);
         let var = plan.var;
         let direction = plan.direction;
         let label = plan.label;
         let op = self.source.node(plan.node).op();
-        let end = match values[0] {
-            Some(value) => B::from_node(value),
+        let end = match end {
+            Some(value) => value,
             None => self.js.undefined(&mut self.arena, false),
         };
         let statement = if op == Op::While {
@@ -167,8 +168,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.js.for_of(&mut self.arena, var.unwrap(), end, body, label, op == Op::ForAwaitOf)
         } else {
             let var = var.unwrap();
-            let init = match values[1] {
-                Some(value) => B::from_node(value),
+            let init = match init {
+                Some(value) => value,
                 None => self.js.undefined(&mut self.arena, false),
             };
             let end_block = blocks[0].unwrap();
@@ -290,7 +291,7 @@ mod tests {
     #[test]
     fn loop_plan_layout() {
         assert_eq!(std::mem::size_of::<Loop>(), 4);
-        assert_eq!(std::mem::size_of::<Plan<crate::bir::ListId>>(), 96);
+        assert_eq!(std::mem::size_of::<Plan<crate::bir::ListId, <crate::bir::j::rows::Rows as crate::bir::lower::js::Js>::E>>(), 96);
     }
 
     #[test]
