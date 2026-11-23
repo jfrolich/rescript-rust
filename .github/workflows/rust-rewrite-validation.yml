@@ -427,8 +427,20 @@ jobs:
         run: |
           api="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           deadline=$((SECONDS + 1800))
+          # An artifact is listed a moment before it can be downloaded: a
+          # download two seconds after the upload found nothing. Each of the
+          # two jobs ends right after its upload, so this also waits until
+          # neither is running. A rerun of this job alone lists no running
+          # job, and its artifacts are old.
+          uploading() {
+            local running
+            running=$(gh api "$api/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq \
+              '.jobs[] | select((.name == "build" or .name == "ocaml") and .status != "completed") | .name') || return 0
+            [[ -n "$running" ]]
+          }
           until names=$(gh api "$api/artifacts" --jq '.artifacts[].name') &&
-                grep -qx rescript <<< "$names" && grep -qx ocaml <<< "$names"; do
+                grep -qx rescript <<< "$names" && grep -qx ocaml <<< "$names" &&
+                ! uploading; do
             failed=$(gh api "$api/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq \
               '.jobs[] | select((.name == "build" or .name == "ocaml") and .status == "completed" and .conclusion != "success") | .name' || true)
             if [[ -n "$failed" ]]; then
