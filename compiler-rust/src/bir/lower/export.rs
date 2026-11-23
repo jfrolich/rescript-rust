@@ -97,9 +97,9 @@ impl Mentions {
 }
 
 /// The tables of the fold. They keep their capacity between units of a test
-/// that reuses them; a lowering owns one. `E` is the expression handle of
-/// the interface.
-pub(super) struct Tables<E> {
+/// that reuses them; a lowering owns one. `E` and `S` are the expression
+/// and the statement handles of the interface.
+pub(super) struct Tables<E, S> {
     /// The values of the exports, detached, in export order: the tables own
     /// them from `extract_exports` until `coerce_exports` consumes each.
     values: Vec<E>,
@@ -123,8 +123,14 @@ pub(super) struct Tables<E> {
     name_next: Vec<u32>,
     /// A name is a process-wide interned string, not a handle of the unit.
     names: ahash::AHashMap<Name, u32>,
-    /// Rebound exports inserted before a row, by ascending row.
-    inserted: Vec<(u32, NodeId)>,
+    /// Rebound exports inserted before a row, by ascending row: the tables
+    /// own each declaration until `coerced_list` moves it into the list.
+    inserted: Vec<(u32, S)>,
+    /// The declarations of the export tail (`Row::TAIL`), in row order,
+    /// owned as `inserted` are.
+    tail: Vec<S>,
+    /// The block statements `coerced_list` dissolves; empty between calls.
+    blocks: Vec<S>,
     /// The variable each export selects, in export order.
     pub(super) selected: Vec<VarId>,
     /// The fold is running: the declarations after the top level are not
@@ -153,7 +159,7 @@ pub(super) struct Tables<E> {
 
 /// Empty tables: no allocation. Written out because a derived `Default`
 /// would ask the handle for one.
-impl<E> Default for Tables<E> {
+impl<E, S> Default for Tables<E, S> {
     fn default() -> Self {
         Tables {
             values: Vec::new(),
@@ -169,6 +175,8 @@ impl<E> Default for Tables<E> {
             name_next: Vec::new(),
             names: Default::default(),
             inserted: Vec::new(),
+            tail: Vec::new(),
+            blocks: Vec::new(),
             selected: Vec::new(),
             folding: false,
             flattened: false,
@@ -996,6 +1004,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Release the statement of a removed row once nothing reads it.
     fn release_row(&mut self, index: u32) {
         let stmt = self.coercion.rows[index as usize].stmt;
+        // PROBE-GAP 4: a statement the tables name by its id, taken out of
+        // its block and released while the block or the statement stack
+        // holds it (`coerced_list` drops the stack's handle of a removed
+        // row of the top level).
         if self.arena.parents[stmt.index()].is_some() {
             self.arena.detach(stmt);
         }
@@ -1008,9 +1020,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// B:1420 define, for the export `export`: `let var = value`, as a row
     /// of kind `place` (`INSERTED` or `TAIL`) that carries the export's
     /// name. When the variable is declared already, the declaration binds a
-    /// copy that prints as the variable. Cost: O(1); it allocates only when
-    /// a table grows.
-    fn define(&mut self, export: u32, place: u32, var: VarId, value: Option<B::E>, kind: LetKind) -> NodeId {
+    /// copy that prints as the variable. The row keeps the statement's id;
+    /// the statement is given to the caller, which keeps it in `inserted`
+    /// or `tail`. Cost: O(1); it allocates only when a table grows.
+    fn define(&mut self, export: u32, place: u32, var: VarId, value: Option<B::E>, kind: LetKind) -> B::S {
         let var = if self.arena.vars.binder(var).is_some() {
             let copy = self.arena.new_var_id(self.arena.vars.name(var), self.arena.vars.order(var));
             let origin = self.origin(var);
@@ -1024,8 +1037,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         // Read before the statement takes the value.
         let function = value.as_ref().is_some_and(|value| self.js.kind(&self.arena, B::of(value)) == row::Kind::Fun);
         let has_value = value.is_some();
-        let stmt = B::stmt_node(self.js.declare(&mut self.arena, kind, var, value));
-        self.built(stmt);
+        let declaration = self.js.declare(&mut self.arena, kind, var, value);
+        let stmt = self.built(NodeId(self.js.stmt_id(&self.arena, &declaration)));
         // The declaration is a row of the final block: C:801 and O:30 read it.
         let row = self.coercion.rows.len() as u32;
         let mut bits = Row::DECL | place;
@@ -1050,7 +1063,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             *tail = row + 1;
         }
-        stmt
+        declaration
     }
 
     /// Give a variable the fold created its entries in the dense tables.
@@ -1405,7 +1418,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     let row = self.declaration_row_removed(target);
                     self.release_row(row);
                     self.js.release(&mut self.arena, value);
-                    self.define(index, Row::TAIL, export, Some(late), property);
+                    let stmt = self.define(index, Row::TAIL, export, Some(late), property);
+                    self.coercion.tail.push(stmt);
                     selected.push(export);
                     #[cfg(test)]
                     self.coercion.arms.push(Arm::MovedAlias);
@@ -1463,7 +1477,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     let row = self.reused_row_removed(index);
                     self.release_row(row);
                     self.js.release(&mut self.arena, value);
-                    self.define(index, Row::TAIL, export, Some(late), property);
+                    let stmt = self.define(index, Row::TAIL, export, Some(late), property);
+                    self.coercion.tail.push(stmt);
                     selected.push(export);
                     #[cfg(test)]
                     self.coercion.arms.push(Arm::MovedReused);
@@ -1510,7 +1525,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 LetKind::Strict
             };
             selected.push(rebound);
-            self.define(index, Row::TAIL, rebound, Some(value), property);
+            let stmt = self.define(index, Row::TAIL, rebound, Some(value), property);
+            self.coercion.tail.push(stmt);
             #[cfg(test)]
             self.coercion.arms.push(Arm::Rebound);
         }
@@ -1571,7 +1587,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             for index in undeclared.drain(..) {
                 let var = selected[index.0 as usize];
-                self.define(index.0, Row::TAIL, var, None, LetKind::Strict);
+                let stmt = self.define(index.0, Row::TAIL, var, None, LetKind::Strict);
+                self.coercion.tail.push(stmt);
             }
             self.coercion.trail = undeclared;
         }
@@ -1736,53 +1753,88 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// The statements of the coerced top level, written over the run `run`
     /// of the stack as one list: the rows that remain, each rebound export
     /// inserted before its row, then the rebound exports of the tail. A
-    /// flattened block loses its block statements. One step per row.
-    pub(super) fn coerced_list(&mut self, run: Span) -> crate::bir::ListId {
-        let mut out = std::mem::take(&mut self.scratch);
-        debug_assert!(out.is_empty());
+    /// flattened block loses its block statements. A first pass over the
+    /// rows counts the list and takes the statements of a dissolved block
+    /// out of it; the second moves each statement into the list where it
+    /// is: the top level's out of the run, in order (one per row of the top
+    /// level), the fold's declarations out of `inserted` and `tail`. One
+    /// step per row, and the list's: one and one per statement.
+    pub(super) fn coerced_list(&mut self, run: Span) -> B::L {
         let flattened = self.coercion.flattened;
-        let mut inserted = 0;
-        let mut blocks = std::mem::take(&mut self.coercion.path);
-        blocks.clear();
+        let mut len = self.coercion.inserted.len();
         for index in 0..self.coercion.rows.len() {
             self.coercion.steps += 1;
             let Row { stmt, bits } = self.coercion.rows[index];
-            while inserted < self.coercion.inserted.len()
-                && self.coercion.inserted[inserted].0 as usize == index
-            {
-                out.push(self.coercion.inserted[inserted].1);
-                inserted += 1;
-            }
             if bits & (Row::REMOVED | Row::INSERTED) != 0 {
                 continue;
             }
             if bits & Row::TAIL != 0 {
-                out.push(stmt);
+                len += 1;
                 continue;
             }
             if flattened {
+                // PROBE-GAP 4: a statement of a block, taken out of it by
+                // its id.
                 if self.arena.parents[stmt.index()].is_some() {
                     self.arena.detach(stmt);
                 }
                 if bits & Row::BLOCK != 0 {
-                    blocks.push(stmt);
                     continue;
                 }
             } else if bits & Row::NESTED != 0 {
                 continue;
             }
-            out.push(stmt);
+            len += 1;
         }
-        // The statements of a dissolved block were detached above.
+        let mut inserted = std::mem::take(&mut self.coercion.inserted);
+        let mut tail = std::mem::take(&mut self.coercion.tail);
+        let mut blocks = std::mem::take(&mut self.coercion.blocks);
+        let list = {
+            let rows = &self.coercion.rows;
+            let mut inserted = inserted.drain(..).peekable();
+            let mut tail = tail.drain(..);
+            let mut top = self.statements.take_run(run);
+            let mut index = 0;
+            let statements = std::iter::from_fn(|| loop {
+                if let Some((_, statement)) = inserted.next_if(|&(at, _)| at as usize == index) {
+                    return Some(statement);
+                }
+                let Row { stmt, bits } = *rows.get(index)?;
+                index += 1;
+                // The rows of the top level are the run's statements, in
+                // order; a removed one was released by `release_row`
+                // (PROBE-GAP 4) and its handle is dropped here.
+                let own = (bits & (Row::NESTED | Row::INSERTED | Row::TAIL) == 0)
+                    .then(|| top.next().expect("a statement of the top-level run"));
+                if bits & (Row::REMOVED | Row::INSERTED) != 0 {
+                    continue;
+                }
+                if bits & Row::TAIL != 0 {
+                    return tail.next();
+                }
+                if flattened {
+                    if bits & Row::BLOCK != 0 {
+                        // PROBE-GAP 1 for a block inside a block.
+                        blocks.push(own.unwrap_or_else(|| B::stmt_from_node(stmt)));
+                        continue;
+                    }
+                } else if bits & Row::NESTED != 0 {
+                    continue;
+                }
+                // PROBE-GAP 1 for a statement of a dissolved block.
+                return Some(own.unwrap_or_else(|| B::stmt_from_node(stmt)));
+            });
+            self.js.list(&mut self.arena, len as u32, statements)
+        };
+        // The statements of a dissolved block were taken out above.
         for block in blocks.drain(..) {
-            self.arena.release(block);
+            self.js.release_stmt(&mut self.arena, block);
         }
-        self.coercion.path = blocks;
-        let list = self.arena.lists.push_iter(out.len(), out.iter().copied());
-        self.statements.copied += out.len();
+        self.coercion.blocks = blocks;
+        self.coercion.inserted = inserted;
+        self.coercion.tail = tail;
+        self.statements.copied += len;
         self.statements.kill(run);
-        out.clear();
-        self.scratch = out;
         list
     }
 }
