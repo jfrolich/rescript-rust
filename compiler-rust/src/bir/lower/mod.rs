@@ -433,7 +433,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     call_arities: Vec<i32>,
     /// A module/member pair has no canonical dense handle; individual component handles do not index their sparse Cartesian product.
     call_arity_index: std::collections::HashMap<(crate::bir::ImportId, crate::bir::StrId), Option<call::AritySpan>>,
-    eta_arguments: Vec<NodeId>,
+    eta_arguments: Vec<B::E>,
     /// The storage of the naming log's replay (`replay_names`).
     names: names::Storage,
     calls: Vec<Option<call::Plan>>,
@@ -517,7 +517,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     location_work: Vec<(NodeId,bool)>,
     location_steps: usize,
     sequence_steps: usize,
-    evaluation: args::Evaluation<B::S>,
+    evaluation: args::Evaluation<B::E, B::S>,
     object_scratch: record::Scratch<B::E>,
     primitive_steps: usize,
     /// Let/Seq nodes read by row R5 step 0 of section 3.6.
