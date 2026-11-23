@@ -87,7 +87,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// O(1) shape selection and construction; tag data remains borrowed.
-    fn recursive_dummy(&mut self, tag: &TagInfo) -> NodeId {
+    fn recursive_dummy(&mut self, tag: &TagInfo) -> B::E {
         let mut dummy = if matches!(tag, TagInfo::Tuple | TagInfo::ModuleExport(_))
             || matches!(tag, TagInfo::Record(r) if r.array) {
             let mark = self.js.mark();
@@ -98,7 +98,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.js.object(&mut self.arena, mark, info)
         };
         self.js.assume_strict(&mut self.arena, &mut dummy);
-        B::node(dummy)
+        dummy
     }
 
     /// O(a + field-name bytes): turn the self block's already lowered fields
@@ -112,14 +112,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let Primitive::Pmakeblock(tag, _) = &prims[primitive.index()].primitive else { unreachable!() };
         if mode == Mode::Update {
             let target = self.js.var(&mut self.arena, var);
-            let call = self.primitive_runtime("Primitive_object", "updateDummy", &[B::node(target), B::node(value)]);
-            self.drop_pure_effect(call);
+            let mark = self.js.mark();
+            self.js.push(target);
+            self.js.push(value);
+            let call = self.runtime_call("Primitive_object", "updateDummy", mark);
+            self.drop_pure_effect(B::node(call));
             let dummy = self.recursive_dummy(tag);
-            let placeholder = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(B::from_node(dummy)));
+            let placeholder = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(dummy));
             self.rec_members[member].placeholder = Some(placeholder);
         } else {
             let dummy = self.recursive_dummy(tag);
-            let declaration = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(B::from_node(dummy)));
+            let declaration = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(dummy));
             self.statements.push(declaration);
             let mut shell = value;
             assert!(self.js.kind(&self.arena, B::of(&shell)) == Kind::BlockLit, "recursive self block");
