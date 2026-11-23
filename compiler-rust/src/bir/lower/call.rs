@@ -398,7 +398,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// `call_node` on handles: `callee(args)`, the constructor performs no
     /// rewrite. O(A): one move and one step per argument; allocates
     /// nothing in a warm unit.
-    fn call_values(
+    pub(super) fn call_values(
         &mut self,
         callee: B::E,
         args: impl Iterator<Item = B::E>,
