@@ -3457,8 +3457,8 @@ fresh_abstract, non_recursive_abbrev}.
 A prototype of this slice was written in the design turn and every
 test of the slice passed against it. It is not in the repository; it
 is a comment on the pull request of the ninth skeleton turn (one
-fenced diff against trunk b877a4814, each body under a line
-`// R3S-PROTOTYPE`). You MAY read it. It meets the doc comments;
+fenced diff against the skeleton as that pull request committed it,
+each body under a line `// R3S-PROTOTYPE`). You MAY read it. It meets the doc comments;
 nothing it does is forbidden by this prompt. Where your code differs
 from it, the doc comment decides.
 
