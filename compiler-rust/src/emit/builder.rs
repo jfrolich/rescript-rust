@@ -179,7 +179,10 @@ impl<'a> S<'a> {
     /// The expression the statement evaluates first, read in place: the
     /// value of an expression statement, of a `return`, of a `throw` and of
     /// a declaration that has one; the test of an `if` and of a `while`.
-    /// `None` for every other statement. Its row is [`Builder::row`] of it.
+    /// `None` for every other statement. (The lowering's `JsStmt::value_of`
+    /// also gives the scrutinee of a `switch`: the builder makes no
+    /// `switch` yet, and the slice that adds one adds its scrutinee here.)
+    /// Its row is [`Builder::row`] of it.
     /// O(1): the statement's node and one field of it.
     pub fn value(&self) -> Option<&Expression<'a>> {
         match &self.stmt {

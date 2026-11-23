@@ -4905,19 +4905,21 @@ before T6x-a or after it.
 | T6x-e | `export.rs` 37 (10 `from_node`, 7 `node`, 15 `at`, 4 `stmt_from_node`, 1 `stmt_node`), 36 after b3b; and ten `NodeId(self.js.id(..))` in `export.rs` and `jsx.rs` | After b3b `extract_exports` takes the unit's value as a handle; `Tables::values` still holds rows (it turns each back with `B::node(self.js.pop())`). `coerced_list` gives a pool list that `complete_unit` wraps ((g)) |
 | T6x-f | The seven transition functions of the two traits, `push_list`, and what calls them when e is merged | After b3b nothing in `close.rs` or `out.rs` calls one; `mod.rs` has two, both another slice's ((g)). `finish` reads the root by its id and needs none |
 
-Read off the code for the design of c1, not probed: the vector the
-values of an application or a primitive are sequenced into is one field
-of `State`, `argument_values`, and it is taken and given back in files
-of three rows (`call.rs`, `prim.rs`, `konst.rs`, `import.rs`,
-`prim_block.rs`: c1; `external.rs`, `ffi_args.rs`, `jsx.rs`: c2;
-`tail.rs`: c4). "The four c slices share no file" holds; "they edit no
-function of another cluster" does not follow for a field every cluster
-reads. Whether c1 can change its type alone, with a wrap at each use in
-the other clusters, or whether the field is a slice of its own before
-c1 to c4 (as T6x-a1 was for the statement stack) is the first question
-of c1's probe. `finish_self_call` (`tail.rs`, c4) takes `values:
-&[NodeId]` from `call.rs` (c1): a row of T6x-d that carries the same
-vector.
+Read off the code for the design of c1, not probed (corrected in the
+review of this turn, which read every use): the vector the values of an
+application or a primitive are sequenced into is one field of `State`,
+`argument_values`. In production it is taken and given back in two
+functions, both of c1: `finish_application` (`call.rs`) and
+`finish_primitive_payload` (`prim.rs`). Every other file that names it
+(`konst.rs`, `import.rs`, `prim_block.rs`, `external.rs`, `ffi_args.rs`,
+`jsx.rs`, `tail.rs`) reads its capacity in an allocation test and
+nothing else, so the field's element type can change in c1 without a
+wrap in another cluster. What crosses clusters is what is made from it:
+`finish_self_call` (`tail.rs`, c4) takes `values: &[NodeId]` from
+`call.rs`, a row of T6x-d, and the externals are given a pool list
+(`compile_js_call`) or an iterator of rows (`compile_jsx`). Whether c1
+can be built beside c2 to c4 with those calls wrapped is the first
+question of c1's probe.
 
 **(h) Changes to earlier sections of this document**, each with its
 reason:
@@ -4928,7 +4930,8 @@ reason:
   `JsStmt::with_stmt_at`.
 - "T6: the interface" (a), the read-back table, "`JSeq` ends in
   `complete_unit`, `extract_exports`": after b3b only `extract_exports`
-  walks the spine.
+  walks the spine. (The line is not edited in this turn: it is true
+  once b3b is merged, and the review of b3b edits it.)
 - "T6x: the cut", the row of T6x-b: rewritten for b3b. `close.rs`
   "takes the interface from `out.rs`" as the row said; what the row did
   not say is in (b), (c) and (f).
@@ -4936,7 +4939,7 @@ reason:
   stack: `close(a, ListId)` is `close(js: &B, a, B::L)` after b3b.
 - "T6: the cut of the interface, revisited", row T6x: `State::{leaf,
   seq, effect}` were b3a's; `complete_unit`, `complete` and `finish`
-  are b3b's.
+  are b3b's. (Not edited in this turn either, for the same reason.)
 - T6r gains one thing ((c)): the descent of a returned value. T6s
   gains the root's row in `finish` ((b)).
 - "T6x-a: the statement stack, after the probe" (a), the table of the
@@ -4963,6 +4966,51 @@ reason:
 - `scripts/count_lowering_ids.py` stops with an error where it finds
   no file (from the repository root it printed zeros) and has a
   `--self-test`.
+
+**Corrections after the review of this turn.** Made in place by the
+reviewer's commit, or owed as said:
+
+1. (i): `argument_values` is taken and given back in two functions of
+   c1 only; the paragraph and step 1 of the probe prompt of T6x-c1 said
+   it crossed three rows. Corrected in both places.
+2. The prompt of T6x-b3b set `Instruction count` at most +0.02% as a
+   gate. The default build does not reach the lowering, and b3a read
+   +0.023% on code it cannot run: a limit the builder cannot control.
+   Reworded to a report with a stop above the job's spread. The prompt
+   listed the fragment as a fifth item of "four commits": it is part of
+   commit 4.
+3. (h) listed two lines of earlier sections as changed that this turn
+   did not edit; each now says so.
+4. `out.rs`: the cost note of `Runs::last` and the doc comment of
+   `Slot::Dead` still described a slot-by-slot crossing; corrected. The
+   invariant `Slot::DeadEnd` rests on is stated in its doc comment (no
+   assertion checks it: a check would read the range it is there to
+   skip).
+5. `emit/builder.rs`, `S::value` gives nothing for a `switch`, where
+   `JsStmt::value_of` gives the scrutinee. The builder makes no `switch`
+   yet; the doc comment says who adds it.
+6. The self-test of `scripts/count_lowering_ids.py` is run by the
+   `script-tests` job (the reviewer's commit adds the step). It pins no
+   count, by intent: it fails where the script finds no file or no
+   call, not when a slice moves the number.
+7. Owed by the design turn of T6v, which puts the builder behind the
+   interface before T6s: the two reads of an id as a row that b3b
+   leaves (`close::decide`, the `return` arm, until T6r; `finish`, the
+   root, until T6s) are right on rows only. That the id is the row is
+   a fact of `Rows`, not a promise of `Js::id` or `JsStmt::stmt_id`
+   (on the builder the id is the `node_id` of an owned node). T6v says
+   how its tests reach `finish` on the builder, or that they stop
+   before it; if T6r leaves the `return` arm's turn-back in place,
+   T6v's design owes the same for `decide`.
+8. Owed by the next design turn, as tests: an allocation count around
+   the reads of `a_statement_of_a_list_in_flight_is_read_where_it_is`
+   (the doc comment of `with_stmt_at` says it allocates nothing, and no
+   test would see an allocation); a `return` without a value among the
+   shapes of `a_statement_reads_the_expression_it_evaluates_first`.
+9. Accepted as it is: in `tail.rs` the test
+   `a_block_wider_than_the_operand_stack_is_unblocked_without_growing_it`
+   is renamed `a_body_wider_than_the_operand_stack_is_moved_without_growing_it`
+   and its assertion message reworded; its condition is unchanged.
 
 ### 11.5 Worker prompt for T4b
 
@@ -7443,7 +7491,8 @@ made:
            assert_eq!(pool.realized, 3);
        }
 
-5. changes/three-trees-t6x-b3b.internal.md, one bullet.
+The fragment changes/three-trees-t6x-b3b.internal.md, one bullet, is
+part of commit 4: the slice is four commits.
 
 Tests. You edit only what is named above: the two calls and the
 imports of the test of close.rs, the import line of the tests of
@@ -7530,8 +7579,12 @@ and genType green, read before the pull request is marked ready (after
 commit 2 the payloads made after the export fold have ids one lower on
 rows, which no decision reads: these jobs are the check, and if one is
 not clean you stop and report the first difference); the four
-allocation counts; CI `Instruction count` at most +0.02%, one rerun
-allowed, both figures reported.
+allocation counts; CI `Instruction count` read and reported, with one
+rerun and both figures. For this slice that replaces the limit of the
+common block: the default build does not reach the lowering, so the
+figure is the job's spread (the three parts of this row on trunk read
++0.014%, -0.039% and +0.023%). If both runs read above +0.05%, stop and
+report the functions the job lists.
 
 Run by the design turn, in a copy that was not pushed: these four
 commits one after the other; after each, the three filters passed; on
@@ -7603,9 +7656,12 @@ Steps:
 1. The storage: `State::argument_values` and the `values` parameter of
    `sequence_arguments` and of `finish_primitive_values` hold `B::E`
    (`Vec<Option<B::E>>` if a value is moved out of the middle, `Vec<
-   B::E>` if not: say which and why). Every file that takes the field
-   compiles, by a wrap where the file is not of this row (external.rs,
-   ffi_args.rs, jsx.rs, tail.rs): count those wraps by file.
+   B::E>` if not: say which and why). The field is taken and given
+   back in call.rs and prim.rs only; the other files read its capacity
+   in a test. What is made from it leaves the row (the `values` slice
+   `finish_self_call` of tail.rs takes, the pool list `compile_js_call`
+   and the iterator `compile_jsx` take): wrap at those calls and count
+   the wraps by file.
 2. prim.rs: the reads `B::from_node(values[i])` become moves or reads
    in place; `push_values`, `bin_of`, `first_value`.
 3. konst.rs (`constant_children`, `constant_values`), record.rs,

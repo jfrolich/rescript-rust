@@ -43,13 +43,17 @@ enum Slot<S> {
     Statement(S),
     Held(Span),
     /// A run consumed below the top: its first slot holds the run's length
-    /// and every other slot 1, so a forward scan crosses the run in one
-    /// step.
+    /// and every slot after it 1 (the last is a `DeadEnd` when the run has
+    /// more than one slot), so a forward scan crosses the run in one step.
     Dead(u32),
     /// The last slot of such a run of more than one slot, with the run's
     /// length: a read from the end and a trim cross the run in one step.
     /// A forward scan does not reach it (it enters the run at its first
-    /// slot) and counts it as one slot if it does.
+    /// slot) and counts it as one slot if it does. The length is right for
+    /// as long as the slot is there: nothing writes a statement into a
+    /// dead slot (a fill and a hold assert a hole, a take of a dead slot
+    /// panics), a later `kill` over part of the run writes dead slots
+    /// only, and a truncation that cuts the run removes this slot first.
     DeadEnd(u32),
 }
 /// One stack per lowering. A hole is distinct from any statement. The slots
@@ -600,7 +604,7 @@ impl<B: JsStmt> super::js_stmt::Runs<B> for StatementStack<B> {
         Span::default()
     }
     /// The stack's `last`: O(1) on a run that ends in a statement, else one
-    /// step per trailing hole or dead slot.
+    /// step per trailing hole, empty hold or dead range.
     fn last(&mut self, run: Span) -> Option<&B::S> {
         StatementStack::last(self, run)
     }
