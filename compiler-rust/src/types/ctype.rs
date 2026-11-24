@@ -9678,6 +9678,10 @@ pub(crate) fn merge_row_fields<'a, 'b>(
 /// Matches OCaml's `unify_row` (ctype.ml:2538): uses `merge_row_fields` to sort
 /// and partition fields, then unifies pairs. The result has fields in alphabetical
 /// order, matching OCaml's `row_repr` which flattens the sorted chain.
+///
+/// While GADT instances are traced, `set_more` first lowers the whole row
+/// to the level of its row variable (compiler/ml/ctype.ml:2609-2611); a
+/// unit that is not tracing pays one load and one branch per side for that.
 fn unify_rows<'a>(
     ctx: &'a TypeContext,
     state: &mut UnifyState,
@@ -9805,6 +9809,18 @@ fn unify_rows<'a>(
             }]));
         }
         let rm = row_more(ctx, row);
+        // OCaml compiler/ml/ctype.ml:2609-2611: while tracing GADT instances,
+        // the whole row is lowered to the level of its own row variable,
+        // which refuses an instance of a deeper equation's set. OCaml lowers
+        // a fresh node `newgenty (Tvariant row)`, so that no node of the
+        // program changes level but the row's contents: one node and one row
+        // descriptor, only while tracing.
+        if ctx.trace_gadt_instances()
+            && let Some(env) = state.env()
+        {
+            let whole = ctx.new_generic_type(TypeDesc::Tvariant(ctx.new_row_desc(row.clone())));
+            update_level_checked(ctx, env, ctx.get_level(rm), whole)?;
+        }
         if row_is_fixed {
             if more == rm {
                 return Ok(());
