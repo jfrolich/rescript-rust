@@ -6689,7 +6689,6 @@ fn used_at_int(c: &mut Checker) -> (Ty, Ty) {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn an_expansion_under_tracing_gives_the_set_its_first_members() {
     let mut c = case_checker(Mode::Success);
     assert_eq!(c.gadt & (GADT_LOCAL | GADT_TRACING | GADT_MEMBER), GADT_LOCAL);
@@ -6730,7 +6729,6 @@ fn an_expansion_under_tracing_gives_the_set_its_first_members() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn a_node_below_its_equation_is_not_expanded_under_tracing() {
     let mut c = case_checker(Mode::Explain);
     let (below, int) = (constr_at(&mut c, CASE - 1, N0, &[]), constr_at(&mut c, CASE - 1, INT, &[]));
@@ -6770,7 +6768,6 @@ fn a_node_below_its_equation_is_not_expanded_under_tracing() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn a_copy_with_the_environment_joins_the_set_of_its_source() {
     let mut c = case_checker(Mode::Success);
     let (y, _) = used_at_int(&mut c);
@@ -6826,7 +6823,6 @@ fn a_copy_with_the_environment_joins_the_set_of_its_source() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn unify2_adds_the_chain_of_the_side_that_is_in_no_set() {
     for swapped in [false, true] {
         let mut c = case_checker(Mode::Success);
@@ -6865,7 +6861,6 @@ fn unify2_adds_the_chain_of_the_side_that_is_in_no_set() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn expanding_a_head_into_a_set_adds_the_chain_whatever_the_flag() {
     let mut c = case_checker(Mode::Success);
     let (y, int) = used_at_int(&mut c);
@@ -6919,7 +6914,6 @@ fn expanding_a_head_into_a_set_adds_the_chain_whatever_the_flag() {
 ///
 /// Reaches: R3s.
 #[test]
-#[ignore = "R3s build"]
 fn a_restore_undoes_an_addition_and_a_keep_keeps_it() {
     let mut c = checker(Mode::Success);
     c.enter_instance_scope(CASE);
@@ -6970,7 +6964,6 @@ fn a_restore_undoes_an_addition_and_a_keep_keeps_it() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn leaving_a_case_puts_its_environment_back() {
     let (mut c, _) = pattern_checker(Mode::Success);
     c.g.level = CASE;
@@ -7024,7 +7017,6 @@ fn leaving_a_case_puts_its_environment_back() {
 ///
 /// Reaches: R3s.
 #[test]
-#[ignore = "R3s build"]
 fn an_existential_type_alone_turns_tracing_on() {
     for local in [false, true] {
         let mut c = checker(Mode::Success);
@@ -7086,7 +7078,6 @@ fn an_existential_type_alone_turns_tracing_on() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn a_constructor_expanded_under_tracing_is_not_linked_at_once() {
     let mut c = case_checker(Mode::Success);
     let (y, z, int) = (constr(&mut c, N0, &[]), constr(&mut c, N0, &[]), constr(&mut c, INT, &[]));
@@ -7117,7 +7108,6 @@ fn a_constructor_expanded_under_tracing_is_not_linked_at_once() {
 ///
 /// Reaches: R3h, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn the_wrappers_of_the_kernel_trace_by_themselves() {
     let mut c = case_checker(Mode::Success);
     let (parameter, result) = (constr(&mut c, N0, &[]), constr(&mut c, N0, &[]));
@@ -7173,7 +7163,6 @@ fn the_wrappers_of_the_kernel_trace_by_themselves() {
 ///
 /// Reaches: R3h, R3r, R3s.
 #[test]
-#[ignore = "R3s build"]
 fn a_pair_after_the_first_equation_of_a_pattern_is_traced() {
     let (mut c, _) = pattern_checker(Mode::Success);
     c.g.level = CASE;
@@ -7208,7 +7197,6 @@ fn a_pair_after_the_first_equation_of_a_pattern_is_traced() {
 ///
 /// Reaches: R3s.
 #[test]
-#[ignore = "R3s build"]
 fn instance_sets_at_ten_thousand() {
     let run = |shape: u32, n: u32| {
         let mut c = checker(Mode::Success);
@@ -7275,4 +7263,206 @@ fn instance_sets_at_ten_thousand() {
         let (small, large) = (run(shape, 1_000), run(shape, 10_000));
         assert!(large <= 11 * small, "shape {shape}: {small} {large}");
     }
+}
+
+/// The marks a walk holds survive an addition to an instance set. The
+/// sets are `Type_set`s and the walks keep `visited` and `seen` as lists
+/// of their own call (compiler/ml/ctype.ml:1505, 1511; 1393-1394;
+/// typecore.ml:2505), so an addition never touches what a walk has
+/// marked:
+///
+/// ```text
+/// (* compiler/ml/env.ml:1332-1345, add_gadt_instance_chain *)
+/// let add_gadt_instance_chain env lv t =
+///   let r =
+///     try List.assoc lv env.gadt_instances with Not_found -> assert false
+///   in
+///   let rec add_instance t =
+///     let t = repr t in
+///     if not (Type_set.mem t !r) then (
+///       set_typeset r (Type_set.add t !r);
+///       match t.desc with
+///       | Tconstr (p, _, memo) -> may add_instance (find_expans Private p !memo)
+///       | _ -> ())
+///   in
+///   add_instance t
+/// (* compiler/ml/ctype.ml:770-774, copy *)
+///         (match env with
+///         | Some env when Env.has_local_constraints env -> (
+///           match Env.gadt_instance_level env ty with
+///           | Some lv -> Env.add_gadt_instances env lv [t]
+///           | None -> ())
+///         | _ -> ());
+/// ```
+///
+/// A generation of `Checker::marks` is held over a member of the set and
+/// over a node that is no member; `add_instance_chain` marks the member
+/// and adds the other node, and `copy_in` marks a member it copies: both
+/// marks are the walk's afterwards.
+///
+/// Bodies: `add_instance_chain`, `copy_in`, `fresh_instance_marks`.
+///
+/// Reaches: R3h, R3s.
+#[test]
+fn the_marks_of_a_walk_survive_an_addition_to_an_instance_set() {
+    let mut c = case_checker(Mode::Success);
+    let (y, _) = used_at_int(&mut c);
+    let member = c.g.repr(y);
+    assert_eq!(c.instance_level(member), CASE);
+    let other = constr(&mut c, INT, &[]);
+    assert_eq!(c.instance_level(other), 0);
+    let walk = c.fresh_marks();
+    c.marks[member.0 as usize] = walk;
+    c.marks[other.0 as usize] = walk;
+    c.add_instance_chain(CASE, other);
+    assert_eq!(c.instance_level(other), CASE);
+    assert_eq!(c.marks[member.0 as usize], walk, "a member of the set");
+    assert_eq!(
+        c.marks[other.0 as usize], walk,
+        "the first node of the chain"
+    );
+    // The copy with the environment: the source of a copied member.
+    let pair = tuple(&mut c, &[y, y]);
+    c.g.level = CASE;
+    c.generalize(pair);
+    let source = c.g.repr(y);
+    assert_eq!(c.instance_level(source), CASE);
+    let walk = c.fresh_marks();
+    c.marks[source.0 as usize] = walk;
+    let copied = c.copy_in(pair);
+    let copied = c.g.repr(copied);
+    let first = c.g.repr(c.g.lists[c.g.nodes[copied.0 as usize].b as usize]);
+    assert_ne!(first, source);
+    assert_eq!(c.instance_level(first), CASE);
+    assert_eq!(c.marks[source.0 as usize], walk, "a member that was copied");
+}
+
+/// [`case_checker`] with the equation `n0 := (int => n0)` in place of
+/// `n0 := int`: pattern mode adds an equation that names its type below
+/// an arrow at the top (the arrow is not searched while not strict,
+/// `| _ -> if strict then ...`, compiler/ml/ctype.ml:1525-1529).
+fn arrow_case_checker() -> Checker {
+    let (mut c, _) = pattern_checker(Mode::Success);
+    c.g.level = CASE;
+    c.enter_instance_scope(CASE);
+    let (n0, inner, int) = (
+        constr(&mut c, N0, &[]),
+        constr(&mut c, N0, &[]),
+        constr(&mut c, INT, &[]),
+    );
+    let destination = arrow(&mut c, &[int], inner);
+    assert!(c.unify_pattern(CASE, true, true, n0, destination).is_ok());
+    assert_eq!(c.equations.len(), 1);
+    c.g.level = CASE + 1;
+    c
+}
+
+/// `lower_args` stops at an arrow it saw, also when the arrow is a
+/// member of an instance set that each expansion adds the chain to:
+///
+/// ```text
+/// (* compiler/ml/typecore.ml:2503-2512 *)
+/// let rec lower_args env seen ty_fun =
+///   let ty = expand_head env ty_fun in
+///   if List.memq ty seen then ()
+///   else
+///     match ty.desc with
+///     | Tarrow (params, ty_fun) ->
+///       List.iter
+///         (fun ({typ} : Types.arg) ->
+///           try unify_var env (newvar ()) typ with Unify _ -> assert false)
+///         params;
+///       lower_args env (ty :: seen) ty_fun
+///     | _ -> ()
+/// ```
+///
+/// Under `n0 := (int => n0)` a node of `n0` expands, under tracing, to
+/// an arrow whose result is that node again (`find_repr`, ctype.ml:720,
+/// 782), and the arrow joins the set of [`CASE`] (ctype.ml:1226-1227);
+/// `expand_head` then adds the chain of the node (ctype.ml:1271-1276).
+/// The second turn of the walk meets the same arrow, which is in `seen`:
+/// the walk returns after two turns and two expansions.
+///
+/// Bodies: `add_instance_chain` (through `expanded_instance`),
+/// `subst_traced`, `inherit_own`, `find_own_expansion`.
+///
+/// Reaches: R3h, R3s.
+#[test]
+fn lower_args_stops_at_an_arrow_it_saw_when_the_arrow_is_a_member() {
+    let mut c = arrow_case_checker();
+    let node = constr(&mut c, N0, &[]);
+    let count = steps::scope(|| c.lower_args(node));
+    // The node was expanded under tracing: it joined the set with its
+    // expansion (ctype.ml:1227).
+    let node = c.g.repr(node);
+    assert_eq!(c.instance_level(node), CASE);
+    assert_eq!(c.gadt & GADT_TRACING, 0);
+    // Two turns, each one expansion (the second a memo hit) and its
+    // chain over a set of a few members: no third turn.
+    assert!(count <= 40, "{count}");
+}
+
+/// `non_recursive_abbrev` keeps a node on the way when the head its
+/// expansion reaches is a member of an instance set, so that the node,
+/// met again below its own expansion, is skipped:
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:1503-1511, local_non_recursive_abbrev *)
+/// let rec local_non_recursive_abbrev strict visited env p ty =
+///   let ty = repr ty in
+///   if not (List.memq ty visited) then
+///     match ty.desc with
+///     | Tconstr (p', args, _abbrev) -> (
+///       if Path.same p p' then raise Occur;
+///       if (not strict) && is_contractive env p' then ()
+///       else
+///         let visited = ty :: visited in
+///         try
+///           (* try expanding, since [p] could be hidden *)
+///           local_non_recursive_abbrev strict visited env p
+///             (try_expand_head try_expand_once_opt env ty)
+/// ```
+///
+/// Under `n0 := (int => n0)`, `k2<int, (t, int, ..., int)>` with `t` a
+/// node of `n0`, the second parameter of `k2` constrained (strict, as
+/// `a_type_on_the_way_is_skipped_whatever_its_strictness` builds its
+/// witnesses), and a source type that occurs nowhere (`n1`): `t` is
+/// entered strictly and put on the way; its expansion is an arrow that
+/// joins the set of [`CASE`], and `t` with it (ctype.ml:1226-1227,
+/// 1271-1276); the arrow is entered strictly, and its result is `t`
+/// again, on the way: skipped. The answer is "not recursive", and the
+/// walk is one step a node of the tuple: the steps at 1,000 and 10,000
+/// `int`s are in a linear relation.
+///
+/// Bodies: `add_instance_chain` (through `expanded_instance`),
+/// `subst_traced`, `inherit_own`.
+///
+/// Reaches: R3h, R3s.
+#[test]
+fn a_type_on_the_way_stays_on_the_way_when_its_expansion_joins_a_set() {
+    let run = |n: u32| {
+        let mut c = arrow_case_checker();
+        c.types.constrained_bits = vec![0; K2 as usize + 1];
+        c.types.constrained_bits[K2 as usize] = 2;
+        let t = constr(&mut c, N0, &[]);
+        let mut elements = vec![t];
+        for _ in 0..n {
+            let int = constr(&mut c, INT, &[]);
+            elements.push(int);
+        }
+        let int = constr(&mut c, INT, &[]);
+        let second = tuple(&mut c, &elements);
+        let ty = constr(&mut c, K2, &[int, second]);
+        let mut answer = Ok(false);
+        let count = steps::scope(|| answer = c.non_recursive_abbrev(N1, ty));
+        assert_eq!(answer, Ok(true));
+        assert!(c.frames.is_empty());
+        assert_eq!(c.gadt & GADT_TRACING, 0);
+        let t = c.g.repr(t);
+        assert_eq!(c.instance_level(t), CASE);
+        count
+    };
+    let (small, large) = (run(1_000), run(10_000));
+    assert!(small >= 1_000, "{small}");
+    assert!(large <= 11 * small, "{small} {large}");
 }

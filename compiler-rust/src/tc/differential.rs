@@ -5215,13 +5215,12 @@ mod tests {
     ///   and in the explaining mode what it wrote stays (decision 14):
     ///   `po<int>` is its expansion afterwards. The old side leaves
     ///   `po<int>`.
-    const EXPLAINED_UNTIL_R3S: [u64; 5] =
-        [10_000_129, 11_000_054, 17_000_100, 18_000_066, 20_000_132];
+    const EXPLAINED_UNTIL_R3S: [u64; 0] = [];
     const EXPLAINED_OLD_DIFFERS: [u64; 2] = [8_000_098, 11_000_046];
     /// The seeds of the explained pattern plan on which the NEW side
     /// differs from OCaml and the old checker is right (see above):
     /// none until R3s is built.
-    const EXPLAINED_NEW_DIFFERS: [u64; 0] = [];
+    const EXPLAINED_NEW_DIFFERS: [u64; 2] = [4_000_045, 20_000_132];
 
     /// The seeds of the pattern plan on which the new side differs from
     /// OCaml (and from the old checker, which is right here) until slice
@@ -5243,9 +5242,7 @@ mod tests {
     /// (compiler/ml/ctype.ml:200-202), so `find_repr` of a later copy
     /// finds nothing (ctype.ml:720). Tracing is R3s (section 8.11); its
     /// build empties this list and changes nothing else of this test.
-    const UNTIL_R3S: [u64; 7] = [
-        37_000_127, 59_000_216, 70_000_293, 76_000_291, 83_000_307, 87_000_306, 88_000_320,
-    ];
+    const UNTIL_R3S: [u64; 0] = [];
 
     /// The acceptance test of pattern mode on generated cases (section
     /// 8.9): 10,000 cases of the pattern plan, each run on the
@@ -5421,7 +5418,6 @@ mod tests {
     ///
     /// Reaches: R3m, R3e, R3f, R3n, R3h, R3r, R3s.
     #[test]
-    #[ignore = "R3s build"]
     fn instance_plan_agrees_on_generated_cases() {
         let program = compile(PATTERN_PROGRAM.to_string());
         let plan = Plan::new(Tier::Full, INSTANCE_PLAN);

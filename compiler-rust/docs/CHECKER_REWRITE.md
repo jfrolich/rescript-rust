@@ -5754,7 +5754,11 @@ rows of `instance`, `copy` and `expand_head`, by 107 and 111), 100
      `add_instance_chain` does NOT ask the list for each node of a
      chain: it marks the members of the target set once (one mark
      generation) and tests a mark a node; with a lookup a node, shape
-     1 takes 1,504,503 and 150,045,003 steps.
+     1 takes 1,504,503 and 150,045,003 steps. Corrected in the review
+     of R3s: the generation is of `Checker::instance_marks`, an array
+     of the sets' own, not of `marks`, which walks hold across the
+     expansion that adds the chain ("Corrections after the review of
+     R3s" at the end of 8.11).
 107. **The copy with an environment reads the members once, and only
      `copy_in` exists** (decision 101 changed). OCaml asks
      `gadt_instance_level env ty` for every node it copies
@@ -7935,6 +7939,69 @@ designed differs from OCaml, where one is known.
     on the prototype and not on the skeleton (the builder reports
     both columns); the eighth turn's items 5 to 10 untouched, each
     still owed.
+
+**Corrections after the review of R3s** (pull request 382). R3s is
+built as section 8.11 and decisions 97 to 112 say; what its review
+found is the design's.
+
+1. Made, in the pull request of R3s (the builder's second turn):
+   decision 106 took a generation of `Checker::marks` for membership
+   in an instance set. `add_instance_chain` is reached from
+   `expand_head` and from unify2 inside walks that hold generations of
+   the same array across that call (`non_recursive_abbrev`,
+   `occur_expanding`, `occur_pattern`, `lower_args_walk`), so a node
+   that joined a set lost "on the way" or "seen", and on a type that
+   reaches itself the walk went round again where OCaml's `visited`
+   and `seen` lists stop it (ctype.ml:1505, 1511, 1393-1394;
+   typecore.ml:2505). The sets now have marks of their own
+   (`Checker::instance_marks`, four bytes a node in a unit that has
+   a member). Three tests at the end of `r3_tests.rs`, each seen to
+   fail without the change: a walk's marks survive an addition;
+   `lower_args` over `n0 := (int => n0)` (it did not end);
+   `non_recursive_abbrev` over a type that holds such a node (its
+   frames grew without end).
+2. OWED: `instance_clash` puts its pair on the trace without cutting
+   the trace to the base of the unification, which `escape_pair`
+   does for the refusal of `update_level` (the `Unify` of ctype.ml:
+   1226 is the whole trace, as the one of 589 is). They differ when
+   the trace holds pairs above the base at the clash. A case, or the
+   reason none exists.
+3. OWED: on the refused path of `ExpandMode::Unif` the memo of the
+   expansion stays (decision 108) and `inherit_own` does not run, so
+   a second expansion finds a body whose copies without arguments
+   have no row of their own. A case after a caught clash.
+4. OWED: `own_ancestor` passes a row that `forget_abbrev` emptied,
+   also after a cleanup; OCaml's cleanup makes that reference `Mnil`
+   (it was registered by `memorize_abbrev`, btype.ml:629-634), which
+   ends the chain. A case, or the reason the order cannot happen.
+5. OWED: `subst_traced` reads the level of the node's set before the
+   plain expansion; OCaml reads `gadt_instance_level env ty` after
+   `subst` (ctype.ml:1217, then 1222). They differ only when binding
+   the parameters adds `ty` to a set.
+6. OWED, to R5: a `Checker` is not reset between units. The state of
+   this slice (the byte `gadt`, the scopes and members, the own
+   memos and their count, `instance_marks`) needs its reset with the
+   rest, and a test that a second unit starts with none of it.
+7. OWED, the same hazard where it was before R3s. Four walks hold a
+   generation of `marks` across an expansion (`occur_expanding`,
+   `occur_pattern`, `non_recursive_abbrev`, `lower_args_walk`; the
+   table is in the pull request of R3s). The expansion of a type with
+   a constrained parameter unifies the parameter with its argument
+   (`subst_plain`), and that unification can reach other takers of
+   `fresh_marks` (`reaches`, `binding_scan`, the occurrence walks
+   themselves, in pattern mode `reify` and `duplicate`), which visit
+   the argument: a node the outer walk can have marked when the type
+   shares or reaches itself. No generated case has a constrained
+   parameter yet. A hand-built case, then either marks of their own
+   for the walks that expand or a rule that an expansion takes none;
+   and a debug assertion that a generation still held is not written
+   over. `begin_cell_session`, reached through `link_memorized`,
+   marks cells the expansion just made: followed only in part.
+8. Made: the cost sentence of `own_ancestor` (the chain is every
+   traced expansion above the copy, ended or not: n rows at the n-th
+   of a chain of abbreviations, as `find_repr` over OCaml's `Mlink`
+   chain) and the size sentence of `OwnMemo` (the table grows to the
+   graph's length).
 
 ## 9. R4 as designed
 
