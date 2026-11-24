@@ -21728,6 +21728,44 @@ from separate Rust and OCaml invocations.
 
 ## Sixth round: instances of a type under an equation
 
+### Summary
+
+Rows I1–I8 and "Found on the way" are counted from their parts as written.
+"Reached the condition" is the part's own condition. For I1–I8, "differs"
+means the OCaml compiler and Rust differ. For the I9 rows it means the two
+Rust builds of part two differ (normal and empty `record_trace_expansions`);
+there the OCaml compiler agrees with the normal build on every candidate.
+The I2 and "Found on the way" differences are fixed on trunk by pull
+request 385 (their "State" paragraphs).
+
+| place | verdict | candidates | of them added a member | of them reached the condition | program that differs |
+|---|---|---|---|---|---|
+| I1 — common object fields | CONDITION NOT REACHED | 12 | 8 | 0 | i1-09, i1-10, i1-11 (under "Found on the way") |
+| Found on the way — comparison with an open object | WITNESS, fixed on trunk | 11 reductions | not recorded | not attributed to a condition | reduce-i1-01, 04, 06, 07, 08, 09, 10 |
+| I2 — polymorphic variant rows | WITNESS, fixed on trunk | 8 (+6 reductions) | 8 | 6 | i2-01, 02, 05, 06, 07, 08; reduce-i2-01, 04, 05, 06 |
+| I3 — unequal instance-set levels after expansion | CONDITION NOT REACHED | 8 | 8 | 0 | none |
+| I4 — variable unification tracing | CONDITION NOT REACHED | 8 | 8 | 0 | none |
+| I5 — special head expansion | CONDITION NOT REACHED | 8 | 8 | 0 | none |
+| I6 — the non-recursive equation walk | CONDITION NOT REACHED | 8 | 8 | 0 | none |
+| I7 — partial copies for polymorphic variant patterns | CONDITION NOT REACHED | 8 | 8 | 0 | none |
+| I8 — a variable representative in an instance set | CONDITION NOT REACHED | 8 | 8 | 0 | none |
+| I9, `typecore.ml:2500` `is_ignore` | NOT REACHED: no trace is expanded | 3 | 2 | 0 | none |
+| I9, `typecore.ml:2511` `lower_args` | NOT REACHED: the failure cannot happen | 3 | 3 | 0 | la-03 (reported error text only) |
+| I9, `typecore.ml:2784` tagged template | CONDITION NOT REACHED | 3 | 2 | 0 | none |
+| I9, `typecore.ml:3602` coercion trial | CONDITION NOT REACHED | 20 | 6 | 0 | co-04, co-09, dbg-01 (reported error text only) |
+| I9, `typecore.ml:3692` object get | NOT REACHED: no trace is expanded | 4 | 0 | 0 | none |
+| I9, `typecore.ml:3706` object set | NOT REACHED: no trace is expanded | 5 | 0 | 0 | none |
+| I9, `typecore.ml:3751` `let module` | CONDITION NOT REACHED | 3 | 1 | 0 | none |
+| I9, `typecore.ml:4002` optional parameter | NOT REACHED: the failure cannot happen | 3 | 3 | 0 | op-01, op-02 (reported error text only) |
+| I9, `typecore.ml:5190` top-level unit | CONDITION NOT REACHED | 3 | 0 | 0 | none |
+
+For I9, the condition is that the caught failure's trace holds an
+abbreviation without arguments whose expansion is a member of an instance
+set, or is reused or lowered afterwards. The print fired at the site, and
+expanded such an abbreviation, in: tagged template 3 and 3, coercion trial
+6 and 6, `let module` 3 and 0, top-level unit 3 and 3. It fired at no other
+site.
+
 ### Scope and calibration
 
 All places, I1–I9, have been investigated. For I1–I8 the reference and
