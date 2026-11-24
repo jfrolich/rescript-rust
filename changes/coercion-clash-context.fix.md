@@ -1,0 +1,1 @@
+- A coercion `(e :> t)` whose target type clashes with its context is reported with that context's message (comparison, array item, if branch, function argument, ...), as the OCaml compiler reports it.

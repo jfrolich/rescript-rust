@@ -1,0 +1,15 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/coercion_context_polymorphic_variant_array.res[0m:[2m1:29-42[0m
+
+  [1;31m1[0m [2m│[0m let f = (v: [#A]) => ["s", ([1;31mv :> [#A | #B][0m)]
+  2 [2m│[0m 
+
+  This array item has type: [1;31m[#A | #B][0m
+  But this array is expected to have items of type: [1;33mstring[0m
+
+  Arrays can only contain items of the same type.
+
+  Possible solutions:
+  - Convert all values in the array to the same type.
+  - Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, "hello", 15.5, true)
