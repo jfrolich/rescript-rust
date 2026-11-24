@@ -314,6 +314,21 @@ pub trait JsStmt: Js {
         index: u32,
         edit: impl FnOnce(&mut Self, &mut Pools, &mut Self::S) -> R,
     ) -> R;
+    // PROBE-ADD 6: a statement of a block statement the caller holds, taken out by its index, leaving a hole.
+    /// Statement `index` of the block statement `block` moved out, to the
+    /// caller, who owns it from here. The block keeps a hole at `index`:
+    /// the indexes of the statements after it do not change, and a block
+    /// with a hole is given to nothing but this function, the readers of
+    /// its other statements and [`JsStmt::release_stmt`], which releases
+    /// what it still holds. On rows the statement is detached from the
+    /// block (`Bir::detach`) and its entry stays in the block's pool list;
+    /// an implementation that owns its nodes takes it out of the slot and
+    /// leaves the slot empty. One step (it takes a node apart); O(1); no
+    /// allocation. Panics on a statement that is not a `Block`, when
+    /// `index` is not below [`JsStmt::block_len`], and on a hole.
+    /// (`export.rs`: a removed row of a block, and the statements of a
+    /// dissolved block, by their index.)
+    fn take_from_block(&mut self, a: &mut Pools, block: &mut Self::S, index: u32) -> Self::S;
     // PROBE-ADD 7: a copy of the value of a statement the caller holds, as `copy_members` (or `copy_leaf`) copies it.
     /// A copy of the expression statement `s` evaluates first
     /// ([`JsStmt::value_of`]): with `cold`, what [`Js::copy_members`] gives
@@ -331,21 +346,6 @@ pub trait JsStmt: Js {
     /// not a leaf. (`export.rs::copy_replacement`: a literal or a module
     /// member that is a row's initialiser.)
     fn copy_value(&mut self, a: &mut Pools, s: &Self::S, cold: bool, made: impl FnMut(u32)) -> Self::E;
-    // PROBE-ADD 6: a statement of a block statement the caller holds, taken out by its index, leaving a hole.
-    /// Statement `index` of the block statement `block` moved out, to the
-    /// caller, who owns it from here. The block keeps a hole at `index`:
-    /// the indexes of the statements after it do not change, and a block
-    /// with a hole is given to nothing but this function, the readers of
-    /// its other statements and [`JsStmt::release_stmt`], which releases
-    /// what it still holds. On rows the statement is detached from the
-    /// block (`Bir::detach`) and its entry stays in the block's pool list;
-    /// an implementation that owns its nodes takes it out of the slot and
-    /// leaves the slot empty. One step (it takes a node apart); O(1); no
-    /// allocation. Panics on a statement that is not a `Block`, when
-    /// `index` is not below [`JsStmt::block_len`], and on a hole.
-    /// (`export.rs`: a removed row of a block, and the statements of a
-    /// dissolved block, by their index.)
-    fn take_from_block(&mut self, a: &mut Pools, block: &mut Self::S, index: u32) -> Self::S;
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code
     /// that can be observed. An expression statement and a `return` are
     /// free when their value is strictly pure (E:15); a block, an `if`, a
