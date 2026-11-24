@@ -9060,6 +9060,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                     body,
                     inner.is_async,
                     expected_ty,
+                    context.as_ref(),
                     &expr.pexp_attributes,
                 )
             }
@@ -13359,7 +13360,9 @@ pub fn prepare_typecheck_arena(arena: &mut ParseArena) {
 /// This follows `compiler/ml/typecore.ml:2468-2487`: each newtype installs a
 /// fresh abstract constructor while the remainder is typed, then replaces that
 /// constructor in the copied result type. The caller's expectation is unified
-/// only after all newtype scopes have been peeled.
+/// only after all newtype scopes have been peeled, under the clash `context`
+/// the caller gave the function (OCaml `rue (peel env newtypes)`,
+/// typecore.ml:2740); the context is read only when that unification fails.
 #[allow(clippy::too_many_arguments)]
 fn type_function_nary_with_newtypes(
     tctx: &mut TypeCheckContext<'_>,
@@ -13376,6 +13379,7 @@ fn type_function_nary_with_newtypes(
     body: crate::parse_arena::ExprIdx,
     is_async: bool,
     expected_ty: TypeExprRef,
+    context: Option<&ClashSite>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     #[allow(clippy::too_many_arguments)]
@@ -13514,7 +13518,7 @@ fn type_function_nary_with_newtypes(
         is_async,
         attributes,
     )?;
-    rue_unify(tctx, env, loc, typed.exp_type, expected_ty, None)?;
+    rue_unify(tctx, env, loc, typed.exp_type, expected_ty, context.copied())?;
     Ok(typed)
 }
 
