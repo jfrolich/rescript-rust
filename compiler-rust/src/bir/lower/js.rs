@@ -259,6 +259,20 @@ pub trait Js {
     /// when the operands are not the callee, the tag and what the header
     /// counts (a spread, the properties, the children, a key).
     fn jsx(&mut self, a: &mut Pools, mark: Mark, info: JsId, has_children: bool) -> Self::E;
+    // PROBE-ADD 1: a JSX element whose callee is given apart from the operands, as `call` takes it.
+    /// The JSX element [`Js::jsx`] makes, with `callee` as its callee and
+    /// the operands since `mark` after it (the tag and what the header
+    /// counts): the lowering builds the callee after the operands (built
+    /// earlier, its module would be registered before the key's runtime
+    /// module), so it pushes each operand as it is converted and gives the
+    /// callee here. An implementation that owns its nodes moves `callee`
+    /// into the element's callee field and the operands since `mark` off
+    /// its stack; on rows the callee is put below the operands on the
+    /// stack, one move per operand and no allocation beyond the stack's
+    /// capacity, and the list is written once. One step, and one per
+    /// operand, the callee counted as one (what [`Js::jsx`] counts for the
+    /// same element). Panics as [`Js::jsx`] does.
+    fn jsx_apart(&mut self, a: &mut Pools, callee: Self::E, mark: Mark, info: JsId, has_children: bool) -> Self::E;
 
     // ---- Taking apart, copying, releasing ----
 

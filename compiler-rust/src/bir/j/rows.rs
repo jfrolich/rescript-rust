@@ -50,6 +50,7 @@
 //! | `take_operands` | each child `Bir::detach`ed and pushed on `Rows::operands`, last first; the node stays |
 //! | `refill` | `plain::node` of the view of `e`'s operation (`JOptional`, `JArray`, `JBlockLit`, `JObject`, `JDot`) over the operands since the mark with `e`'s `aux`, information, property and position; `plain::copy_cold` from `e`; `Bir::release` of `e` |
 //! | `copy_cold` | `plain::copy_cold`, then the character of `from` (`Node::js_char`) set on `to` when `from` has one |
+//! | `jsx_apart` (PROBE-ADD 1) | `callee` pushed and rotated to the mark (`slice::rotate_right(1)` of the operands since it), then the body of `jsx`: one step and one per operand, the callee one of them |
 //!
 //! Steps (`Js::steps`): one for every function that builds a node or takes
 //! one apart (`without_pure` and `project` too, whatever they return); a
@@ -588,19 +589,13 @@ impl Js for Rows {
     }
     fn jsx(&mut self, a: &mut Pools, mark: Mark, info: JsId, has_children: bool) -> E {
         let start = self.since(mark);
-        let JsPayload::Jsx(header) = a.javascript(info) else { panic!("a JSX header") };
-        // The callee and the tag, then what the header counts.
-        let expected = 2 + usize::from(header.spread) + header.props.len as usize + header.children as usize + usize::from(header.key);
-        assert_eq!(self.operands.len() - start, expected, "the operands the JSX header counts");
-        let id = plain::node(
-            a,
-            View::JJsx {
-                values: &self.operands[start..],
-                info,
-            },
-            u16::from(has_children),
-        );
-        self.cut(start, id)
+        self.jsx_element(a, start, info, has_children)
+    }
+    fn jsx_apart(&mut self, a: &mut Pools, callee: E, mark: Mark, info: JsId, has_children: bool) -> E {
+        let start = self.since(mark);
+        self.operands.push(callee.0);
+        self.operands[start..].rotate_right(1);
+        self.jsx_element(a, start, info, has_children)
     }
 
     fn keep_operand(&mut self, a: &mut Pools, e: E, index: u32) -> E {
@@ -853,6 +848,24 @@ impl Rows {
         self.steps += 1;
         E(plain::node(a, view, aux))
     }
+    /// The JSX element over the operands from `start` on the stack (the
+    /// callee first), the stack cut back after it: the body of [`Js::jsx`]
+    /// and [`Js::jsx_apart`]. One step, and one per operand.
+    fn jsx_element(&mut self, a: &mut Pools, start: usize, info: JsId, has_children: bool) -> E {
+        let JsPayload::Jsx(header) = a.javascript(info) else { panic!("a JSX header") };
+        // The callee and the tag, then what the header counts.
+        let expected = 2 + usize::from(header.spread) + header.props.len as usize + header.children as usize + usize::from(header.key);
+        assert_eq!(self.operands.len() - start, expected, "the operands the JSX header counts");
+        let id = plain::node(
+            a,
+            View::JJsx {
+                values: &self.operands[start..],
+                info,
+            },
+            u16::from(has_children),
+        );
+        self.cut(start, id)
+    }
     /// The index of `mark` on the operand stack. O(1).
     #[inline]
     fn since(&self, mark: Mark) -> usize {
@@ -872,3 +885,7 @@ impl Rows {
         E(id)
     }
 }
+
+#[cfg(test)]
+#[path = "rows_tests.rs"]
+mod tests;

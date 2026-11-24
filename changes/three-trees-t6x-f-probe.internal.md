@@ -1,0 +1,1 @@
+- Probe (not for merge): what the backend lowering's interface must gain before the transition functions can be deleted (T6x-f).
