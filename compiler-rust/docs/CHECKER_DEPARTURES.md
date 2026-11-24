@@ -21749,12 +21749,12 @@ request 385 (their "State" paragraphs).
 | I6 — the non-recursive equation walk | CONDITION NOT REACHED | 8 | 8 | 0 | none |
 | I7 — partial copies for polymorphic variant patterns | CONDITION NOT REACHED | 8 | 8 | 0 | none |
 | I8 — a variable representative in an instance set | CONDITION NOT REACHED | 8 | 8 | 0 | none |
-| I9, `typecore.ml:2500` `is_ignore` | NOT REACHED: no trace is expanded | 3 | 2 | 0 | none |
+| I9, `typecore.ml:2500` `is_ignore` | NOT REACHED: no trace is expanded on the routes that ran | 3 | 2 | 0 | none |
 | I9, `typecore.ml:2511` `lower_args` | NOT REACHED: the failure cannot happen | 3 | 3 | 0 | la-03 (reported error text only) |
 | I9, `typecore.ml:2784` tagged template | CONDITION NOT REACHED | 3 | 2 | 0 | none |
 | I9, `typecore.ml:3602` coercion trial | CONDITION NOT REACHED | 20 | 6 | 0 | co-04, co-09, dbg-01 (reported error text only) |
-| I9, `typecore.ml:3692` object get | NOT REACHED: no trace is expanded | 4 | 0 | 0 | none |
-| I9, `typecore.ml:3706` object set | NOT REACHED: no trace is expanded | 5 | 0 | 0 | none |
+| I9, `typecore.ml:3692` object get | NOT REACHED: no trace is expanded on the routes that ran | 4 | 0 | 0 | none |
+| I9, `typecore.ml:3706` object set | NOT REACHED: no trace is expanded on the routes that ran | 5 | 0 | 0 | none |
 | I9, `typecore.ml:3751` `let module` | CONDITION NOT REACHED | 3 | 1 | 0 | none |
 | I9, `typecore.ml:4002` optional parameter | NOT REACHED: the failure cannot happen | 3 | 3 | 0 | op-01, op-02 (reported error text only) |
 | I9, `typecore.ml:5190` top-level unit | CONDITION NOT REACHED | 3 | 0 | 0 | none |
@@ -26408,7 +26408,9 @@ Three things keep the memo unseen, and the prints confirm each of them:
    `expand_trace` finds `simple_abbrevs` empty and makes a fresh expansion.
    With tracing off it adds no member (`ctype.ml:1215-1227`), and
    `try_expand_head` adds a chain only when the expansion is already a
-   member (`ctype.ml:1271-1276`). In all 51 calls the print showed
+   member (`ctype.ml:1271-1276`). In every call whose print is pasted
+   below (34 `I9PROBE CALL` lines; this sentence first said 51, a count
+   with no pasted output behind it) the print showed
    `tracing=false`, and every expanded abbreviation without arguments had
    `exp_member=None`, including those whose own node was a member
    (`member=Some(1007)` in co-14).
@@ -26418,6 +26420,16 @@ Three things keep the memo unseen, and the prints confirm each of them:
    the logged level and instance-set changes. Rust's `restore_type_state`
    also forgets memorized expansions. In co-13–18 the next memo hit on `a`
    returns a new node (co-14: trace expansion `#99`, later hits `#101`).
+   Added in review: the cleanup runs only when a change was logged since
+   the snapshot (the `Change` arm; the `Unchanged` arm, `btype.ml:776`,
+   cleans nothing). A link or a level change is logged only for a node
+   made before the snapshot (`btype.ml:710-712`, `735-737`), and
+   `memorize_abbrev` is never logged. So a trial that fails without a
+   logged change leaves the trace's expansion in the shared memo, and a
+   later node of the same abbreviation reuses it. Rust has the same
+   condition (the `has_changes` test of `restore_type_state`), so by
+   reading the two compilers do the same there. No candidate of this part
+   is such a trial; one is owed.
 3. At the top-level unit check (`typecore.ml:5188-5203`), the warning is
    followed by `end_def` and `generalize`, which sets `simple_abbrevs := Mnil`
    (`ctype.ml:518-520`). A top-level environment has no instance set:
@@ -26429,6 +26441,10 @@ Three things keep the memo unseen, and the prints confirm each of them:
 The other catching sites raise an error at once (2784, 3751), cannot fail
 (2511, 4002), or catch a failure that does not pass through `expand_trace`
 (2500, 3692, 3706). The per-site parts below give the path condition.
+Added in review: for those five sites the statement rests on reading the
+source, not on a run, and for 2500, 3692 and 3706 it holds only while the
+condition of I8 (a variable that is a member of an instance set) is not
+reached; the list below says why.
 
 #### Builds and the print
 
@@ -26506,7 +26522,10 @@ Sites where the print cannot fire for the caught failure:
   (`ctype.ml:1129-1130`). It links a fresh stub to a fresh copy and fresh
   parameters to the type's own arguments, whose levels do not exceed the
   type's, so it does not fail.
-- `typecore.ml:2511`: `unify_var env (newvar ()) typ` fails only if
+- `typecore.ml:2511` (added in review: the two other raises of
+  `update_level`, an escaping constructor at `ctype.ml:600` and a package
+  at `611`, were not followed; OCaml asserts that the call does not fail):
+  `unify_var env (newvar ()) typ` fails only if
   `update_level` refuses a member (`ctype.ml:587-589`), which needs a target
   level below the instance set's level. A set's level is the level at
   `init_env`, and the levels inside jump by 1000 (`typecore.ml:4034-4040`).
@@ -26517,7 +26536,14 @@ Sites where the print cannot fire for the caught failure:
   themselves (2899) or return `Error Owrite_missing` without raising
   (2873, 2884). The remaining raises come from `expand_head_trace` (the
   ambiguity at `ctype.ml:1225`) and from `update_level` on a fresh object.
-  None of them passes through `expand_trace`.
+  Those raises do not pass through `expand_trace`. Corrected in review:
+  one route does, here and at 2500. `expand_head_trace` reaches `subst`,
+  whose `unify'` is `unify_var` (`ctype.ml:1129-1130`, `2771`), and a
+  failed `unify_var` expands its trace (`ctype.ml:2765-2768`). The body
+  `subst` unifies is a copy whose constructor nodes are new and whose
+  variables are the declaration's own, so by reading the route fails only
+  when such a variable is a member of an instance set: the condition of
+  I8, which no candidate reached. These rows rest on that.
 - `typecore.ml:4002`: `typetexp.ml:328-329` wraps every optional parameter
   type in `option`, and an inferred one is a fresh variable. The fresh `tv`
   is created after `begin_def` when the environment has local constraints,
@@ -28054,7 +28080,7 @@ I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2008 cached=TypeExprRef(86) cach
 
 #### Site typecore.ml:3692 — object get
 
-Candidates 4; print fired at the site 0; abbreviation without arguments expanded 0. `filter_method` raises `Unify []` on the non-object expansion (og-01–03). In og-04 the object is a parameter without annotation, linked to `a` before the switch. That tries the other raising route, the ambiguity of a traced expansion (`ctype.ml:1225`); the outputs do not show which route ran. Neither route calls `expand_trace`.
+Candidates 4; print fired at the site 0; abbreviation without arguments expanded 0. `filter_method` raises `Unify []` on the non-object expansion (og-01–03). In og-04 the object is a parameter without annotation, linked to `a` before the switch. That tries the other raising route, the ambiguity of a traced expansion (`ctype.ml:1225`); the outputs do not show which route ran. Neither of these two routes calls `expand_trace`; the route through `subst` that does is described in the list of sites above (added in review).
 
 #### og-01
 
