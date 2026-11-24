@@ -9289,7 +9289,8 @@ same 3,735 signatures, the same 32 diagnostics in 18 files and the same
   `let f = (o: int) => "s" === (o :> int)` gives the same two texts (OCaml
   "But it's being compared to something of type: string", Rust "But it's
   expected to have type: string"), so the comparison context is lost for a
-  coercion operand.
+  coercion operand. Fixed by K1 below: p55 (with `o: {.."f": int}`) agrees
+  after `a9e7e97f7`.
 
 ### K1 - a coercion keeps the context of the expression it stands in
 
@@ -9444,7 +9445,10 @@ puts locally abstract types on `Pexp_fun`), so no program reaches it.
   Fixtures: the super_errors `coercion_context_*` (one per context, plus
   `coercion_context_left_operand` and `coercion_context_not_subtype`, which
   agreed before), and `tests/tests/src/coercion_context_accepted` for
-  coercions that succeed in five contexts.
+  coercions that succeed in five contexts. A1's open p55, `{"f": y} === (o
+  :> {"f": int})` with `o: {.."f": int}` under a GADT equation, differed on
+  trunk and agrees after this commit (refused at 4:26-40 with the
+  comparison text and the ambiguity lines).
 - `aafe6982e`: OCaml types a function with locally abstract types by
   `rue (peel env newtypes)` (typecore.ml:2740), under the caller's context.
   The Rust `type_function_nary_with_newtypes` (typecore.rs:13367) unified
