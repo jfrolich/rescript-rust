@@ -7,23 +7,18 @@
 //! `compiler/core` without its prefix: `coercion.ml` and `compile_main.ml`.
 //!
 //! Since T6x-e the export values, the fold's own declarations and the final
-//! list are handles of the interface. The rows still name the statements of
-//! the block, their initialisers and the uses of a moved variable by id,
-//! and four kinds of place read or edit a node through its id alone, each
-//! under a comment that starts "By id" and its number. On rows an id is the
-//! node, so they are what trunk did; an implementation that owns its nodes
-//! cannot serve them, and the interface owes each before T6x-f:
-//!
-//! 1. a statement read by its id (a row's statement, a variable's binder),
-//!    and a statement of a dissolved block moved into the final list;
-//! 2. an expression read by its id (a row's initialiser, a replacement, a
-//!    later use), with the copy of a chain of member reads;
-//! 3. an expression written in place of a use named by its id;
-//! 4. a statement taken out of its block by its id and released, while the
-//!    block or the statement stack still holds it: `coerced_list` then
-//!    drops the stack's handle of a removed top-level row unreleased, which
-//!    on rows loses nothing and on an owning implementation would be a node
-//!    with two owners.
+//! list are handles of the interface. In the probe before T6x-f a row says
+//! where its statement is (`Row::place`: a place on the statement stack,
+//! an index in its block, or in `inserted` or `tail`), every read of a
+//! row's statement or initialiser goes from there by reference, an
+//! expression the fold names is a position (`At`), a removed row is given
+//! up by whoever holds it and released through the interface, and the
+//! statements of a dissolved block are taken out of it by their index. Two
+//! places still reach a node through its id, each under a comment that
+//! starts "PROBE-GAP": the binder of a variable no row declares
+//! (`alias_of`), and the use of a moved variable that `substitute_after`
+//! replaces. The uses are found by id too (`mentions` and `row_of` climb
+//! from the site table with `Js::owner`), as before.
 use super::*;
 use super::js::Pools;
 use crate::emit::row::{self, flag};
@@ -218,6 +213,7 @@ pub(super) struct Tables<E, S> {
     last_effect: u32,
     /// The references to the variable of the last collecting `mentions`
     /// pass that stand in a later row: what `substitute_after` replaces.
+    /// Ids from the site table (PROBE-GAP 2).
     later: Vec<NodeId>,
     /// Rows, exports, alias-chain links, sites and ancestors visited.
     pub(super) steps: usize,
@@ -1188,8 +1184,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         for node in later.drain(..) {
             self.coercion.steps += 1;
             let copy = self.copy_replacement(replacement, value);
-            // By id 3: an expression written in place of a use the
-            // tables name by its id (`Bir::replace` on rows).
+            // PROBE-GAP 2: the use's operand index in each node above it up to its row's statement, to replace it from the statement at the row's place.
+            // On rows `Bir::replace` writes the copy into the use's own
+            // slot. The fold knows a use only by the id the site table
+            // holds, and climbs to its row by id (`Js::owner`); no function
+            // of the interface gives the index of a node in its owner
+            // without its id (a `Ref` of the owner needs `Js::at`).
             self.arena.replace(node, B::node(copy));
         }
         self.coercion.later = later;
