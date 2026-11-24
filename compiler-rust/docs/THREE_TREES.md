@@ -8603,8 +8603,8 @@ Precondition, check it first and stop with a report if it fails: `rg -n
 ninth design turn, pull request 390, is merged) and `rg -c 'fn jsx\('
 compiler-rust/src/bir/lower/js.rs` prints nothing (T6x-e2 is merged);
 `cargo test --manifest-path compiler-rust/Cargo.toml --lib bir::lower`
-reads 585 passed, `--lib bir::j` 71, `--lib emit::builder`
-40, none ignored; from compiler-rust, `python3
+reads 585 passed, `--lib bir::j` 73, `--lib emit::builder`
+41, none ignored; from compiler-rust, `python3
 ../scripts/count_lowering_ids.py --self-test` prints `32 files, 26
 transition calls` and `python3 ../scripts/count_lowering_ids.py | grep
 'export.rs' | head -1` prints `| `export.rs` | 1885 | 7 | 5 | 18 | 0 |
@@ -8621,8 +8621,9 @@ src/bir/lower/out.rs the attribute `#[cfg(test)]` of `at_place`,
 `at_place_mut` and `take_placed` and the sentence of each doc comment
 that announces its removal; in src/bir/lower/unit.rs two numbers and a
 comment; in src/bir/lower/js_stmt.rs and src/bir/j/rows_stmt.rs the
-attribute of `block_ids` and three doc comments; the changelog fragment
-`changes/three-trees-t6x-e3.internal.md`. Nothing else. You add no
+attribute of `block_ids` and three doc comments; in
+scripts/count_lowering_ids.py the number of `CEILING`; the changelog
+fragment `changes/three-trees-t6x-e3.internal.md`. Nothing else. You add no
 function to a trait and none to the statement stack. Not yours: every
 other function of export.rs (in particular `classify`, `replacement`,
 `member_of`, `copy_replacement`, `substitute_after`, `mentions`,
@@ -9142,8 +9143,12 @@ made:
                // units (`row_of` does in the other two). THREE_TREES 11.4, "T6x-e
                // and T6x-f: the fold reads where its rows are", decision 10.
 
-   After this commit: the three filters read 585, 71 and
-   40; the self-test prints `32 files, 21 transition calls`.
+   In scripts/count_lowering_ids.py `CEILING=26` becomes `CEILING=21`:
+   the self-test fails above it, so the calls this commit removed
+   cannot come back unseen.
+
+   After this commit: the three filters read 585, 73 and 41; the
+   self-test prints `32 files, 21 transition calls`.
 
 2. `JsStmt::block_ids` is compiled for tests: `build_rows` was its only
    caller outside tests, and five tests of js_stmt_tests.rs read with
@@ -9220,8 +9225,10 @@ twice).
 
 Run by the design turn, in a copy that was not pushed: these two
 commits one after the other on trunk at 0b05ebef12 with pull request
-390; after the second the three filters read 585, 71 and
-40, with clippy and `cargo doc` clean and the cost-note check at
+390; after the second the three filters read 585, 71 and 40 (the copy
+did not hold the three tests that pull request added to `bir::j` and
+`emit::builder` afterwards; with them 585, 73 and 41), with clippy and
+`cargo doc` clean and the cost-note check at
 zero; 331 lines added and 195 removed in five files. A check-mode build
 (`RESCRIPT_BACKEND=check`, a debug build of `rescript`, `clean` then
 `build`) of the runtime and of `tests/tests`: the lowering stage
@@ -9271,7 +9278,9 @@ transition calls`, and `sed '/^mod tests/q' src/bir/lower/export.rs | rg
 
 Yours: src/bir/lower/export.rs above its tests (the module's doc
 comment, the types `At`, `Binds`, `Init`, `Replacement`, two fields of
-`Tables`, and the functions named below), and the changelog fragment
+`Tables`, and the functions named below); in
+scripts/count_lowering_ids.py the number of `CEILING`, which becomes 8
+(from 21) in the same commit; and the changelog fragment
 `changes/three-trees-t6x-e4.internal.md`. Nothing else: no test, no
 other file. You add no function to a trait. Not yours: `Row`,
 `build_rows`, `add_row`, `with_row`, `with_row_dyn`, `row_key`,
