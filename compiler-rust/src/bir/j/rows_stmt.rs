@@ -52,6 +52,12 @@
 //! | `copy_stmt` | T6o | `Bir::copy_subtree_with_scratch(s, &[], fresh, ..)` with the copy storage and the label vector of `Rows`, as `copy_fresh` |
 //! | `declared` | T6q | the `var` of `SDecl` or `SRest` |
 //! | `block_ids` | T6q | the ids of the `statements` of an `SBlock`, in order |
+//! | `block_len` | T6x-e | the length of the `statements` of an `SBlock`, a detached entry counted |
+//! | `with_block_stmt` | T6x-e | `read` on entry `index` of the `statements` of an `SBlock` as a statement: the row is named for the length of the call; a panic when the entry's parent is not the block (a hole) |
+//! | `lend_block_stmt` | T6x-e | `edit` on the implementation, the pools and that entry as a statement; a panic when the reference names another row afterwards |
+//! | `take_block_stmt` | T6x-e | that entry, `Bir::detach`ed: the parent link is cleared and the entry stays in the list, so the indexes after it stay; one step |
+//! | `substitute` | T6x-e | a walk of the statement's subtree on `Rows::work`: a `Var` of exactly `var` is `Bir::replace`d by what `make` gives and not entered, any other node has its children pushed; it stops at `uses` replacements; one step per node popped |
+//! | `alias_at` | T6x-e | the `var` of the `Var` that is the `value` of the `SDecl` `id`; `None` otherwise |
 //! | `effect_free` | T6q | the read `export.rs::has_toplevel_effect` made of a statement that is not a declaration row: a work stack (`Rows::work`) of the node's children for a compound statement, the `STRICT` flag of the value of `SExp` and `SReturn` and of every expression below a compound statement, `false` at `SThrow`, `SDebugger`, a jump, `SDecl`, `SRest`, `SForOf`, `SForAwaitOf`; one step per node read |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
@@ -116,7 +122,7 @@ impl JsStmt for Rows {
         if matches!(node.op(), crate::bir::Op::SDecl) { (node.aux() & 0b11) as u8 } else { node.aux() as u8 }
     }
     #[inline]
-    fn value_of<'r>(&self, a: &'r Pools, s: &'r S) -> Option<NodeId> {
+    fn value_of<'r>(&self, a: &Pools, s: &'r S) -> Option<NodeId> {
         match a.view(s.0) {
             View::SExp { value } | View::SReturn { value } | View::SThrow { value } => Some(value),
             View::SDecl { value, .. } => value,
@@ -320,6 +326,75 @@ impl JsStmt for Rows {
             sink(statement.0);
         }
     }
+    fn block_len(&self, a: &Pools, block: &S) -> u32 {
+        let View::SBlock { statements } = a.view(block.0) else { panic!("not a block statement") };
+        statements.len() as u32
+    }
+    fn with_block_stmt<R>(&self, a: &Pools, block: &S, index: u32, read: impl FnOnce(&S) -> R) -> R {
+        read(&S(Self::block_entry(a, block, index)))
+    }
+    fn lend_block_stmt<R>(
+        &mut self,
+        a: &mut Pools,
+        block: &mut S,
+        index: u32,
+        edit: impl FnOnce(&mut Self, &mut Pools, &mut S) -> R,
+    ) -> R {
+        let row = Self::block_entry(a, block, index);
+        let mut statement = S(row);
+        let result = edit(self, a, &mut statement);
+        assert_eq!(statement.0, row, "a statement of a block replaced through its reference");
+        result
+    }
+    fn take_block_stmt(&mut self, a: &mut Pools, block: &mut S, index: u32) -> S {
+        let statement = Self::block_entry(a, block, index);
+        a.detach(statement);
+        self.steps += 1;
+        S(statement)
+    }
+    fn substitute(
+        &mut self,
+        a: &mut Pools,
+        s: &mut S,
+        var: VarId,
+        uses: u32,
+        mut make: impl FnMut(&mut Self, &mut Pools) -> E,
+    ) -> u32 {
+        let mut replaced = 0;
+        if uses == 0 {
+            return replaced;
+        }
+        let mut work = std::mem::take(&mut self.work);
+        debug_assert!(work.is_empty());
+        work.push(s.0);
+        while let Some(node) = work.pop() {
+            self.steps += 1;
+            match a.view(node) {
+                View::Var { var: found } if found == var => {
+                    // `make` may run a walk of its own (`copy_members`).
+                    self.work = work;
+                    let copy = make(self, a);
+                    work = std::mem::take(&mut self.work);
+                    a.replace(node, copy.0);
+                    replaced += 1;
+                    if replaced == uses {
+                        break;
+                    }
+                }
+                view => view.children_into(&mut work),
+            }
+        }
+        work.clear();
+        self.work = work;
+        replaced
+    }
+    fn alias_at(&self, a: &Pools, id: u32) -> Option<VarId> {
+        let View::SDecl { value: Some(value), .. } = a.view(NodeId(id)) else { return None };
+        match a.view(value) {
+            View::Var { var } => Some(var),
+            _ => None,
+        }
+    }
     fn effect_free(&mut self, a: &Pools, s: &S) -> bool {
         let mut work = std::mem::take(&mut self.work);
         debug_assert!(work.is_empty());
@@ -457,6 +532,15 @@ impl<R: Runs<Rows>> norm::IfLists for RunLists<'_, R> {
 }
 
 impl Rows {
+    /// Entry `index` of the `statements` of the `SBlock` `block`. O(1).
+    /// Panics on a statement that is not a block, on an index outside it
+    /// and on an entry the block no longer holds (a hole).
+    fn block_entry(a: &Pools, block: &S, index: u32) -> NodeId {
+        let View::SBlock { statements } = a.view(block.0) else { panic!("not a block statement") };
+        let statement = statements[index as usize];
+        assert_eq!(a.parents[statement.index()], Some(block.0), "a statement taken out of its block");
+        statement
+    }
     /// `Bir::block_from_list` of `list`: one step for the block and one per
     /// statement it adopts. O(statements).
     #[inline]
@@ -472,3 +556,7 @@ impl Rows {
         a.block_from_list(list)
     }
 }
+
+#[cfg(test)]
+#[path = "rows_stmt_tests.rs"]
+mod tests;
