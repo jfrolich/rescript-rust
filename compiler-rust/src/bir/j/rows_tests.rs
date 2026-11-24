@@ -36,10 +36,10 @@ pub(in crate::bir::j) fn unit() -> Unit {
 fn done(_: E) {}
 
 /// A JSX element of `children` children (and its tag) whose callee is the
-/// variable `f`, made with `Js::jsx_element` (the callee given after the
-/// operands) or, as trunk does, with `Js::jsx` (the operands kept in a
-/// vector until the callee is made, and the callee pushed first). Returns
-/// the steps the interface counted.
+/// variable `f`: made with `Js::jsx_element`, the callee given after the
+/// operands, or as the row itself (`plain::node` over the callee, the tag
+/// and the children, which is what trunk's `Js::jsx` wrote with the callee
+/// pushed first). Returns the steps the interface counted for the element.
 fn jsx(u: &mut Unit, children: u32, apart: bool) -> u64 {
     let mut r = Rows::default();
     let a = &mut u.b;
@@ -62,25 +62,20 @@ fn jsx(u: &mut Unit, children: u32, apart: bool) -> u64 {
         done(r.jsx_element(a, callee, mark, info, true));
         r.steps() - before
     } else {
-        let mut values = Vec::new();
+        let mut values = vec![NodeId(0)];
         for _ in 0..=children {
-            values.push(r.var(a, u.x));
+            values.push(r.var(a, u.x).0);
         }
-        let callee = r.var(a, u.f);
-        r.push(callee);
-        for value in values {
-            r.push(value);
-        }
-        let before = r.steps();
-        done(r.jsx(a, mark, info, true));
-        r.steps() - before
+        values[0] = r.var(a, u.f).0;
+        crate::bir::j::plain::node(a, View::JJsx { values: &values, info }, 1);
+        u64::from(children) + 3
     }
 }
 
-/// The element `jsx_element` makes is the one `jsx` makes with the callee
-/// pushed first, with the same steps; the steps grow by one an operand
-/// from 1,000 to 10,000 children; operands pushed before the mark are
-/// still there.
+/// The element `jsx_element` makes is the row with the callee first; its
+/// steps are one, and one per operand with the callee counted, at 1,000
+/// and at 10,000 children; operands pushed before the mark are still
+/// there.
 #[test]
 fn a_jsx_element_with_its_callee_apart_is_the_element_jsx_makes() {
     let mut counts = [0; 2];
