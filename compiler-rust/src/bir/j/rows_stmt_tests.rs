@@ -148,3 +148,84 @@ fn a_statement_taken_out_of_a_block_leaves_a_hole() {
     right.b.release(NodeId(t.stmt_id(&right.b, &theirs)));
     assert_eq!(left.b.dump(), right.b.dump());
 }
+
+/// `let t = x.name.name...`, `depth` reads deep, the reads with a location.
+fn declaration(r: &mut Rows, u: &mut Unit, depth: u32) -> S {
+    let a = &mut u.b;
+    let name = a.intern_text("name");
+    let mut value = r.var(a, u.x);
+    for _ in 0..depth {
+        value = r.dot(a, value, name, crate::js_ir::arena::FieldPos::NONE, false);
+        r.locate(a, &mut value, LamLoc::NONE);
+    }
+    r.declare(a, LetKind::Strict, u.t, Some(value))
+}
+
+/// Trunk's copy of a replacement that is a chain of member reads, by id
+/// (`export.rs::copy_replacement`): the reads pushed from the top, the
+/// leaf copied with its cold data, then each read from the innermost out.
+fn copy_by_id(r: &mut Rows, a: &mut Bir, node: NodeId, made: &mut Vec<u32>) -> crate::bir::j::rows::E {
+    let mut spine = Vec::new();
+    let mut at = <Rows as Js>::at(node);
+    while r.kind(a, at) == Kind::Dot {
+        spine.push(NodeId(r.id(a, at)));
+        at = r.operand(a, at, 0);
+    }
+    let leaf = <Rows as Js>::at(NodeId(r.id(a, at)));
+    let mut copy = r.copy_leaf(a, leaf);
+    r.copy_cold(a, leaf, &mut copy);
+    made.push(r.id(a, Rows::of(&copy)));
+    while let Some(read) = spine.pop() {
+        let read = <Rows as Js>::at(read);
+        let (name, position) = r.member_of(a, read).expect("a static read");
+        let tag = r.aux(a, read) != 0;
+        copy = r.dot(a, copy, name, position, tag);
+        r.copy_cold(a, read, &mut copy);
+        made.push(r.id(a, Rows::of(&copy)));
+    }
+    copy
+}
+
+/// PROBE-ADD 7: the copy of a statement's value is the copy trunk made of
+/// the initialiser by its id: the chain and its cold data (a literal
+/// replacement), `copy_leaf` without (a module member); the same nodes,
+/// ids reported in order, the same steps, one a node from 1,000 to 10,000
+/// reads.
+#[test]
+fn a_copy_of_a_statement_value_is_the_copy_trunk_makes_by_id() {
+    let mut counts = [0; 2];
+    for (at, depth) in [1_000u32, 10_000].into_iter().enumerate() {
+        let (mut left, mut right) = (unit(), unit());
+        let (mut r, mut t) = (Rows::default(), Rows::default());
+        let ours = declaration(&mut r, &mut left, depth);
+        let theirs = declaration(&mut t, &mut right, depth);
+        let (mut made, mut expected) = (Vec::new(), Vec::new());
+        let before = r.steps();
+        let copy = r.copy_value(&mut left.b, &ours, true, |id| made.push(id));
+        let steps = r.steps() - before;
+        let initialiser = NodeId(t.id(&right.b, t.value_of(&right.b, &theirs).unwrap()));
+        let before = t.steps();
+        let trunk = copy_by_id(&mut t, &mut right.b, initialiser, &mut expected);
+        assert_eq!(steps, t.steps() - before);
+        assert_eq!(made, expected);
+        assert_eq!(left.b.dump(), right.b.dump());
+        counts[at] = steps;
+        r.release(&mut left.b, copy);
+        t.release(&mut right.b, trunk);
+    }
+    assert_eq!(counts[1] - 1, 10 * (counts[0] - 1));
+    // Without cold data, of a leaf: `copy_leaf`, as trunk copied a module
+    // member.
+    let (mut left, mut right) = (unit(), unit());
+    let (mut r, mut t) = (Rows::default(), Rows::default());
+    let ours = declaration(&mut r, &mut left, 0);
+    let theirs = declaration(&mut t, &mut right, 0);
+    let mut made = Vec::new();
+    let copy = r.copy_value(&mut left.b, &ours, false, |id| made.push(id));
+    let initialiser = NodeId(t.id(&right.b, t.value_of(&right.b, &theirs).unwrap()));
+    let trunk = t.copy_leaf(&mut right.b, <Rows as Js>::at(initialiser));
+    assert_eq!(made, [t.id(&right.b, Rows::of(&trunk))]);
+    assert_eq!(left.b.dump(), right.b.dump());
+    r.release(&mut left.b, copy);
+    t.release(&mut right.b, trunk);
+}

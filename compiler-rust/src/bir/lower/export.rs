@@ -87,16 +87,49 @@ enum Kind {
     Other,
 }
 
+/// Where an expression the fold names is: the initialiser of a row (the
+/// value of its statement, `JsStmt::value_of`, read at the row's place), or
+/// the export value being coerced, which the caller holds (`At::VALUE`).
+/// A position, not a node: it is read through `State::with_row` or the
+/// caller's handle. 4 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct At(u32);
+impl At {
+    /// The export value in hand.
+    const VALUE: At = At(u32::MAX);
+    /// The initialiser of `row`. O(1).
+    fn row(row: u32) -> At {
+        debug_assert!(row != u32::MAX);
+        At(row)
+    }
+    /// The row whose initialiser this is; `None` for the export value.
+    /// O(1).
+    fn of_row(self) -> Option<u32> {
+        (self != At::VALUE).then_some(self.0)
+    }
+}
+
+/// What a declaration row binds its variable to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Binds {
+    /// `let x;`.
+    Nothing,
+    /// `let x = value`: the initialiser is `At::row` of the row.
+    Value,
+    /// A rest of a record (`SRest`): no initialiser the fold reads.
+    Rest,
+}
+
 /// The initialiser of a declaration row, classified once where it is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Init {
     Absent,
-    Literal(NodeId),
-    Qualified(NodeId),
-    /// A reference to a variable (its origin) and the node.
-    Var(VarId, NodeId),
+    Literal(At),
+    Qualified(At),
+    /// A reference to a variable (its origin) and where it is.
+    Var(VarId, At),
     Fun,
-    Other(NodeId),
+    Other(At),
 }
 
 /// S:282 the expression a moved alias is replaced by. Every use is a copy.
@@ -106,9 +139,9 @@ enum Replacement {
     Var(VarId),
     /// A copy of an existing expression: a literal, a module member, or a
     /// chain of static field reads over one.
-    Node(NodeId),
+    Node(At),
     /// A module member without the source metadata of the node it is read from.
-    Member(NodeId),
+    Member(At),
 }
 
 /// What one pass over the sites of a variable found, relative to a row.
@@ -535,25 +568,42 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     fn with_row_mut<R>(&mut self, row: u32, edit: impl FnOnce(&mut B, &mut Pools, &mut B::S) -> R) -> R {
         let mut edit = Some(edit);
         let mut result = None;
-        self.with_row_mut_dyn(row, &mut |js, a, s| result = Some((edit.take().expect("edit once"))(js, a, s)));
+        Self::lend_row(
+            &mut self.coercion,
+            &mut self.statements,
+            &mut self.js,
+            &mut self.arena,
+            row,
+            &mut |js, a, s| result = Some((edit.take().expect("edit once"))(js, a, s)),
+        );
         result.expect("the row's statement was lent")
     }
 
-    /// `with_row_mut` behind a reference to a closure. Cost: that of
+    /// `with_row_mut` on the parts of the state it borrows, so that a
+    /// caller may hold a table it moved out of the tables beside it, and
+    /// behind a reference to a closure, so that the descent through the
+    /// blocks of a nested row is one function. Cost: that of
     /// `with_row_mut`.
-    fn with_row_mut_dyn(&mut self, row: u32, edit: &mut dyn FnMut(&mut B, &mut Pools, &mut B::S)) {
-        let Row { place, bits } = self.coercion.rows[row as usize];
+    fn lend_row(
+        t: &mut Tables<B::E, B::S>,
+        stack: &mut StatementStack<B>,
+        js: &mut B,
+        a: &mut Pools,
+        row: u32,
+        edit: &mut dyn FnMut(&mut B, &mut Pools, &mut B::S),
+    ) {
+        let Row { place, bits } = t.rows[row as usize];
         if bits & Row::INSERTED != 0 {
-            edit(&mut self.js, &mut self.arena, &mut self.coercion.inserted[place as usize].1)
+            edit(js, a, &mut t.inserted[place as usize].1)
         } else if bits & Row::TAIL != 0 {
-            edit(&mut self.js, &mut self.arena, &mut self.coercion.tail[place as usize])
+            edit(js, a, &mut t.tail[place as usize])
         } else if bits & Row::NESTED != 0 {
-            let parent = self.coercion.rows[row as usize].parent();
-            self.with_row_mut_dyn(parent, &mut |js, a, block| {
+            let parent = t.rows[row as usize].parent();
+            Self::lend_row(t, stack, js, a, parent, &mut |js, a, block| {
                 js.with_block_stmt_mut(a, block, place, |js, a, s| edit(js, a, s))
             })
         } else {
-            edit(&mut self.js, &mut self.arena, self.statements.at_place_mut(place))
+            edit(js, a, stack.at_place_mut(place))
         }
     }
 
@@ -584,9 +634,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         self.visible(row, flat).then_some(row)
     }
 
-    /// The variable, the initialiser and the kind of a declaration row.
-    /// Cost: O(1), a fixed number of reads of the statement.
-    fn declared_by(&self, row: u32) -> (VarId, Option<NodeId>, LetKind) {
+    /// The variable, what it is bound to and the kind of a declaration
+    /// row. Cost: O(1), a fixed number of reads of the statement where it
+    /// is (`with_row`).
+    fn declared_by(&self, row: u32) -> (VarId, Binds, LetKind) {
         self.with_row(row, |handle| {
             let kind = match self.js.stmt_aux(&self.arena, handle) & 3 {
                 0 => LetKind::Strict,
@@ -597,10 +648,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let var = self.js.declared(&self.arena, handle).expect("a declaration row");
             match self.js.stmt_kind(&self.arena, handle) {
                 row::Kind::Declare => {
-                    let value = self.js.value_of(&self.arena, handle);
-                    (self.origin(var), value.map(|value| NodeId(self.js.id(&self.arena, value))), kind)
+                    let binds = match self.js.value_of(&self.arena, handle) {
+                        Some(_) => Binds::Value,
+                        None => Binds::Nothing,
+                    };
+                    (self.origin(var), binds, kind)
                 }
-                row::Kind::Rest => (self.origin(var), Some(NodeId(self.js.stmt_id(&self.arena, handle))), kind),
+                row::Kind::Rest => (self.origin(var), Binds::Rest, kind),
                 _ => unreachable!("a declaration row"),
             }
         })
@@ -615,18 +669,57 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// Classify an expression as an initialiser. Cost: O(1), the kind and
-    /// the variable of a reference.
-    fn classify(&self, node: NodeId) -> Init {
-        match self.js.kind_of(&self.arena, node.0) {
-            row::Kind::Var => {
-                // By id 2: an expression the tables name by its id, read by reference.
-                let var = self.js.var_of(&self.arena, B::at(node)).expect("a reference");
-                Init::Var(self.origin(var), node)
-            }
-            row::Kind::Qualified => Init::Qualified(node),
-            row::Kind::Fun => Init::Fun,
-            kind if Self::is_literal(kind) => Init::Literal(node),
-            _ => Init::Other(node),
+    /// the variable of a reference, read where the expression is
+    /// (`kind_and_var`).
+    fn classify(&self, at: At, value: Option<&B::E>) -> Init {
+        match self.kind_and_var(at, value) {
+            (row::Kind::Var, var) => Init::Var(self.origin(var.expect("a reference")), at),
+            (row::Kind::Qualified, _) => Init::Qualified(at),
+            (row::Kind::Fun, _) => Init::Fun,
+            (kind, _) if Self::is_literal(kind) => Init::Literal(at),
+            _ => Init::Other(at),
+        }
+    }
+
+    /// The kind of the expression at `at`, and its variable when it is a
+    /// reference: read in the row's statement (`with_row`, `value_of`) or
+    /// in the export value `value`. Cost: O(1), plus one block per level
+    /// for a nested row. Panics on `At::VALUE` without the value.
+    fn kind_and_var(&self, at: At, value: Option<&B::E>) -> (row::Kind, Option<VarId>) {
+        match at.of_row() {
+            Some(row) => self.with_row(row, |s| {
+                self.read_kind_and_var(self.js.value_of(&self.arena, s).expect("an initialiser"))
+            }),
+            None => self.read_kind_and_var(B::of(value.expect("the export value in hand"))),
+        }
+    }
+
+    /// `kind_and_var` of a reference in hand. O(1): the kind, and the
+    /// variable of a reference only.
+    fn read_kind_and_var(&self, r: B::Ref<'_>) -> (row::Kind, Option<VarId>) {
+        let kind = self.js.kind(&self.arena, r);
+        (kind, if kind == row::Kind::Var { self.js.var_of(&self.arena, r) } else { None })
+    }
+
+    /// The variable of the expression at `at` when it is a reference, read
+    /// where it is. Cost: as `kind_and_var`.
+    fn var_at(&self, at: At, value: Option<&B::E>) -> Option<VarId> {
+        match at.of_row() {
+            Some(row) => self.with_row(row, |s| {
+                self.js.var_of(&self.arena, self.js.value_of(&self.arena, s).expect("an initialiser"))
+            }),
+            None => self.js.var_of(&self.arena, B::of(value.expect("the export value in hand"))),
+        }
+    }
+
+    /// The module and member of the expression at `at` when it is a module
+    /// reference, read where it is. Cost: as `kind_and_var`.
+    fn qualified_at(&self, at: At, value: Option<&B::E>) -> Option<(crate::bir::ImportId, Option<crate::bir::StrId>)> {
+        match at.of_row() {
+            Some(row) => self.with_row(row, |s| {
+                self.js.qualified_of(&self.arena, self.js.value_of(&self.arena, s).expect("an initialiser"))
+            }),
+            None => self.js.qualified_of(&self.arena, B::of(value.expect("the export value in hand"))),
         }
     }
 
@@ -635,11 +728,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// for a nested row.
     fn initialiser(&self, row: u32) -> Init {
         match self.declared_by(row) {
-            (_, None, _) => Init::Absent,
-            (_, Some(value), _) if value == self.row_key(row) => {
-                Init::Other(value)
-            }
-            (_, Some(value), _) => self.classify(value),
+            (_, Binds::Nothing, _) => Init::Absent,
+            (_, Binds::Rest, _) => Init::Other(At::row(row)),
+            (_, Binds::Value, _) => self.classify(At::row(row), None),
         }
     }
 
@@ -721,23 +812,24 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// S:282 resolve_tail_move_replacement_expression. `start` is the
-    /// expression the walk starts from: an existing node, or a reference to
-    /// a variable the legacy code builds for the walk. One step per
+    /// expression the walk starts from: an existing expression (a row's
+    /// initialiser, or the export value `value`), or a reference to a
+    /// variable the legacy code builds for the walk. One step per
     /// declaration on the same-name alias chain.
     fn replacement(
         &mut self,
-        start: Result<NodeId, VarId>,
+        start: Result<At, VarId>,
         rebound: VarId,
         prefer_materialized_root: bool,
         flat: bool,
+        value: Option<&B::E>,
     ) -> Replacement {
         let unresolved = match start {
-            Ok(node) => Replacement::Node(node),
+            Ok(at) => Replacement::Node(at),
             Err(var) => Replacement::Var(var),
         };
         let mut current = match start {
-            // By id 2.
-            Ok(node) => match self.js.var_of(&self.arena, B::at(node)) {
+            Ok(at) => match self.var_at(at, value) {
                 Some(var) => self.origin(var),
                 None => return unresolved,
             },
@@ -758,9 +850,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 break Replacement::Var(current);
             }
             match init {
-                Init::Qualified(node) => {
+                Init::Qualified(at) => {
                     break if current == rebound {
-                        Replacement::Member(node)
+                        Replacement::Member(at)
                     } else {
                         Replacement::Var(current)
                     };
@@ -770,11 +862,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 {
                     current = next
                 }
-                Init::Literal(node) => {
+                Init::Literal(at) => {
                     break if prefer_materialized_root && current != rebound {
                         Replacement::Var(current)
                     } else {
-                        Replacement::Node(node)
+                        Replacement::Node(at)
                     };
                 }
                 _ => break Replacement::Var(current),
@@ -786,18 +878,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// The module member a replacement reads, if it is one. Cost: O(1), one
     /// read.
-    fn member_of(&self, replacement: Replacement) -> Option<(crate::bir::ImportId, Option<crate::bir::StrId>)> {
-        let (Replacement::Node(node) | Replacement::Member(node)) = replacement else {
+    fn member_of(&self, replacement: Replacement, value: Option<&B::E>) -> Option<(crate::bir::ImportId, Option<crate::bir::StrId>)> {
+        let (Replacement::Node(at) | Replacement::Member(at)) = replacement else {
             return None;
         };
-        // By id 2.
-        self.js.qualified_of(&self.arena, B::at(node))
+        self.qualified_at(at, value)
     }
 
     /// S:428 ml_module_field_tail_move_replacement and S:414 its same-name
-    /// form. Two reads.
-    fn is_ml_member(&self, replacement: Replacement, name: Option<Name>) -> bool {
-        self.member_of(replacement).is_some_and(|(module, member)| {
+    /// form. Cost: O(1), two reads where the replacement is (`member_of`).
+    fn is_ml_member(&self, replacement: Replacement, name: Option<Name>, value: Option<&B::E>) -> bool {
+        self.member_of(replacement, value).is_some_and(|(module, member)| {
             self.arena.pools.j_modules[module.index()].kind == crate::js_ir::op::Kind::Ml
                 && name.is_none_or(|name| {
                     member.is_some_and(|member| self.arena.text(member) == name.as_str())
@@ -806,12 +897,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// The kind of a replacement as an initialiser (S:256 on the replacement).
-    fn replacement_kind(&mut self, replacement: Replacement, flat: bool) -> Kind {
+    /// Cost: that of `chain_kind` for a variable, O(1) otherwise.
+    fn replacement_kind(&mut self, replacement: Replacement, flat: bool, value: Option<&B::E>) -> Kind {
         match replacement {
             Replacement::Var(var) => self.chain_kind(var, flat).unwrap_or(Kind::Other),
             Replacement::Member(_) => Kind::Qualified,
-            Replacement::Node(node) => {
-                let init = self.classify(node);
+            Replacement::Node(at) => {
+                let init = self.classify(at, value);
                 self.initialiser_kind(init, flat)
             }
         }
@@ -1042,26 +1134,48 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// leaf, each with the cold data of the original. One step per node;
     /// no allocation once the implementation's work stack has the chain's
     /// depth.
-    fn copy_replacement(&mut self, replacement: Replacement) -> B::E {
+    fn copy_replacement(&mut self, replacement: Replacement, value: Option<&B::E>) -> B::E {
         match replacement {
             Replacement::Var(var) => {
                 let copy = self.js.var(&mut self.arena, var);
                 self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
                 copy
             }
-            Replacement::Member(node) => {
-                // By id 2.
-                let mut copy = self.js.copy_leaf(&mut self.arena, B::at(node));
+            Replacement::Member(at) => {
+                let row = at.of_row().expect("a member is a row's initialiser");
+                let mut copy = self.copy_row_value(row, false);
                 self.js.assume_strict(&mut self.arena, &mut copy);
-                self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
                 copy
             }
-            Replacement::Node(node) => {
-                // By id 2.
-                let row_of = &mut self.coercion.row_of;
-                self.js.copy_members(&mut self.arena, B::at(node), |id| Self::forget(row_of, id))
-            }
+            Replacement::Node(at) => match at.of_row() {
+                Some(row) => self.copy_row_value(row, true),
+                None => {
+                    let row_of = &mut self.coercion.row_of;
+                    let value = B::of(value.expect("the export value in hand"));
+                    self.js.copy_members(&mut self.arena, value, |id| Self::forget(row_of, id))
+                }
+            },
         }
+    }
+
+    /// `JsStmt::copy_value` of the statement of `row`, lent where it is,
+    /// with what `built` forgets for each node made. Cost: that of
+    /// `copy_value`, one step per node made, and the descent of
+    /// `with_row` for a nested row.
+    fn copy_row_value(&mut self, row: u32, cold: bool) -> B::E {
+        // Moved out for the length of the lend and back: no allocation.
+        let mut row_of = std::mem::take(&mut self.coercion.row_of);
+        let mut copy = None;
+        Self::lend_row(
+            &mut self.coercion,
+            &mut self.statements,
+            &mut self.js,
+            &mut self.arena,
+            row,
+            &mut |js, a, s| copy = Some(js.copy_value(a, s, cold, |id| Self::forget(&mut row_of, id))),
+        );
+        self.coercion.row_of = row_of;
+        copy.expect("the row's statement was lent")
     }
 
     /// S:160 substitute_after: remove the declaration row `index` and
@@ -1069,11 +1183,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// variable found in a later row by a copy of the replacement. Cost:
     /// one write and one copy per such reference; no chain is read again.
     /// The block is flattened from here on.
-    fn substitute_after(&mut self, index: u32, replacement: Replacement) {
+    fn substitute_after(&mut self, index: u32, replacement: Replacement, value: Option<&B::E>) {
         let mut later = std::mem::take(&mut self.coercion.later);
         for node in later.drain(..) {
             self.coercion.steps += 1;
-            let copy = self.copy_replacement(replacement);
+            let copy = self.copy_replacement(replacement, value);
             // By id 3: an expression written in place of a use the
             // tables name by its id (`Bir::replace` on rows).
             self.arena.replace(node, B::node(copy));
@@ -1211,8 +1325,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             return None;
         }
         let index = self.declaration(target, true)?;
-        let (_, initialiser, property) = self.declared_by(index);
-        let initialiser = initialiser?;
+        let (_, binds, property) = self.declared_by(index);
+        if binds == Binds::Nothing {
+            return None;
+        }
         let init = self.initialiser(index);
         let kind = self.initialiser_kind(init, true);
         if property == LetKind::Variable || kind == Kind::Other {
@@ -1231,17 +1347,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             _ => false,
         };
-        let replacement = self.replacement(Ok(initialiser), target, prefer_materialized_root, true);
+        let replacement = self.replacement(Ok(At::row(index)), target, prefer_materialized_root, true, Some(value));
         let qualified = kind == Kind::Qualified;
-        let qualified_safe = self.is_ml_member(replacement, Some(self.arena.vars.name(target)))
+        let qualified_safe = self.is_ml_member(replacement, Some(self.arena.vars.name(target)), Some(value))
             || !uses.has(Mentions::LATER_UNSAFE);
         let recursive = self.is_recursive_function(replacement);
         let blocked = uses.has(Mentions::LATER_FUNCTION)
             || (qualified && self.coercion.last_function > index + 1)
             || replacement == Replacement::Var(target)
-            || matches!(replacement, Replacement::Node(node)
-                // By id 2.
-                if self.js.var_of(&self.arena, B::at(node)).is_some_and(|var| self.origin(var) == target))
+            || matches!(replacement, Replacement::Node(at)
+                if self.var_at(at, Some(value)).is_some_and(|var| self.origin(var) == target))
             || uses.has(Mentions::PRIOR)
             || (qualified && !qualified_safe)
             || later_initialiser
@@ -1249,7 +1364,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if blocked {
             return None;
         }
-        self.substitute_after(index, replacement);
+        self.substitute_after(index, replacement, Some(value));
         Some((replacement, property))
     }
 
@@ -1257,7 +1372,6 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// declaration carrying the export's name whose initialiser is the
     /// export's value. One step per declaration of that name.
     fn reused_binding(&mut self, export: u32, value: &B::E) -> Option<u32> {
-        let value = NodeId(self.js.id(&self.arena, B::of(value)));
         let mut at = self.coercion.name_head[export as usize];
         while at != 0 {
             self.coercion.steps += 1;
@@ -1266,46 +1380,73 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             if !self.visible(row, true) {
                 continue;
             }
-            if let (_, Some(initialiser), _) = self.declared_by(row) {
-                if self.same_reusable_value(initialiser, value) {
-                    return Some(row);
-                }
+            if self.declared_by(row).1 != Binds::Nothing && self.same_reusable_value(row, At::VALUE, Some(value)) {
+                return Some(row);
             }
         }
         None
     }
 
-    /// O:308 same_reusable_export_value. One step per static read of the
-    /// shorter chain.
-    fn same_reusable_value(&mut self, left: NodeId, right: NodeId) -> bool {
-        // By id 2: two expressions named by their ids (a row's
-        // initialiser, an export value), read by reference while the walk
-        // counts its steps in the tables.
-        let (mut left, mut right) = (B::at(left), B::at(right));
+    /// O:308 same_reusable_export_value, of the initialiser of `left` and
+    /// the expression at `right` (another row's initialiser, or the export
+    /// value `value`). Both are read where they are: the references are
+    /// taken inside the innermost read, where one lifetime serves both, and
+    /// the steps are counted in a local, so that the walk borrows nothing
+    /// mutably. A rest row has no initialiser here: one step, unequal, as
+    /// trunk's walk read a statement's kind. One step per static read of
+    /// the shorter chain.
+    fn same_reusable_value(&mut self, left: u32, right: At, value: Option<&B::E>) -> bool {
+        let mut steps = 0;
+        let same = match right.of_row() {
+            Some(right) => self.with_row(left, |ls| {
+                self.with_row(right, |rs| {
+                    let (l, r) = (self.js.value_of(&self.arena, ls), self.js.value_of(&self.arena, rs));
+                    self.same_values(l, r, &mut steps)
+                })
+            }),
+            None => {
+                let value = value.expect("the export value in hand");
+                self.with_row(left, |ls| {
+                    let (l, r) = (self.js.value_of(&self.arena, ls), Some(B::of(value)));
+                    self.same_values(l, r, &mut steps)
+                })
+            }
+        };
+        self.coercion.steps += steps;
+        same
+    }
+
+    /// The walk of `same_reusable_value` over two references in hand. Cost:
+    /// one step per pair read, added to `steps`, at most one per static
+    /// read of the shorter chain and one more.
+    fn same_values<'a>(&'a self, mut left: Option<B::Ref<'a>>, mut right: Option<B::Ref<'a>>, steps: &mut usize) -> bool {
         loop {
-            self.coercion.steps += 1;
-            match (self.js.kind(&self.arena, left), self.js.kind(&self.arena, right)) {
+            *steps += 1;
+            let (Some(l), Some(r)) = (left, right) else {
+                return false;
+            };
+            match (self.js.kind(&self.arena, l), self.js.kind(&self.arena, r)) {
                 (row::Kind::Var, row::Kind::Var) => {
-                    let (l, r) = (self.js.var_of(&self.arena, left), self.js.var_of(&self.arena, right));
-                    return self.ident(l.expect("a reference")) == self.ident(r.expect("a reference"));
+                    let (lv, rv) = (self.js.var_of(&self.arena, l), self.js.var_of(&self.arena, r));
+                    return self.ident(lv.expect("a reference")) == self.ident(rv.expect("a reference"));
                 }
                 (row::Kind::Qualified, row::Kind::Qualified) => {
-                    let (lm, lf) = self.js.qualified_of(&self.arena, left).expect("a module reference");
-                    let (rm, rf) = self.js.qualified_of(&self.arena, right).expect("a module reference");
+                    let (lm, lf) = self.js.qualified_of(&self.arena, l).expect("a module reference");
+                    let (rm, rf) = self.js.qualified_of(&self.arena, r).expect("a module reference");
                     return self.arena.pools.j_modules[lm.index()]
                         == self.arena.pools.j_modules[rm.index()]
                         && lf.map(|f| self.arena.text(f)) == rf.map(|f| self.arena.text(f));
                 }
                 (row::Kind::Dot, row::Kind::Dot)
-                    if self.js.aux(&self.arena, left) == 0 && self.js.aux(&self.arena, right) == 0 =>
+                    if self.js.aux(&self.arena, l) == 0 && self.js.aux(&self.arena, r) == 0 =>
                 {
-                    let (lp, lpos) = self.js.member_of(&self.arena, left).expect("a member read");
-                    let (rp, rpos) = self.js.member_of(&self.arena, right).expect("a member read");
+                    let (lp, lpos) = self.js.member_of(&self.arena, l).expect("a member read");
+                    let (rp, rpos) = self.js.member_of(&self.arena, r).expect("a member read");
                     if self.arena.text(lp) != self.arena.text(rp) || lpos != rpos {
                         return false;
                     }
-                    left = self.js.operand(&self.arena, left, 0);
-                    right = self.js.operand(&self.arena, right, 0);
+                    left = Some(self.js.operand(&self.arena, l, 0));
+                    right = Some(self.js.operand(&self.arena, r, 0));
                 }
                 _ => return false,
             }
@@ -1333,11 +1474,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     fn move_reused_to_tail(&mut self, export: u32, value: &B::E) -> Option<(Replacement, LetKind)> {
         let index = self.reused_binding(export, value)?;
         let (reused, _, property) = self.declared_by(index);
-        let value = NodeId(self.js.id(&self.arena, B::of(value)));
-        let replacement = self.replacement(Ok(value), reused, false, true);
-        let kind = self.replacement_kind(replacement, true);
+        let replacement = self.replacement(Ok(At::VALUE), reused, false, true, Some(value));
+        let kind = self.replacement_kind(replacement, true, Some(value));
         let uses = self.mentions(reused, index, true);
-        let qualified_safe = self.is_ml_member(replacement, Some(self.arena.vars.name(reused)))
+        let qualified_safe = self.is_ml_member(replacement, Some(self.arena.vars.name(reused)), Some(value))
             || !uses.has(Mentions::LATER_UNSAFE);
         let recursive = self.is_recursive_function(replacement);
         let blocked = property == LetKind::Variable
@@ -1351,7 +1491,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if blocked {
             return None;
         }
-        self.substitute_after(index, replacement);
+        self.substitute_after(index, replacement, Some(value));
         Some((replacement, property))
     }
 
@@ -1389,7 +1529,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O:84 resolve_declared_same_name_self_alias_target. Cost: the
     /// same-name alias chain of the export.
     fn self_alias_target(&mut self, var: VarId) -> Option<VarId> {
-        match self.replacement(Err(var), var, false, false) {
+        match self.replacement(Err(var), var, false, false, None) {
             Replacement::Var(target) => {
                 (target != var && self.declaration(target, false).is_some()).then_some(target)
             }
@@ -1468,14 +1608,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if !self.coercion.rows[row as usize].has(Row::DECL | Row::VALUE) {
             return false;
         }
-        let (var, initialiser, _) = self.declared_by(row);
-        let Some(initialiser) = initialiser else {
-            return false;
-        };
-        self.coercion.position[var.index()] > export + 1
-            && initialiser != self.row_key(row)
-            // By id 2.
-            && self.js.equal(&self.arena, B::at(initialiser), B::of(value), &mut 0)
+        let (var, binds, _) = self.declared_by(row);
+        binds == Binds::Value
+            && self.coercion.position[var.index()] > export + 1
+            && self.with_row(row, |s| {
+                let initialiser = self.js.value_of(&self.arena, s).expect("an initialiser");
+                self.js.equal(&self.arena, initialiser, B::of(value), &mut 0)
+            })
     }
 
     /// C:1099 coerce_toplevel_exports_with_name_reservations on the rows of
@@ -1515,7 +1654,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             // changes the export list only.
             if !exact_self_export {
                 if let Some((replacement, property)) = self.move_alias_to_tail(export, &value) {
-                    let late = self.copy_replacement(replacement);
+                    let late = self.copy_replacement(replacement, Some(&value));
                     let target = value_var.expect("a moved alias is a variable");
                     let row = self.declaration_row_removed(target);
                     self.release_row(row);
@@ -1548,7 +1687,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     }
                     if self.declared(target) {
                         let flat = false;
-                        let chosen = match self.replacement(Err(target), target, false, flat) {
+                        let chosen = match self.replacement(Err(target), target, false, flat, None) {
                             Replacement::Var(resolved) => resolved,
                             _ => target,
                         };
@@ -1575,7 +1714,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             if self.reusable_candidate(&value) {
                 if let Some((replacement, property)) = self.move_reused_to_tail(index, &value) {
-                    let late = self.copy_replacement(replacement);
+                    let late = self.copy_replacement(replacement, Some(&value));
                     let row = self.reused_row_removed(index);
                     self.release_row(row);
                     self.js.release(&mut self.arena, value);
@@ -1598,8 +1737,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     }
                 }
                 // O:295 reusable_same_name_export_binding.
-                let id = NodeId(self.js.id(&self.arena, B::of(&value)));
-                if let Some(reused) = self.reusable_binding(index, export, id) {
+                if let Some(reused) = self.reusable_binding(index, export, At::VALUE, Some(&value)) {
                     selected.push(reused);
                     self.js.release(&mut self.arena, value);
                     #[cfg(test)]
@@ -1747,12 +1885,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// declaration of that name.
     fn reusable_declared(&mut self, export: u32, var: VarId) -> Option<VarId> {
         let row = self.declaration(var, true)?;
-        let (_, initialiser, _) = self.declared_by(row);
-        let initialiser = initialiser?;
-        if initialiser == self.row_key(row) {
+        if self.declared_by(row).1 != Binds::Value {
             return None;
         }
-        self.reusable_binding(export, var, initialiser)
+        self.reusable_binding(export, var, At::row(row), None)
     }
 
     /// O:150 collect_export_aliases, for one variable: the variable its
@@ -1837,7 +1973,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// carries the export's name, is not the export and is no `Variable`,
     /// with the export's value as initialiser. One step per declaration of
     /// that name.
-    fn reusable_binding(&mut self, export: u32, var: VarId, value: NodeId) -> Option<VarId> {
+    fn reusable_binding(&mut self, export: u32, var: VarId, initialiser: At, value: Option<&B::E>) -> Option<VarId> {
         let mut at = self.coercion.name_head[export as usize];
         while at != 0 {
             self.coercion.steps += 1;
@@ -1846,10 +1982,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             if !self.visible(row, true) {
                 continue;
             }
-            let (reused, initialiser, property) = self.declared_by(row);
+            let (reused, binds, property) = self.declared_by(row);
             if reused != var
                 && property != LetKind::Variable
-                && initialiser.is_some_and(|initialiser| self.same_reusable_value(initialiser, value))
+                && binds != Binds::Nothing
+                && self.same_reusable_value(row, initialiser, value)
             {
                 return Some(reused);
             }

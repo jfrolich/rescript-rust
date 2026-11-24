@@ -312,6 +312,23 @@ pub trait JsStmt: Js {
         index: u32,
         edit: impl FnOnce(&mut Self, &mut Pools, &mut Self::S) -> R,
     ) -> R;
+    // PROBE-ADD 7: a copy of the value of a statement the caller holds, as `copy_members` (or `copy_leaf`) copies it.
+    /// A copy of the expression statement `s` evaluates first
+    /// ([`JsStmt::value_of`]): with `cold`, what [`Js::copy_members`] gives
+    /// for it (the member reads down to their leaf and the leaf, each with
+    /// its cold data); without, what [`Js::copy_leaf`] gives (the value is a
+    /// leaf; no cold data). `made` is given the id of each node made, in
+    /// order. A `Ref` that `value_of` gives borrows the pools, which a copy
+    /// takes mutably, so the copy is asked of the statement and not of the
+    /// reference. The caller owns `s` (the statement stack, a block it
+    /// lends, or the fold's tables hold it); the copy is the caller's. An
+    /// implementation that owns its nodes reads the value in `s` and makes
+    /// a new owned chain. One step per node made; allocates nothing once
+    /// the implementation's work stack has the chain's depth. Panics on a
+    /// statement without a value, and without `cold` on a value that is
+    /// not a leaf. (`export.rs::copy_replacement`: a literal or a module
+    /// member that is a row's initialiser.)
+    fn copy_value(&mut self, a: &mut Pools, s: &Self::S, cold: bool, made: impl FnMut(u32)) -> Self::E;
     // PROBE-ADD 6: a statement of a block statement the caller holds, taken out by its index, leaving a hole.
     /// Statement `index` of the block statement `block` moved out, to the
     /// caller, who owns it from here. The block keeps a hole at `index`:

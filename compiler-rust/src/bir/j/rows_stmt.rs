@@ -55,6 +55,7 @@
 //! | `block_len` | PROBE-ADD 3 | the length of the `statements` of an `SBlock` |
 //! | `with_block_stmt_at` | PROBE-ADD 4 | `read` on entry `index` of the `statements` of an `SBlock` as a statement: the row is named for the length of the call |
 //! | `with_block_stmt_mut` | PROBE-ADD 5 | `edit` on the implementation, the pools and entry `index` of the `statements` of an `SBlock` as a statement; a debug check that the reference still names that row afterwards |
+//! | `copy_value` | PROBE-ADD 7 | `value_of`, then `Js::copy_members` of it with `cold`, else `Js::copy_leaf` of it and `made` of the copy; one step per node made |
 //! | `take_from_block` | PROBE-ADD 6 | entry `index` of the `statements` of an `SBlock`, `Bir::detach`ed (it clears the parent link and leaves the entry in the list, so the indexes after it stay); one step |
 //! | `effect_free` | T6q | the read `export.rs::has_toplevel_effect` made of a statement that is not a declaration row: a work stack (`Rows::work`) of the node's children for a compound statement, the `STRICT` flag of the value of `SExp` and `SReturn` and of every expression below a compound statement, `false` at `SThrow`, `SDebugger`, a jump, `SDecl`, `SRest`, `SForOf`, `SForAwaitOf`; one step per node read |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
@@ -69,7 +70,7 @@
 //! functions count nothing.
 use super::rows::{E, Rows, kind_of};
 use super::{norm, plain};
-use crate::bir::lower::js::Pools;
+use crate::bir::lower::js::{Js, Pools};
 use crate::bir::lower::js_stmt::{IfHead, JsStmt, Range, Runs};
 use crate::bir::{FuncId, ListId, NodeFlags, NodeId, StrId, SwitchId, VarId, View};
 use crate::lambda::LamLoc;
@@ -345,6 +346,15 @@ impl JsStmt for Rows {
         let result = edit(self, a, &mut statement);
         debug_assert_eq!(statement.0, row, "a statement of a block replaced through its reference");
         result
+    }
+    fn copy_value(&mut self, a: &mut Pools, s: &S, cold: bool, mut made: impl FnMut(u32)) -> E {
+        let value = self.value_of(a, s).expect("a statement with a value");
+        if cold {
+            return self.copy_members(a, value, made);
+        }
+        let copy = self.copy_leaf(a, value);
+        made(copy.0.0);
+        copy
     }
     fn take_from_block(&mut self, a: &mut Pools, block: &mut S, index: u32) -> S {
         let View::SBlock { statements } = a.view(block.0) else { panic!("not a block statement") };
