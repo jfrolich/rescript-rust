@@ -9289,7 +9289,191 @@ same 3,735 signatures, the same 32 diagnostics in 18 files and the same
   `let f = (o: int) => "s" === (o :> int)` gives the same two texts (OCaml
   "But it's being compared to something of type: string", Rust "But it's
   expected to have type: string"), so the comparison context is lost for a
-  coercion operand.
+  coercion operand. Fixed by K1 below: p55 (with `o: {.."f": int}`) agrees
+  after `a9e7e97f7`.
+
+### K1 - a coercion keeps the context of the expression it stands in
+
+Found while fixing: both compilers refuse a coercion `(e :> t)` whose target
+type clashes with the expression the coercion stands in, but the Rust compiler
+printed the generic "But it's expected to have type:" where OCaml prints the
+message of the context (comparison, array item, if branch, function argument,
+string concatenation, math operator, record field, ...). Witness, verified on
+trunk `b3ae311eb`:
+
+```rescript
+let f = (o: int) => "s" === (o :> int)
+```
+
+OCaml refuses at 1:30-37: "This has type: int / But it's being compared to
+something of type: string / You can only compare things of the same type. /
+You can convert int to string with Int.toString." Rust refused at the same
+location with "This has type: int / But it's expected to have type: string /
+You can convert int to string with Int.toString."
+
+Commands are the ones in "Scope, calibration and reproducibility": each
+program is `Main.res` alone, run with `bsc -w +A -bs-jsx 4 -color never
+Main.res` through both compilers; "agree" is the same exit status and the
+same output byte for byte (the whole diagnostic, its location, the
+JavaScript and every warning). Rust before is trunk `b3ae311eb`, after is the
+second commit below. w01-w08 are the witnesses, a01-a02 agreed before and
+must stay so, c01-c22 put a coercion in each context of
+`Error_message_utils.type_clash_context`, t01-t03 are the two-type form and
+coercions whose own subtyping fails, s01-s07 are coercions that succeed,
+p01-p06 coerce a polymorphic variant, an object and a private type, n01-n08
+are functions with locally abstract types (the second cause below), u01-u02
+probe the coercion's `unify_var`.
+
+| # | program | OCaml | Rust before | Rust after |
+| --- | --- | --- | --- | --- |
+| w01 | `let f = (o: int) => "s" === (o :> int)` | refused at 1:30-37: "This has type: int / But it's being compared to something of type: string" | DIFFER | agree |
+| w02 | `let f = (o: int) => "s" == (o :> int)` | refused at 1:29-36: "This has type: int / But it's being compared to something of type: string" | DIFFER | agree |
+| w03 | `let f = (o: int) => "s" > (o :> int)` | refused at 1:28-35: "This has type: int / But it's being compared to something of type: string" | DIFFER | agree |
+| w04 | `let f = (o: int) => ["s", (o :> int)]` | refused at 1:28-35: "This array item has type: int / But this array is expected to have items of type: string" | DIFFER | agree |
+| w05 | `let f = (o: int) => "s" ++ (o :> int)` | refused at 1:29-36: "This has type: int / But string concatenation is expecting: string" | DIFFER | agree |
+| w06 | `let f = (o: int) => 1.5 +. (o :> int)` | refused at 1:29-36: "This has type: int / But it's being used with the +. operator, which works on: float" | DIFFER | agree |
+| w07 | `let f = (o: int) => if true { "s" } else { (o :> int) }` | refused at 1:45-52: "This has type: int / But this if statement is expected to return: string" | DIFFER | agree |
+| w08 | `let g = (_: string, _: string) => true let f = (o: int) => g("s", (o :> int))` | refused at 2:29-36: "This has type: int / But this function argument is expecting: string" | DIFFER | agree |
+| a01 | `let f = (o: int) => (o :> int) === "s"` | refused at 1:36-38: "This has type: string / But it's being compared to something of type: int" | agree | agree |
+| a02 | `let f = (o: int) => "s" === (o: int)` | refused at 1:30-35: "This has type: int / But it's being compared to something of type: string" | agree | agree |
+| c01 | `let f = (s: string) => 1 + (s :> string)` | refused at 1:29-39: "This has type: string / But it's expected to have type: int" | agree | agree |
+| c02 | `let f = (o: int) => if (o :> int) { 1 } else { 2 }` | refused at 1:25-32: "This has type: int / But if conditions must always be of type: bool" | DIFFER | agree |
+| c03 | `let f = (o: int) => true ? "s" : (o :> int)` | refused at 1:35-42: "This has type: int / But this ternary is expected to return: string" | DIFFER | agree |
+| c04 | `let f = (o: int) => switch o { \| 1 => "s" \| _ => (o :> int) }` | refused at 1:51-58: "This has type: int / But this switch is expected to return: string" | DIFFER | agree |
+| c05 | `let f = (o: int) => try "s" catch { \| _ => (o :> int) }` | refused at 1:45-52: "This has type: int / But this try/catch is expected to return: string" | DIFFER | agree |
+| c06 | `let tag = TaggedTemplate.make((_: array<string>, _: array<string>) => "") let f = (o: int) => tag`a${(o :> int)}`` | refused at 2:29-36: "This interpolated value has type: int / But this tag expects interpolations of type: string" | DIFFER | agree |
+| c07 | `let f = (o: int): string => (o :> int)` | refused at 1:30-37: "This has type: int / But it's expected to have type: string" | agree | agree |
+| c08 | `type r = {a: string} let f = (o: int) => {a: (o :> int)}` | refused at 2:26-33: "This has type: int / But the record field a is expected to have type: string" | DIFFER | agree |
+| c09 | `type r = {mutable a: string} let f = (r: r, o: int) => r.a = (o :> int)` | refused at 2:34-41: "But the record field is of type: string" | DIFFER | agree |
+| c10 | `let f = (o: int) => assert((o :> int))` | refused at 1:29-36: "This has type: int / But assertions must always be of type: bool" | DIFFER | agree |
+| c11 | `let f = (o: int) => while (o :> int) { () }` | refused at 1:28-35: "This has type: int / But a while loop condition must always be of type: bool" | DIFFER | agree |
+| c12 | `let f = (s: string) => for _ in 0 to (s :> string) { () }` | refused at 1:39-49: "This has type: string / But a for loop bounds must always be of type: int" | DIFFER | agree |
+| c13 | `let f = async (o: int) => await (o :> int)` | refused at 1:34-41: "This has type: int / But you're using await on this expression, so it is expected to be of type:" | DIFFER | agree |
+| c14 | `type r = {a?: string} let f = (o: int): r => {a: (o :> int)}` | refused at 2:29-36: "This has type: int / But the record field a is expected to have type: string" | DIFFER | agree |
+| c15 | `let g = (~x: string) => x let f = (o: int) => g(~x=(o :> int))` | refused at 2:27-34: "This has type: int / But this function argument ~x is expecting: string" | DIFFER | agree |
+| c16 | `let f = (s: string) => 1.5 -. (s :> string)` | refused at 1:32-42: "This has type: string / But it's being used with the -. operator, which works on: float" | DIFFER | agree |
+| c17 | `let f = (o: int) => "s" !== (o :> int)` | refused at 1:30-37: "This has type: int / But it's being compared to something of type: string" | DIFFER | agree |
+| c18 | `let f = (o: int) => (1, "s") == (2, (o :> int))` | refused at 1:38-45: "This has type: int / But it's expected to have type: string" | agree | agree |
+| c19 | `let f = (o: int) => { let x: string = (o :> int); x }` | refused at 1:40-47: "This has type: int / But it's expected to have type: string" | agree | agree |
+| c20 | `let f = (o: int) => list{"s", (o :> int)}` | refused at 1:32-39: "This has type: int / But it's expected to have type: string" | agree | agree |
+| c21 | `let f = (o: int) => Some("s") == Some((o :> int))` | refused at 1:40-47: "This has type: int / But it's expected to have type: string" | agree | agree |
+| c22 | `let f = (o: int) => 2.0 *. (o :> int)` | refused at 1:29-36: "This has type: int / But it's being used with the *. operator, which works on: float" | DIFFER | agree |
+| t01 | `let f = (o: int) => "s" === (o: int :> int)` | refused at 1:30-42: "This has type: int / But it's being compared to something of type: string" | DIFFER | agree |
+| t02 | `let f = (o: int) => "s" === (o :> string)` | refused at 1:30-40: "Type int is not a subtype of string" | agree | agree |
+| t03 | `let f = (o: int) => [(o :> string)]` | refused at 1:23-33: "Type int is not a subtype of string" | agree | agree |
+| s01 | `let f = (o: int) => 1 === (o :> int)` | accepted | agree | agree |
+| s02 | `let f = (o: int) => [1, (o :> int)]` | accepted | agree | agree |
+| s03 | `let f = (o: int) => if true { 1 } else { (o :> int) }` | accepted | agree | agree |
+| s04 | `let g = (_: int, _: int) => true let f = (o: int) => g(1, (o :> int))` | accepted | agree | agree |
+| s05 | `type r = {a: int} let f = (o: int) => {a: (o :> int)}` | accepted | agree | agree |
+| s06 | `let f = (v: [#A]) => [#B, (v :> [#A \| #B])]` | accepted | agree | agree |
+| s07 | `type t = private int let f = (x: t) => 1 + (x :> int)` | accepted | agree | agree |
+| p01 | `let f = (v: [#A]) => "s" === (v :> [#A \| #B])` | refused at 1:31-44: "This has type: [#A | #B] / But it's being compared to something of type: string" | DIFFER | agree |
+| p02 | `let f = (x: {"a": int, "b": int}) => "s" === (x :> {"a": int})` | refused at 1:47-61: "This has type: {"a": int} / But it's being compared to something of type: string" | DIFFER | agree |
+| p03 | `module M: { type t = private int let v: t } = { type t = int let v = 1 } let f = () => "s" === (M.v :> int)` | refused at 8:24-33: "This has type: int / But it's being compared to something of type: string" | DIFFER | agree |
+| p04 | `let f = (v: [#A]) => ["s", (v :> [#A \| #B])]` | refused at 1:29-42: "This array item has type: [#A | #B] / But this array is expected to have items of type: string" | DIFFER | agree |
+| p05 | `let f = (x: {"a": int, "b": int}) => if true { "s" } else { (x :> {"a": int}) }` | refused at 1:62-76: "This has type: {"a": int} / But this if statement is expected to return: string" | DIFFER | agree |
+| p06 | `type t = private int let f = (x: t) => 1.5 +. (x :> int)` | refused at 2:27-34: "This has type: int / But it's being used with the +. operator, which works on: float" | DIFFER | agree |
+| n01 | `let f = () => "s" === ((type a, x: a) => x)` | refused at 1:24-42: "This has type: 'a => 'a / But it's being compared to something of type: string" | DIFFER | agree |
+| n02 | `let f = () => ["s", (type a, x: a) => x]` | refused at 1:21-39: "This array item has type: 'a => 'a / But this array is expected to have items of type: string" | DIFFER | agree |
+| n03 | `let f = () => if true { "s" } else { (type a, x: a) => x }` | refused at 1:38-56: "This has type: 'a => 'a / But this if statement is expected to return: string" | DIFFER | agree |
+| n04 | `let g = (_: string) => true let f = () => g((type a, x: a) => x)` | refused at 2:17-35: "This has type: 'a => 'a / But this function argument is expecting: string" | DIFFER | agree |
+| n05 | `let f = () => { let g: int = (type a, x: a) => x; g }` | refused at 1:30-48: "This has type: 'a => 'a / But it's expected to have type: int" | agree | agree |
+| n06 | `let f = () => "s" === ((type a, (x: a, _y: a)) => x)` | refused at 1:24-51: "This has type: (('a, 'a)) => 'a / But it's being compared to something of type: string" | DIFFER | agree |
+| n07 | `let f = () => [(type a, x: a) => x, (type b, y: b) => y]` | accepted | agree | agree |
+| n08 | `type r = {a: string} let f = () => {a: (type a, x: a) => x}` | refused at 2:19-37: "This has type: 'a => 'a / But the record field a is expected to have type: string" | DIFFER | agree |
+| u01 | `let f = () => ({ module M = { type t = A }; M.A } :> int)` | refused at 1:45-47: "This has type: M.t / But it's expected to have type: 'a" | agree | agree |
+| u02 | `type rec t = Ex('a): t let f = (x: t) => switch x { \| Ex(v) => (v :> int) }` | refused at 2:42-49: "Type $a is not a subtype of int" | agree | agree |
+
+The OCaml arms of `type_expect_` that end in `rue` or call `unify_exp
+~context` (`grep -n "\brue\b\|unify_exp ~context" compiler/ml/typecore.ml`),
+with the Rust function that does the final unification (lines after the
+fixes):
+
+| OCaml line | construct | Rust | passes the context |
+| --- | --- | --- | --- |
+| 2655 | `Pexp_ident` | `type_identifier` (`finish_expected_at`, typecore.rs:9378) | yes |
+| 2666 | `Pexp_constant` | `type_expect_with_recarg_unscoped` (`rue_unify`, 8367) | yes |
+| 2740 | `Pexp_fun` with newtypes | `type_function_nary_with_newtypes` (`rue_unify`, 13521) | no, fixed |
+| 2764 | `Pexp_template` | `rue_unify`, 8917 | yes |
+| 2794 | `Pexp_tagged_template` | `rue_unify`, 8973 | yes |
+| 2845, 2862 | `Pexp_apply` (`rue` captures the outer `~context`, not the shadowing one at 2832) | `type_application_parts` (`finish_expected_at`, 10739); unified ops `translate_unified_ops` (9760, 9816) | yes |
+| 2999 | `Pexp_variant` | `type_variant` (`rue_unify`, 14805, 14831) | yes |
+| 3196-3197 | `Pexp_field` (the record: `~context:None`) | `type_field` (16558, None) then `finish_expected` (8399) | yes (None in both for the record) |
+| 3213, 3219 | `Pexp_setfield` (the record: `~context:None`) | `type_setfield` (16992, None; `rue_unify`, 17025) | yes |
+| 3309 | `Pexp_ifthenelse` without else | `type_conditional` (`rue_unify`, 11881) | yes |
+| 3322 | if/else, `~context:return_context` | `type_conditional` (11848) | yes |
+| 3360, 3378 | `Pexp_break`, `Pexp_continue` | `rue_unify`, 8460, 8479 | yes |
+| 3395 | `Pexp_while` | `rue_unify`, 8709 | yes |
+| 3431 | `Pexp_for` | `type_for` (`rue_unify`, 14170) | yes |
+| 3492, 3532 | `Pexp_for_of`, `Pexp_for_await_of` | `type_for_of` (`rue_unify`, 14387) | yes |
+| 3555 | `Pexp_constraint` | `type_constraint` (`rue_unify`, 17088) | yes |
+| 3616 | `Pexp_coerce` | `type_coerce` (17200) | no, fixed |
+| 3667 | `Pexp_object_literal` | `type_object_literal` (`rue_unify`, 17803) | yes |
+| 3683 | `Pexp_object_get` | `type_object_get` (`rue_unify`, 17617) | yes |
+| 3720 | `Pexp_object_set` | `type_object_set` (`rue_unify`, 17685) | yes |
+| 3783 | `Pexp_assert` | `rue_unify`, 8749 | yes |
+| 3800 | `Pexp_pack` | `type_pack` (`rue_unify`, 19028) | yes |
+| 4173 | `type_function`, the body, `~context:None` | `type_function_nary` (13921, None) | yes (None in both) |
+| 4352 | `type_label_exp` retry, `~context:field_context` | `check_label_univars` (19578) | yes |
+| 4363 | `type_argument` | function arguments (10634); record fields (15998); `r.f = v` (16967) | yes, except `r.f = v`: no, not reached (below) |
+| 4738, 4750 | `type_construct` (the context is `None` except for the `Some` an optional field injects) | `type_construct` (14640, 14659) | no, not reached (below) |
+| 4789 | `type_statement` | `type_statement_with` (7890) | yes |
+| 4912 | `type_cases`, `~context:None` | `type_match` (12116, 12148) | yes (None in both) |
+| 5092 | `type_let` with a constraint | binding typing | yes (every caller passes `~context:None`: 2703, 4091, typemod.ml:1438) |
+
+There is no Rust counterpart of a separate `Pexp_newtype` arm in OCaml's
+checker; the Rust `type_newtype` (typecore.rs:17479, unifies with no context)
+types a `Pexp_newtype` node that the ReScript parser does not produce (it
+puts locally abstract types on `Pexp_fun`), so no program reaches it.
+
+#### Fixed
+
+- `a9e7e97f7`: OCaml's `Pexp_coerce` ends in `rue`
+  (`compiler/ml/typecore.ml:3616`), which is `unify_exp ~context env (re
+  exp) (instance env ty_expected)` (typecore.ml:2606-2608), so the final
+  unification of the target type with the expected type carries the clash
+  context the caller gave. The Rust `type_coerce`
+  (`compiler-rust/src/types/typecore.rs:17118`, called at 9178) took no
+  context and unified with `None` (17191 before the fix). It now takes the
+  caller's context by reference and passes it to that unification
+  (typecore.rs:17200). The `ExprTypeClash` built with `context: None` for
+  the coercion argument's `unify_var` is OCaml's
+  `Expr_type_clash {trace; context = None}` (typecore.ml:3577-3580) and is
+  unchanged. w01-w08, c02-c15, c17, c22, t01 and p01-p06 now agree;
+  a01-a02, c01, c16, c18-c21, t02-t03 and s01-s07 agreed before and after.
+  Fixtures: the super_errors `coercion_context_*` (one per context, plus
+  `coercion_context_left_operand` and `coercion_context_not_subtype`, which
+  agreed before), and `tests/tests/src/coercion_context_accepted` for
+  coercions that succeed in five contexts. A1's open p55, `{"f": y} === (o
+  :> {"f": int})` with `o: {.."f": int}` under a GADT equation, differed on
+  trunk and agrees after this commit (refused at 4:26-40 with the
+  comparison text and the ambiguity lines).
+- `aafe6982e`: OCaml types a function with locally abstract types by
+  `rue (peel env newtypes)` (typecore.ml:2740), under the caller's context.
+  The Rust `type_function_nary_with_newtypes` (typecore.rs:13367) unified
+  with `None` (13516 before the fix); it now passes the caller's context.
+  n01-n04, n06 and n08 now agree. Fixtures: the super_errors
+  `coercion_context_newtype_function_*`.
+
+#### Open
+
+- `r.f = v` (`type_setfield`, typecore.rs:16967) unifies the value with an
+  instance of the field type under no context where OCaml's `type_argument`
+  passes `SetRecordField` (typecore.ml:4363). The value was typed against the
+  same field type under that context the line before, and `instance_label`
+  returns a field type that is not generic, so the instance is the type itself
+  and this unification cannot fail: no program shows it. Not changed.
+- `type_construct` (typecore.rs:14640, 14659) unifies the constructor's
+  result with the expected type under no context. OCaml's context there is
+  `None` except for a `Some` an optional record field injects
+  (typecore.ml:4722-4733), whose expected type is always `option<_>` of the
+  field, so that unification cannot fail: no program shows it. Not changed.
+- The coercion argument's `unify_var` error is reported at the coercion's
+  location in Rust and at the argument's (`arg.exp_loc`, typecore.ml:3580)
+  in OCaml. u01 (a local module's type escaping through the argument) is
+  refused earlier by the `let module` check in both, and u02 (an existential)
+  by the subtype check; no program reached it. Not changed.
 
 ## Fourth round: modules, aliases and usage marks
 

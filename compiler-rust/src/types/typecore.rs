@@ -9060,6 +9060,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                     body,
                     inner.is_async,
                     expected_ty,
+                    context.as_ref(),
                     &expr.pexp_attributes,
                 )
             }
@@ -9182,6 +9183,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 opt_from_type_ref,
                 to_type_ref,
                 expected_ty,
+                context.as_ref(),
                 &expr.pexp_attributes,
             )
         }
@@ -13358,7 +13360,9 @@ pub fn prepare_typecheck_arena(arena: &mut ParseArena) {
 /// This follows `compiler/ml/typecore.ml:2468-2487`: each newtype installs a
 /// fresh abstract constructor while the remainder is typed, then replaces that
 /// constructor in the copied result type. The caller's expectation is unified
-/// only after all newtype scopes have been peeled.
+/// only after all newtype scopes have been peeled, under the clash `context`
+/// the caller gave the function (OCaml `rue (peel env newtypes)`,
+/// typecore.ml:2740); the context is read only when that unification fails.
 #[allow(clippy::too_many_arguments)]
 fn type_function_nary_with_newtypes(
     tctx: &mut TypeCheckContext<'_>,
@@ -13375,6 +13379,7 @@ fn type_function_nary_with_newtypes(
     body: crate::parse_arena::ExprIdx,
     is_async: bool,
     expected_ty: TypeExprRef,
+    context: Option<&ClashSite>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     #[allow(clippy::too_many_arguments)]
@@ -13513,7 +13518,7 @@ fn type_function_nary_with_newtypes(
         is_async,
         attributes,
     )?;
-    rue_unify(tctx, env, loc, typed.exp_type, expected_ty, None)?;
+    rue_unify(tctx, env, loc, typed.exp_type, expected_ty, context.copied())?;
     Ok(typed)
 }
 
@@ -17106,7 +17111,9 @@ fn prepend_exp_extra(
     expr
 }
 
-/// Type check type coercion.
+/// Type check type coercion. `context` is the clash context the caller gave
+/// the coercion; it is read only when the final unification with the
+/// expected type fails, so a coercion that types costs nothing more.
 #[allow(clippy::too_many_arguments)]
 fn type_coerce(
     tctx: &mut TypeCheckContext<'_>,
@@ -17116,6 +17123,7 @@ fn type_coerce(
     opt_from_type: Option<&crate::parser::ast::CoreType>,
     to_type: &crate::parser::ast::CoreType,
     expected_ty: TypeExprRef,
+    context: Option<&ClashSite>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
@@ -17184,11 +17192,12 @@ fn type_coerce(
     let target_type = crate::types::ctype::expand_head(ctx, env, to_ty);
     let source_type = crate::types::ctype::expand_head(ctx, env, typed_inner.exp_type);
 
-    // OCaml `rue { exp_type = ty'; ... }` (typecore.ml:3295-3305, 2369-2371)
-    // after the coercion check: `unify_exp` at the coercion's location
-    // (`proper_exp_loc`) of `ty'` with `instance env ty_expected`.
+    // OCaml `rue { exp_type = ty'; ... }` (compiler/ml/typecore.ml:3616,
+    // `rue` at 2606-2608) after the coercion check: `unify_exp ~context` at
+    // the coercion's location (`proper_exp_loc`) of `ty'` with `instance env
+    // ty_expected`, under the clash context the caller gave the coercion.
     let inst_expected = instance_if_generic_in(ctx, env, expected_ty);
-    unify_expression_types(tctx, loc, to_ty, inst_expected, None)?;
+    unify_expression_types(tctx, loc, to_ty, inst_expected, context.copied())?;
 
     // Return the inner expression with the coercion as exp_extra
     // The expression type becomes the target type after coercion
