@@ -26540,8 +26540,10 @@ Sites where the print cannot fire for the caught failure:
   one route does, here and at 2500. `expand_head_trace` reaches `subst`,
   whose `unify'` is `unify_var` (`ctype.ml:1129-1130`, `2771`), and a
   failed `unify_var` expands its trace (`ctype.ml:2765-2768`). The body
-  `subst` unifies is a copy whose constructor nodes are new and whose
-  variables are the declaration's own, so by reading the route fails only
+  `subst` unifies is a new copy of the declaration's generic nodes; the
+  only older nodes in it are the variables that the right side of an
+  equation kept (`duplicate_type` at `ctype.ml:2095` copies every node
+  but a variable, `subst.ml:135-143`). So by reading the route fails only
   when such a variable is a member of an instance set: the condition of
   I8, which no candidate reached. These rows rest on that.
 - `typecore.ml:4002`: `typetexp.ml:328-329` wraps every optional parameter
