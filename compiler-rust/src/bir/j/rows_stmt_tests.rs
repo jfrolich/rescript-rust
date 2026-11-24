@@ -273,6 +273,111 @@ fn the_references_to_a_variable_in_a_statement_are_replaced_where_they_are() {
     r.release_stmt(&mut u.b, s);
 }
 
+/// `f(x, x.name, function () { return f(x, x); }, x);`: references to `x`
+/// at two depths and inside a function literal. The references inside the
+/// literal are built first, so the order of the sites (newest first: the
+/// last argument, the object of the read, the first argument, then the
+/// two of the literal) is not the order of the walk (the last argument,
+/// the two of the literal, the object, the first argument).
+fn nested(r: &mut Rows, u: &mut Unit) -> S {
+    let a = &mut u.b;
+    let header = a.function_header(crate::bir::VarSpan { start: 0, len: 0 }, Default::default(), LamLoc::NONE);
+    let info = a.js_info(JsPayload::Call(Default::default()));
+    let callee = r.var(a, u.f);
+    let mark = r.mark();
+    for _ in 0..2 {
+        let value = r.var(a, u.x);
+        r.push(value);
+    }
+    let inner = r.call(a, callee, mark, info);
+    let returned = r.return_(a, inner);
+    let body = r.list(a, 1, std::iter::once(returned));
+    let function = r.function(a, header, body);
+    let info = a.js_info(JsPayload::Call(Default::default()));
+    let callee = r.var(a, u.f);
+    let mark = r.mark();
+    let first = r.var(a, u.x);
+    r.push(first);
+    let object = r.var(a, u.x);
+    let read = r.dot(a, object, u.name, crate::js_ir::arena::FieldPos::NONE, false);
+    r.push(read);
+    r.push(function);
+    let last = r.var(a, u.x);
+    r.push(last);
+    let call = r.call(a, callee, mark, info);
+    r.exp(a, call)
+}
+
+/// THREE_TREES 11.4, "T6x-e and T6x-f: the fold reads where its rows are",
+/// decision 16: where the order of the walk and the order of the sites
+/// differ, `substitute` still leaves the arena trunk's replacement at the
+/// sites leaves: every node at the same id, the same counts. What differs
+/// is the site each copy got (a copy is a new `Var`, recorded when it is
+/// made, so the copies' sites are in the order they were made): the two
+/// site tables hold the same nodes for `f`, in another order.
+#[test]
+fn a_substitution_at_two_depths_and_inside_a_function_is_trunks_but_for_the_order_of_the_new_sites() {
+    let (mut left, mut right) = (unit(), unit());
+    let (mut r, mut t) = (Rows::default(), Rows::default());
+    let mut ours = nested(&mut r, &mut left);
+    let theirs = nested(&mut t, &mut right);
+    let f = left.f;
+    assert_eq!(r.substitute(&mut left.b, &mut ours, left.x, 5, |js, a| js.var(a, f)), 5);
+    assert_eq!(replace_at_sites(&mut t, &mut right), 5);
+    assert_eq!(left.b.dump(), right.b.dump());
+    let sites = |u: &Unit, var: VarId| {
+        let scope = u.b.js_scope.as_ref().expect("sites");
+        let (mut at, mut nodes) = (scope.site_heads[var.index()], Vec::new());
+        while at != 0 {
+            let site = scope.sites[at as usize - 1];
+            at = site.next;
+            if site.node != NodeId(u32::MAX) {
+                nodes.push(site.node);
+            }
+        }
+        nodes
+    };
+    assert!(sites(&left, left.x).is_empty() && sites(&right, right.x).is_empty());
+    let (ours_f, mut theirs_f) = (sites(&left, left.f), sites(&right, right.f));
+    assert_eq!(ours_f.len(), 7);
+    // The same nodes; the five copies in the order each side made them.
+    assert_ne!(ours_f, theirs_f, "the walk and the sites agree on this shape: the test shows nothing");
+    let mut sorted = ours_f.clone();
+    sorted.sort();
+    theirs_f.sort();
+    assert_eq!(sorted, theirs_f);
+    let scope = |u: &Unit| u.b.js_scope.as_ref().unwrap().uses[u.f.index()];
+    assert_eq!(scope(&left), scope(&right));
+    r.release_stmt(&mut left.b, ours);
+    t.release_stmt(&mut right.b, theirs);
+}
+
+/// A call that is asked for fewer references than the statement holds
+/// stops at the last it was asked for: its steps depend on what it was
+/// asked for and not on what is left. With `asked` of `uses` references
+/// in a flat call the walk reads the statement, the call and `asked`
+/// arguments, and `make` builds `asked` references: asked for 100 it costs
+/// the same with 1,000 and with 10,000 references, and each further
+/// reference asked for costs two steps.
+#[test]
+fn a_substitution_that_stops_with_references_left_reads_no_further() {
+    let steps = |uses: u32, asked: u32| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut s = call(&mut r, &mut u, 3, uses);
+        let f = u.f;
+        let before = r.steps();
+        assert_eq!(r.substitute(&mut u.b, &mut s, u.x, asked, |js, a| js.var(a, f)), asked);
+        let steps = r.steps() - before;
+        assert_eq!(u.b.js_scope.as_ref().unwrap().uses[u.x.index()].remaining, uses - asked);
+        r.release_stmt(&mut u.b, s);
+        steps
+    };
+    assert_eq!(steps(10_000, 100), steps(1_000, 100));
+    assert_eq!(steps(10_000, 1_000) - steps(10_000, 100), 2 * 900);
+    assert_eq!(steps(10_000, 10_000) - steps(10_000, 1_000), 2 * 9_000);
+}
+
 /// The stated cost: one call reads the nodes of the statement up to its
 /// last reference, so a reference behind n other nodes costs n, at 1,000
 /// and at 10,000, and a variable that is not there costs the statement.
