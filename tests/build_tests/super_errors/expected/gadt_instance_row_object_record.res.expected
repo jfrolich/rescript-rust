@@ -1,0 +1,21 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/gadt_instance_row_object_record.res[0m:[2m5:29[0m
+
+  3 [2m│[0m let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  4 [2m│[0m   switch x {
+  [1;31m5[0m [2m│[0m   | Int => {l: {"f": y}, m: [1;31mo[0m}
+  6 [2m│[0m   }
+  7 [2m│[0m 
+
+  This has type: [1;31m{.."f": int}[0m
+  But the record field [1;33mm[0m is expected to have type: [1;33m{"f": a}[0m
+  
+  The incompatible parts:
+    [1;31mint[0m vs [1;33ma[0m [2m(defined as[0m [1;33mint[0m[2m)[0m
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: [1;33m(o :> {"f": a})
+[0m

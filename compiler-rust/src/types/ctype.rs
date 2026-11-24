@@ -10284,6 +10284,11 @@ fn unify_object_fields(
     result
 }
 
+/// The body of [`unify_object_fields`]: unify the row tails, then each pair
+/// of common fields. While GADT instances are traced, each left field is
+/// first lowered to the level of the shared row variable
+/// (compiler/ml/ctype.ml:2489-2490); a unit that is not tracing pays one
+/// load and one branch per common field for that.
 #[allow(clippy::too_many_arguments)]
 fn unify_object_field_pairs(
     ctx: &TypeContext,
@@ -10308,7 +10313,19 @@ fn unify_object_field_pairs(
     // Unify paired fields (matching names from both sides)
     for (f1, f2) in pairs {
         unify_mutability(ctx, open1, open2, f1, f2)?;
-        if let Err(err) = unify(ctx, state, f1.typ, f2.typ) {
+        // OCaml compiler/ml/ctype.ml:2489-2490: while tracing GADT instances,
+        // the left field's type is lowered to the level of the shared row
+        // variable before the field types are unified. A type known only
+        // through an equation is so lowered below the equation's level, and
+        // its expansion is then refused (ctype.ml:1220-1225). The refusal
+        // is wrapped in the pair of fields, as a failed unification is.
+        let lowered = match state.env() {
+            Some(env) if ctx.trace_gadt_instances() => {
+                update_level_checked(ctx, env, ctx.get_level(va), f1.typ)
+            }
+            _ => Ok(()),
+        };
+        if let Err(err) = lowered.and_then(|()| unify(ctx, state, f1.typ, f2.typ)) {
             return Err(match err {
                 TypeError::Unify(trace) => {
                     let field1 = ctx.new_type(TypeDesc::Tfield {
