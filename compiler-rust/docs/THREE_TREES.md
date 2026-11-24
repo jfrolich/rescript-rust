@@ -5020,16 +5020,18 @@ reviewer's commit, or owed as said:
 
 #### T6x-e and T6x-f: the fold reads where its rows are
 
-Status: design, with the interface on trunk. What the lowering's
-interface owes before the transition functions can be deleted was
-decided from a probe that built it once (draft pull request 383, not
-merged; its body is the report). The functions this section adds are in
-`bir/lower/js.rs`, `js_stmt.rs` and `out.rs` with their bodies on rows
-(`bir/j/rows.rs`, `rows_stmt.rs`) and on the builder
-(`emit/builder.rs`); nothing in `export.rs` or `jsx.rs` calls them yet.
-The slices that convert the two files are T6x-e2 to e4 below; the
-prompt of the first is in 11.9, and the others get theirs when a
-throw-away build of each has run (decision 12).
+Status: design, with the interface on trunk; T6x-e2 is built (pull
+request 389). What the lowering's interface owes before the transition
+functions can be deleted was decided from a probe that built it once
+(draft pull request 383, not merged; its body is the report). The
+functions this section adds are in `bir/lower/js.rs`, `js_stmt.rs` and
+`out.rs` with their bodies on rows (`bir/j/rows.rs`, `rows_stmt.rs`) and
+on the builder (`emit/builder.rs`). Decisions 1 to 12 are the eighth
+design turn's; the ninth ("The ninth design turn: the fold built once",
+below the corrections) built the remaining slices once in a throw-away
+copy, replaced decision 5's deferred release (decision 13), corrected
+decision 3 (decision 14) and wrote the prompts in 11.9 of the slices
+whose build ran.
 
 **What was measured.** A throw-away build (not pushed) wrote one line
 per event of the export fold to a file: the rows of each unit that
@@ -5369,6 +5371,7 @@ design turn that builds T6x-e3, e4 and f once and writes their prompts):
    there are 34 (7 `from_node`, 5 `node`, 20 `stmt_from_node`, 2
    `stmt_node`). The one use of `call.rs::call_node` is in the test
    `arity_groups_match_legacy`.
+   State: made in pull request 388; nothing owed.
 2. Made: the doc comment of `JsStmt::substitute` says what the caller
    promises about an assigned variable. The two bodies differ on a
    reference that is the target of an assignment: rows replace it (it
@@ -5379,8 +5382,12 @@ design turn that builds T6x-e3, e4 and f once and writes their prompts):
    number `substitute` returns against the number of uses the fold
    recorded for the row, so that a difference stops the build instead
    of leaving a reference.
+   State: the doc comment was made in pull request 388. The assertion is
+   T6x-e4's: see the State line of item 5.
 3. Made: the prompt of T6x-e2 names its changelog fragment and its
    search for `external_values` says what it prints.
+   State: made in pull request 388; T6x-e2 is on trunk (pull request
+   389).
 4. Owed, decision 5 (the release of a removed row when the list is
    made). It is not final as written: it names one reader that sees the
    statement trunk had released (`mentions`), and there are others.
@@ -5414,14 +5421,23 @@ design turn that builds T6x-e3, e4 and f once and writes their prompts):
    a reused binding of the export's own variable moves is owed with it;
    if the lowering's tests have one already (they compare with the
    legacy export code), the build names it.
+   State: paid in pull request 390 by decision 13 (the release is not
+   deferred), with the test of the export's own variable (commit
+   7f51ad14c) and `StatementStack::take_placed` (commit 4bc2aec19). The
+   lowering's tests had no such unit.
 5. Owed, decision 6. A test of `substitute` on a shape where the order
    of the walk and trunk's order of sites differ (uses at two depths,
    and inside a function literal), compared with trunk's replacement as
    the flat test is; the steps of a call that stops at `uses` with
    references left; and the debug assertion of item 2.
+   State: owed by the ninth turn's build of T6x-e4 (L2 of pull request
+   390); not reached when this line was written.
 6. Owed, decision 3 and 5: a removed row that stands inside a block has
    no test through the lowering and no reason it cannot happen. The
    row of T6x-e3 owes one of the two.
+   State: paid in pull request 390 by two tests through the lowering
+   (commit 75470d61b): a removed row inside a block and a removed row
+   that is held. Decision 13.
 7. Owed, the builder (test-only until T6v; none blocks T6x-e2):
    `size_of` tests for `Property`, `Pending` and the alias entry;
    `reserve` reserves neither `members` nor `aliases`; `realias`
@@ -5430,12 +5446,17 @@ design turn that builds T6x-e3, e4 and f once and writes their prompts):
    declaration (T6e); and the push `declare` makes for every alias
    declaration is paid by every unit for a read no unit of the corpora
    makes, which T6v measures with the column of decision 8.
+   State: still owed, by T6v. No build of the ninth turn needed one.
 8. Owed, small: a debug assertion where a place is made that a slot
    index is below `StatementStack::HELD` (today a comment); the body of
    pull request 388 did not list three changes of built code that
    change no behaviour (`Rows::jsx` moved into `jsx_over`, the
    builder's `dot` onto `dot_row`, the constant `HELD`).
+   State: the debug assertion is in `placed_refs` (commit 4bc2aec19).
+   The three changes are recorded here; the merged body is not edited.
 9. Not done by the turn: the probe prompt of T6r (K5).
+   State: owed (L5 of the ninth turn, written only when L0 to L4 are
+   complete).
 10. Checked in the review beyond the turn's own runs: the source
     program of "What was measured", alone and with an alias used inside
     the match and exported, builds in check mode on trunk with no
@@ -5443,6 +5464,143 @@ design turn that builds T6x-e3, e4 and f once and writes their prompts):
     reference compiler. That shows the program is lowered alike, not
     which rows the fold writes for it: the block rows are known from
     the turn's instrumented build and from the three hand-built tests.
+    State: a record; nothing owed.
+
+**The ninth design turn: the fold built once** (pull request 390). The
+turn converted `export.rs` in a throw-away copy, slice by slice, settled
+what the review of the eighth turn left open on that build, and wrote
+the prompts of the slices from the builds that ran (11.9). Seen first,
+on trunk at 67070ede3d: `count_lowering_ids.py --self-test` 30
+transition calls (26 once T6x-e2 was merged, 0b05ebef12); `--lib
+bir::lower` 579 passed, `--lib bir::j` 71, `--lib emit::builder` 40;
+the allocation counts of `unit.rs` 86, 103, 86, 156.
+
+13. *A removed row is released at once, as on trunk* (replaces decision
+    5 where it defers the release; what decision 5 says of
+    `placed_refs`, `at_place` and `at_place_mut` and its refusal of an
+    emptied held entry stand). When `substitute_after` has removed a
+    row, `release_row` makes its holder give the statement up and
+    releases it through the interface, at the moment trunk releases it:
+
+    | Where the row stands | How it is given up | What is left |
+    | --- | --- | --- |
+    | a slot of the stack | `StatementStack::take_placed` | the slot `Dead(1)`, as `take` leaves one; the run gives nothing for it |
+    | inside a block of the top level | `JsStmt::take_block_stmt`, the block reached with `at_place_mut` and one `lend_block_stmt` a level | a hole at its index (decision 3); the block is dissolved by `coerced_list` (`substitute_after` set `flattened` before the removal) |
+    | a held statement of the stack | `take_placed` exchanges it for a stand-in | the stand-in in its entry, which the run gives in its place and `coerced_list` releases |
+
+    *Why not deferred.* What `Bir::release` of a removed declaration
+    changes, and who reads it before the final list is made:
+
+    | What the release changes (`edit.rs`) | Readers between the removal and the list | With the release deferred |
+    | --- | --- | --- |
+    | the binder of the declared variable becomes none, its fact `Unknown` (`unbind`) | `define`, the first line (`vars.binder(var).is_some()`), when the variable it declares is the removed row's own: the arm `MovedReused` with `reused == export`. `declared`, `declared_now` and `alias_of` return before they read the binder for a variable a row declares (`decl[var] != 0`) | `define` binds a copy: a second variable in the exported tree. Seen: the test below fails, and only it (35 of the 36 tests of `export.rs` pass) |
+    | each `Var` and module reference below is marked released in the site table, its occurrence and use counts fall (`register_kind`, `adjust_direct`) | `mentions` of the variable the initialiser reads (`let x = f` removed, then an export that asks about `f`): a later export's `move_alias_to_tail`, `move_reused_to_tail`, `is_recursive_function` | the site of a removed row counts as a later use and as a later initialiser, which blocks a move trunk makes, and `substitute_after` would replace a use inside a statement that is not printed |
+    | the nodes are freed and their slots reused | `row_of` (a table by id), which `built` and `copy_members`' `made` clear for each node made | nothing, while the nodes live |
+    | the entry of the statement in `row_of` is cleared (`release_row`) | `row_of` from a site below it | a site in a removed row inside a block would climb to the block's row (the review's second point) |
+    | the owner of a function header is cleared (`unbind`) | none: a removed row's initialiser is a reference, a module member or a chain of static reads over one (`move_alias_to_tail` refuses the kinds `Other` and `Literal`; `reused_binding` accepts what `same_reusable_value` accepts), never a function literal |
+    | `drain_dead` | none: it frees the value of a level-L `Let` only, and the lowering's arena holds none. The throw-away build counted its kills in an arena with a site table: 0 over the lowering's tests, the runtime and `tests/tests` |
+
+    With the release where trunk has it, no row of this table has a
+    reader that sees anything else than on trunk, and the table of
+    readers a deferral would have to change is empty. `row_of` needs no
+    entry for a removed row: nothing below it is live, so no site climbs
+    to it; the fill leaves `REMOVED` rows out as on trunk.
+
+    *The evidence.* `export.rs`,
+    `a_reused_binding_of_the_exports_own_variable_moves_and_is_bound_again`:
+    `let x = Other.f` with `x` exported as `Other.f`, with 0, 1 and 3
+    later calls of `x`, through the whole lowering against the legacy
+    export code. No source program was found for it: the simplifier
+    substitutes an alias of a module member before the lowering, so the
+    Lambda is built by hand, as that of the three block tests. With
+    `release_row` deferred to `coerced_list` in the throw-away copy it
+    fails on "a copy of the export's variable was declared" (two
+    variables named `x`, one on trunk), while both printed texts still
+    equal the legacy ones: a copy prints as its origin. So the test
+    counts variables; the comparison of texts cannot see the
+    difference.
+
+    *The held case is real.* Instrumented, the throw-away build wrote
+    one line a unit and one a removed row. The lowering's tests: 92
+    units reach the fold, 19 rows removed, all in a slot. The runtime
+    and `tests/tests` in check mode: 1,380 units (232 and 1,148), no row
+    removed, 15 units with a held statement at the top level, one of
+    them with a held declaration, none with a declaration inside a
+    block. A held declaration at the top level is the temporary of an
+    argument that is evaluated before a later one (`args.rs`,
+    `evaluate_now`: `let tmp = value`, for a value that is not safe to
+    delay; whether the fold can remove one of those was not examined).
+    A declaration the fold does remove is held where a run is moved
+    into a hold: the run of an argument of a static
+    exit with more than one argument (`exit.rs::exit_child`,
+    `hold_run`). Two tests through the whole lowering, against the
+    legacy export code, remove such rows:
+    `a_removed_row_that_is_held_is_released_and_the_hold_is_written`
+    (`let x = Other.f` in the first argument of an exit with two) and
+    `a_removed_row_inside_a_block_is_taken_out_of_the_block` (the same
+    `let` in the arm of the untagged match of "What was measured"). Both
+    pass on trunk and on the build of T6x-e3; item 6 of the corrections
+    is paid by them.
+
+    *The stand-in.* An empty block that is not explicit
+    (`JsStmt::block_of` of a list of none). On rows one `SBlock` row and
+    an empty list, made at the removal and released when the list is
+    made: two steps and one. On an owning implementation one block node
+    of the arena, which a bump arena does not give back before the unit
+    ends: one node for each removed row that was held, none in the
+    corpora. `take_placed(place, stand_in)` is O(1), one write; it
+    counts no step and allocates nothing, and calls `stand_in` for a
+    held statement only (test at 1,000 and 10,000 held statements).
+    Read against `out.rs`: a slot left `Dead(1)` is what `take` and
+    `drop_empty_blocks` leave, and `placed_refs`, `take_run`,
+    `take_run_rev`, `slot_len`, `live`, `first`, `last_at`, `trim` and
+    `kill` cross it as one dead slot; it is no `DeadEnd`, and nothing
+    writes a statement into it. A hold keeps every entry, so the
+    functions that hand out statements and those that consume them
+    accept the same set (`statement_refs`, `slot_ref`, `head_mut`,
+    `take`, `take_run`, `take_run_rev`: the test reads `first`, `last`,
+    `only`, `has_statements`, `statement_refs`, `take_run` and
+    `take_run_rev` after both kinds of take). No stand-in reaches the
+    printed list: the only reader of the run after the fold is
+    `coerced_list`, which takes the run in order, knows a removed row
+    of the top level whose place has the `HELD` bit, and puts what the
+    run gives for it with the dissolved blocks, released after the list
+    is made.
+
+    Not chosen: (i) unbinding and marking at the removal and releasing
+    the handle later. It needs a function that retires a statement in
+    place on both sides (on rows a release that keeps the root, and a
+    husk the readers then have to refuse), for a state no reader needs.
+    (iii) decision 5 as written, with `define`, `mentions` and `row_of`
+    changed to test `REMOVED`: three readers changed and a statement
+    kept alive for nothing. The probe's `take_place`, which empties a
+    held entry, stays refused (decision 5).
+
+14. *The final list stages the statements of a dissolved block*
+    (corrects decision 3, which has `coerced_list` take each statement
+    out of its block "by its index" while the list is written).
+    `JsStmt::list` is given an iterator, and an iterator cannot borrow
+    the implementation and the pools the list is being written with: a
+    statement cannot be taken out of its block from inside it. So the
+    first pass of `coerced_list`, which counts the list, also takes each
+    statement of a dissolved block out (`take_block_stmt`; the block is
+    reached with `at_place_mut`, or, a block inside a block, where it
+    was staged) into `Tables::blocks`, and writes the index there into
+    the row's place; the second pass moves it from there into the list.
+    A block of the top level stays on the stack until the run is taken.
+    Cost: a statement of a dissolved block is moved twice (trunk: a
+    detach in place and one move); `blocks` is `Vec<Option<S>>` (8 bytes
+    an entry on rows), reserved once for every row in a unit that is
+    flattened and not touched in one that is not, so a unit that
+    dissolves no block allocates what it did. Seen: the four counts of
+    `unit.rs` read 86, 102, 86, 155 on the build (decision 10's two
+    moved, the other two as they were), and
+    `the_final_list_of_a_unit_that_dissolves_a_block_moves_each_statement_once`
+    passes unchanged (2 allocations at 1,000 and at 10,000 rows). Not
+    chosen: a `list` that hands its closure the implementation (on rows
+    the list pool is borrowed while the list is written, so the body
+    would buffer the statements itself); the probe's `take_place` of
+    the block before the run is taken (decision 5).
 
 **Changes to earlier sections**, each with its reason:
 
