@@ -116,27 +116,76 @@ impl<B: JsStmt> StatementStack<B> {
     /// the run + held statements): one step per slot, a dead range crossed
     /// in one, and one per held statement.
     pub(super) fn statement_refs(&self, span: Span) -> impl Iterator<Item = &B::S> + '_ {
+        self.placed_refs(span).map(|(_, s)| s)
+    }
+    /// `statement_refs` with the place of each statement: its slot, or its
+    /// index among the held statements with [`StatementStack::HELD`] set.
+    /// A place names its statement for `at_place` and `at_place_mut` until
+    /// the run is taken or killed: nothing moves a statement of a run that
+    /// is complete, and no function takes a statement out by its place, so
+    /// the invariant of `Slot::DeadEnd` and the holds are as they were.
+    /// Cost: that of `statement_refs`, O(slots of the run + held
+    /// statements): one step per slot, a dead range crossed in one, and
+    /// one per held statement. (THREE_TREES 11.4, "T6x-e and T6x-f: the
+    /// fold reads where its rows are", decision 5: `export.rs::build_rows`
+    /// keeps the place of each row of the top level.)
+    pub(super) fn placed_refs(&self, span: Span) -> impl Iterator<Item = (u32, &B::S)> + '_ {
         let (mut at, end) = (span.start as usize, span.end());
         let (mut inner, mut inner_end) = (0usize, 0usize);
         std::iter::from_fn(move || loop {
             if inner < inner_end {
                 inner += 1;
-                return Some(self.held[inner - 1].as_ref().expect("held statement"));
+                let s = self.held[inner - 1].as_ref().expect("held statement");
+                return Some((Self::HELD | (inner - 1) as u32, s));
             }
             if at >= end {
                 return None;
             }
+            let current = at;
             let slot = &self.slots[at];
             at += match slot {
                 Some(Slot::Dead(len)) => *len as usize,
                 _ => 1,
             };
             match slot {
-                Some(Slot::Statement(s)) => return Some(s),
+                Some(Slot::Statement(s)) => return Some((current as u32, s)),
                 Some(Slot::Held(span)) => (inner, inner_end) = (span.start as usize, span.end()),
                 Some(Slot::Dead(_) | Slot::DeadEnd(_)) | None => {}
             }
         })
+    }
+    /// The bit of a place (`placed_refs`) that names a held statement. A
+    /// stack has fewer than 2^31 slots and holds fewer than 2^31
+    /// statements (`mark` and `fill_held_since` count both in 32 bits and
+    /// a statement is at least 4 bytes).
+    pub(super) const HELD: u32 = 1 << 31;
+    /// The statement at `place`, read in place. O(1). Panics when the
+    /// place holds no statement. (Slice T6x-e3 removes the attribute with
+    /// its first caller in `export.rs`.)
+    #[cfg(test)]
+    pub(super) fn at_place(&self, place: u32) -> &B::S {
+        if place & Self::HELD != 0 {
+            return self.held[(place & !Self::HELD) as usize].as_ref().expect("held statement");
+        }
+        match &self.slots[place as usize] {
+            Some(Slot::Statement(s)) => s,
+            _ => panic!("place {place} holds no statement"),
+        }
+    }
+    /// `at_place`, lent to be read through a function that takes the
+    /// statement mutably (`JsStmt::lend_block_stmt`, `JsStmt::substitute`,
+    /// `JsStmt::take_block_stmt` of a block). The statement stays at its
+    /// place: nothing is written into the slot. O(1). (Slice T6x-e3
+    /// removes the attribute with its first caller in `export.rs`.)
+    #[cfg(test)]
+    pub(super) fn at_place_mut(&mut self, place: u32) -> &mut B::S {
+        if place & Self::HELD != 0 {
+            return self.held[(place & !Self::HELD) as usize].as_mut().expect("held statement");
+        }
+        match &mut self.slots[place as usize] {
+            Some(Slot::Statement(s)) => s,
+            _ => panic!("place {place} holds no statement"),
+        }
     }
     /// The statements of a run moved out of their slots, in order; a slot
     /// or a hold that gave its statements is left a hole, and the caller
@@ -1010,6 +1059,72 @@ mod tests {
             stack.kill(run);
             assert_eq!(stack.mark(), Span::default());
         }
+    }
+    /// The places `placed_refs` gives name the statements `statement_refs`
+    /// gives, in order, in a slot and in a hold, across a hole and a dead
+    /// range; `at_place` and `at_place_mut` read each at its place without
+    /// a step, an allocation or a change of the run, at 1,000 and at
+    /// 10,000 held statements; the run is then taken whole.
+    #[test]
+    fn a_place_names_a_statement_of_a_run_until_the_run_is_taken() {
+        for n in [1_000u32, 10_000] {
+            let mut bir = Bir::default();
+            bir.begin_bulk();
+            let mut js = Rows::default();
+            let mut stack = StatementStack::<Rows>::default();
+            let mut ids = Vec::new();
+            let make = |js: &mut Rows, bir: &mut Bir, ids: &mut Vec<u32>| {
+                let statement = js.debugger(bir);
+                ids.push(js.stmt_id(bir, &statement));
+                statement
+            };
+            stack.push(make(&mut js, &mut bir, &mut ids));
+            let hole = stack.reserve();
+            // A run consumed below the top: a dead range of two slots.
+            let dead = stack.mark();
+            stack.push(js.debugger(&mut bir));
+            stack.push(js.debugger(&mut bir));
+            let dead = stack.since(dead);
+            let last = make(&mut js, &mut bir, &mut ids);
+            let held: Vec<_> = (0..n).map(|_| make(&mut js, &mut bir, &mut ids)).collect();
+            // In run order the hold comes before the last statement.
+            let moved = ids.remove(1);
+            ids.push(moved);
+            stack.reserve();
+            stack.push(last);
+            stack.fill_held(hole, held);
+            for statement in stack.take_run(dead) {
+                js.release_stmt(&mut bir, statement);
+            }
+            stack.kill(dead);
+            let run = stack.since(Span::default());
+            let places: Vec<u32> = stack.placed_refs(run).map(|(place, _)| place).collect();
+            assert_eq!(places.len(), ids.len());
+            assert_eq!(places[0], 0);
+            assert_eq!(places[1], StatementStack::<Rows>::HELD);
+            assert_eq!(places[n as usize], StatementStack::<Rows>::HELD | (n - 1));
+            let scanned = stack.scanned;
+            let read = allocation_counter::measure(|| {
+                for (&place, &id) in places.iter().zip(&ids) {
+                    assert_eq!(js.stmt_id(&bir, stack.at_place(place)), id);
+                    assert_eq!(js.stmt_id(&bir, stack.at_place_mut(place)), id);
+                }
+            });
+            assert_eq!(read.count_total, 0, "{n}: {read:?}");
+            assert_eq!(stack.scanned, scanned);
+            let taken: Vec<u32> = stack.take_run(run).map(|s| js.stmt_id(&bir, &s)).collect();
+            assert_eq!(taken, ids);
+            stack.kill(run);
+            assert_eq!(stack.mark(), Span::default());
+        }
+    }
+    /// A place that holds no statement is not read.
+    #[test]
+    #[should_panic(expected = "place 0 holds no statement")]
+    fn a_place_without_a_statement_is_not_read() {
+        let mut stack = StatementStack::<Rows>::default();
+        stack.reserve();
+        stack.at_place(0);
     }
     /// A statement, a dead range of `n` slots and a dead slot above it: a
     /// read from the end (`last`), a take from the end (`take_run_rev`) and

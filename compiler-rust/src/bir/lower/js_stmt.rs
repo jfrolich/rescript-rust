@@ -124,8 +124,11 @@ pub trait JsStmt: Js {
     /// The expression the statement evaluates first: the value of an
     /// `Exp`, a `Return`, a `Throw` and a `Declare` that has one, the test
     /// of an `If`, the condition of a `While`, the scrutinee of a
-    /// `Switch`. `None` for every other statement. O(1).
-    fn value_of<'r>(&self, a: &'r Pools, s: &'r Self::S) -> Option<Self::Ref<'r>>;
+    /// `Switch`. `None` for every other statement. O(1). The reference
+    /// borrows the statement and not the pools, so that the value of a
+    /// statement the caller holds can be given to a function that takes
+    /// the pools mutably ([`Js::copy_members`], [`Js::copy_leaf`]).
+    fn value_of<'r>(&self, a: &Pools, s: &'r Self::S) -> Option<Self::Ref<'r>>;
 
     /// Whether the statement has a source location. O(1). (T6o.)
     fn stmt_located(&self, a: &Pools, s: &Self::S) -> bool;
@@ -267,6 +270,108 @@ pub trait JsStmt: Js {
     /// reader). Panics on a statement that is not a `Block`. (T6q:
     /// `export.rs::build_rows`, the rows of a top-level block.)
     fn block_ids(&self, a: &Pools, s: &Self::S, sink: impl FnMut(u32));
+    /// The number of statements of the block statement `block`, one that
+    /// [`JsStmt::take_block_stmt`] took out counted: the bound of the
+    /// indexes the three functions below take. O(1); counts no step (a
+    /// reader). Panics on a statement that is not a `Block`. (THREE_TREES
+    /// 11.4, "T6x-e and T6x-f: the fold reads where its rows are",
+    /// decision 3: `export.rs::build_rows`.)
+    fn block_len(&self, a: &Pools, block: &Self::S) -> u32;
+    /// Statement `index` of the block statement `block`, read where it is:
+    /// `read` is given it by reference, as [`JsStmt::with_stmt_at`] gives a
+    /// statement of a list in flight, and what it returns is returned. A
+    /// block the statement stack holds is not a list in flight: its
+    /// statements are its own and stay in it. The caller holds `block`;
+    /// the block owns the statement. A reference into the statement
+    /// ([`JsStmt::value_of`]) does not outlive `read`.
+    ///
+    /// O(1) and whatever `read` costs: the statement is found by its
+    /// position, and no other statement of the block is read. Counts no
+    /// step; allocates nothing. Panics on a statement that is not a
+    /// `Block`, when `index` is not below [`JsStmt::block_len`], and on a
+    /// statement that was taken out. (Decision 3: `export.rs`, every read
+    /// of a row that stands in a block of the top level.)
+    fn with_block_stmt<R>(&self, a: &Pools, block: &Self::S, index: u32, read: impl FnOnce(&Self::S) -> R) -> R;
+    /// Statement `index` of the block statement `block`, lent to `edit`
+    /// with the implementation and the pools, so that `edit` may call a
+    /// function that takes them mutably (a copy of its value, a reader
+    /// that counts steps, [`JsStmt::substitute`], this function again for
+    /// a block inside the block); what `edit` returns is returned. `edit`
+    /// may not put another statement in its place. The caller holds
+    /// `block`; the block owns the statement.
+    ///
+    /// O(1) and whatever `edit` costs; counts no step; allocates nothing.
+    /// Panics as [`JsStmt::with_block_stmt`] does. (Decision 3:
+    /// `export.rs`, a row nested in a block when `JsStmt::effect_free`, a
+    /// copy or a substitution reads it.)
+    fn lend_block_stmt<R>(
+        &mut self,
+        a: &mut Pools,
+        block: &mut Self::S,
+        index: u32,
+        edit: impl FnOnce(&mut Self, &mut Pools, &mut Self::S) -> R,
+    ) -> R;
+    /// Statement `index` of the block statement `block` moved out, to the
+    /// caller, who owns it from here. The block keeps a hole at `index`:
+    /// the indexes of the statements after it do not change. A block with
+    /// a hole is given to nothing but this function, the two readers
+    /// above for its other statements, [`JsStmt::block_len`] and
+    /// [`JsStmt::release_stmt`], which releases what the block still
+    /// holds: it is never given to a list or a constructor, so a hole is
+    /// never printed. One step (it takes a node apart); O(1). On rows the
+    /// statement is detached and its entry stays in the block's list; an
+    /// implementation that owns its nodes leaves an empty statement in the
+    /// slot, which costs one node of its arena for each statement taken.
+    /// Panics on a statement that is not a `Block`, when `index` is not
+    /// below [`JsStmt::block_len`], and on a hole. (Decision 3:
+    /// `export.rs::coerced_list`, the statements of a block it dissolves
+    /// and a removed row of one.)
+    fn take_block_stmt(&mut self, a: &mut Pools, block: &mut Self::S, index: u32) -> Self::S;
+    /// Replace references to the variable `var` inside the statement `s`,
+    /// which the caller holds, each by what `make` gives: at most `uses`
+    /// of them, and the walk stops at the last. Returns the number
+    /// replaced. A reference is a `Var` node of exactly `var` (a copy of
+    /// the variable is another variable); what replaces it is not entered.
+    /// `make` is called once per reference replaced, with the
+    /// implementation and the pools, and gives a detached expression,
+    /// which is consumed. The statement stays where it is and keeps its
+    /// id. The facts of the nodes above a replaced reference are those of
+    /// the implementation's own replacement (on rows `Bir::replace`); the
+    /// caller replaces a strictly pure reference by a strictly pure
+    /// expression. The caller substitutes only a variable that is never
+    /// assigned (the export fold moves no declaration of
+    /// `LetKind::Variable`): what an implementation does with a
+    /// reference that is the target of an assignment is not specified
+    /// (rows replace it as any other `Var`; the builder passes it), and
+    /// a caller that knows how many references the statement holds
+    /// checks the number returned against it.
+    ///
+    /// One step per node of the statement the walk reads, until the last
+    /// reference replaced: O(nodes of the statement) for one call. A
+    /// caller that substitutes k variables in one statement of n nodes
+    /// pays k times n. Allocates nothing once the implementation's work
+    /// stack has the statement's width and depth. (Decision 6:
+    /// `export.rs::substitute_after`, for each later row that holds a use
+    /// of a moved variable.)
+    fn substitute(
+        &mut self,
+        a: &mut Pools,
+        s: &mut Self::S,
+        var: VarId,
+        uses: u32,
+        make: impl FnMut(&mut Self, &mut Pools) -> Self::E,
+    ) -> u32;
+    /// The variable the declaration whose statement has the id `id` binds
+    /// its own to: the variable of its initialiser when that is a
+    /// reference, `None` for a declaration without one or with any other
+    /// initialiser and for a statement that is no `Declare`. `id` is a key
+    /// (a variable's binder, `JsStmt::stmt_id`): the fact is the
+    /// implementation's, kept where the declaration is made, and the node
+    /// is not handed out. O(1) on rows; on an implementation that owns its
+    /// nodes a search among the declarations whose initialiser is a
+    /// reference, O(log of their number). Counts no step. (Decision 7:
+    /// `export.rs::alias_of`, a variable no row declares.)
+    fn alias_at(&self, a: &Pools, id: u32) -> Option<VarId>;
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code
     /// that can be observed. An expression statement and a `return` are
     /// free when their value is strictly pure (E:15); a block, an `if`, a

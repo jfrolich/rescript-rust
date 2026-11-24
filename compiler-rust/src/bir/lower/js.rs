@@ -168,6 +168,10 @@ pub trait Js {
     fn equal(&self, a: &Pools, left: Self::Ref<'_>, right: Self::Ref<'_>, steps: &mut usize) -> bool;
 
     // ---- Leaves (plain; O(1) unless said) ----
+    //
+    // A leaf constructor leaves the operand stack alone: it does not read
+    // it and does not change it, so a leaf may be made between two pushes
+    // and between two pops of a list being collected or taken apart.
 
     /// A reference to `var`. Counts the occurrence and records its site.
     /// The node is strictly pure (`STRICT`) as built, on every
@@ -259,6 +263,23 @@ pub trait Js {
     /// when the operands are not the callee, the tag and what the header
     /// counts (a spread, the properties, the children, a key).
     fn jsx(&mut self, a: &mut Pools, mark: Mark, info: JsId, has_children: bool) -> Self::E;
+    /// A JSX element with the header `info`, its callee given apart from
+    /// its operands, as [`Js::call`] takes a callee: `callee`, then the
+    /// operands since `mark` (the tag and what the header counts: a
+    /// spread, the properties, the children, a key). The lowering builds
+    /// the callee after the operands (built earlier, its module would be
+    /// registered before the key's runtime module), so it pushes each
+    /// operand as it is converted and gives the callee here. One step, and
+    /// one per operand, the callee counted as one: what [`Js::jsx`] counts
+    /// for the same element. On rows the callee is put below the operands
+    /// on the stack, which moves each operand once (4 bytes), and the list
+    /// is written once; an implementation that owns its nodes moves
+    /// `callee` into the element and the operands off its stack, and moves
+    /// nothing twice. No allocation once the operand stack has its
+    /// capacity. Panics as [`Js::jsx`] does. (THREE_TREES 11.4, "T6x-e and
+    /// T6x-f: the fold reads where its rows are", decision 1: slice T6x-e2
+    /// calls it from `jsx.rs::compile_jsx` and deletes [`Js::jsx`].)
+    fn jsx_element(&mut self, a: &mut Pools, callee: Self::E, mark: Mark, info: JsId, has_children: bool) -> Self::E;
 
     // ---- Taking apart, copying, releasing ----
 
@@ -301,8 +322,31 @@ pub trait Js {
     /// of its cold data ([`Js::copy_cold`] gives that). O(1). Panics when
     /// `r` has an operand.
     fn copy_leaf(&mut self, a: &mut Pools, r: Self::Ref<'_>) -> Self::E;
+    /// A copy of a chain of member reads: of the reads from `r` down to
+    /// the first node that is not one (a `Dot` of any position, a tag read
+    /// too) and of that node, which is a leaf. It is [`Js::copy_leaf`] of
+    /// the leaf, then one [`Js::dot`] per read from the innermost out with
+    /// the name, position and tag bit of its original, and each node is
+    /// given the cold data of its original ([`Js::copy_cold`]) as it is
+    /// made. No flag is set beyond what those constructors set. `made` is
+    /// given the id of each node made, in that order: a key (the caller
+    /// forgets what a table indexed by id held for a slot the
+    /// implementation reused), never a way back to the node. The walk is
+    /// the implementation's because a reference taken with [`Js::operand`]
+    /// borrows the pools and cannot be held across the constructors. `r`
+    /// is the caller's node and stays whole; the copy is the caller's.
+    ///
+    /// One step per node made (the leaf and each read), what `copy_leaf`
+    /// and `dot` count; the chain is read once more to find its leaf,
+    /// which counts nothing. Allocates nothing once the implementation's
+    /// work stack has the chain's depth. Panics when the leaf has an
+    /// operand. (THREE_TREES 11.4, "T6x-e and T6x-f: the fold reads where
+    /// its rows are", decision 2: `jsx.rs::duplicate_jsx_key` and
+    /// `export.rs::copy_replacement`.)
+    fn copy_members(&mut self, a: &mut Pools, r: Self::Ref<'_>, made: impl FnMut(u32)) -> Self::E;
     /// `e` is not used: its references and sites are given back. One step
-    /// per node released.
+    /// per node released. The operand stack is not read and not changed:
+    /// operands pushed before the call are there after it, in order.
     fn release(&mut self, a: &mut Pools, e: Self::E);
     /// The operands since `mark` are not used. One step per node released.
     fn drop_operands(&mut self, a: &mut Pools, mark: Mark);

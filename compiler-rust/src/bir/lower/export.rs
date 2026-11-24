@@ -223,6 +223,11 @@ pub(crate) struct Coerced {
     /// The arm of the fold and the arm of the resolution each export took.
     #[cfg(test)]
     pub arms: Vec<(Arm, Resolved)>,
+    /// The rows of the top level when the fold ended: block statements,
+    /// statements inside one, block statements inside one, and whether the
+    /// fold flattened the block (one or zero).
+    #[cfg(test)]
+    pub blocks: [usize; 4],
     /// `Tables::steps` and `Tables::site_visits` when the unit was complete.
     #[cfg(test)]
     pub steps: usize,
@@ -1568,6 +1573,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 .zip(self.coercion.resolved.iter().copied())
                 .collect(),
             #[cfg(test)]
+            blocks: {
+                let count = |bits: u32| self.coercion.rows.iter().filter(|row| row.has(bits)).count();
+                [
+                    count(Row::BLOCK),
+                    count(Row::NESTED),
+                    count(Row::BLOCK | Row::NESTED),
+                    usize::from(self.coercion.flattened),
+                ]
+            },
+            #[cfg(test)]
             steps: 0,
             #[cfg(test)]
             site_visits: 0,
@@ -2164,6 +2179,193 @@ mod tests {
                 if followed { Arm::DeclaredTarget } else { Arm::MovedAlias }
             );
         }
+    }
+
+    /// An untagged dispatch over the variable `y` with two block cases:
+    /// an array, which raises, and an object, which runs `body`. The
+    /// lowering makes of it a guard and `body` in one block statement.
+    fn guarded(a: &mut LamArena, body: Lam) -> Lam {
+        use crate::lambda::{SwitchDispatch, SwitchKey};
+        use crate::types::{
+            ShapeAllocation, VariantBlock, VariantBlockType, VariantConstructorCase as Case, VariantInstance,
+            VariantLiteralTag as Literal, VariantMatchingFacts, VariantTag,
+        };
+        let kinds = [
+            VariantBlockType::Instance(VariantInstance::Array(ShapeAllocation::TUPLE_ARRAY)),
+            VariantBlockType::Object,
+        ];
+        let blocks: Vec<_> = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, kind)| {
+                SwitchKey::Constructor(Case::Block(VariantBlock::Untagged {
+                    tag: VariantTag {
+                        name: crate::name::Name::new(&format!("B{i}")),
+                        literal: Literal::String(format!("B{i}")),
+                    },
+                    block_type: kind.clone(),
+                }))
+            })
+            .collect();
+        let info = a.add_switch(
+            true,
+            [],
+            true,
+            blocks,
+            false,
+            SwitchDispatch::Variant(VariantMatchingFacts {
+                tag_name: None,
+                literal_tags: vec![],
+                block_types: kinds.to_vec(),
+            }),
+        );
+        let exception = a.const_(C::Int { i: 0, comment: None });
+        let raise = a.prim_raw(P::Praise, &[exception], LamLoc::NONE);
+        let actions = a.add_list(&[raise, body]);
+        let scrutinee = a.var(id("y", 3));
+        a.switch_raw(scrutinee, actions, info)
+    }
+
+    /// A unit whose top level holds block statements: `let f = function`,
+    /// an alias `let x = f` when `alias` (else the export is `f` itself),
+    /// then `depth` untagged dispatches inside one another, each with a
+    /// call before it inside the block of the one around it, the innermost
+    /// around a call of the exported variable; `tail` calls of `h` after
+    /// them; the export block.
+    fn unit_with_blocks(a: &mut LamArena, alias: bool, depth: usize, tail: usize) -> Lam {
+        let (f, local, export) = (id("f", 5), id("x", 10), id("x", 20));
+        let used = if alias { local } else { f };
+        let read = a.var(used);
+        let mut rest = exports(a, &[if alias { export } else { f }], &[read]);
+        for _ in 0..tail {
+            let effect = call(a, "h", 8);
+            rest = a.seq_raw(effect, rest);
+        }
+        let callee = a.var(used);
+        let unit = a.const_(C::JsUndefined { is_unit: true });
+        let mut body = a.apply_raw(callee, &[unit], ApInfo { status: ApplyStatus::InferFull, loc: LamLoc::NONE });
+        for level in 0..depth {
+            body = guarded(a, body);
+            if level + 1 < depth {
+                let effect = call(a, "g", 7);
+                body = a.seq_raw(effect, body);
+            }
+        }
+        let rest = a.seq_raw(body, rest);
+        let inner = if alias {
+            let value = a.var(f);
+            a.let_(LetKind::Alias, local, value, rest)
+        } else {
+            rest
+        };
+        let function = function(a, 6);
+        a.let_(LetKind::Strict, f, function, inner)
+    }
+
+    /// The fold's rows for the unit `root`: block statements, statements
+    /// inside one, block statements inside one, and whether the block was
+    /// flattened; and the arms.
+    fn block_rows(a: &LamArena, root: Lam) -> ([usize; 4], Vec<(Arm, Resolved)>) {
+        let input = crate::bir::bridge::import_for_lowering(a, root).0.unwrap();
+        let lowered = super::super::lower(input, None, false).unwrap();
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+        (lowered.coerced.blocks, lowered.coerced.arms)
+    }
+
+    /// THREE_TREES 11.4, "T6x-e and T6x-f: the fold reads where its rows
+    /// are": a unit with a block statement at its top level. The source
+    /// program is an untagged variant matched at the top level with an arm
+    /// that raises (`switch y { | A(_) => throw(E) | B(_) => f() }`): the
+    /// guard and the other arm are two statements of one block. The fold
+    /// reads the rows inside it and moves nothing: the block stays, and
+    /// both texts are the legacy ones.
+    #[test]
+    fn a_block_of_the_top_level_is_read_and_kept_when_nothing_moves() {
+        let mut a = LamArena::new();
+        let root = unit_with_blocks(&mut a, false, 1, 1);
+        let (blocks, arms) = block_rows(&a, root);
+        assert_eq!(blocks, [1, 2, 0, 0]);
+        assert_eq!(arms.len(), 1);
+        let (_, text) = rule(a, root);
+        assert!(text.contains("throw 0;") && text.contains("f();") && text.contains("h();"), "{text}");
+    }
+
+    /// The same unit with the export an alias that moves to the tail: the
+    /// use inside the block is replaced where it is, and the block is
+    /// dissolved into the top level.
+    #[test]
+    fn a_moved_alias_used_inside_a_block_dissolves_the_block() {
+        let mut a = LamArena::new();
+        let root = unit_with_blocks(&mut a, true, 1, 1);
+        let (blocks, arms) = block_rows(&a, root);
+        assert_eq!(blocks, [1, 2, 0, 1]);
+        assert_eq!(arms, [(Arm::MovedAlias, Resolved::Chain(false))]);
+        let (_, text) = rule(a, root);
+        assert!(text.contains("f();") && !text.contains("x();"), "{text}");
+        assert!(text.contains("let x = f;"), "{text}");
+    }
+
+    /// A block inside a block: both are dissolved, and the use two blocks
+    /// down is replaced.
+    #[test]
+    fn a_block_inside_a_block_is_dissolved_with_it() {
+        for depth in [2, 3] {
+            let mut a = LamArena::new();
+            let root = unit_with_blocks(&mut a, true, depth, 1);
+            let (blocks, arms) = block_rows(&a, root);
+            // Each block holds its guard and what follows; each inner one
+            // also follows a call.
+            assert_eq!(blocks, [depth, 2 + 3 * (depth - 1), depth - 1, 1]);
+            assert_eq!(arms, [(Arm::MovedAlias, Resolved::Chain(false))]);
+            let (_, text) = rule(a, root);
+            assert_eq!(text.matches("throw 0;").count(), depth, "{text}");
+            assert_eq!(text.matches("g();").count(), depth - 1, "{text}");
+            assert!(text.contains("f();") && !text.contains("x();"), "{text}");
+        }
+    }
+
+    /// The final list of a unit that dissolves a block, at 1,000 and at
+    /// 10,000 rows: the rows walked, the statements moved and the steps of
+    /// the interface each grow by one a row, and the heap allocations do
+    /// not grow with the rows.
+    #[test]
+    fn the_final_list_of_a_unit_that_dissolves_a_block_moves_each_statement_once() {
+        use super::super::js::Js;
+        use super::super::js_stmt::JsStmt;
+        use super::*;
+        let measure = |rows: usize| {
+            let mut a = LamArena::new();
+            let root = unit_with_blocks(&mut a, true, 2, rows);
+            let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap().into_imported();
+            let root = input.root;
+            let mut state = State::new(input);
+            let probed = state.probe(Cx::value(), root).unwrap();
+            let out = state.realize(Cx::value(), probed);
+            let finished = out.finished;
+            let exports = state.extract_exports(out.value, finished).unwrap();
+            let run = state.statements.since(Span { start: out.stmts.start, len: 0 });
+            let coerced = state.coerce_exports(run, exports, finished);
+            assert_eq!(coerced.blocks, [2, 5, 1, 1]);
+            let before = (state.coercion.steps, state.statements.copied, state.js.steps());
+            let mut list = None;
+            let allocations = allocation_counter::measure(|| list = Some(state.coerced_list(run)));
+            let list = list.expect("the final list");
+            // The function, the statements of the two blocks without the
+            // blocks, the tail's calls and the moved alias.
+            assert_eq!(state.js.len(&state.arena, list) as usize, rows + 6);
+            (
+                state.coercion.steps - before.0,
+                state.statements.copied - before.1,
+                state.js.steps() - before.2,
+                allocations.count_total,
+            )
+        };
+        let (one, ten) = (measure(1_000), measure(10_000));
+        assert_eq!(ten.0 - one.0, 9_000, "rows walked");
+        assert_eq!(ten.1 - one.1, 9_000, "statements moved");
+        assert_eq!(ten.2 - one.2, 9_000, "steps of the interface");
+        assert_eq!(ten.3, one.3, "heap allocations");
+        println!("the final list of a unit that dissolves two blocks: {} heap allocations", one.3);
     }
 
     #[test]

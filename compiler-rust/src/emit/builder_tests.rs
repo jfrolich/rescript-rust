@@ -1159,4 +1159,429 @@ mod statements {
         let allocations = allocation_counter::measure(|| b.reserve_statements(statements, 10_000));
         assert_eq!(allocations.count_total, 0);
     }
+
+    /// One statement as the text of a program that holds only it.
+    fn text<'a>(b: &mut Builder<'a>, statement: S<'a>, variables: u32) -> String {
+        let mark = b.stage_mark();
+        b.stage(statement);
+        let list = b.list(mark);
+        let body = b.statements_of(list);
+        print_program(b, body, variables)
+    }
+
+    /// `v0.a[0]["x-y"].a...`: `depth` reads over a reference, their names
+    /// in turn an identifier, an index and a string key, every other one
+    /// with a position.
+    fn chain<'a>(b: &mut Builder<'a>, depth: usize) -> J<'a> {
+        let mut value = b.reference(0, 0);
+        for read in 0..depth {
+            let name = ["a", "0", "x-y"][read % 3];
+            value = b.dot(value, name, (read % 2 == 0).then_some(read as u32), read % 5 == 0);
+        }
+        value
+    }
+
+    /// The rows of a chain from its top to its leaf.
+    fn chain_rows<'a>(b: &Builder<'a>, mut at: &Expression<'a>) -> Vec<Row> {
+        let mut rows = Vec::new();
+        loop {
+            rows.push(b.row(at));
+            at = match at {
+                Expression::StaticMemberExpression(member) => &member.object,
+                Expression::ComputedMemberExpression(member) => &member.object,
+                _ => return rows,
+            };
+        }
+    }
+
+    /// THREE_TREES 11.4, "T6x-e and T6x-f", decision 2: the copy of a
+    /// chain of member reads prints as the chain, has the rows the
+    /// constructors give, reports one id a node in the order made, and
+    /// costs one step a node at 1,000 and at 10,000 reads; a second copy
+    /// of the same depth allocates nothing outside the arena.
+    #[test]
+    fn a_copy_of_a_member_chain_is_the_chain_built_again() {
+        let mut counts = [0; 2];
+        for (at, depth) in [1_000usize, 10_000].into_iter().enumerate() {
+            let allocator = Allocator::with_capacity(64 << 20);
+            let mut b = Builder::new(&allocator);
+            b.reserve(4 * depth + 8, 0);
+            let original = chain(&mut b, depth);
+            let mut made = Vec::with_capacity(depth + 1);
+            let before = (b.steps, b.nodes());
+            let copy = b.copy_members(&original.expr, |id| made.push(id));
+            counts[at] = b.steps - before.0;
+            assert_eq!(b.nodes() - before.1, depth + 1);
+            assert_eq!(made, (before.1 as u32 + 1..=b.nodes() as u32).collect::<Vec<_>>());
+            assert_eq!(chain_rows(&b, &copy.expr), chain_rows(&b, &original.expr));
+            assert_eq!(copy.row, original.row);
+            let again = allocation_counter::measure(|| {
+                b.copy_members(&original.expr, |_| {});
+            });
+            assert_eq!(again.count_total, 0, "{depth}: {again:?}");
+            if depth == 1_000 {
+                assert_eq!(printed(&b, copy.expr), printed(&b, original.expr));
+            }
+        }
+        assert_eq!(counts, [1_001, 10_001]);
+    }
+
+    /// The value of a statement the caller holds is copied where it is:
+    /// the reference `S::value` gives borrows the statement, not the
+    /// builder (decision 4).
+    #[test]
+    fn the_value_of_a_statement_in_hand_is_copied_where_it_is() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let value = chain(&mut b, 4);
+        let declaration = b.declare(1, LetKind::Strict as u8, Some(value));
+        let copy = b.copy_members(declaration.value().expect("an initialiser"), |_| {});
+        let second = b.declare(2, LetKind::Strict as u8, Some(copy));
+        let (first, second) = (text(&mut b, declaration, 3), text(&mut b, second, 3));
+        assert_eq!(first.replace("v1", "v2"), second);
+        assert!(first.contains("v0.a[0][\"x-y\"].a"), "{first}");
+    }
+
+    /// Every leaf the builder makes is copied with its node and its row.
+    #[test]
+    fn a_copy_of_a_leaf_is_the_leaf_built_again() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let float = Number::Float(crate::js_ir::op::FloatLit { f: "1.5".into() });
+        let leaves = [
+            b.reference(3, 0),
+            b.named("f", true),
+            b.undefined(true),
+            b.null(),
+            b.boolean(true),
+            b.string("text"),
+            b.int(-7),
+            b.number(&float).unwrap(),
+        ];
+        for leaf in leaves {
+            let before = b.steps;
+            let copy = b.copy_leaf(&leaf.expr);
+            assert_eq!(b.steps, before + 1);
+            assert_eq!(copy.row, leaf.row);
+            assert_ne!(copy.expr.node_id(), leaf.expr.node_id());
+            assert_eq!(printed(&b, copy.expr), printed(&b, leaf.expr));
+        }
+    }
+
+    /// A block of `width` statements: `v0;` but for statement `width / 2`,
+    /// `let v1 = v0;`.
+    fn wide_block<'a>(b: &mut Builder<'a>, width: usize) -> S<'a> {
+        let mark = b.stage_mark();
+        for index in 0..width {
+            let value = b.reference(0, 0);
+            let statement = if index == width / 2 {
+                b.declare(1, LetKind::Strict as u8, Some(value))
+            } else {
+                b.exp(value)
+            };
+            b.stage(statement);
+        }
+        let list = b.list(mark);
+        b.block(list)
+    }
+
+    /// Decision 3: the statements of a block the caller holds are counted,
+    /// read by their index where they are and lent to an edit, without a
+    /// step, at 1,000 and at 10,000 statements.
+    #[test]
+    fn the_statements_of_a_block_in_hand_are_read_and_lent_where_they_are() {
+        for width in [1_000usize, 10_000] {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let mut block = wide_block(&mut b, width);
+            let before = b.steps;
+            assert_eq!(b.block_len(&block), width);
+            for index in [0, width / 2, width - 1] {
+                let statement = b.block_statement(&block, index);
+                let row = b.statement_row(statement);
+                let expected = if index == width / 2 { Kind::Declare } else { Kind::Exp };
+                assert_eq!(row.kind, expected);
+                let id = statement.node_id();
+                let lent = b.block_statement_mut(&mut block, index);
+                assert_eq!(lent.node_id(), id);
+            }
+            assert_eq!(b.steps, before, "a read and a lend count no step");
+        }
+    }
+
+    /// Decision 3: a statement taken out of a block leaves a hole, the
+    /// statements after it keep their indexes, and the take is one step.
+    #[test]
+    fn a_statement_taken_out_of_a_block_leaves_a_hole() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let mut block = wide_block(&mut b, 5);
+        let ids: Vec<_> = (0..5).map(|index| b.block_statement(&block, index).node_id()).collect();
+        let before = b.steps;
+        let taken = b.take_from_block(&mut block, 2);
+        assert_eq!(b.steps, before + 1);
+        assert_eq!(taken.stmt.node_id(), ids[2]);
+        assert_eq!(taken.row.kind, Kind::Declare);
+        assert_eq!(b.block_len(&block), 5);
+        for index in [0, 1, 3, 4] {
+            assert_eq!(b.block_statement(&block, index).node_id(), ids[index]);
+        }
+        // The statement is the caller's: it goes into a list of its own.
+        assert_eq!(text(&mut b, taken, 2), "let v1 = v0;\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "a statement taken out of its block")]
+    fn a_hole_of_a_block_is_not_read() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let mut block = wide_block(&mut b, 3);
+        b.take_from_block(&mut block, 1);
+        b.block_statement(&block, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "a statement taken out of its block")]
+    fn a_hole_of_a_block_is_not_taken_again() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let mut block = wide_block(&mut b, 3);
+        b.take_from_block(&mut block, 1);
+        b.take_from_block(&mut block, 1);
+    }
+
+    /// `f(v0, .., v2, ..)`: `uses` references to variable 0 after `pad`
+    /// references to variable 2, as an expression statement.
+    fn wide_call<'a>(b: &mut Builder<'a>, pad: usize, uses: usize) -> S<'a> {
+        let callee = b.named("f", false);
+        let mark = b.mark();
+        for index in 0..pad + uses {
+            let value = b.reference(if index < pad { 2 } else { 0 }, 0);
+            b.push(value);
+        }
+        let call = b.call(callee, mark, 0, false);
+        b.exp(call)
+    }
+
+    /// Decision 6: the references to a variable in a statement the caller
+    /// holds are replaced where they are, through every node the builder
+    /// makes; the count is returned; the walk stops at the last one asked
+    /// for and reads nothing when asked for none.
+    #[test]
+    fn the_references_to_a_variable_in_a_statement_are_replaced_where_they_are() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // Each shape with references to `variable` where the uses are and
+        // its number of uses: built with variable 0 and substituted, it
+        // must print as the shape built with variable 1.
+        fn shape<'a>(b: &mut Builder<'a>, which: usize, variable: u32) -> (S<'a>, u32) {
+            let u = |b: &mut Builder<'a>| b.reference(variable, 0);
+            let other = |b: &mut Builder<'a>| b.reference(2, 0);
+            match which {
+                0 => {
+                    let callee = b.named("f", false);
+                    let mark = b.mark();
+                    let first = u(b);
+                    b.push(first);
+                    let (left, right) = (u(b), other(b));
+                    let sum = b.bin(BinOp::Plus, left, right).unwrap();
+                    b.push(sum);
+                    let call = b.call(callee, mark, 0, false);
+                    (b.exp(call), 2)
+                }
+                1 => {
+                    let test = u(b);
+                    let inner = u(b);
+                    let then = b.not(inner);
+                    let otherwise = other(b);
+                    let value = b.cond(test, then, otherwise);
+                    (b.return_(value), 2)
+                }
+                2 => {
+                    let object = u(b);
+                    let value = b.dot(object, "a", None, false);
+                    (b.throw(value), 1)
+                }
+                3 => {
+                    let first = u(b);
+                    let (object, index) = (other(b), u(b));
+                    let second = b.index(object, index);
+                    let value = b.seq(first, second);
+                    (b.declare(3, LetKind::Strict as u8, Some(value)), 2)
+                }
+                4 => {
+                    let test = u(b);
+                    let then = {
+                        let mark = b.stage_mark();
+                        let value = u(b);
+                        let statement = b.exp(value);
+                        b.stage(statement);
+                        let statement = b.break_(None);
+                        b.stage(statement);
+                        b.list(mark)
+                    };
+                    let otherwise = {
+                        let test = u(b);
+                        let body = {
+                            let mark = b.stage_mark();
+                            let (left, right) = (u(b), u(b));
+                            let value = b.bin(BinOp::And, left, right).unwrap();
+                            let statement = b.exp(value);
+                            b.stage(statement);
+                            b.list(mark)
+                        };
+                        let inner = b.while_(Some("l"), test, body);
+                        let mark = b.stage_mark();
+                        b.stage(inner);
+                        let list = b.list(mark);
+                        let block = b.block(list);
+                        let mark = b.stage_mark();
+                        b.stage(block);
+                        b.list(mark)
+                    };
+                    (b.if_(test, then, otherwise), 5)
+                }
+                _ => {
+                    let object = u(b);
+                    let target = b.dot(object, "a", None, false);
+                    let callee = u(b);
+                    let mark = b.mark();
+                    let argument = u(b);
+                    b.push(argument);
+                    let value = b.new_(callee, mark);
+                    let assignment = b.bin(BinOp::Eq, target, value).unwrap();
+                    (b.exp(assignment), 3)
+                }
+            }
+        }
+        for which in 0..6 {
+            let (mut statement, uses) = shape(&mut b, which, 0);
+            let id = statement.stmt.node_id();
+            let replaced = b.substitute(&mut statement, 0, u32::MAX, |b| b.reference(1, 0));
+            assert_eq!(replaced, uses, "shape {which}");
+            assert_eq!(statement.stmt.node_id(), id);
+            let after = text(&mut b, statement, 4);
+            let (expected, _) = shape(&mut b, which, 1);
+            assert_eq!(after, text(&mut b, expected, 4), "shape {which}");
+            assert!(!after.contains("v0"), "{after}");
+        }
+        let mut statement = wide_call(&mut b, 0, 5);
+        assert_eq!(b.substitute(&mut statement, 0, 2, |b| b.reference(1, 0)), 2);
+        let before = b.steps;
+        assert_eq!(b.substitute(&mut statement, 0, 0, |b| b.reference(1, 0)), 0);
+        assert_eq!(b.steps, before);
+        assert_eq!(text(&mut b, statement, 3).matches("v0").count(), 3);
+    }
+
+    /// The stated cost of a substitution: one step a node read, linear
+    /// from 1,000 to 10,000 references, and a reference behind n other
+    /// nodes costs n.
+    #[test]
+    fn a_substitution_reads_the_statement_up_to_the_last_reference() {
+        let steps = |pad: usize, uses: usize| {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            // The walk reads the arguments from the last.
+            let mut statement = wide_call(&mut b, pad, uses);
+            let before = (b.steps, b.nodes());
+            assert_eq!(b.substitute(&mut statement, 0, uses as u32, |b| b.reference(1, 0)) as usize, uses);
+            // What `make` builds is counted by its constructor.
+            b.steps - before.0 - (b.nodes() - before.1) as u64
+        };
+        let (one, ten) = (steps(0, 1_000), steps(0, 10_000));
+        assert_eq!(ten - 2, 10 * (one - 2));
+        assert_eq!(steps(10_000, 0), 0);
+        // One reference in front of the padding is found at once; the
+        // callee and the padding are not read.
+        assert_eq!(steps(10_000, 1), steps(1_000, 1));
+        // The padding behind a reference the walk is asked for is read.
+        let behind = |pad: usize| {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let callee = b.named("f", false);
+            let mark = b.mark();
+            let value = b.reference(0, 0);
+            b.push(value);
+            for _ in 0..pad {
+                let value = b.reference(2, 0);
+                b.push(value);
+            }
+            let call = b.call(callee, mark, 0, false);
+            let mut statement = b.exp(call);
+            let before = b.steps;
+            assert_eq!(b.substitute(&mut statement, 0, 1, |b| b.reference(1, 0)), 1);
+            b.steps - before
+        };
+        assert_eq!(behind(10_000) - behind(1_000), 9_000);
+    }
+
+    /// Decision 7: the alias of a declaration is read through its id, and
+    /// follows a substitution of its initialiser.
+    #[test]
+    fn the_variable_a_declaration_aliases_is_read_through_its_id() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let id = |s: &S<'_>| s.stmt.node_id().index() as u32;
+        let value = b.reference(0, 0);
+        let mut alias = b.declare(1, LetKind::Strict as u8, Some(value));
+        let value = chain(&mut b, 1);
+        let member = b.declare(2, LetKind::Strict as u8, Some(value));
+        let bare = b.declare(3, LetKind::Strict as u8, None);
+        let value = b.reference(0, 0);
+        let statement = b.exp(value);
+        let value = b.reference(2, 0);
+        let mut late = b.declare(4, LetKind::Strict as u8, Some(value));
+        assert_eq!(b.alias_at(id(&alias)), Some(0));
+        assert_eq!(b.alias_at(id(&late)), Some(2));
+        for other in [&member, &bare, &statement] {
+            assert_eq!(b.alias_at(id(other)), None);
+        }
+        // The initialiser is replaced by another reference, then by a
+        // literal: the fact follows.
+        assert_eq!(b.substitute(&mut alias, 0, 1, |b| b.reference(5, 0)), 1);
+        assert_eq!(b.alias_at(id(&alias)), Some(5));
+        assert_eq!(b.substitute(&mut late, 2, 1, |b| b.int(1)), 1);
+        assert_eq!(b.alias_at(id(&late)), None);
+        assert_eq!(b.alias_at(id(&alias)), Some(5));
+        b.clear();
+        assert_eq!(b.alias_at(id(&alias)), None);
+    }
+
+    /// A leaf constructor leaves the operand stack alone: operands pushed
+    /// before leaves are made are the arguments of the call, in order.
+    /// (`Js::release` has no body on the builder until T6e.)
+    #[test]
+    fn a_leaf_leaves_the_operand_stack_alone() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let float = Number::Float(crate::js_ir::op::FloatLit { f: "1.5".into() });
+        let callee = b.named("f", false);
+        let mark = b.mark();
+        let first = b.reference(0, 0);
+        b.push(first);
+        b.reference(1, 0);
+        b.named("g", false);
+        b.undefined(false);
+        b.null();
+        b.boolean(false);
+        b.string("s");
+        b.int(1);
+        b.number(&float).unwrap();
+        let second = b.reference(2, 0);
+        b.push(second);
+        let call = b.call(callee, mark, 0, false);
+        let statement = b.exp(call);
+        assert_eq!(text(&mut b, statement, 3), "f(v0, v2);\n");
+    }
+
+    /// A `return` without a value evaluates nothing first. The builder
+    /// writes none (`Builder::return_` takes a value); the seal does.
+    #[test]
+    fn a_return_without_a_value_reads_no_expression() {
+        let allocator = Allocator::default();
+        let b = Builder::new(&allocator);
+        let stmt = Statement::new_return_statement(SPAN, None, &b.ast);
+        let statement = S { stmt, row: Row { flags: 0, kind: Kind::Return, aux: 0, payload: 0 } };
+        assert!(statement.value().is_none());
+    }
 }
