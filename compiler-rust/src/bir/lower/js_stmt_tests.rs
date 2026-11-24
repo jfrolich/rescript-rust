@@ -1539,10 +1539,16 @@ fn a_statement_of_a_list_in_flight_is_read_where_it_is() {
         let mut rows_read = [0u64; 3];
         for (slot, index) in [0, statements / 2 - 1, statements - 1].into_iter().enumerate() {
             u.b.steps.set(0);
-            let (id, kind, var, aux, strict) = r.with_stmt_at(&u.b, list, index as u32, |s| {
-                let strict = r.value_of(&u.b, s).map(|value| r.has(&u.b, value, flag::STRICT));
-                (r.stmt_id(&u.b, s), r.stmt_kind(&u.b, s), r.declared(&u.b, s), r.stmt_aux(&u.b, s), strict)
+            let mut read = None;
+            // The doc comment of `with_stmt_at` says it allocates nothing.
+            let allocations = allocation_counter::measure(|| {
+                read = Some(r.with_stmt_at(&u.b, list, index as u32, |s| {
+                    let strict = r.value_of(&u.b, s).map(|value| r.has(&u.b, value, flag::STRICT));
+                    (r.stmt_id(&u.b, s), r.stmt_kind(&u.b, s), r.declared(&u.b, s), r.stmt_aux(&u.b, s), strict)
+                }));
             });
+            assert_eq!(allocations.count_total, 0, "{statements} statements, index {index}: {allocations:?}");
+            let (id, kind, var, aux, strict) = read.expect("the statement was read");
             rows_read[slot] = u.b.steps.get();
             assert_eq!(id, ids[index]);
             assert_eq!(kind, r.kind_at(&u.b, list, index as u32));

@@ -808,6 +808,73 @@ mod tests {
         }
     }
 
+    /// The counts of one external call over `width` values: the source
+    /// nodes visited, the primitive's steps, the steps of the interface
+    /// and the statements pushed. `spliced` gives a variadic external one
+    /// array literal of `width` elements (`ffi_args.rs`,
+    /// `assemble_external_args_with_splice`); otherwise a named external
+    /// without arity is given `width` arguments (`compile_js_call`, the
+    /// push loop of that arm).
+    fn wide_external_counts(width: usize, spliced: bool) -> [u64; 4] {
+        use crate::bir::lower::js::Js;
+        let mut a = LamArena::new();
+        let values: Vec<_> = (0..width as i32).map(|i| a.const_(Constant::Int { i, comment: None })).collect();
+        let (args, specs, arity) = if spliced {
+            (vec![a.prim_raw(Primitive::Pmakearray, &values, LamLoc::NONE)], vec![Param::dummy()], 1)
+        } else {
+            (values, vec![], 0)
+        };
+        let root = a.prim_raw(
+            Primitive::PjsCall(Box::new(JsCall {
+                prim_name: "invoke".into(),
+                arg_types: specs,
+                ffi: ExternalDecl {
+                    kind: DeclKind::DeclVal { name: "invoke".into() },
+                    module_: None,
+                    scopes: vec![],
+                    variadic: spliced,
+                    effective_arity: arity,
+                },
+            })),
+            &args,
+            LamLoc::NONE,
+        );
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let output = state.probe(Cx::value(), root).unwrap();
+        let out = state.realize(Cx::value(), output);
+        let counts = [
+            state.source_steps as u64,
+            state.primitive_steps as u64,
+            state.js.steps(),
+            state.statements.pushed as u64,
+        ];
+        // The call has the callee and one operand a value.
+        let call = <crate::bir::j::rows::Rows as Js>::of(out.value.as_ref().expect("the call"));
+        assert_eq!(state.js.arity(&state.arena, call) as usize, width + 1);
+        let lowered = state.complete(Cx::value(), Probed::Out(out));
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+        counts
+    }
+
+    /// A spliced array literal of 10,000 elements and 10,000 arguments of
+    /// a named external without arity: every count grows by the same
+    /// amount an element from 1,000 to 2,000 as from 2,000 to 10,000, and
+    /// no statement is made.
+    #[test]
+    fn ten_thousand_spliced_elements_and_pushed_arguments_have_linear_counts() {
+        for spliced in [true, false] {
+            let [one, two, ten] = [1_000, 2_000, 10_000].map(|width| wide_external_counts(width, spliced));
+            for count in 0..3 {
+                let per_thousand = two[count] - one[count];
+                assert!(per_thousand >= 1_000, "spliced {spliced}, count {count}: {one:?} {two:?}");
+                assert_eq!(ten[count] - two[count], 8 * per_thousand, "spliced {spliced}, count {count}");
+            }
+            assert_eq!([one[3], two[3], ten[3]], [0; 3]);
+        }
+    }
+
     #[test]
     fn variadic_arguments_match_legacy() {
         use crate::lambda::lam_primitive::{Attr, LabelNoname};
