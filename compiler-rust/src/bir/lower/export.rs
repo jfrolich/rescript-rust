@@ -1084,22 +1084,27 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         row.bits |= Row::REMOVED;
     }
 
-    /// Release the statement of a removed row once nothing reads it. Cost:
-    /// the read of its key (`row_key`), one write, and one release, one
-    /// step per node released.
+    /// Release the statement of a removed row once nothing reads it: its
+    /// holder gives it up (the statement stack its place, a block the
+    /// statement at its index, which leaves a hole there, so the indexes of
+    /// the later rows of the block stay right), and it is released through
+    /// the interface. Cost: the read of its key (`row_key`), one write,
+    /// one step for a statement taken out of a block, and one step per
+    /// node released.
     fn release_row(&mut self, index: u32) {
-        let stmt = self.row_key(index);
-        // By id 4: a statement the tables name by its id, taken out of
-        // its block and released while the block or the statement stack
-        // holds it (`coerced_list` drops the stack's handle of a removed
-        // row of the top level).
-        if self.arena.parents[stmt.index()].is_some() {
-            self.arena.detach(stmt);
-        }
+        let row = self.coercion.rows[index as usize];
+        // The key is read before the handle moves.
+        let key = self.row_key(index);
         if !self.coercion.row_of.is_empty() {
-            self.coercion.row_of[stmt.index()] = 0;
+            self.coercion.row_of[key.index()] = 0;
         }
-        self.arena.release(stmt);
+        let statement = if row.bits & Row::NESTED != 0 {
+            self.with_row_mut(row.parent(), |js, a, block| js.take_from_block(a, block, row.place))
+        } else {
+            debug_assert!(row.bits & (Row::INSERTED | Row::TAIL) == 0, "a removed row of the fold's own");
+            self.statements.take_place(row.place)
+        };
+        self.js.release_stmt(&mut self.arena, statement);
     }
 
     /// B:1420 define, for the export `export`: `let var = value`, as a row
@@ -1929,10 +1934,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let Row { place, bits } = *rows.get(index)?;
                 index += 1;
                 // The rows of the top level are the run's statements, in
-                // order, but for the blocks the first pass took; a removed
-                // one was released by `release_row` (By id 4) and its
-                // handle is dropped here.
-                let own = (bits & (Row::NESTED | Row::INSERTED | Row::TAIL) == 0
+                // order, but for the blocks the first pass took and the
+                // removed rows `release_row` took and released.
+                let own = (bits & (Row::NESTED | Row::INSERTED | Row::TAIL | Row::REMOVED) == 0
                     && !(flattened && bits & Row::BLOCK != 0))
                     .then(|| top.next().expect("a statement of the top-level run"));
                 if bits & (Row::REMOVED | Row::INSERTED) != 0 {
