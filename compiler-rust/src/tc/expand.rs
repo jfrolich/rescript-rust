@@ -620,9 +620,9 @@ pub struct Memo {
 /// One row of [`Memo::own`]: the `abbrev` reference of a constructor
 /// node without arguments, as far as tracing uses it
 /// (`abbrev_memo ref`, compiler/ml/types.ml: `Mnil`, `Mcons` or
-/// `Mlink`). 16 bytes; one per node handle up to the highest nullary
-/// constructor that was expanded under tracing or copied by such an
-/// expansion.
+/// `Mlink`). 16 bytes; the table grows to the graph's length at the
+/// first constructor without arguments that is expanded under tracing
+/// or copied by such an expansion, and with the graph after.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct OwnMemo {
@@ -817,7 +817,9 @@ impl Checker {
     /// of the chain. A row whose entry is of an older generation ends
     /// the chain (`Mnil`); a row that was never memorized is passed
     /// (`Mlink`). One step a row: at most the number of traced
-    /// expansions in progress above this copy. (R3s; decision 109)
+    /// expansions above this copy, ended or not (a chain of n
+    /// abbreviations walks n rows at its n-th expansion, as OCaml's
+    /// `find_repr` does over its `Mlink` chain). (R3s; decision 109)
     fn own_ancestor(&self, from: Ty, type_index: u32) -> Ty {
         let mut at = from;
         while at.0 != NONE {
