@@ -7264,3 +7264,75 @@ fn instance_sets_at_ten_thousand() {
         assert!(large <= 11 * small, "shape {shape}: {small} {large}");
     }
 }
+
+/// The marks a walk holds survive an addition to an instance set. The
+/// sets are `Type_set`s and the walks keep `visited` and `seen` as lists
+/// of their own call (compiler/ml/ctype.ml:1505, 1511; 1393-1394;
+/// typecore.ml:2505), so an addition never touches what a walk has
+/// marked:
+///
+/// ```text
+/// (* compiler/ml/env.ml:1332-1345, add_gadt_instance_chain *)
+/// let add_gadt_instance_chain env lv t =
+///   let r =
+///     try List.assoc lv env.gadt_instances with Not_found -> assert false
+///   in
+///   let rec add_instance t =
+///     let t = repr t in
+///     if not (Type_set.mem t !r) then (
+///       set_typeset r (Type_set.add t !r);
+///       match t.desc with
+///       | Tconstr (p, _, memo) -> may add_instance (find_expans Private p !memo)
+///       | _ -> ())
+///   in
+///   add_instance t
+/// (* compiler/ml/ctype.ml:770-774, copy *)
+///         (match env with
+///         | Some env when Env.has_local_constraints env -> (
+///           match Env.gadt_instance_level env ty with
+///           | Some lv -> Env.add_gadt_instances env lv [t]
+///           | None -> ())
+///         | _ -> ());
+/// ```
+///
+/// A generation of `Checker::marks` is held over a member of the set and
+/// over a node that is no member; `add_instance_chain` marks the member
+/// and adds the other node, and `copy_in` marks a member it copies: both
+/// marks are the walk's afterwards.
+///
+/// Bodies: `add_instance_chain`, `copy_in`, `fresh_instance_marks`.
+///
+/// Reaches: R3h, R3s.
+#[test]
+fn the_marks_of_a_walk_survive_an_addition_to_an_instance_set() {
+    let mut c = case_checker(Mode::Success);
+    let (y, _) = used_at_int(&mut c);
+    let member = c.g.repr(y);
+    assert_eq!(c.instance_level(member), CASE);
+    let other = constr(&mut c, INT, &[]);
+    assert_eq!(c.instance_level(other), 0);
+    let walk = c.fresh_marks();
+    c.marks[member.0 as usize] = walk;
+    c.marks[other.0 as usize] = walk;
+    c.add_instance_chain(CASE, other);
+    assert_eq!(c.instance_level(other), CASE);
+    assert_eq!(c.marks[member.0 as usize], walk, "a member of the set");
+    assert_eq!(
+        c.marks[other.0 as usize], walk,
+        "the first node of the chain"
+    );
+    // The copy with the environment: the source of a copied member.
+    let pair = tuple(&mut c, &[y, y]);
+    c.g.level = CASE;
+    c.generalize(pair);
+    let source = c.g.repr(y);
+    assert_eq!(c.instance_level(source), CASE);
+    let walk = c.fresh_marks();
+    c.marks[source.0 as usize] = walk;
+    let copied = c.copy_in(pair);
+    let copied = c.g.repr(copied);
+    let first = c.g.repr(c.g.lists[c.g.nodes[copied.0 as usize].b as usize]);
+    assert_ne!(first, source);
+    assert_eq!(c.instance_level(first), CASE);
+    assert_eq!(c.marks[source.0 as usize], walk, "a member that was copied");
+}

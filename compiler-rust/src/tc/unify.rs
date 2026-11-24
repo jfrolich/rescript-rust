@@ -309,6 +309,17 @@ pub struct Checker {
     /// it equals `mark_generation`.
     pub marks: Vec<u32>,
     pub mark_generation: u32,
+    /// Membership marks of an instance set, indexed by node; a mark is
+    /// set when it equals `instance_mark_generation`. Read and written
+    /// by `Checker::add_instance_chain` and [`Checker::copy_in`] only.
+    /// Not `marks`: `non_recursive_abbrev`, `occur_expanding`,
+    /// `occur_pattern` and `lower_args_walk` hold a generation of
+    /// `marks` across an expansion that can add a chain to a set, and
+    /// OCaml's walks keep theirs apart from its `Type_set`s
+    /// (compiler/ml/ctype.ml:1393-1394, 1505, 1511; typecore.ml:2505).
+    /// Empty until a unit adds a chain or copies with a member. (R3s)
+    pub instance_marks: Vec<u32>,
+    pub instance_mark_generation: u32,
     pub pairs: PairSet,
     /// `univar_pairs` (compiler/ml/ctype.ml:1681): the open scopes of
     /// universal variables, innermost last. Empty between top-level
@@ -371,6 +382,8 @@ impl Checker {
             trace: Vec::new(),
             marks: Vec::new(),
             mark_generation: 0,
+            instance_marks: Vec::new(),
+            instance_mark_generation: 0,
             pairs: PairSet::default(),
             scopes: Vec::new(),
             packages: None,
@@ -1924,7 +1937,8 @@ impl Checker {
     /// for one with arguments, the row of `Memo::own` for one without;
     /// never the memo all nullary constructors of a type share), the
     /// same for that expansion. Nothing when no scope has the level.
-    /// Membership in the set is one mark generation: the set's members
+    /// Membership in the set is one generation of
+    /// `Checker::instance_marks`: the set's members
     /// are marked once (one step each), then each node of the chain is
     /// one step, one mark and one memo lookup. O(members of the set +
     /// chain), not their product. (R3s; decision 106)
@@ -1934,14 +1948,14 @@ impl Checker {
             return;
         }
         // The set's members, marked once.
-        let generation = self.fresh_marks();
+        let generation = self.fresh_instance_marks();
         let mut member = self.g.nodes[self.instance_scopes[scope as usize].head.0 as usize].b;
         while member != NONE {
             #[cfg(test)]
             super::steps::tick();
             let entry = self.instance_members[member as usize];
             let node = self.g.repr(entry.ty);
-            self.marks[node.0 as usize] = generation;
+            self.instance_marks[node.0 as usize] = generation;
             member = entry.next;
         }
         // `add_instance`, a loop: each node of the chain once.
@@ -1949,10 +1963,10 @@ impl Checker {
         loop {
             #[cfg(test)]
             super::steps::tick();
-            if self.marks[ty.0 as usize] == generation {
+            if self.instance_marks[ty.0 as usize] == generation {
                 return;
             }
-            self.marks[ty.0 as usize] = generation;
+            self.instance_marks[ty.0 as usize] = generation;
             self.push_instance(scope, ty);
             let node = self.g.nodes[ty.0 as usize];
             if node.tag() != CONSTR {
@@ -1978,8 +1992,11 @@ impl Checker {
 
     /// The copy WITH an environment (`copy ?env`, compiler/ml/ctype.ml:
     /// 770-774; `instance env`, 846-851): [`Checker::copy`], and when a
-    /// member exists ([`GADT_MEMBER`]: one load and one branch otherwise)
-    /// the copy of every member that was copied joins the member's set
+    /// member exists and the environment has a local constraint
+    /// ([`GADT_MEMBER`] and [`GADT_LOCAL`]: `Some env when
+    /// Env.has_local_constraints env`, ctype.ml:771; one load and one
+    /// branch otherwise) the copy of every member that was copied joins
+    /// the member's set
     /// (`Some lv -> Env.add_gadt_instances env lv [t]`). The members of
     /// the scopes from the current one outwards are read once, innermost
     /// scope first; a member whose representative has a forwarding row
@@ -1996,7 +2013,7 @@ impl Checker {
         // A source whose copy was added is marked: an outer scope that
         // holds it too adds nothing (`gadt_instance_level` answers the
         // innermost scope).
-        let generation = self.fresh_marks();
+        let generation = self.fresh_instance_marks();
         let mut scope = self.instance_scope;
         while scope != NONE {
             #[cfg(test)]
@@ -2013,11 +2030,11 @@ impl Checker {
                     continue;
                 };
                 if forward.generation != self.g.copy_generation
-                    || self.marks[source.0 as usize] == generation
+                    || self.instance_marks[source.0 as usize] == generation
                 {
                     continue;
                 }
-                self.marks[source.0 as usize] = generation;
+                self.instance_marks[source.0 as usize] = generation;
                 let target = self.g.repr(Ty(forward.target));
                 self.push_instance(scope, target);
             }
@@ -2871,6 +2888,23 @@ impl Checker {
                 entry.0 |= flag;
             }
         }
+    }
+
+    /// Amortized O(1): a fresh generation of `instance_marks`, which
+    /// grows to the graph's length; a wrap of the counter clears the
+    /// marks once. The array is grown the first time a unit adds a chain
+    /// or copies with a member: four bytes a node in a unit that has a
+    /// member, nothing in any other. (R3s)
+    pub(super) fn fresh_instance_marks(&mut self) -> u32 {
+        if self.instance_marks.len() < self.g.nodes.len() {
+            self.instance_marks.resize(self.g.nodes.len(), 0);
+        }
+        if self.instance_mark_generation == u32::MAX {
+            self.instance_marks.fill(0);
+            self.instance_mark_generation = 0;
+        }
+        self.instance_mark_generation += 1;
+        self.instance_mark_generation
     }
 
     /// Amortized O(1): a fresh generation of `marks`, which grows to the
