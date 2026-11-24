@@ -122,7 +122,7 @@ impl JsStmt for Rows {
         if matches!(node.op(), crate::bir::Op::SDecl) { (node.aux() & 0b11) as u8 } else { node.aux() as u8 }
     }
     #[inline]
-    fn value_of<'r>(&self, a: &Pools, s: &'r S) -> Option<NodeId> {
+    fn value_of(&self, a: &Pools, s: &S) -> Option<NodeId> {
         match a.view(s.0) {
             View::SExp { value } | View::SReturn { value } | View::SThrow { value } => Some(value),
             View::SDecl { value, .. } => value,
