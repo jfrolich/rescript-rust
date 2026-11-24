@@ -10,10 +10,13 @@ From any other directory it finds no file and stops with an error (it used
 to print tables of zeros). `--self-test` checks the two things every count
 rests on, the cut of a file at its test module and the pattern of a
 transition call, on a text written here, and that the tree it is run in has
-the lowering's files with at least one such call; it prints nothing else.
+the lowering's files with at least one such call and no more than
+`CEILING`; it prints nothing else.
 """
 import re,glob,os,collections,sys
 T=['from_node','node','at','stmt_from_node','stmt_node','list_from','list_id']
+# The most transition calls src/bir/lower may hold (`--self-test`).
+CEILING=26
 def non_test(text):
     """The text of a file above its test module."""
     lines=text.split('\n'); cut=len(lines)
@@ -57,6 +60,11 @@ if '--self-test' in sys.argv[1:]:
     files=len(src); calls=sum(sum(transitions(t).values()) for t in src.values())
     assert files>=25, f'{files} files of the lowering found'
     assert calls>0 or '--no-calls-left' in sys.argv[1:], 'no transition call found in src/bir/lower (after T6x-f: pass --no-calls-left)'
+    # The count only falls: a slice that removes calls lowers the ceiling
+    # in the same pull request (T6x-e3 to 21, T6x-e4 to 8). T6x-f sets it
+    # to 0 and replaces the assertion above by a check that the two
+    # traits declare no transition function.
+    assert calls<=CEILING, f'{calls} transition calls in src/bir/lower, above the ceiling of {CEILING}: a transition call was added'
     print(f'count_lowering_ids self-test ok: {files} files, {calls} transition calls')
     sys.exit(0)
 fn=re.compile(r'\n[ \t]*(?:pub(?:\([a-z:]+\))? )?fn (\w+)\s*(?:<[^>]*>)?\(([^{;]*?)\)\s*(->[^{;]*)?\{')
