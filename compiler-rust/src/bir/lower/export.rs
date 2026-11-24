@@ -2422,6 +2422,57 @@ mod tests {
         assert_eq!(arms[0].0, Arm::MovedReused);
     }
 
+    /// THREE_TREES 11.4, "T6x-e and T6x-f: the fold reads where its rows
+    /// are", decision 13: the reused binding that moves is the export's
+    /// OWN variable (`let x = Other.f` with `x` exported as `Other.f`:
+    /// `move_reused_to_tail` with `reused == export`). The declaration of
+    /// the export tail then binds that variable itself: the removed
+    /// declaration was unbound before `define` reads the binder, so no
+    /// copy of the variable is made. `uses` later uses of the variable are
+    /// replaced by the member, each in a statement of its own.
+    fn own_reused_binding(uses: usize) -> (super::super::Lowered, Vec<(Arm, Resolved)>, String) {
+        let mut a = LamArena::new();
+        let x = id("x", 10);
+        let value = member(&mut a, "Other", "f");
+        let mut rest = exports(&mut a, &[x], &[value]);
+        for _ in 0..uses {
+            let callee = a.var(x);
+            let unit = a.const_(C::JsUndefined { is_unit: true });
+            let effect = a.apply_raw(callee, &[unit], ApInfo { status: ApplyStatus::InferFull, loc: LamLoc::NONE });
+            rest = a.seq_raw(effect, rest);
+        }
+        let bound = member(&mut a, "Other", "f");
+        let root = a.let_(LetKind::Strict, x, bound, rest);
+        let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+        let lowered = super::super::lower(input, None, false).unwrap();
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+        let (arms, text) = rule(a, root);
+        (lowered, arms, text)
+    }
+
+    #[test]
+    fn a_reused_binding_of_the_exports_own_variable_moves_and_is_bound_again() {
+        for uses in [0, 1, 3] {
+            let (lowered, arms, text) = own_reused_binding(uses);
+            assert_eq!(arms, [(Arm::MovedReused, Resolved::Chain(false))], "{uses} uses");
+            // One declaration, after every use, and every use reads the member.
+            assert_eq!(text.matches("let x = ").count(), 1, "{text}");
+            assert_eq!(text.matches("Other.f()").count(), uses, "{text}");
+            assert!(!text.contains("x()"), "{text}");
+            // The tail declaration binds the export's variable itself: the
+            // fold made no variable, and the one variable of the unit that
+            // is named `x` is bound by a declaration of the final block.
+            let vars = &lowered.program.arena.vars;
+            let named: Vec<_> = (0..vars.len() as u32)
+                .map(crate::bir::VarId)
+                .filter(|&var| vars.name(var).as_str() == "x")
+                .collect();
+            assert_eq!(named.len(), 1, "{uses} uses: a copy of the export's variable was declared");
+            let binder = vars.binder(named[0]).expect("the export's variable is bound");
+            assert!(lowered.program.arena.parents[binder.index()].is_some(), "bound by a statement of the block");
+        }
+    }
+
     #[test]
     fn a_literal_export_is_inserted_before_equal_later_bindings() {
         // `let b = 1` is the end of the block and `b` is a later export.
