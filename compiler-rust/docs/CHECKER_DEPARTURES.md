@@ -9259,6 +9259,24 @@ handle), since only a member can be refused there that trunk's plain update
 lowers; the escape of a constructor at those three lines stays as on trunk
 (the plain update, see "Open" above).
 
+##### Cost
+
+A unit that is not tracing pays one load and one branch per common object
+field and per side of a row unification for the two tracing sites; a unit
+where no type has joined a set pays one load and one branch at each of the
+three others, then the plain update as before. While tracing, the whole-row
+update allocates one node and one row descriptor per side. The CI
+`Instruction count` check on a clean `tests/tests` build, five runs a side
+(millions): base 4,175.4, 4,178.7, 4,175.5, 4,176.5, 4,175.2; head
+4,175.2, 4,175.3, 4,176.3, 4,176.0, 4,175.8; the smallest of each,
+4,175,171,603 and 4,175,247,858, +76,255 (+0.002%). Of the functions that
+changed most, the only checker function is `unify_rows`'s `set_more`
+closure (+14,496); the rest is the allocator and `IdTbl::find_by_ident`
+(-274,740), which move by as much between runs. On a 3,735-module
+application, trunk and the third commit (thin-LTO release builds) give the
+same 3,735 signatures, the same 32 diagnostics in 18 files and the same
+3,980 generated files (`scripts/compare_checker_builds.py`).
+
 ##### Open
 
 - `ctype.ml:2703` (two conjunctions) keeps the plain update: p46 and p47,
