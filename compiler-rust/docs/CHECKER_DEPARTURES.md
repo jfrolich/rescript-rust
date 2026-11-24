@@ -23191,6 +23191,22 @@ stderr:
 
 ```
 
+**State.** The difference is fixed on trunk by pull request 385 (place A1, "Third part", earlier in this document). The reduced programs of this part were rerun with the same commands as above and the Rust build of trunk at `bb47dc1317` (this branch's compiler sources are trunk's). "agree" means equal exit status, equal diagnostics after stripping colour escapes, and equal JavaScript after removing blank lines:
+
+```text
+reduce-i1-01  ocaml exit 2  rust exit 2  agree
+reduce-i1-02  ocaml exit 0  rust exit 0  agree
+reduce-i1-03  ocaml exit 2  rust exit 2  agree
+reduce-i1-04  ocaml exit 2  rust exit 2  agree
+reduce-i1-05  ocaml exit 0  rust exit 0  agree
+reduce-i1-06  ocaml exit 2  rust exit 2  agree
+reduce-i1-07  ocaml exit 2  rust exit 2  agree
+reduce-i1-08  ocaml exit 2  rust exit 2  agree
+reduce-i1-09  ocaml exit 2  rust exit 2  agree
+reduce-i1-10  ocaml exit 2  rust exit 2  agree
+reduce-i1-11  ocaml exit 0  rust exit 0  agree
+```
+
 ### I2 — polymorphic variant rows
 
 Verdict: **WITNESS** (i2-01, 02, 05–08). All eight candidates parsed and
@@ -24111,6 +24127,17 @@ stderr:
 
   You can only compare things of the same type.
 
+```
+
+**State.** The difference is fixed on trunk by pull request 385 (place A1, "Third part", earlier in this document). The reduced programs of this part were rerun with the same commands as above and the Rust build of trunk at `bb47dc1317` (this branch's compiler sources are trunk's). "agree" means equal exit status, equal diagnostics after stripping colour escapes, and equal JavaScript after removing blank lines:
+
+```text
+reduce-i2-01  ocaml exit 2  rust exit 2  agree
+reduce-i2-02  ocaml exit 2  rust exit 2  agree
+reduce-i2-03  ocaml exit 0  rust exit 0  agree
+reduce-i2-04  ocaml exit 2  rust exit 2  agree
+reduce-i2-05  ocaml exit 2  rust exit 2  agree
+reduce-i2-06  ocaml exit 2  rust exit 2  agree
 ```
 
 ### I3 — unequal instance-set levels after expansion
