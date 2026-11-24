@@ -1,0 +1,1 @@
+- Backend lowering: a JSX element gives its callee apart from its operands, and a duplicated JSX key is copied through the lowering interface.

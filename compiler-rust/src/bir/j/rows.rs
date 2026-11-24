@@ -18,7 +18,7 @@
 //! | a leaf | `plain::node` with the leaf's view (`int_literal`: `plain::int`; `string`: `plain::string`; `boolean`: `plain::boolean`); `aux` is the unit bit of `undefined` and the statement bit of `raw`, 0 otherwise |
 //! | `bin_plain`, `seq` | `plain::bin`, `plain::seq` |
 //! | the other plain functions | `plain::node` with the view of the same name; `aux` is the tag bit of `dot`, the identity bit of `optional`, 0 otherwise |
-//! | a list constructor | `plain::node` with `&self.operands[mark..]` as the list (the callee or tag is not on the stack), then the stack is cut back to the mark; `aux` is the mutability of `array` and `block`, the children bit of `jsx`, and 1 for `new_` (its argument list is present, as `Bir::call_from_list` without call information writes it) |
+//! | a list constructor | `plain::node` with `&self.operands[mark..]` as the list (the callee or tag is not on the stack), then the stack is cut back to the mark; `aux` is the mutability of `array` and `block`, and 1 for `new_` (its argument list is present, as `Bir::call_from_list` without call information writes it) |
 //! | a rule function | the function of `norm.rs` named in THREE_TREES 11.4, "T6: the interface" (c); `template` gives `jm12_interpolated_template` the operands since the mark and cuts the stack back; `project` returns `Err(value)` when `jm11_projection` returns `None` (it has consumed nothing then) |
 //! | `id` | the row's id (`NodeId::0`) |
 //! | `kind` | `kind_of` of the node's operation |
@@ -51,7 +51,7 @@
 //! | `refill` | `plain::node` of the view of `e`'s operation (`JOptional`, `JArray`, `JBlockLit`, `JObject`, `JDot`) over the operands since the mark with `e`'s `aux`, information, property and position; `plain::copy_cold` from `e`; `Bir::release` of `e` |
 //! | `copy_cold` | `plain::copy_cold`, then the character of `from` (`Node::js_char`) set on `to` when `from` has one |
 //! | `copy_members` | the `JDot`s from `r` down pushed on `Rows::work`, then `copy_leaf` and `copy_cold` of the first node that is not one, then for each read from the innermost out `dot` with its `property`, `position` and `aux != 0`, and `copy_cold`; `made` after each node; one step per node made |
-//! | `jsx_element` | `callee` pushed and rotated to the mark (`slice::rotate_right(1)` of the operands since it), then the body of `jsx`: one step and one per operand, the callee one of them |
+//! | `jsx_element` | `callee` pushed and rotated to the mark (`slice::rotate_right(1)` of the operands since it), then `plain::node` with the operands since the mark as the list and the children bit as `aux`: one step and one per operand, the callee one of them |
 //!
 //! Steps (`Js::steps`): one for every function that builds a node or takes
 //! one apart (`without_pure` and `project` too, whatever they return); a
@@ -589,15 +589,23 @@ impl Js for Rows {
         );
         self.cut(start, id)
     }
-    fn jsx(&mut self, a: &mut Pools, mark: Mark, info: JsId, has_children: bool) -> E {
-        let start = self.since(mark);
-        self.jsx_over(a, start, info, has_children)
-    }
     fn jsx_element(&mut self, a: &mut Pools, callee: E, mark: Mark, info: JsId, has_children: bool) -> E {
         let start = self.since(mark);
         self.operands.push(callee.0);
         self.operands[start..].rotate_right(1);
-        self.jsx_over(a, start, info, has_children)
+        let JsPayload::Jsx(header) = a.javascript(info) else { panic!("a JSX header") };
+        // The callee and the tag, then what the header counts.
+        let expected = 2 + usize::from(header.spread) + header.props.len as usize + header.children as usize + usize::from(header.key);
+        assert_eq!(self.operands.len() - start, expected, "the operands the JSX header counts");
+        let id = plain::node(
+            a,
+            View::JJsx {
+                values: &self.operands[start..],
+                info,
+            },
+            u16::from(has_children),
+        );
+        self.cut(start, id)
     }
 
     fn keep_operand(&mut self, a: &mut Pools, e: E, index: u32) -> E {
@@ -873,24 +881,6 @@ impl Rows {
     fn leaf(&mut self, a: &mut Pools, view: View<'_>, aux: u16) -> E {
         self.steps += 1;
         E(plain::node(a, view, aux))
-    }
-    /// The JSX element over the operands from `start` on the stack (the
-    /// callee first), the stack cut back after it: the body of
-    /// [`Js::jsx`] and [`Js::jsx_element`]. One step, and one per operand.
-    fn jsx_over(&mut self, a: &mut Pools, start: usize, info: JsId, has_children: bool) -> E {
-        let JsPayload::Jsx(header) = a.javascript(info) else { panic!("a JSX header") };
-        // The callee and the tag, then what the header counts.
-        let expected = 2 + usize::from(header.spread) + header.props.len as usize + header.children as usize + usize::from(header.key);
-        assert_eq!(self.operands.len() - start, expected, "the operands the JSX header counts");
-        let id = plain::node(
-            a,
-            View::JJsx {
-                values: &self.operands[start..],
-                info,
-            },
-            u16::from(has_children),
-        );
-        self.cut(start, id)
     }
     /// The index of `mark` on the operand stack. O(1).
     #[inline]
