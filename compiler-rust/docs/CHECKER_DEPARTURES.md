@@ -8989,6 +8989,308 @@ locally abstract type, `box<b>` and `list<b>`. Six of them are refused
 by both compilers, four with the ambiguity lines, and twelve accepted
 with the same JavaScript.
 
+#### Third part: a field's type and a variant row are lowered under tracing
+
+Programs (each starts with `type rec t<_> = Int: t<int>`, the function is
+`(type a, x: t<a>, y: a, ...) => switch x { | Int => ... }`): OCaml refuses
+`{"f": y} === o` with `o: {.."f": int}` and `#A(y) === v` with
+`v: [> #A(int)]`; trunk `45c4f78a5` accepted both and emitted JavaScript.
+
+```text
+  We've found a bug for you!
+  /.../fixtures/gadt_instance_row_object_open_left.res:4:25
+
+  2 │ let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  3 │   switch x {
+  4 │   | Int => {"f": y} === o
+  5 │   }
+  6 │ 
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+```
+
+```text
+  We've found a bug for you!
+  /.../fixtures/gadt_instance_row_variant_open_left.res:4:22
+
+  2 │ let f = (type a, x: t<a>, y: a, v: [> #A(int)]) =>
+  3 │   switch x {
+  4 │   | Int => #A(y) === v
+  5 │   }
+  6 │ 
+
+  This has type: [> #A(int)]
+  But it's being compared to something of type: [> #A(a)]
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+```
+
+Rust on trunk, exit 0, for the first (the second is the same with
+`{NAME: "A", VAL: y}` and `v`):
+
+```js
+function f(x, y, o) {
+  return ({
+    f: y
+  }) === o;
+}
+```
+
+The upper-bounded row (`let p = #A(if true { y } else { 0 }); p === v`
+with `v: [< #A(int)]`) was refused by both, with another text in Rust:
+"This has type: [< #A(int)]" and an "incompatible parts" paragraph
+(`int vs a (defined as int)`) where OCaml prints:
+
+```text
+  We've found a bug for you!
+  /.../fixtures/gadt_instance_row_variant_upper_bound_left.res:6:13
+
+  4 ┆ | Int => {
+  5 ┆     let p = #A(if true { y } else { 0 })
+  6 ┆     p === v
+  7 ┆   }
+  8 ┆ }
+
+  This has type: [#A(int)]
+  But it's being compared to something of type: [> #A(a)]
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+```
+
+Commands are the ones of "Scope, calibration and reproducibility": each
+program is `Main.res` alone, run with `bsc -w +A -bs-jsx 4 -color never
+Main.res` through both compilers; "agree" is the same exit status and the
+same stdout and stderr byte for byte, after removing colour escapes. Rust
+before is trunk `45c4f78a5`, after is the third commit below; the column
+"fixed by" names the OCaml line whose port made the program agree (each
+commit was built and run on its own). A location after "accepted" is a
+warning's. Each program is in the PR's fixtures or recorded here only.
+
+| # | program | OCaml | Rust before | after | fixed by |
+| --- | --- | --- | --- | --- | --- |
+| p01 | (1) `{"f": y} === o`, `o: {.."f": int}` | refused at 4:25 | DIFFER (accepted) | agree | 2490 |
+| p02 | (2) `#A(y) === v`, `v: [> #A(int)]` | refused at 4:22 | DIFFER (accepted) | agree | 2611 |
+| p03 | (3) `o === {"f": y}` | refused at 4:18-25 | DIFFER (accepted) | agree | 2490 |
+| p04 | (3) `{"f": y, "g": "s"} === o`, two fields, instance in the first | refused at 4:35 | DIFFER (accepted) | agree | 2490 |
+| p05 | `{"f": "s", "g": y} === o`, instance in the last field | refused at 4:35 | DIFFER (accepted) | agree | 2490 |
+| p06 | (4) `v === #A(y)` | accepted | agree | agree |  |
+| p07 | (4) `{"f": y} === o`, `o: {"f": int}` closed | accepted | agree | agree |  |
+| p08 | (5) `[{"f": y}, o]` | refused at 4:23 | agree | agree |  |
+| p09 | (5) `[#A(y), v]` | refused at 4:20 | agree | agree |  |
+| p10 | (5) `if true { {"f": y} } else { o }` | refused at 4:40 | agree | agree |  |
+| p11 | (6) `let p = #A(if true { y } else { 0 }); p === v`, `v: [< #A(int)]` | refused at 6:13 | DIFFER (refused) | agree | 2714 |
+| p12 | `{"f": y} == o` | refused at 4:24 | DIFFER (accepted) | agree | 2490 |
+| p13 | `#A(y) == v` | refused at 4:21 | DIFFER (accepted) | agree | 2611 |
+| p14 | `same({"f": y}, o)`, `same: ('x, 'x) => bool` | refused at 5:27 | DIFFER (accepted) | agree | 2490 |
+| p15 | `same(#A(y), v)` | refused at 5:24 | DIFFER (accepted) | agree | 2611 |
+| p16 | `({"f": y}, 1) === (o, 1)` (tuple) | refused at 4:31 | DIFFER (accepted) | agree | 2490 |
+| p17 | `r := Some({"f": y})`, `r: ref<option<{.."f": int}>>` a parameter | refused at 4:22-29 | DIFFER (accepted) | agree | 2490 |
+| p18 | `{l: {"f": y}, m: o}`, record `box<'x> = {l: 'x, m: 'x}` | refused at 5:29 | DIFFER (refused) | agree | 2490 |
+| p19 | result annotation `: {.."f": int}`, `{"f": y}` returned | refused at 4:12-19 | DIFFER (accepted) | agree | 2490 |
+| p20 | `eq<a, int>` witness, `{"f": y} === o` | refused at 4:26 | DIFFER (accepted) | agree | 2490 |
+| p21 | `type u = int`, `U: t<u>`, `{"f": y} === o` | refused at 5:23 | DIFFER (accepted) | agree | 2490 |
+| p22 | `type r<'a> = 'a constraint 'a = [> #A(int)]`, `v: r<_>`, `#A(y) === v` | refused at 5:22 | DIFFER (accepted) | agree | 2611 |
+| p23 | `v: [< #A(int) \| #B]`, `#A(y) === v` | refused at 4:22 | agree | agree |  |
+| p24 | `v: [> #B]`, `#A(y) === v` (tag on one side) | accepted | agree | agree |  |
+| p25 | `o: {.."f": {.."g": int}}`, `{"f": {"g": y}} === o` (nested object) | refused at 4:32 | DIFFER (accepted) | agree | 2490 |
+| p26 | `o: {.."f": [> #A(int)]}`, `{"f": #A(y)} === o` (variant in a field) | refused at 4:29 | DIFFER (accepted) | agree | 2490 |
+| p27 | `{"f": y + 1} === o` | accepted | agree | agree |  |
+| p28 | `{"f": (y: int)} === o` | accepted | agree | agree |  |
+| p29 | `v: [#A(int)]` closed, `#A(y) === v` | accepted | agree | agree |  |
+| p30 | `o2: {.."f": a}` against `o: {.."f": int}`, open against open | refused at 4:19 | DIFFER (accepted) | agree | 2490 |
+| p31 | `(#A(y): [#A(a)]) === v`, closed against open | refused at 4:33 | DIFFER (accepted) | agree | 2611 |
+| p32 | `(if true { #A(y) } else { #B("s") }) === v`, `v: [> #A(int) \| #B(string)]` | refused at 4:53 | DIFFER (accepted) | agree | 2611 |
+| p33 | the same with the instance in the last tag, `#B(y)` | refused at 4:53 | DIFFER (accepted) | agree | 2611 |
+| p34 | result annotation `: [> #A(int)]`, `#A(y)` returned | accepted, a warning at 2:33 | agree | agree |  |
+| p35 | `#A(y + 1) === v` | accepted | agree | agree |  |
+| p36 | `v2: [> #A(a)]` against `v: [> #A(int)]`, open against open | refused at 4:19 | DIFFER (accepted) | agree | 2611 |
+| p37 | `o == {"f": y}` | refused at 4:17-24 | DIFFER (accepted) | agree | 2490 |
+| p38 | `v == #A(y)` (warning 102 in both) | accepted, a warning at 4:12-21 | agree | agree |  |
+| p39 | `o === {"f": y, "g": "s"}` | refused at 4:18-35 | DIFFER (accepted) | agree | 2490 |
+| p40 | `#A((y: int)) === v` | accepted | agree | agree |  |
+| p41 | `let r = ref(o); r := {"f": y}; r` | refused at 6:12-19 | DIFFER (accepted) | agree | 2490 |
+| p42 | `v: [> #A({.."g": int})]`, `#A({"g": y}) === v` | refused at 4:29 | DIFFER (accepted) | agree | 2490 |
+| p43 | (6) reversed: `v === p`, `v: [< #A(int)]` | refused at 6:13 | DIFFER (refused) | agree | 2721 |
+| p44 | `let p = #A(if ...); p === v`, `v: [> #B]` | refused at 6:13 | DIFFER (accepted) | agree | 2618 |
+| p45 | the same reversed, `v === p` | refused at 6:13 | DIFFER (accepted) | agree | 2618 |
+| p46 | `(w: [< #A(a) \| #B]) => w === v`, `v: [< #A(int) \| #B]` | accepted, a warning at 2:27 | agree | agree |  |
+| p47 | p46 with `w === p` first, `p` holding the instance | refused at 7:13 | agree | agree |  |
+| p48 | `let p = {"f": if true { y } else { 0 }}; p === o` | refused at 6:13 | DIFFER (accepted) | agree | 2490 |
+| p49 | (6) with `v: [< #A(int) \| #B]` | refused at 6:13 | DIFFER (refused) | agree | 2714 |
+| p50 | (6) with `v: [> #A(int)]` | refused at 6:13 | DIFFER (accepted) | agree | 2611 |
+| p51 | `eq<a, int>` witness, `#A(y) === v` | refused at 4:23 | DIFFER (accepted) | agree | 2611 |
+| p52 | `type u = int`, `U: t<u>`, `#A(y) === v` | refused at 5:20 | DIFFER (accepted) | agree | 2611 |
+| p53 | `ignore({"f": y} === o); 1` | refused at 5:27 | DIFFER (accepted) | agree | 2490 |
+| p54 | `({"f": y}: {.."f": int}) === o` | accepted | agree | agree |  |
+| p55 | `{"f": y} === (o :> {"f": int})` | refused at 4:26-40 | DIFFER (accepted) | DIFFER (refused) | open |
+| p56 | `{"f": 1, "g": y} === o`, `o: {.."f": int, "g": int}` | refused at 4:33 | DIFFER (accepted) | agree | 2490 |
+| p57 | `(#A(y): [> #A(int)]) === v` | accepted | agree | agree |  |
+
+Eighty-five programs of an unmerged search of the same mechanism (objects
+against open objects, rows against open rows, their reductions) were run
+too: on trunk 65 agree and 20 differ (17 accepted by Rust and refused by
+OCaml, 3 refused with another text); after the third commit all 85 agree.
+
+##### The trace
+
+A scratch copy of `compiler/ml/ctype.ml` (never committed) printed, at each
+call of `update_level` in `unify_fields`, `unify_row` and `unify_row_field`,
+the level and the place, and, at the two refusals (`update_level`,
+`ctype.ml:588`, and `expand_abbrev_gen`, `ctype.ml:1226`), the type, its
+level and the set's level; "ADD" is `ctype.ml:1227`. `row==row1` says which
+side `set_more` lowers. Each `update_level:588` refusal prints twice: the
+first pass and its retry with expansion (`ctype.ml:631-638`).
+
+```text
+== p01
+TRACE unify_fields:2490 field=f f1.level=2007 va.level=1004 desc=other
+TRACE expand_abbrev_gen:1226 REFUSE path=a ty.level=1004 setlevel=1007
+== p02
+TRACE set_more:2611 row==row1:false rm.level=2007 fields=A
+TRACE set_more:2611 row==row1:true rm.level=1004 fields=A
+TRACE expand_abbrev_gen:1227 ADD path=a level=2007 setlevel=1007
+TRACE update_level:588 REFUSE ty.id=361 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE update_level:588 REFUSE ty.id=361 ty.level=2007 level=1004 setlevel=1007 desc=a
+== p06
+TRACE expand_abbrev_gen:1227 ADD path=a level=2008 setlevel=1007
+== p11
+TRACE expand_abbrev_gen:1227 ADD path=a level=2008 setlevel=1007
+TRACE set_more:2611 row==row1:false rm.level=2007 fields=A
+TRACE set_more:2611 row==row1:true rm.level=1004 fields=A
+TRACE update_level:588 REFUSE ty.id=375 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE update_level:588 REFUSE ty.id=375 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE   raised at unify_row_field:2714
+== p43
+TRACE expand_abbrev_gen:1227 ADD path=a level=2008 setlevel=1007
+TRACE set_more:2611 row==row1:false rm.level=1004 fields=A
+TRACE set_more:2611 row==row1:true rm.level=2007 fields=A
+TRACE update_level:588 REFUSE ty.id=378 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE update_level:588 REFUSE ty.id=378 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE   raised at unify_row_field:2721
+== p44
+TRACE expand_abbrev_gen:1227 ADD path=a level=2008 setlevel=1007
+TRACE set_more:2611 row==row1:false rm.level=2007 fields=A
+TRACE set_more:2611 row==row1:true rm.level=1004 fields=B
+TRACE update_level:588 REFUSE ty.id=369 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE update_level:588 REFUSE ty.id=369 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE   raised at set_more:2618 row==row1:true
+== p45
+TRACE expand_abbrev_gen:1227 ADD path=a level=2008 setlevel=1007
+TRACE set_more:2611 row==row1:false rm.level=1004 fields=B
+TRACE update_level:588 REFUSE ty.id=371 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE update_level:588 REFUSE ty.id=371 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE   raised at set_more:2618 row==row1:false
+```
+
+For the object (p01) nothing is refused at `ctype.ml:2490` itself: the left
+field's type (level 2007) is lowered to the row variable's level 1004 with
+`a` in it, not yet a member of any set; the unification of the two fields
+then expands `a` at level 1004, below the equation's expansion level 1007,
+and `expand_abbrev_gen` refuses (`ctype.ml:1220-1226`). A Rust trace of the
+same program (temporary `eprintln!`, never committed) showed the field loop
+reached with tracing on and the row variable at 1004, the field types at
+2007, and `a` then expanded at 2007 and added to the set: nothing lowered
+it. For the open row (p02) the lowering of `v`'s row at `ctype.ml:2611`
+(`row==row1:true`, level 1004) takes its payload `int` to 1004; the
+unification of the tag's payloads expands `a` at 2007 (ADD) and `unify2`
+then lowers `a` to the smaller level 1004 (`ctype.ml:2284-2285`), which refuses
+the member. In Rust the payload `int` stayed at 2007. With the operands the
+other way round (p06) no row of `v` is unified with the literal's row (the
+literal is typed against `v`'s type), and both accept. The upper-bounded
+row (p11, p43, p49) is refused at `ctype.ml:2714` or `2721`, after the
+conjunction is linked to the present tag and before its payloads are
+unified: the refusal leaves the link, so the type prints as `[#A(int)]`,
+and the trace is the refusal's one pair, with no "incompatible parts".
+A tag on one side only (p44, p45) is refused at `ctype.ml:2618`, where the
+row built from the other side's unmatched tag is lowered to `v`'s level.
+No program raised at `ctype.ml:2703`.
+
+| OCaml line | only while tracing | what is lowered, to which level | Rust on trunk | after | programs |
+| --- | --- | --- | --- | --- | --- |
+| `ctype.ml:2490` (`unify_fields`) | yes | the left object's common field type `f1.f_typ`, to the shared row variable's level `va.level` | none (`unify_object_field_pairs`, `ctype.rs:10311`) | ported | p01, p03-p05, p12, p14, p16-p21, p25, p26, p30, p37, p39, p41, p42, p48, p53, p56 |
+| `ctype.ml:2611` (`set_more`) | yes | the whole row, a fresh `Tvariant row`, to its own row variable's level `rm.level` | none (`unify_rows`'s `set_more`) | ported | p02, p13, p15, p22, p31-p33, p36, p50-p52 |
+| `ctype.ml:2618` (`set_more`) | no | the row of the other side's unmatched tags, to `rm.level` | plain `update_level` without the environment (`ctype.rs:9823`) | `update_level !env` once a type has joined a set | p44, p45 |
+| `ctype.ml:2703` (`unify_row_field`, two conjunctions) | no | the payloads of both conjunctions, to `more`'s level | plain `update_level` (`ctype.rs:10028`) | not ported | none (p46, p47 agree) |
+| `ctype.ml:2714` (conjunction, present tag) | no | the present tag's payload `t2`, to `more`'s level | plain `update_level` (`ctype.rs:10083`) | `update_level !env` once a type has joined a set | p11, p49 |
+| `ctype.ml:2721` (present tag, conjunction) | no | the present tag's payload `t1`, to `more`'s level | plain `update_level` (`ctype.rs:10103`) | `update_level !env` once a type has joined a set | p43 |
+
+##### Fixed
+
+- `7366a5f93`: `unify_object_field_pairs` lowers the left field's type to
+  the level of the shared row variable while tracing
+  (`ctype.ml:2489-2490`), with the environment (`update_level_checked`),
+  before it unifies the pair; a refusal is wrapped in the pair of fields as
+  a failed unification is.
+- `d870093f8`: `set_more` in `unify_rows` lowers the whole row to its row
+  variable's level while tracing (`ctype.ml:2609-2611`), through a fresh
+  node as OCaml's `newgenty (Tvariant row)`, so no node of the program
+  changes level but the row's contents.
+- `c156c2de6`: the row of the unmatched tags (`ctype.ml:2618`) and a present
+  tag's payload matched with a conjunction (`ctype.ml:2714`, `2721`) are
+  lowered with the environment (`update_level_with_gadt_instances`) once a
+  type has joined an instance set; before that, the plain update as on
+  trunk. Its message cites these lines as 2617, 2706 and 2712; the code's
+  comments were corrected to 2618, 2714 and 2721 in the next commit.
+- Fixtures: super_errors `gadt_instance_row_*` (38 refused programs,
+  expected files from the OCaml compiler) and
+  `tests/tests/src/gadt_instance_row_accepted.res` (12 accepted programs,
+  compared by the JavaScript parity suite).
+
+The two tracing sites test OCaml's own condition, the tracing bit of the
+context's byte, and not the member bit: in p01 no type has joined a set
+when the field is lowered, and the refusal comes from the equation's
+expansion level. The three others test the member bit (with the scope
+handle), since only a member can be refused there that trunk's plain update
+lowers; the escape of a constructor at those three lines stays as on trunk
+(the plain update, see "Open" above).
+
+##### Cost
+
+A unit that is not tracing pays one load and one branch per common object
+field and per side of a row unification for the two tracing sites; a unit
+where no type has joined a set pays one load and one branch at each of the
+three others, then the plain update as before. While tracing, the whole-row
+update allocates one node and one row descriptor per side. The CI
+`Instruction count` check on a clean `tests/tests` build, five runs a side
+(millions): base 4,175.4, 4,178.7, 4,175.5, 4,176.5, 4,175.2; head
+4,175.2, 4,175.3, 4,176.3, 4,176.0, 4,175.8; the smallest of each,
+4,175,171,603 and 4,175,247,858, +76,255 (+0.002%). Of the functions that
+changed most, the only checker function is `unify_rows`'s `set_more`
+closure (+14,496); the rest is the allocator and `IdTbl::find_by_ident`
+(-274,740), which move by as much between runs. On a 3,735-module
+application, trunk and the third commit (thin-LTO release builds) give the
+same 3,735 signatures, the same 32 diagnostics in 18 files and the same
+3,980 generated files (`scripts/compare_checker_builds.py`).
+
+##### Open
+
+- `ctype.ml:2703` (two conjunctions) keeps the plain update: p46 and p47,
+  written for it, agree, and no program raised there.
+- p55, `{"f": y} === (o :> {"f": int})`: both refuse at the coercion with
+  the ambiguity lines, OCaml with "But it's being compared to something of
+  type: {"f": a}" and "You can only compare things of the same type.", Rust
+  with "But it's expected to have type: {"f": a}" and the coercion advice
+  ("Possible solutions: ... :>"). It is not this mechanism: without a GADT,
+  `let f = (o: int) => "s" === (o :> int)` gives the same two texts (OCaml
+  "But it's being compared to something of type: string", Rust "But it's
+  expected to have type: string"), so the comparison context is lost for a
+  coercion operand.
+
 ## Fourth round: modules, aliases and usage marks
 
 ### Scope, commands and calibration

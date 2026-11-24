@@ -2727,6 +2727,28 @@ fn unify1_var_link(
     Ok(())
 }
 
+/// OCaml `update_level !env` at a level update of a row that Rust makes
+/// with the plain [`update_level`]: once a type has joined an instance set
+/// in this unit and `env` has an instance scope, [`update_level_checked`],
+/// which refuses to lower a member below the level of its set
+/// (compiler/ml/ctype.ml:587-589); otherwise the plain update, as before.
+/// A unit where no type has joined a set pays one load and one branch on
+/// top of the plain update.
+fn update_level_with_gadt_instances(
+    ctx: &TypeContext,
+    env: Option<&Env>,
+    level: i32,
+    ty: TypeExprRef,
+) -> Result<(), TypeError> {
+    match env {
+        Some(env) if has_gadt_instance_scope(ctx, env) => update_level_checked(ctx, env, level, ty),
+        _ => {
+            update_level(ctx, level, ty);
+            Ok(())
+        }
+    }
+}
+
 /// OCaml `update_level` (ctype.ml:615-622): first lower levels without
 /// expanding parameterized constructors; if a constructor would escape its
 /// scope, backtrack and retry expanding them. The error is OCaml's
@@ -9678,6 +9700,13 @@ pub(crate) fn merge_row_fields<'a, 'b>(
 /// Matches OCaml's `unify_row` (ctype.ml:2538): uses `merge_row_fields` to sort
 /// and partition fields, then unifies pairs. The result has fields in alphabetical
 /// order, matching OCaml's `row_repr` which flattens the sorted chain.
+///
+/// While GADT instances are traced, `set_more` first lowers the whole row
+/// to the level of its row variable (compiler/ml/ctype.ml:2609-2611); a
+/// unit that is not tracing pays one load and one branch per side for that.
+/// The row built from the other side's unmatched fields is lowered as
+/// OCaml's `update_level !env` (ctype.ml:2618) does once a type has joined
+/// an instance set; until one has, one load and one branch per side.
 fn unify_rows<'a>(
     ctx: &'a TypeContext,
     state: &mut UnifyState,
@@ -9805,6 +9834,18 @@ fn unify_rows<'a>(
             }]));
         }
         let rm = row_more(ctx, row);
+        // OCaml compiler/ml/ctype.ml:2609-2611: while tracing GADT instances,
+        // the whole row is lowered to the level of its own row variable,
+        // which refuses an instance of a deeper equation's set. OCaml lowers
+        // a fresh node `newgenty (Tvariant row)`, so that no node of the
+        // program changes level but the row's contents: one node and one row
+        // descriptor, only while tracing.
+        if ctx.trace_gadt_instances()
+            && let Some(env) = state.env()
+        {
+            let whole = ctx.new_generic_type(TypeDesc::Tvariant(ctx.new_row_desc(row.clone())));
+            update_level_checked(ctx, env, ctx.get_level(rm), whole)?;
+        }
         if row_is_fixed {
             if more == rm {
                 return Ok(());
@@ -9820,7 +9861,9 @@ fn unify_rows<'a>(
             row_fields: rest.into(),
             ..row0.clone()
         })));
-        update_level(ctx, ctx.get_level(rm), ty);
+        // OCaml compiler/ml/ctype.ml:2618 `update_level !env`, before the
+        // link.
+        update_level_with_gadt_instances(ctx, state.env(), ctx.get_level(rm), ty)?;
         link_type(ctx, rm, ty);
         Ok(())
     };
@@ -9885,6 +9928,9 @@ fn mkvariant(ctx: &TypeContext, fields: Vec<(Label, RowField)>, closed: bool) ->
 
 /// Unify two row fields.
 /// Matches OCaml's `unify_row_field` behavior, including Reither link updates.
+/// A present field matched with a conjunction is lowered to the level of
+/// `more` as OCaml's `update_level !env` (ctype.ml:2714, 2721) does once a
+/// type has joined an instance set; until one has, one load and one branch.
 fn unify_row_field(
     ctx: &TypeContext,
     state: &mut UnifyState,
@@ -10080,7 +10126,9 @@ fn unify_row_field(
         ) if !fixed1 => {
             ctx.set_row_field(*e1, f2.clone());
             let more_level = ctx.get_level(ctx.repr(more));
-            update_level(ctx, more_level, *t2);
+            // OCaml compiler/ml/ctype.ml:2714 `update_level !env`: a refused
+            // instance leaves the field linked, as there.
+            update_level_with_gadt_instances(ctx, state.env(), more_level, *t2)?;
             for t1 in types {
                 if let Err(err) = unify(ctx, state, *t1, *t2) {
                     ctx.clear_row_field(*e1);
@@ -10100,7 +10148,8 @@ fn unify_row_field(
         ) if !fixed2 => {
             ctx.set_row_field(*e2, f1.clone());
             let more_level = ctx.get_level(ctx.repr(more));
-            update_level(ctx, more_level, *t1);
+            // OCaml compiler/ml/ctype.ml:2721, as above.
+            update_level_with_gadt_instances(ctx, state.env(), more_level, *t1)?;
             for t2 in types {
                 if let Err(err) = unify(ctx, state, *t1, *t2) {
                     ctx.clear_row_field(*e2);
@@ -10284,6 +10333,11 @@ fn unify_object_fields(
     result
 }
 
+/// The body of [`unify_object_fields`]: unify the row tails, then each pair
+/// of common fields. While GADT instances are traced, each left field is
+/// first lowered to the level of the shared row variable
+/// (compiler/ml/ctype.ml:2489-2490); a unit that is not tracing pays one
+/// load and one branch per common field for that.
 #[allow(clippy::too_many_arguments)]
 fn unify_object_field_pairs(
     ctx: &TypeContext,
@@ -10308,7 +10362,19 @@ fn unify_object_field_pairs(
     // Unify paired fields (matching names from both sides)
     for (f1, f2) in pairs {
         unify_mutability(ctx, open1, open2, f1, f2)?;
-        if let Err(err) = unify(ctx, state, f1.typ, f2.typ) {
+        // OCaml compiler/ml/ctype.ml:2489-2490: while tracing GADT instances,
+        // the left field's type is lowered to the level of the shared row
+        // variable before the field types are unified. A type known only
+        // through an equation is so lowered below the equation's level, and
+        // its expansion is then refused (ctype.ml:1220-1225). The refusal
+        // is wrapped in the pair of fields, as a failed unification is.
+        let lowered = match state.env() {
+            Some(env) if ctx.trace_gadt_instances() => {
+                update_level_checked(ctx, env, ctx.get_level(va), f1.typ)
+            }
+            _ => Ok(()),
+        };
+        if let Err(err) = lowered.and_then(|()| unify(ctx, state, f1.typ, f2.typ)) {
             return Err(match err {
                 TypeError::Unify(trace) => {
                     let field1 = ctx.new_type(TypeDesc::Tfield {
