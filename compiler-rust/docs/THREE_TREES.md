@@ -4292,7 +4292,7 @@ is not a call: `Out` is passed by value in 37 constructions and read at
 | T6x-e2 | `jsx.rs`: `compile_jsx` pushes the operands as they come and gives the callee to `Js::jsx_element`; `duplicate_jsx_key` copies with `Js::copy_members`; `Js::jsx` is deleted; `State::external_values` stays for `ffi_args.rs` | `jsx.rs`, `js.rs`, `rows.rs`, `js_tests.rs` | 54 lines added and 100 removed in the design turn's throw-away build; transition calls 30 to 26. Prompt in 11.9 | the design turn of T6x-e and f | none |
 | T6x-e3 | `export.rs`, kinds 1 and 4: a row says where its statement is (a place of the stack, an index in its block, an index in `inserted` or `tail`) and every read of it goes from there (`with_block_stmt`, `lend_block_stmt`, `StatementStack::at_place`); a removed row is given up by its holder and released at once (`take_placed`, `take_block_stmt`; decision 13 of "T6x-e and T6x-f"), and `coerced_list` stages the statements of a dissolved block (decision 14); `build_rows` recurses, and two allocation counts of `unit.rs` move (103 to 102, 156 to 155); `JsStmt::block_ids` is compiled for tests | `export.rs`, `out.rs` (three attributes), `unit.rs` (two numbers), `js_stmt.rs` and `rows_stmt.rs` (one attribute each) | built once by the ninth design turn (the comment `// T6X-THROWAWAY e3` on pull request 390): two commits, 331 lines added and 195 removed; `export.rs` 18 transition calls to 13, the self-test 26 to 21. Its prompt is in 11.9 | T6x-e2 | none |
 | T6x-e4 | `export.rs`, kinds 2 and 3 and the binder: an expression the fold names is a position (a row's initialiser, or the export value in hand); `mentions` records the later rows that hold a use and how many each holds, and `substitute_after` calls `JsStmt::substitute` once a row, with the number replaced asserted, from one first copy of the replacement that becomes the value of the tail declaration (decision 16 of "T6x-e and T6x-f"); `alias_of` reads `JsStmt::alias_at` | `export.rs` | built once by the ninth design turn (the comment `// T6X-THROWAWAY e4` on pull request 390): one commit, 365 lines added and 206 removed; `export.rs` 13 transition calls to 0, the self-test 21 to 8. Its prompt is in 11.9 | T6x-e3 | none |
-| T6x-f | The transition functions leave the two traits: `from_node`, `node`, `at`, `stmt_from_node`, `stmt_node`, `list_from`, `list_id`, `push_list` (`function_of_block` left in T6x-a2). `Rows` keeps the first seven as functions of its own compiled for tests, which the tests of `out.rs`, `js_stmt_tests.rs` and `js_tests.rs` call (54 calls); the three generic test helpers go (`call_node`, `empty_block`, `raw_if`); `rg 'B::(from_node\|node\|at\|stmt_from_node\|stmt_node\|list_from\|list_id)\(' src/bir/lower` is empty. `norm::jm14_push_effect_expression`, which only tests call since T6q, gets `#[cfg(test)]` | `js.rs`, `js_stmt.rs`, `rows.rs`, `rows_stmt.rs`, `norm.rs`, `call.rs`, `cond.rs` | about 150 (estimate; not built). It does not wait for T6r: `names.rs` and `globals.rs` call no transition function | T6x-e4 | none |
+| T6x-f | The transition functions leave the two traits: `from_node`, `node`, `at`, `stmt_from_node`, `stmt_node`, `list_from`, `list_id`, `push_list` (`function_of_block` left in T6x-a2). `Rows` keeps the eight as functions of its own in impls compiled for tests, which the tests of `out.rs`, `js_stmt_tests.rs` and `js_tests.rs` call; the three generic test helpers go (`call_node`, `empty_block`, `raw_if`) and eight test lines that named one through a trait name it on `Rows`; `norm::jm14_push_effect_expression`, which only tests call since T6q, gets `#[cfg(test)]`; `count_lowering_ids.py --self-test` then requires zero calls, no transition function declared by a trait, and the eight on `Rows` under `#[cfg(test)]` (decision 18 of "T6x-e and T6x-f") | `js.rs`, `js_stmt.rs`, `rows.rs`, `rows_stmt.rs`, `norm.rs`, `call.rs`, `cond.rs`, four test lines' files, the script | built once by the ninth design turn (the comment `// T6X-THROWAWAY f` on pull request 390): one commit, 96 lines added and 118 removed in eleven files; the self-test 8 to 0. Its prompt is in 11.9. It does not wait for T6r | T6x-e4 | none |
 
 Order: a1, a2, a3, a4, b, then c1 to c4 at once, then d, e1, e2, e3,
 e4, f. The
@@ -5720,6 +5720,56 @@ the allocation counts of `unit.rs` 86, 103, 86, 156.
     `export.rs`. Not run on this build: the parity suites,
     `Instruction count`, the 3,735-module application.
 
+18. *T6x-f as built, and what the script checks afterwards* (the
+    throw-away copy on the build of T6x-e4; its diff is the comment
+    that starts `// T6X-THROWAWAY f` on pull request 390, its prompt is
+    in 11.9). One commit, 96 lines added and 118 removed in eleven
+    files: the eight functions leave `Js` and `JsStmt`; their bodies
+    move into two `impl Rows` compiled for tests; the three helpers of
+    decision 9 go as it says; `jm14_push_effect_expression` is compiled
+    for tests.
+
+    Decision 9 counted the calls of the tests on `Rows` by name; the
+    build found eight more test lines that name a transition function
+    through a trait (`<Rows as JsStmt>::stmt_from_node(` in `args.rs`
+    twice, `cond.rs` three times, `oracle_tests.rs` once,
+    `...::list_id(` in `oracle_tests.rs`, `<Rows as Js>::from_node(` in
+    `mod.rs`): they name it on `Rows`. The tests use all of `at`,
+    `list_from` and `list_id` too (`js_tests.rs`, `js_stmt_tests.rs`),
+    so `Rows` keeps the eight, not seven.
+
+    *The script.* Until this turn `count_lowering_ids.py --self-test`
+    checked only that it found a call, so the number could rise unseen;
+    and with no call left it fails unless it is given
+    `--no-calls-left`, which the workflow does not pass. Two changes:
+
+    - In this pull request (it runs green on trunk as it is): the
+      self-test fails above `CEILING`, 26 today; T6x-e3 lowers it to
+      21 and T6x-e4 to 8, each in the commit that removes the calls.
+    - In T6x-f: no call may be left (`calls == 0`); neither trait may
+      declare one of the seven names; and each of them in `rows.rs` and
+      `rows_stmt.rs` must stand in an impl under `#[cfg(test)]`. The
+      flag goes. After the slice the compiler holds the first line
+      itself (generic code cannot name a function no trait declares,
+      and built code cannot call one compiled for tests); the script
+      holds what the compiler does not: that nobody puts a function
+      back into a trait or takes the attribute off. Both new checks
+      were seen to fail on the build (a `fn node` added to `Js`; the
+      attribute removed from the impl of `rows_stmt.rs`).
+
+    | Check | On the build of T6x-e4 | On the build of T6x-f |
+    | --- | --- | --- |
+    | `--lib bir::lower`, `bir::j`, `emit::builder` | 585, 71, 40 | 585, 71, 40 (trunk with this turn: 585, 73, 41) |
+    | `count_lowering_ids.py --self-test` | 8 | 0 |
+    | transition functions declared by the two traits | 8 | 0 |
+    | clippy and `cargo doc`, warnings denied | clean | clean |
+    | check mode, the runtime and `tests/tests` (a debug build) | 113 of 113 and 905 of 906 identical | the same |
+
+    Not run on this build: the parity suites, `Instruction count`, the
+    3,735-module application. The builder (`emit/builder.rs`) was not
+    touched by any of the three builds: it has no transition function,
+    and its owed items (item 7 of the corrections) stay T6v's.
+
 **Changes to earlier sections**, each with its reason:
 
 - "T6: the interface" (a): `jsx(a, mark, JsId, has_children)` becomes
@@ -5731,6 +5781,12 @@ the allocation counts of `unit.rs` 86, 103, 86, 156.
   of decision 12.
 - `count_lowering_ids.py --self-test` prints 30 on this turn's head and
   26 after T6x-e2.
+- (ninth turn) "T6x: the cut": the rows of T6x-e3, e4 and f are
+  rewritten as built (decisions 15, 17 and 18); decision 5's deferred
+  release is replaced by decision 13 and decision 3's take inside the
+  list by decision 14; decision 9's "first seven" is eight (decision
+  18). `count_lowering_ids.py --self-test` gains a ceiling (decision
+  18).
 
 ### 11.5 Worker prompt for T4b
 
@@ -10182,6 +10238,263 @@ the removed declaration inside the lend of a later row; `copy_leaf`,
 left without a caller; an edit of a test, of `Row`, of `coerced_list`,
 `release_row` or `row_of`, of js.rs, js_stmt.rs, out.rs, src/bir/j or
 src/emit.
+```
+
+
+T6x-f (with the common block of phase C and the common block of T6x-a1
+to T6x-a4; read also 11.4 "T6x-e and T6x-f: the fold reads where its
+rows are", decisions 9 and 18). Written from a throw-away build that ran
+(pull request 390; its diff is a comment there that starts `//
+T6X-THROWAWAY f`).
+
+```text
+Task T6x-f: the transition functions leave the two traits of the
+lowering's interface. One slice, one pull request against
+ocaml-to-rust-rewrite.
+
+Precondition, check it first and stop with a report if it fails: T6x-e4
+is merged: from compiler-rust, `python3
+../scripts/count_lowering_ids.py --self-test` prints `32 files, 8
+transition calls` and `rg -n 'B::(from_node|node|at|stmt_from_node|stmt_node|list_from|list_id)\(' src/bir/lower`
+prints five lines, three in cond.rs and two in call.rs, all in
+functions under `#[cfg(test)]`; `cargo test --manifest-path
+compiler-rust/Cargo.toml --lib bir::lower` reads 585 passed, `--lib
+bir::j` 73, `--lib emit::builder` 41, none ignored.
+
+Yours: in src/bir/lower/js.rs the deletion of `from_node`, `node`, `at`
+and `push_list` and one `use`; in src/bir/lower/js_stmt.rs the deletion
+of `stmt_from_node`, `stmt_node`, `list_from` and `list_id` and one
+`use`; in src/bir/j/rows.rs and src/bir/j/rows_stmt.rs the same eight
+bodies moved out of the two trait impls into an `impl Rows` compiled for
+tests, and three sentences of the module comments; in src/bir/j/norm.rs
+one attribute and one doc comment; in src/bir/lower/call.rs the helper
+`call_node` and its one use; in src/bir/lower/cond.rs the helpers
+`empty_block` and `raw_if` and their two uses; eight test lines that
+name a transition function through a trait (args.rs 2, cond.rs 3,
+oracle_tests.rs 2, mod.rs 1); scripts/count_lowering_ids.py; the
+changelog fragment `changes/three-trees-t6x-f.internal.md`. Nothing
+else. No test is deleted and no expected value changes.
+
+What the slice is. The eight functions were the way a caller that was
+not converted turned a row into a handle and back. After T6x-e4 no
+built code calls one. They leave the traits, so that no generic code
+(`B::node(..)`) can name one and the builder (the implementation that
+owns its nodes) never has to give them a body. The tests of rows build
+rows on the arena and wrap them (`Rows::stmt_from_node(NodeId(7))`: 34
+calls in out.rs, 12 in js_stmt_tests.rs, 4 in js_tests.rs, and
+`r.push_list` once): for them `Rows` keeps the eight as functions of its
+own, compiled for tests.
+
+One commit (the design turn built it as one: a function cannot leave a
+trait while a helper still calls it through the trait).
+
+js.rs: remove the section comment "// ---- The transition (deleted by
+T6x with their last call) ----" with `from_node`, `node` and `at` and
+their doc comments, and `push_list` with its doc comment; the `use` of
+`crate::bir` loses `ListId` and `NodeId`. js_stmt.rs: remove the same
+section comment with `stmt_from_node`, `stmt_node`, `list_from` and
+`list_id`; the `use` loses `ListId` and `NodeId`.
+
+rows.rs: remove the bodies of `from_node`, `node`, `at` and `push_list`
+from `impl Js for Rows`, the row of `push_list` from the module's table,
+and `ListId` from the `use`; above the `impl Rows` that holds `leaf`
+add
+
+           /// For the tests of rows, which build rows on the arena and wrap them
+           /// (`out.rs`, `js_tests.rs`, `js_stmt_tests.rs`): a handle is its row. No
+           /// generic code can name these: they are not of the interface (THREE_TREES
+           /// 11.4, "T6x-e and T6x-f: the fold reads where its rows are", decision 9).
+           #[cfg(test)]
+           impl Rows {
+               /// The handle of a J row built on the arena. O(1).
+               pub(crate) fn from_node(node: NodeId) -> E {
+                   E(node)
+               }
+               /// The J row of a handle. O(1).
+               pub(crate) fn node(e: E) -> NodeId {
+                   e.0
+               }
+               /// The reference of a J row built on the arena. O(1).
+               pub(crate) fn at(node: NodeId) -> NodeId {
+                   node
+               }
+               /// The nodes of a pool list of detached J expressions, pushed as
+               /// operands in order. One move per node; counts no step.
+               pub(crate) fn push_list(&mut self, a: &Pools, list: crate::bir::ListId) {
+                   self.operands.extend_from_slice(a.lists.get(list));
+               }
+           }
+
+   The module comment's sentence on the representation becomes "`of`,
+   `reserve`, `steps`, `mark`, `push`, `pop` and `kind_of` are the
+   representation, as are the functions kept for the tests of rows
+   (`from_node`, `node`, `at`, `push_list`: the interface has no
+   transition function since T6x-f); every other body is the row of the
+   table below."
+
+rows_stmt.rs: remove the four bodies from `impl JsStmt for Rows`; above
+the `impl Rows` that holds `block_entry` add
+
+           /// For the tests of rows (see the like block of `rows.rs`): a statement
+           /// is its row and a list its pool list.
+           #[cfg(test)]
+           impl Rows {
+               /// The handle of a J statement built on the arena. O(1).
+               pub(crate) fn stmt_from_node(node: NodeId) -> S {
+                   S(node)
+               }
+               /// The J row of a statement. O(1).
+               pub(crate) fn stmt_node(s: S) -> NodeId {
+                   s.0
+               }
+               /// The list in flight of a pool list. O(1).
+               pub(crate) fn list_from(list: ListId) -> ListId {
+                   list
+               }
+               /// The pool list of a list in flight. O(1).
+               pub(crate) fn list_id(list: ListId) -> ListId {
+                   list
+               }
+           }
+
+   The module comment: "The transition functions are the
+   representation." becomes "The interface has no transition function
+   since T6x-f; the four this file keeps for the tests of rows
+   (`stmt_from_node`, `stmt_node`, `list_from`, `list_id`) are the
+   representation.", and "A reader and the transition functions count
+   nothing." becomes "A reader counts nothing."
+
+norm.rs: `#[cfg(test)]` above `pub fn jm14_push_effect_expression` (its
+five callers are tests of norm_tests.rs and js_stmt_tests.rs), and the
+doc comment of `jm14_effect_expression` no longer links to it: its
+first sentence becomes "J-M14 with each statement given to `sink` as it
+is made, in order." A doc link to an item compiled for tests fails
+`cargo doc`.
+
+The test helpers (decision 9). call.rs: delete `call_node` with its doc
+comment; the doc comment of `call_values` starts "C:1144
+compile_apply_call_inner: `callee(args)`; the constructor performs no
+rewrite."; in the test `arity_groups_match_legacy` the line
+`args.push(state.call_node(value, &[], Default::default()));` becomes
+
+           let call = state.call_values(crate::bir::lower::out::of_row(value), std::iter::empty(), Default::default());
+           args.push(crate::bir::lower::out::row(call));
+
+cond.rs: delete `empty_block` and `raw_if`; in the hand of
+`if_statement_is_simplify_if_for_every_rule` the arm `'o'` becomes
+
+           'o' => {
+               let list = self.state.arena.lists.push(&[]);
+               self.state.arena.explicit_block_from_list(list)
+           }
+
+and the last line of the arm `'i' | 'j'` (`self.state.raw_if(test, yes,
+no)`) becomes
+
+           // Both blocks as given: no rule of J-S3.
+           let then_ = self.state.arena.block_from_list(yes);
+           let else_ = self.state.arena.block_from_list(no);
+           self.state.arena.new_node(View::SIf { condition: test, then_, else_: Some(else_) }, 0)
+
+The eight test lines: `<crate::bir::j::rows::Rows as
+...::js_stmt::JsStmt>::stmt_from_node(` (args.rs twice, cond.rs three
+times, oracle_tests.rs once), `...::JsStmt>::list_id(` (oracle_tests.rs)
+and `<crate::bir::j::rows::Rows as js::Js>::from_node(` (mod.rs) become
+`crate::bir::j::rows::Rows::stmt_from_node(`, `::list_id(` and
+`::from_node(`. Find them with `rg -n 'as
+(crate::bir::lower::)?(js::Js|js_stmt::JsStmt)>::(from_node|node|at|stmt_from_node|stmt_node|list_from|list_id)'
+src`.
+
+scripts/count_lowering_ids.py: `CEILING` and its assertion go, with the
+assertion `calls>0 or '--no-calls-left'`; in their place
+
+               # Since T6x-f the lowering has no transition call and the two traits
+               # declare no transition function, so generic code cannot name one; the
+               # implementation on rows keeps them for its tests only.
+               assert calls==0, f'{calls} transition calls in src/bir/lower: none may be left'
+               declared=[(f,k) for f in ('js','js_stmt') for k in T if re.search(r'\n\s*fn '+k+r'\b', non_test(open(f'src/bir/lower/{f}.rs').read()))]
+               assert not declared, f'a trait of the lowering declares a transition function: {declared}'
+               for f in ('rows','rows_stmt'):
+                   t=open(f'src/bir/j/{f}.rs').read()
+                   for m in re.finditer(r'\n([^\n]*)\n[^\n]*fn ('+'|'.join(T)+r')\b', t):
+                       start=t.rfind('\nimpl', 0, m.start())
+                       assert t[:start].rstrip().endswith('#[cfg(test)]'), f'{f}.rs: `{m.group(2)}` is not in an impl compiled for tests'
+
+   and the module's doc comment says so in its last sentence. The
+   workflow calls `--self-test` without a flag: do not edit a file
+   under .github/workflows.
+
+End state, run from compiler-rust and paste the output. On the design
+turn's throw-away head each printed what is given; before the slice,
+what is in brackets:
+- `rg -n 'B::(from_node|node|at|stmt_from_node|stmt_node|list_from|list_id)\(' src/bir/lower | wc -l`
+  prints 0 [5].
+- `rg -n 'fn (from_node|node|at|stmt_from_node|stmt_node|list_from|list_id|push_list)\b' src/bir/lower/js.rs src/bir/lower/js_stmt.rs | wc -l`
+  prints 0 [8].
+- the same pattern over `src/bir/j/rows.rs src/bir/j/rows_stmt.rs`
+  prints 8 [8]: the bodies moved, none was deleted.
+- `rg -n 'as (crate::bir::lower::)?(js::Js|js_stmt::JsStmt)>::(from_node|node|at|stmt_from_node|stmt_node|list_from|list_id)' src | wc -l`
+  prints 0 [8].
+- `rg -n 'fn (call_node|empty_block|raw_if)\b' src/bir/lower | wc -l`
+  prints 0 [3].
+- `rg -n -B1 'pub fn jm14_push_effect_expression' src/bir/j/norm.rs | rg -c 'cfg\(test\)'`
+  prints 1 [nothing].
+- `python3 ../scripts/count_lowering_ids.py --self-test` prints `32
+  files, 0 transition calls` [8], and the total row printed `| total |
+  16315 | 82 | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 140 |`.
+- The two new checks of the script fail when they should. Show both,
+  then undo: add `fn node(e: Self::E) -> u32;` to `pub trait Js` (the
+  self-test must stop with "a trait of the lowering declares a
+  transition function"), and remove `#[cfg(test)]` above the new `impl
+  Rows` of rows_stmt.rs (it must stop with "is not in an impl compiled
+  for tests").
+
+Tests. You edit the eight lines and the two helpers' uses named above
+and nothing else in a test; no test is added or deleted and no expected
+value changes. The filters stay at 585, 73 and 41. If a test of rows
+does not compile because it calls one of the eight on a value (`r.at(`)
+or through `Js::`, change the call to `Rows::name(`: do not put the
+function back into a trait.
+
+Cost notes. From compiler-rust: `python3
+../scripts/check_lowering_cost_docs.py --base
+origin/ocaml-to-rust-rewrite`; the figure after `missing/generic=` must
+be 0.
+
+Before the commit: `cargo clippy --manifest-path compiler-rust/Cargo.toml
+--all-targets -- -D warnings` (an unused import or a function without a
+caller fails it) and `RUSTDOCFLAGS="-D warnings" cargo doc
+--manifest-path compiler-rust/Cargo.toml --no-deps`, both clean.
+
+Gates of the pull request, beside those of the common blocks: the
+three filters with the counts above; CI `Test the lowering id count`
+green with the changed script; CI `Backend bridge coverage` at zero
+differences and the parity jobs green, read before the pull request is
+marked ready; CI `Instruction count` read and reported (eight
+`#[inline]` bodies leave the built code of the lowering, which the
+default build does not reach; above +0.05% on two runs, stop and
+report). The body of the pull request lists the attributes added
+(`#[cfg(test)]` on two `impl Rows` and on `jm14_push_effect_expression`)
+and removed (`#[inline]` on the eight moved bodies).
+
+Run by the design turn, in a copy that was not pushed: this commit on
+its build of T6x-e4; the three filters read 585, 71 and 40 there (the
+copy did not hold the three tests pull request 390 adds), clippy and
+`cargo doc` clean, the cost-note check at zero, the self-test at 0 and
+its two new checks seen to fail as above; 96 lines added and 118
+removed in eleven files. A check-mode build of the runtime and of
+`tests/tests` (a debug build): the lowering stage identical for 113 of
+113 and 905 of 906 units. Not run: the parity suites, `Instruction
+count`, the 3,735-module application.
+
+Shortcuts that count as failure, beside the common lists: a transition
+function left in a trait, or left there under `#[cfg(test)]`; a new
+trait or a `pub` function that gives a row for a handle; one of the
+eight on `Rows` outside an impl compiled for tests; a test deleted, or
+a test of out.rs, js_tests.rs or js_stmt_tests.rs rewritten to avoid
+the functions; `call_node`, `empty_block` or `raw_if` kept; the flag
+`--no-calls-left` kept or the workflow edited; an `allow`; an edit of
+export.rs, jsx.rs, out.rs outside its tests, or src/emit.
 ```
 
 
