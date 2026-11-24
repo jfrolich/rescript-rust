@@ -38,8 +38,8 @@ fn done(_: E) {}
 /// A JSX element of `children` children (and its tag) whose callee is the
 /// variable `f`: made with `Js::jsx_element`, the callee given after the
 /// operands, or as the row itself (`plain::node` over the callee, the tag
-/// and the children, which is what trunk's `Js::jsx` wrote with the callee
-/// pushed first). Returns the steps the interface counted for the element.
+/// and the children: the row with the callee first). Returns the steps the
+/// interface counted for the element.
 fn jsx(u: &mut Unit, children: u32, apart: bool) -> u64 {
     let mut r = Rows::default();
     let a = &mut u.b;
