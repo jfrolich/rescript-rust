@@ -130,7 +130,7 @@ pub trait JsStmt: Js {
     /// Whether the statement has a source location. O(1). (T6o.)
     fn stmt_located(&self, a: &Pools, s: &Self::S) -> bool;
     /// The id of the statement, read in place: what [`Js::owner`] gives for
-    /// its value, what [`JsStmt::block_ids`] gives for it once a block
+    /// its value, what `JsStmt::block_ids` (tests only) gives for it once a block
     /// holds it, and a key for [`Js::kind_of`]. It does not change while
     /// the statement lives, and no other live statement has it. O(1): on
     /// rows the row; on the builder the `node_id` of the owned node, one
@@ -265,7 +265,9 @@ pub trait JsStmt: Js {
     /// The ids of the statements of a block, given to `sink` in order; the
     /// statements stay in the block. O(statements); counts no step (a
     /// reader). Panics on a statement that is not a `Block`. (T6q:
-    /// `export.rs::build_rows`, the rows of a top-level block.)
+    /// `export.rs::build_rows`, the rows of a top-level block, until the
+    /// probe before T6x-f read them by index; tests only since.)
+    #[cfg(test)]
     fn block_ids(&self, a: &Pools, s: &Self::S, sink: impl FnMut(u32));
     // PROBE-ADD 3: the number of statements of a block statement the caller holds.
     /// The number of statements of the block statement `block`, a taken
