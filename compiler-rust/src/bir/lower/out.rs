@@ -116,31 +116,78 @@ impl<B: JsStmt> StatementStack<B> {
     /// the run + held statements): one step per slot, a dead range crossed
     /// in one, and one per held statement.
     pub(super) fn statement_refs(&self, span: Span) -> impl Iterator<Item = &B::S> + '_ {
+        self.placed_refs(span).map(|(_, s)| s)
+    }
+    /// `statement_refs` with the place of each statement: its slot, or its
+    /// index among the held statements with [`StatementStack::HELD`] set,
+    /// which `at_place`, `at_place_mut` and `take_place` read. A place
+    /// names the statement until its slot or hold is consumed. Cost: that
+    /// of `statement_refs`. (Probe before T6x-f: `export.rs::build_rows`
+    /// keeps the place of each row of the top level.)
+    pub(super) fn placed_refs(&self, span: Span) -> impl Iterator<Item = (u32, &B::S)> + '_ {
         let (mut at, end) = (span.start as usize, span.end());
         let (mut inner, mut inner_end) = (0usize, 0usize);
         std::iter::from_fn(move || loop {
             if inner < inner_end {
                 inner += 1;
-                return Some(self.held[inner - 1].as_ref().expect("held statement"));
+                let s = self.held[inner - 1].as_ref().expect("held statement");
+                return Some((Self::HELD | (inner - 1) as u32, s));
             }
             if at >= end {
                 return None;
             }
+            let current = at;
             let slot = &self.slots[at];
             at += match slot {
                 Some(Slot::Dead(len)) => *len as usize,
                 _ => 1,
             };
             match slot {
-                Some(Slot::Statement(s)) => return Some(s),
+                Some(Slot::Statement(s)) => return Some((current as u32, s)),
                 Some(Slot::Held(span)) => (inner, inner_end) = (span.start as usize, span.end()),
                 Some(Slot::Dead(_) | Slot::DeadEnd(_)) | None => {}
             }
         })
     }
+    /// The bit of a place (`placed_refs`) that names a held statement.
+    pub(super) const HELD: u32 = 1 << 31;
+    /// The statement at `place`, read in place. O(1). Panics when the
+    /// place holds no statement.
+    pub(super) fn at_place(&self, place: u32) -> &B::S {
+        if place & Self::HELD != 0 {
+            return self.held[(place & !Self::HELD) as usize].as_ref().expect("held statement");
+        }
+        match &self.slots[place as usize] {
+            Some(Slot::Statement(s)) => s,
+            _ => panic!("place {place} holds no statement"),
+        }
+    }
+    /// `at_place`, to be changed in place. O(1).
+    pub(super) fn at_place_mut(&mut self, place: u32) -> &mut B::S {
+        if place & Self::HELD != 0 {
+            return self.held[(place & !Self::HELD) as usize].as_mut().expect("held statement");
+        }
+        match &mut self.slots[place as usize] {
+            Some(Slot::Statement(s)) => s,
+            _ => panic!("place {place} holds no statement"),
+        }
+    }
+    /// The statement at `place` moved out: a slot becomes `Dead(1)`, as
+    /// `take` leaves it; a held statement leaves `None`, which `take_run`
+    /// passes over. O(1). Panics when the place holds no statement.
+    pub(super) fn take_place(&mut self, place: u32) -> B::S {
+        if place & Self::HELD != 0 {
+            return self.held[(place & !Self::HELD) as usize].take().expect("held statement");
+        }
+        match self.slots[place as usize].replace(Slot::Dead(1)) {
+            Some(Slot::Statement(s)) => s,
+            _ => panic!("place {place} holds no statement"),
+        }
+    }
     /// The statements of a run moved out of their slots, in order; a slot
     /// or a hold that gave its statements is left a hole, and the caller
-    /// kills the run. Cost: O(slots of the run + held statements), each
+    /// kills the run. A held statement `take_place` moved out before is
+    /// passed over. Cost: O(slots of the run + held statements), each
     /// statement moved once.
     pub(super) fn take_run(&mut self, span: Span) -> impl Iterator<Item = B::S> + '_ {
         let (mut at, end) = (span.start as usize, span.end());
@@ -148,7 +195,10 @@ impl<B: JsStmt> StatementStack<B> {
         std::iter::from_fn(move || loop {
             if inner < inner_end {
                 inner += 1;
-                return Some(self.held[inner - 1].take().expect("held statement"));
+                match self.held[inner - 1].take() {
+                    Some(s) => return Some(s),
+                    None => continue,
+                }
             }
             if at >= end {
                 return None;

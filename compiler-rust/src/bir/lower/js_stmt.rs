@@ -267,6 +267,66 @@ pub trait JsStmt: Js {
     /// reader). Panics on a statement that is not a `Block`. (T6q:
     /// `export.rs::build_rows`, the rows of a top-level block.)
     fn block_ids(&self, a: &Pools, s: &Self::S, sink: impl FnMut(u32));
+    // PROBE-ADD 3: the number of statements of a block statement the caller holds.
+    /// The number of statements of the block statement `block`, a taken
+    /// one ([`JsStmt::take_from_block`]) counted: the bound of the indexes
+    /// [`JsStmt::with_block_stmt_at`] reads. The caller owns `block` (the
+    /// statement stack holds it, or another block the caller reads). An
+    /// implementation that owns its nodes gives the length of the block's
+    /// statement vector. O(1); counts no step (a reader). Panics on a
+    /// statement that is not a `Block`. (`export.rs::build_rows`.)
+    fn block_len(&self, a: &Pools, block: &Self::S) -> u32;
+    // PROBE-ADD 4: a statement of a block statement the caller holds, read where it is, by its index.
+    /// Statement `index` of the block statement `block`, read where it is:
+    /// `read` is given it by reference, as [`JsStmt::with_stmt_at`] gives a
+    /// statement of a list in flight, and what it returns is returned. A
+    /// block the statement stack holds is not a list in flight: its
+    /// statements are its own, and stay in it. The caller owns `block`;
+    /// the block owns the statement. An implementation that owns its nodes
+    /// lends `&block.statements[index]`; on rows the statement is the
+    /// entry of the block's pool list, named for the length of the call.
+    /// O(1) and whatever `read` costs; counts no step; allocates nothing.
+    /// Panics on a statement that is not a `Block`, when `index` is not
+    /// below [`JsStmt::block_len`], and where a statement can be absent
+    /// (the builder) when it was taken out. (`export.rs`: the rows of a
+    /// block of the top level.)
+    fn with_block_stmt_at<R>(&self, a: &Pools, block: &Self::S, index: u32, read: impl FnOnce(&Self::S) -> R) -> R;
+    // PROBE-ADD 5: a statement of a block statement the caller holds, lent with the implementation and the pools.
+    /// Statement `index` of the block statement `block`, lent to `edit`
+    /// with the implementation and the pools, so that `edit` may call a
+    /// function that takes them mutably (a copy of its value, a release, a
+    /// reader that counts steps) or change the statement in place; what
+    /// `edit` returns is returned. `edit` may not put another statement in
+    /// its place (on rows a statement written into the reference is
+    /// dropped). The caller owns `block`; the block owns the statement. An
+    /// implementation that owns its nodes lends `&mut
+    /// block.statements[index]`; on rows the statement is the entry of the
+    /// block's pool list. O(1) and whatever `edit` costs; counts no step;
+    /// allocates nothing. Panics as [`JsStmt::with_block_stmt_at`] does.
+    /// (`export.rs`: a row nested in a block, when a copy, a release or
+    /// `JsStmt::effect_free` reads it.)
+    fn with_block_stmt_mut<R>(
+        &mut self,
+        a: &mut Pools,
+        block: &mut Self::S,
+        index: u32,
+        edit: impl FnOnce(&mut Self, &mut Pools, &mut Self::S) -> R,
+    ) -> R;
+    // PROBE-ADD 6: a statement of a block statement the caller holds, taken out by its index, leaving a hole.
+    /// Statement `index` of the block statement `block` moved out, to the
+    /// caller, who owns it from here. The block keeps a hole at `index`:
+    /// the indexes of the statements after it do not change, and a block
+    /// with a hole is given to nothing but this function, the readers of
+    /// its other statements and [`JsStmt::release_stmt`], which releases
+    /// what it still holds. On rows the statement is detached from the
+    /// block (`Bir::detach`) and its entry stays in the block's pool list;
+    /// an implementation that owns its nodes takes it out of the slot and
+    /// leaves the slot empty. One step (it takes a node apart); O(1); no
+    /// allocation. Panics on a statement that is not a `Block`, when
+    /// `index` is not below [`JsStmt::block_len`], and on a hole.
+    /// (`export.rs`: a removed row of a block, and the statements of a
+    /// dissolved block, by their index.)
+    fn take_from_block(&mut self, a: &mut Pools, block: &mut Self::S, index: u32) -> Self::S;
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code
     /// that can be observed. An expression statement and a `return` are
     /// free when their value is strictly pure (E:15); a block, an `if`, a

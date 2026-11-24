@@ -25,18 +25,31 @@
 //!    on rows loses nothing and on an owning implementation would be a node
 //!    with two owners.
 use super::*;
+use super::js::Pools;
 use crate::emit::row::{self, flag};
 use crate::lambda::TagInfo;
 use crate::name::Name;
 
 /// One top-level statement, in output order. Its index is stable for the
-/// whole fold.
+/// whole fold. It says where its statement is, and every read of the
+/// statement goes from there by reference (`State::with_row`).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Row {
-    stmt: NodeId,
+    /// Where the statement is: a row of the top level, its place on the
+    /// statement stack (`StatementStack::placed_refs`); a `NESTED` row, its
+    /// index among the statements of its block (`Row::parent`); an
+    /// `INSERTED` row, its index in `Tables::inserted`; a `TAIL` row, its
+    /// index in `Tables::tail`. In `coerced_list`, once a flattened block
+    /// is dissolved: the index of its handle in `Tables::blocks`.
+    place: u32,
+    /// The flags below, and above `Row::PARENT` the row of the block of a
+    /// `NESTED` row.
     bits: u32,
 }
 impl Row {
+    /// The bits of `Row::bits` above the flags: the row of the block a
+    /// `NESTED` row stands in.
+    const PARENT: u32 = 9;
     /// A declaration (`SDecl`, `SRest`).
     const DECL: u32 = 1;
     /// The declaration has an initialiser.
@@ -58,6 +71,10 @@ impl Row {
     const TAIL: u32 = 256;
     fn has(self, bits: u32) -> bool {
         self.bits & bits == bits
+    }
+    /// The row of the block a `NESTED` row stands in. O(1).
+    fn parent(self) -> u32 {
+        self.bits >> Row::PARENT
     }
 }
 
@@ -148,8 +165,11 @@ pub(super) struct Tables<E, S> {
     /// The declarations of the export tail (`Row::TAIL`), in row order,
     /// owned as `inserted` are.
     tail: Vec<S>,
-    /// The block statements `coerced_list` dissolves; empty between calls.
-    blocks: Vec<S>,
+    /// The statements `coerced_list` takes out of the blocks it dissolves,
+    /// and those blocks, in row order: a block stays until it is released
+    /// after the list is made; a statement of one is moved into the list.
+    /// Empty between calls.
+    blocks: Vec<Option<S>>,
     /// The variable each export selects, in export order.
     pub(super) selected: Vec<VarId>,
     /// The fold is running: the declarations after the top level are not
@@ -403,81 +423,145 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             t.position[var.index()] = index as u32 + 1;
             t.names.entry(self.arena.vars.name(var)).or_insert(index as u32);
         }
-        let mut work = std::mem::take(&mut t.path);
-        work.clear();
-        let mut nested = std::mem::take(&mut self.scratch);
-        debug_assert!(nested.is_empty());
-        for stmt in self.statements.statement_refs(run).map(|s| NodeId(self.js.stmt_id(&self.arena, s))) {
-            // `nested` holds the statements of the blocks still open, last
-            // first; a zero marks where a block ends.
-            work.push(stmt);
-            let mut depth = 0u32;
-            while let Some(stmt) = work.pop() {
-                if stmt == NodeId(u32::MAX) {
-                    depth -= 1;
-                    continue;
-                }
-                t.steps += 1;
-                let row = t.rows.len() as u32;
-                let mut bits = if depth > 0 { Row::NESTED } else { 0 };
-                // By id 1: a statement the tables name by its id, read by reference.
-                let handle = B::stmt_from_node(stmt);
-                match self.js.stmt_kind(&self.arena, &handle) {
-                    row::Kind::Block => {
-                        bits |= Row::BLOCK;
-                        self.js.block_ids(&self.arena, &handle, |id| nested.push(NodeId(id)));
-                        work.push(NodeId(u32::MAX));
-                        work.extend(nested.drain(..).rev());
-                        depth += 1;
-                    }
-                    row::Kind::Declare => {
-                        bits |= Row::DECL;
-                        let var = self.js.declared(&self.arena, &handle).expect("a declaration binds");
-                        let value = self.js.value_of(&self.arena, &handle);
-                        if let Some(value) = value {
-                            bits |= Row::VALUE;
-                            if self.js.kind(&self.arena, value) == row::Kind::Fun {
-                                bits |= Row::FUNCTION;
-                                t.last_function = row + 1;
-                            }
-                        }
-                        let origin = self.arena.vars.j_origin[var.index()];
-                        if t.decl[origin.index()] == 0 {
-                            t.decl[origin.index()] = row + 1;
-                        }
-                        if value.is_some() {
-                            if let Some(&export) = t.names.get(&self.arena.vars.name(origin)) {
-                                t.name_next.resize(row as usize + 1, 0);
-                                let tail = &mut t.name_tail[export as usize];
-                                if *tail == 0 {
-                                    t.name_head[export as usize] = row + 1;
-                                } else {
-                                    t.name_next[*tail as usize - 1] = row + 1;
-                                }
-                                *tail = row + 1;
-                            }
-                        }
-                    }
-                    row::Kind::Rest => {
-                        bits |= Row::DECL | Row::VALUE;
-                        let var = self.js.declared(&self.arena, &handle).expect("a rest binds");
-                        let origin = self.arena.vars.j_origin[var.index()];
-                        if t.decl[origin.index()] == 0 {
-                            t.decl[origin.index()] = row + 1;
-                        }
-                    }
-                    _ => {}
-                }
-                if bits & (Row::DECL | Row::BLOCK) == 0 {
-                    t.last_plain = row + 1;
-                }
-                t.rows.push(Row { stmt, bits });
-            }
+        for (place, statement) in self.statements.placed_refs(run) {
+            Self::add_row(&self.js, &self.arena, &mut t, statement, place, None);
         }
         t.name_next.resize(t.rows.len(), 0);
-        self.scratch = nested;
-        t.path = work;
         self.coercion = t;
+    }
+
+    /// The row of `build_rows` for the statement `s` at `place`, then, for a
+    /// block statement, the rows of its statements in order (each read
+    /// where it is, `JsStmt::with_block_stmt_at`), recursively: the rows in
+    /// pre-order, as trunk's work stack gave them. One step per row; no
+    /// allocation once the tables have their capacity.
+    fn add_row(js: &B, a: &Pools, t: &mut Tables<B::E, B::S>, s: &B::S, place: u32, parent: Option<u32>) {
+        t.steps += 1;
+        let row = t.rows.len() as u32;
+        let mut bits = match parent {
+            Some(parent) => {
+                assert!(parent < 1 << (32 - Row::PARENT), "a block row beyond the parent bits");
+                Row::NESTED | parent << Row::PARENT
+            }
+            None => 0,
+        };
+        match js.stmt_kind(a, s) {
+            row::Kind::Block => {
+                bits |= Row::BLOCK;
+                t.rows.push(Row { place, bits });
+                for index in 0..js.block_len(a, s) {
+                    js.with_block_stmt_at(a, s, index, |inner| Self::add_row(js, a, t, inner, index, Some(row)));
+                }
+                return;
+            }
+            row::Kind::Declare => {
+                bits |= Row::DECL;
+                let var = js.declared(a, s).expect("a declaration binds");
+                let value = js.value_of(a, s);
+                if let Some(value) = value {
+                    bits |= Row::VALUE;
+                    if js.kind(a, value) == row::Kind::Fun {
+                        bits |= Row::FUNCTION;
+                        t.last_function = row + 1;
+                    }
+                }
+                let origin = a.vars.j_origin[var.index()];
+                if t.decl[origin.index()] == 0 {
+                    t.decl[origin.index()] = row + 1;
+                }
+                if value.is_some() {
+                    if let Some(&export) = t.names.get(&a.vars.name(origin)) {
+                        t.name_next.resize(row as usize + 1, 0);
+                        let tail = &mut t.name_tail[export as usize];
+                        if *tail == 0 {
+                            t.name_head[export as usize] = row + 1;
+                        } else {
+                            t.name_next[*tail as usize - 1] = row + 1;
+                        }
+                        *tail = row + 1;
+                    }
+                }
+            }
+            row::Kind::Rest => {
+                bits |= Row::DECL | Row::VALUE;
+                let var = js.declared(a, s).expect("a rest binds");
+                let origin = a.vars.j_origin[var.index()];
+                if t.decl[origin.index()] == 0 {
+                    t.decl[origin.index()] = row + 1;
+                }
+            }
+            _ => {}
+        }
+        if bits & (Row::DECL | Row::BLOCK) == 0 {
+            t.last_plain = row + 1;
+        }
+        t.rows.push(Row { place, bits });
+    }
+
+    /// The statement of `row`, read where it is (`Row::place`): `read` is
+    /// given it by reference and what it returns is returned. O(1) for a
+    /// row of the top level, of `inserted` or of `tail`; for a nested row
+    /// one `JsStmt::with_block_stmt_at` per block between it and the top
+    /// level. Counts no step; allocates nothing.
+    fn with_row<R>(&self, row: u32, read: impl FnOnce(&B::S) -> R) -> R {
+        let mut read = Some(read);
+        let mut result = None;
+        self.with_row_dyn(row, &mut |s| result = Some((read.take().expect("read once"))(s)));
+        result.expect("the row's statement was read")
+    }
+
+    /// `with_row` behind a reference to a closure, so that the descent
+    /// through the blocks of a nested row is one function. Cost: that of
+    /// `with_row`.
+    fn with_row_dyn(&self, row: u32, read: &mut dyn FnMut(&B::S)) {
+        let Row { place, bits } = self.coercion.rows[row as usize];
+        if bits & Row::INSERTED != 0 {
+            read(&self.coercion.inserted[place as usize].1)
+        } else if bits & Row::TAIL != 0 {
+            read(&self.coercion.tail[place as usize])
+        } else if bits & Row::NESTED != 0 {
+            let parent = self.coercion.rows[row as usize].parent();
+            self.with_row_dyn(parent, &mut |block| {
+                self.js.with_block_stmt_at(&self.arena, block, place, |s| read(s))
+            })
+        } else {
+            read(self.statements.at_place(place))
+        }
+    }
+
+    /// The statement of `row` lent to `edit` with the implementation and
+    /// the pools, as `JsStmt::with_block_stmt_mut` lends a statement of a
+    /// block. Cost: that of `with_row`, and what `edit` costs.
+    fn with_row_mut<R>(&mut self, row: u32, edit: impl FnOnce(&mut B, &mut Pools, &mut B::S) -> R) -> R {
+        let mut edit = Some(edit);
+        let mut result = None;
+        self.with_row_mut_dyn(row, &mut |js, a, s| result = Some((edit.take().expect("edit once"))(js, a, s)));
+        result.expect("the row's statement was lent")
+    }
+
+    /// `with_row_mut` behind a reference to a closure. Cost: that of
+    /// `with_row_mut`.
+    fn with_row_mut_dyn(&mut self, row: u32, edit: &mut dyn FnMut(&mut B, &mut Pools, &mut B::S)) {
+        let Row { place, bits } = self.coercion.rows[row as usize];
+        if bits & Row::INSERTED != 0 {
+            edit(&mut self.js, &mut self.arena, &mut self.coercion.inserted[place as usize].1)
+        } else if bits & Row::TAIL != 0 {
+            edit(&mut self.js, &mut self.arena, &mut self.coercion.tail[place as usize])
+        } else if bits & Row::NESTED != 0 {
+            let parent = self.coercion.rows[row as usize].parent();
+            self.with_row_mut_dyn(parent, &mut |js, a, block| {
+                js.with_block_stmt_mut(a, block, place, |js, a, s| edit(js, a, s))
+            })
+        } else {
+            edit(&mut self.js, &mut self.arena, self.statements.at_place_mut(place))
+        }
+    }
+
+    /// The id of the statement of `row`, read where it is: a key, compared
+    /// with an id `Js::owner` gives and stored in `Tables::row_of`. Cost:
+    /// that of `with_row`.
+    fn row_key(&self, row: u32) -> NodeId {
+        self.with_row(row, |s| NodeId(self.js.stmt_id(&self.arena, s)))
     }
 
     /// Whether `row` is a statement of the block the legacy helper reads:
@@ -503,24 +587,23 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// The variable, the initialiser and the kind of a declaration row.
     /// Cost: O(1), a fixed number of reads of the statement.
     fn declared_by(&self, row: u32) -> (VarId, Option<NodeId>, LetKind) {
-        let stmt = self.coercion.rows[row as usize].stmt;
-        // By id 1: a statement the tables name by its id, read by reference.
-        let handle = B::stmt_from_node(stmt);
-        let kind = match self.js.stmt_aux(&self.arena, &handle) & 3 {
-            0 => LetKind::Strict,
-            1 => LetKind::Alias,
-            2 => LetKind::StrictOpt,
-            _ => LetKind::Variable,
-        };
-        let var = self.js.declared(&self.arena, &handle).expect("a declaration row");
-        match self.js.stmt_kind(&self.arena, &handle) {
-            row::Kind::Declare => {
-                let value = self.js.value_of(&self.arena, &handle);
-                (self.origin(var), value.map(|value| NodeId(self.js.id(&self.arena, value))), kind)
+        self.with_row(row, |handle| {
+            let kind = match self.js.stmt_aux(&self.arena, handle) & 3 {
+                0 => LetKind::Strict,
+                1 => LetKind::Alias,
+                2 => LetKind::StrictOpt,
+                _ => LetKind::Variable,
+            };
+            let var = self.js.declared(&self.arena, handle).expect("a declaration row");
+            match self.js.stmt_kind(&self.arena, handle) {
+                row::Kind::Declare => {
+                    let value = self.js.value_of(&self.arena, handle);
+                    (self.origin(var), value.map(|value| NodeId(self.js.id(&self.arena, value))), kind)
+                }
+                row::Kind::Rest => (self.origin(var), Some(NodeId(self.js.stmt_id(&self.arena, handle))), kind),
+                _ => unreachable!("a declaration row"),
             }
-            row::Kind::Rest => (self.origin(var), Some(stmt), kind),
-            _ => unreachable!("a declaration row"),
-        }
+        })
     }
 
     /// S:36 is_literal, of a node of kind `kind`. Cost: O(1), no read.
@@ -547,11 +630,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
     }
 
-    /// The initialiser of a declaration row. Two reads.
+    /// The initialiser of a declaration row. Cost: O(1), two reads of the
+    /// row's statement where it is (`with_row`), plus one block per level
+    /// for a nested row.
     fn initialiser(&self, row: u32) -> Init {
         match self.declared_by(row) {
             (_, None, _) => Init::Absent,
-            (_, Some(value), _) if value == self.coercion.rows[row as usize].stmt => {
+            (_, Some(value), _) if value == self.row_key(row) => {
                 Init::Other(value)
             }
             (_, Some(value), _) => self.classify(value),
@@ -766,20 +851,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// one per node it reads until the first effect, O(1) where the
     /// implementation keeps the fact with the statement.
     fn has_toplevel_effect(&mut self, row: u32) -> bool {
-        let Row { stmt, bits } = self.coercion.rows[row as usize];
-        // By id 1.
-        let handle = B::stmt_from_node(stmt);
+        let bits = self.coercion.rows[row as usize].bits;
         if bits & Row::DECL != 0 {
-            return match self.js.stmt_kind(&self.arena, &handle) {
+            return self.with_row(row, |handle| match self.js.stmt_kind(&self.arena, handle) {
                 row::Kind::Declare => self
                     .js
-                    .value_of(&self.arena, &handle)
+                    .value_of(&self.arena, handle)
                     .is_some_and(|value| !self.js.has(&self.arena, value, flag::STRICT)),
                 _ => true,
-            };
+            });
         }
         self.coercion.steps += 1;
-        !self.js.effect_free(&self.arena, &handle)
+        !self.with_row_mut(row, |js, a, handle| js.effect_free(a, handle))
     }
 
     /// The last row plus one with a top-level effect, read once per unit
@@ -814,16 +897,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// per ancestor entered. No allocation once `Tables::path` and the table
     /// have their capacity.
     fn row_of(&mut self, node: NodeId) -> u32 {
-        let t = &mut self.coercion;
-        if t.row_of.is_empty() {
-            t.row_of.resize(self.js.id_bound(&self.arena) as usize, 0);
-            for (index, row) in t.rows.iter().enumerate() {
-                t.steps += 1;
-                if row.bits & (Row::REMOVED | Row::INSERTED | Row::TAIL) == 0 {
-                    t.row_of[row.stmt.index()] = (index as u32 + 1) << 1;
+        if self.coercion.row_of.is_empty() {
+            self.coercion.row_of.resize(self.js.id_bound(&self.arena) as usize, 0);
+            for index in 0..self.coercion.rows.len() {
+                self.coercion.steps += 1;
+                if self.coercion.rows[index].bits & (Row::REMOVED | Row::INSERTED | Row::TAIL) == 0 {
+                    let key = self.row_key(index as u32);
+                    self.coercion.row_of[key.index()] = (index as u32 + 1) << 1;
                 }
             }
         }
+        let t = &mut self.coercion;
         let mut path = std::mem::take(&mut t.path);
         path.clear();
         let mut at = node;
@@ -1000,9 +1084,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         row.bits |= Row::REMOVED;
     }
 
-    /// Release the statement of a removed row once nothing reads it.
+    /// Release the statement of a removed row once nothing reads it. Cost:
+    /// the read of its key (`row_key`), one write, and one release, one
+    /// step per node released.
     fn release_row(&mut self, index: u32) {
-        let stmt = self.coercion.rows[index as usize].stmt;
+        let stmt = self.row_key(index);
         // By id 4: a statement the tables name by its id, taken out of
         // its block and released while the block or the statement stack
         // holds it (`coerced_list` drops the stack's handle of a removed
@@ -1037,7 +1123,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let function = value.as_ref().is_some_and(|value| self.js.kind(&self.arena, B::of(value)) == row::Kind::Fun);
         let has_value = value.is_some();
         let declaration = self.js.declare(&mut self.arena, kind, var, value);
-        let stmt = self.built(NodeId(self.js.stmt_id(&self.arena, &declaration)));
+        self.built(NodeId(self.js.stmt_id(&self.arena, &declaration)));
         // The declaration is a row of the final block: C:801 and O:30 read it.
         let row = self.coercion.rows.len() as u32;
         let mut bits = Row::DECL | place;
@@ -1047,7 +1133,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 bits |= Row::FUNCTION;
             }
         }
-        self.coercion.rows.push(Row { stmt, bits });
+        // The caller keeps the declaration in `inserted` or `tail`, at the
+        // end of either.
+        let place = if place == Row::INSERTED { self.coercion.inserted.len() } else { self.coercion.tail.len() };
+        self.coercion.rows.push(Row { place: place as u32, bits });
         self.coercion.name_next.push(0);
         let origin = self.origin(var);
         if self.coercion.decl[origin.index()] == 0 {
@@ -1379,7 +1468,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             return false;
         };
         self.coercion.position[var.index()] > export + 1
-            && initialiser != self.coercion.rows[row as usize].stmt
+            && initialiser != self.row_key(row)
             // By id 2.
             && self.js.equal(&self.arena, B::at(initialiser), B::of(value), &mut 0)
     }
@@ -1655,7 +1744,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let row = self.declaration(var, true)?;
         let (_, initialiser, _) = self.declared_by(row);
         let initialiser = initialiser?;
-        if initialiser == self.coercion.rows[row as usize].stmt {
+        if initialiser == self.row_key(row) {
             return None;
         }
         self.reusable_binding(export, var, initialiser)
@@ -1668,17 +1757,22 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if !self.declared_now(var) {
             return None;
         }
-        let stmt = match self.declaration(var, true) {
-            Some(row) => self.coercion.rows[row as usize].stmt,
-            None => self.arena.vars.binder(var)?,
+        let alias = |handle: &B::S| {
+            if self.js.stmt_kind(&self.arena, handle) != row::Kind::Declare {
+                return None;
+            }
+            let value = self.js.value_of(&self.arena, handle)?;
+            self.js.var_of(&self.arena, value)
         };
-        // By id 1.
-        let handle = B::stmt_from_node(stmt);
-        if self.js.stmt_kind(&self.arena, &handle) != row::Kind::Declare {
-            return None;
-        }
-        let value = self.js.value_of(&self.arena, &handle)?;
-        self.js.var_of(&self.arena, value).map(|var| self.origin(var))
+        let target = match self.declaration(var, true) {
+            Some(row) => self.with_row(row, alias),
+            None => {
+                let stmt = self.arena.vars.binder(var)?;
+                // PROBE-GAP 1: the declaration of a variable no row names (below an `if` of the top level), found from its binder's id.
+                alias(&B::stmt_from_node(stmt))
+            }
+        };
+        target.map(|var| self.origin(var))
     }
 
     /// O:112 collect_declared_idents on the final block, for one variable.
@@ -1762,22 +1856,31 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// of the stack as one list: the rows that remain, each rebound export
     /// inserted before its row, then the rebound exports of the tail. A
     /// flattened block loses its block statements. A first pass over the
-    /// rows counts the list and takes the statements of a dissolved block
-    /// out of it; the second moves each statement into the list where it
-    /// is: the top level's out of the run, in order (one per row of the top
-    /// level), the fold's declarations out of `inserted` and `tail`. Cost:
-    /// both passes walk the rows, and the tables count one step per row,
-    /// once; the second also walks the slots of the run; the list counts
-    /// one step and one per statement on the interface; each dissolved
-    /// block is released, one step per node released. `blocks` allocates
-    /// once in a unit that dissolves a block; nothing else allocates once
-    /// the tables have their capacity.
+    /// rows counts the list and, in a flattened block, takes each block of
+    /// the top level off the stack and each statement of a dissolved block
+    /// out of its block by its index (`JsStmt::take_from_block`, one step
+    /// each on the interface), into `blocks`; the second moves each
+    /// statement into the list where it is: the top level's out of the
+    /// run, in order (one per row of the top level that is not a dissolved
+    /// block), a dissolved block's out of `blocks`, the fold's declarations
+    /// out of `inserted` and `tail`. Cost: both passes walk the rows, and
+    /// the tables count one step per row, once; the second also walks the
+    /// slots of the run; the list counts one step and one per statement on
+    /// the interface; each dissolved block is released, one step per node
+    /// released. `blocks` allocates once in a unit that dissolves a block
+    /// (it is reserved for every row); nothing else allocates once the
+    /// tables have their capacity.
     pub(super) fn coerced_list(&mut self, run: Span) -> B::L {
         let flattened = self.coercion.flattened;
         let mut len = self.coercion.inserted.len();
+        let mut blocks = std::mem::take(&mut self.coercion.blocks);
+        debug_assert!(blocks.is_empty());
+        if flattened {
+            blocks.reserve(self.coercion.rows.len());
+        }
         for index in 0..self.coercion.rows.len() {
             self.coercion.steps += 1;
-            let Row { stmt, bits } = self.coercion.rows[index];
+            let Row { place, bits } = self.coercion.rows[index];
             if bits & (Row::REMOVED | Row::INSERTED) != 0 {
                 continue;
             }
@@ -1786,10 +1889,21 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 continue;
             }
             if flattened {
-                // By id 4: a statement of a block, taken out of it by
-                // its id.
-                if self.arena.parents[stmt.index()].is_some() {
-                    self.arena.detach(stmt);
+                // A block of the top level is taken off the stack, and each
+                // statement of a dissolved block out of its block by its
+                // index (`JsStmt::take_from_block`); the handle waits in
+                // `blocks`, where the row's place now points.
+                if bits & (Row::NESTED | Row::BLOCK) != 0 {
+                    let statement = if bits & Row::NESTED != 0 {
+                        let parent = self.coercion.rows[index].parent();
+                        let at = self.coercion.rows[parent as usize].place as usize;
+                        let block = blocks[at].as_mut().expect("a dissolved block");
+                        self.js.take_from_block(&mut self.arena, block, place)
+                    } else {
+                        self.statements.take_place(place)
+                    };
+                    self.coercion.rows[index].place = blocks.len() as u32;
+                    blocks.push(Some(statement));
                 }
                 if bits & Row::BLOCK != 0 {
                     continue;
@@ -1801,9 +1915,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         let mut inserted = std::mem::take(&mut self.coercion.inserted);
         let mut tail = std::mem::take(&mut self.coercion.tail);
-        let mut blocks = std::mem::take(&mut self.coercion.blocks);
         let list = {
             let rows = &self.coercion.rows;
+            let blocks = &mut blocks;
             let mut inserted = inserted.drain(..).peekable();
             let mut tail = tail.drain(..);
             let mut top = self.statements.take_run(run);
@@ -1812,12 +1926,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if let Some((_, statement)) = inserted.next_if(|&(at, _)| at as usize == index) {
                     return Some(statement);
                 }
-                let Row { stmt, bits } = *rows.get(index)?;
+                let Row { place, bits } = *rows.get(index)?;
                 index += 1;
                 // The rows of the top level are the run's statements, in
-                // order; a removed one was released by `release_row`
-                // (By id 4) and its handle is dropped here.
-                let own = (bits & (Row::NESTED | Row::INSERTED | Row::TAIL) == 0)
+                // order, but for the blocks the first pass took; a removed
+                // one was released by `release_row` (By id 4) and its
+                // handle is dropped here.
+                let own = (bits & (Row::NESTED | Row::INSERTED | Row::TAIL) == 0
+                    && !(flattened && bits & Row::BLOCK != 0))
                     .then(|| top.next().expect("a statement of the top-level run"));
                 if bits & (Row::REMOVED | Row::INSERTED) != 0 {
                     continue;
@@ -1827,21 +1943,20 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 }
                 if flattened {
                     if bits & Row::BLOCK != 0 {
-                        // By id 1 for a block inside a block; like every
-                        // dissolved block it is released below (by id 4).
-                        blocks.push(own.unwrap_or_else(|| B::stmt_from_node(stmt)));
                         continue;
+                    }
+                    if bits & Row::NESTED != 0 {
+                        return Some(blocks[place as usize].take().expect("a statement of a dissolved block"));
                     }
                 } else if bits & Row::NESTED != 0 {
                     continue;
                 }
-                // By id 1 for a statement of a dissolved block.
-                return Some(own.unwrap_or_else(|| B::stmt_from_node(stmt)));
+                return own;
             });
             self.js.list(&mut self.arena, len as u32, statements)
         };
-        // The statements of a dissolved block were taken out above.
-        for block in blocks.drain(..) {
+        // The blocks whose statements were taken out above, in row order.
+        for block in blocks.drain(..).flatten() {
             self.js.release_stmt(&mut self.arena, block);
         }
         self.coercion.blocks = blocks;

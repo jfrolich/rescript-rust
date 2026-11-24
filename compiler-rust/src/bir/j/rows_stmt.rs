@@ -52,6 +52,10 @@
 //! | `copy_stmt` | T6o | `Bir::copy_subtree_with_scratch(s, &[], fresh, ..)` with the copy storage and the label vector of `Rows`, as `copy_fresh` |
 //! | `declared` | T6q | the `var` of `SDecl` or `SRest` |
 //! | `block_ids` | T6q | the ids of the `statements` of an `SBlock`, in order |
+//! | `block_len` | PROBE-ADD 3 | the length of the `statements` of an `SBlock` |
+//! | `with_block_stmt_at` | PROBE-ADD 4 | `read` on entry `index` of the `statements` of an `SBlock` as a statement: the row is named for the length of the call |
+//! | `with_block_stmt_mut` | PROBE-ADD 5 | `edit` on the implementation, the pools and entry `index` of the `statements` of an `SBlock` as a statement; a debug check that the reference still names that row afterwards |
+//! | `take_from_block` | PROBE-ADD 6 | entry `index` of the `statements` of an `SBlock`, `Bir::detach`ed (it clears the parent link and leaves the entry in the list, so the indexes after it stay); one step |
 //! | `effect_free` | T6q | the read `export.rs::has_toplevel_effect` made of a statement that is not a declaration row: a work stack (`Rows::work`) of the node's children for a compound statement, the `STRICT` flag of the value of `SExp` and `SReturn` and of every expression below a compound statement, `false` at `SThrow`, `SDebugger`, a jump, `SDecl`, `SRest`, `SForOf`, `SForAwaitOf`; one step per node read |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
@@ -320,6 +324,35 @@ impl JsStmt for Rows {
             sink(statement.0);
         }
     }
+    fn block_len(&self, a: &Pools, block: &S) -> u32 {
+        let View::SBlock { statements } = a.view(block.0) else { panic!("not a block statement") };
+        statements.len() as u32
+    }
+    fn with_block_stmt_at<R>(&self, a: &Pools, block: &S, index: u32, read: impl FnOnce(&S) -> R) -> R {
+        let View::SBlock { statements } = a.view(block.0) else { panic!("not a block statement") };
+        read(&S(statements[index as usize]))
+    }
+    fn with_block_stmt_mut<R>(
+        &mut self,
+        a: &mut Pools,
+        block: &mut S,
+        index: u32,
+        edit: impl FnOnce(&mut Self, &mut Pools, &mut S) -> R,
+    ) -> R {
+        let View::SBlock { statements } = a.view(block.0) else { panic!("not a block statement") };
+        let row = statements[index as usize];
+        let mut statement = S(row);
+        let result = edit(self, a, &mut statement);
+        debug_assert_eq!(statement.0, row, "a statement of a block replaced through its reference");
+        result
+    }
+    fn take_from_block(&mut self, a: &mut Pools, block: &mut S, index: u32) -> S {
+        let View::SBlock { statements } = a.view(block.0) else { panic!("not a block statement") };
+        let statement = statements[index as usize];
+        a.detach(statement);
+        self.steps += 1;
+        S(statement)
+    }
     fn effect_free(&mut self, a: &Pools, s: &S) -> bool {
         let mut work = std::mem::take(&mut self.work);
         debug_assert!(work.is_empty());
@@ -472,3 +505,7 @@ impl Rows {
         a.block_from_list(list)
     }
 }
+
+#[cfg(test)]
+#[path = "rows_stmt_tests.rs"]
+mod tests;
