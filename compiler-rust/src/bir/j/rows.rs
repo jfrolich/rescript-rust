@@ -587,6 +587,7 @@ impl Js for Rows {
         );
         self.cut(start, id)
     }
+    #[cfg(test)]
     fn jsx(&mut self, a: &mut Pools, mark: Mark, info: JsId, has_children: bool) -> E {
         let start = self.since(mark);
         self.jsx_element(a, start, info, has_children)
@@ -849,7 +850,7 @@ impl Rows {
         E(plain::node(a, view, aux))
     }
     /// The JSX element over the operands from `start` on the stack (the
-    /// callee first), the stack cut back after it: the body of [`Js::jsx`]
+    /// callee first), the stack cut back after it: the body of `Js::jsx`
     /// and [`Js::jsx_apart`]. One step, and one per operand.
     fn jsx_element(&mut self, a: &mut Pools, start: usize, info: JsId, has_children: bool) -> E {
         let JsPayload::Jsx(header) = a.javascript(info) else { panic!("a JSX header") };
