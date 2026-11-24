@@ -2727,6 +2727,30 @@ fn unify1_var_link(
     Ok(())
 }
 
+/// OCaml `update_level !env` at a level update of a row that Rust makes
+/// with the plain [`update_level`]: once a type has joined an instance set
+/// in this unit and `env` has an instance scope, [`update_level_checked`],
+/// which refuses to lower a member below the level of its set
+/// (compiler/ml/ctype.ml:587-589); otherwise the plain update, as before.
+/// A unit where no type has joined a set pays one load and one branch on
+/// top of the plain update.
+fn update_level_with_gadt_instances(
+    ctx: &TypeContext,
+    env: Option<&Env>,
+    level: i32,
+    ty: TypeExprRef,
+) -> Result<(), TypeError> {
+    match env {
+        Some(env) if has_gadt_instance_scope(ctx, env) => {
+            update_level_checked(ctx, env, level, ty)
+        }
+        _ => {
+            update_level(ctx, level, ty);
+            Ok(())
+        }
+    }
+}
+
 /// OCaml `update_level` (ctype.ml:615-622): first lower levels without
 /// expanding parameterized constructors; if a constructor would escape its
 /// scope, backtrack and retry expanding them. The error is OCaml's
@@ -9682,6 +9706,9 @@ pub(crate) fn merge_row_fields<'a, 'b>(
 /// While GADT instances are traced, `set_more` first lowers the whole row
 /// to the level of its row variable (compiler/ml/ctype.ml:2609-2611); a
 /// unit that is not tracing pays one load and one branch per side for that.
+/// The row built from the other side's unmatched fields is lowered as
+/// OCaml's `update_level !env` (ctype.ml:2617) does once a type has joined
+/// an instance set; until one has, one load and one branch per side.
 fn unify_rows<'a>(
     ctx: &'a TypeContext,
     state: &mut UnifyState,
@@ -9836,7 +9863,9 @@ fn unify_rows<'a>(
             row_fields: rest.into(),
             ..row0.clone()
         })));
-        update_level(ctx, ctx.get_level(rm), ty);
+        // OCaml compiler/ml/ctype.ml:2617 `update_level !env`, before the
+        // link.
+        update_level_with_gadt_instances(ctx, state.env(), ctx.get_level(rm), ty)?;
         link_type(ctx, rm, ty);
         Ok(())
     };
@@ -9901,6 +9930,9 @@ fn mkvariant(ctx: &TypeContext, fields: Vec<(Label, RowField)>, closed: bool) ->
 
 /// Unify two row fields.
 /// Matches OCaml's `unify_row_field` behavior, including Reither link updates.
+/// A present field matched with a conjunction is lowered to the level of
+/// `more` as OCaml's `update_level !env` (ctype.ml:2706, 2712) does once a
+/// type has joined an instance set; until one has, one load and one branch.
 fn unify_row_field(
     ctx: &TypeContext,
     state: &mut UnifyState,
@@ -10096,7 +10128,9 @@ fn unify_row_field(
         ) if !fixed1 => {
             ctx.set_row_field(*e1, f2.clone());
             let more_level = ctx.get_level(ctx.repr(more));
-            update_level(ctx, more_level, *t2);
+            // OCaml compiler/ml/ctype.ml:2706 `update_level !env`: a refused
+            // instance leaves the field linked, as there.
+            update_level_with_gadt_instances(ctx, state.env(), more_level, *t2)?;
             for t1 in types {
                 if let Err(err) = unify(ctx, state, *t1, *t2) {
                     ctx.clear_row_field(*e1);
@@ -10116,7 +10150,8 @@ fn unify_row_field(
         ) if !fixed2 => {
             ctx.set_row_field(*e2, f1.clone());
             let more_level = ctx.get_level(ctx.repr(more));
-            update_level(ctx, more_level, *t1);
+            // OCaml compiler/ml/ctype.ml:2712, as above.
+            update_level_with_gadt_instances(ctx, state.env(), more_level, *t1)?;
             for t2 in types {
                 if let Err(err) = unify(ctx, state, *t1, *t2) {
                     ctx.clear_row_field(*e2);
