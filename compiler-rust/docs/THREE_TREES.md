@@ -5458,8 +5458,8 @@ design turn that builds T6x-e3, e4 and f once and writes their prompts):
    State: the debug assertion is in `placed_refs` (commit 4bc2aec19).
    The three changes are recorded here; the merged body is not edited.
 9. Not done by the turn: the probe prompt of T6r (K5).
-   State: owed (L5 of the ninth turn, written only when L0 to L4 are
-   complete).
+   State: paid in pull request 390: "Probe of T6r" in 11.9, after the
+   prompt of T6x-f.
 10. Checked in the review beyond the turn's own runs: the source
     program of "What was measured", alone and with an alias used inside
     the match and exported, builds in check mode on trunk with no
@@ -10495,6 +10495,140 @@ a test of out.rs, js_tests.rs or js_stmt_tests.rs rewritten to avoid
 the functions; `call_node`, `empty_block` or `raw_if` kept; the flag
 `--no-calls-left` kept or the workflow edited; an `allow`; an edit of
 export.rs, jsx.rs, out.rs outside its tests, or src/emit.
+```
+
+
+Probe of T6r (a throw-away conversion; issued verbatim, with the common
+block of phase C; no build prompt for T6r exists until this probe and
+its design turn):
+
+```text
+Task: probe row T6r of the lowering's interface (compiler-rust/docs/
+THREE_TREES.md 11.4, "T6: the interface" (d) and (g), and "T6x-e and
+T6x-f: the fold reads where its rows are", decision 8). This is a
+measurement, not a slice: its pull request is a draft that is never
+merged, and its body is the report.
+
+Start from trunk with the ninth design turn merged (`rg -n 'fn
+take_placed' compiler-rust/src/bir/lower/out.rs` shows one line). It
+does not wait for T6x-e3, e4 or f: names.rs, globals.rs and close.rs
+call no transition function. Branch from trunk; open the draft pull
+request against ocaml-to-rust-rewrite after the first push, titled
+"Probe: T6r (not for merge)". Say in the report which of T6x-e3, e4 and
+f were on trunk when you branched.
+
+Convert the row: names.rs and globals.rs reach J nodes through the
+interface only. Today `names::replay`, the naming log (`open`, `close`,
+`read_sites`, `unprinted`, `adopt`, `eta_shape`), `scope::return_sites`
+(called from the `return` arm of `close::decide`) and `globals::decide`
+(`binding_scope`, `shadowed`) take `&Bir` and read `bir.view(node)`,
+`bir.parents` and `bir.func_owners` by id. "T6: the interface" (d)
+proposes for them `JsStmt::{bodies, body, set_body, functions, globals,
+binder, rest_fields}`, the replay generic over `JsStmt`, and the
+external-shadow decision made in the replay's walk.
+
+Rules of a probe:
+- You MAY add the seven functions of (d) to `JsStmt` with a body on
+  rows (src/bir/j/rows_stmt.rs), each under a comment `// PROBE-ADD n:`
+  with its cost in one line: they are what is measured. You add nothing
+  else to the traits and nothing to src/emit. Where the conversion
+  needs something the interface and those seven do not give, write what
+  works today under a comment `// PROBE-GAP n: <what is needed, in one
+  line>` and go on. Number the gaps in order of appearance.
+- No cost notes, no changelog discipline beyond one fragment, no `allow`
+  attribute. A test is edited only so that it compiles; no expected
+  value changes. If one would, leave the test failing and report it.
+- One commit per step below, pushed when made. After each: `cargo check
+  --all-targets --manifest-path compiler-rust/Cargo.toml`, and `cargo
+  test --manifest-path compiler-rust/Cargo.toml --lib bir::lower` and
+  `--lib bir::j` (never the whole suite). A step that does not compile
+  alone is merged with the next and the report says so.
+- Do not run `Instruction count` or the parity suites, and do not wait
+  for CI. Step 6 runs check mode once.
+
+Steps:
+1. The return arm: `scope::return_sites` reads the returned expression
+   through `Js` (`kind`, `operand`, `var_of`, on the reference
+   `value_of` gives inside `with_stmt_at`), and `close::decide` no
+   longer turns the value into an id for it. It writes
+   `VarFacts::site`, the id of a call: list every reader of that field
+   and say for each whether it compares the id, tests it against
+   `NO_SITE`, or finds the call from it.
+2. `names::adopt` (three calls of call.rs, one of ffi_args.rs): it takes
+   the handle or a reference, not a row. Count what it reads below the
+   node (`Log::adopted_nodes`) and through which functions of `Js`.
+3. The naming log's close: `read_sites` and `unprinted` read
+   `bir.view(site.node)` and climb parents from a site. Convert what the
+   interface serves (`Js::kind_of`, `Js::owner`, `Js::is_callee`); mark
+   the rest. Then, in a commit of its own that may be dropped, try the
+   other form: the site records what `close` needs when the reference
+   is built (the variable or the import, 4 bytes), so that `close` reads
+   no node; say what `unprinted` still needs and what a released
+   reference costs.
+4. `names::replay` generic over `JsStmt`, on the seven functions: one
+   frame per open list, each list rebuilt (`take_at`, stage, `list`).
+   The prelude, `Scratch::marks`, `Scratch::next` and
+   `ambiguous_orders` go if the descent makes them unnecessary; if one
+   cannot go, that is a gap.
+5. `globals::decide` in the replay's walk: a count per referenced
+   global name of the bindings that cover the place the walk is at;
+   `binding_scope`, `shadowed`, `Globals::marks` and the epochs go.
+6. Measure, with what steps 1 to 5 built: a debug build of `rescript`;
+   `RESCRIPT_BACKEND=check`, `clean` then `build`, of
+   packages/@rescript/runtime and of tests/tests, with
+   `RESCRIPT_BACKEND_STATS` set to a directory. Report the units of the
+   lowering stage that are identical and those that are not, and
+   "Naming log against the pass" (compared, uncompared, sum of
+   differences) as `scripts/test_backend_coverage.py` prints it, before
+   and after.
+
+The report (the body of the draft pull request), with these sections:
+(1) Size: `git diff --stat` against trunk; changed lines per commit,
+    production and test apart; whether the row is under 600 lines and,
+    if not, the cut the commits give, each part compiling and passing
+    at its place.
+(2) PROBE-ADDs: for each of the seven, the signature as built, its body
+    on rows in one line, its callers, its cost as counted (a step test
+    is not asked for; say what one call visits), and what its body
+    would be on an implementation that owns its nodes (read
+    src/emit/builder.rs; do not write it).
+(3) PROBE-GAPs: for each, the file, function and line, what is needed,
+    what you wrote instead, and the signature you would propose with
+    its cost on both sides.
+(4) Ids that stay: every id the converted files still store or pass
+    (`VarFacts::site`, `Site::node`, `Child`, `ScopeRow`, the rows of
+    `Globals`, `Printed`), with for each: who writes it, who reads it,
+    and whether a reader finds a node from it. The rule is that of the
+    eighth design turn: an id is a key (compared, stored to say "the
+    same node as", used to read a fact the implementation keeps in a
+    table indexed by it), never a way to find a node.
+(5) "Reading by id" after the conversion: the callers of `Js::owner`,
+    `Js::kind_of`, `Js::is_callee` and `Js::id_bound` in names.rs,
+    globals.rs, scope.rs and close.rs, and how often each ran in step 6
+    (a counter in the probe, removed from no commit: it is a probe).
+    T6v needs these numbers to decide the column of owners.
+(6) The walk: moves per statement in the replay (the claim of (d) is
+    "moves equal statements"); the allocation counts of unit.rs (86,
+    103, 86, 156 on trunk, or what trunk reads when you branch) before
+    and after, with the reason for each change; whether one walk serves
+    the external-shadow decision for every kind of binder
+    `binding_scope` knows (a declaration, a parameter, a loop variable,
+    a catch variable, the cases of a `switch`, an explicit block
+    spliced into its list) and which test shows each.
+(7) The sites: the two forms of step 3 side by side (lines, what
+    `close` reads, bytes a site, what a release writes), and which you
+    would build.
+(8) Tests: every test edited and why; every test of names.rs,
+    globals.rs, scope.rs and close.rs that builds rows by hand and
+    would need the functions `Rows` keeps for tests after T6x-f.
+(9) What you did not run and what you are not sure of.
+
+Shortcuts that count as failure: a function added to a trait that is
+not one of the seven; a gap closed with `B::at`, `B::node` or any
+transition function without a `PROBE-GAP` comment above it; an expected
+value changed; a test deleted; the generated JavaScript changed (check
+mode shows it); a report that gives a figure without the command that
+printed it.
 ```
 
 
