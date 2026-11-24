@@ -21423,3 +21423,1469 @@ release executable also matched: 3,735 signatures, 32 diagnostics in 18 files,
 and 3,980 generated files. This verifies repeatability, not a Rust-versus-OCaml
 comparison or a performance improvement; the pattern evidence above comes
 from separate Rust and OCaml invocations.
+
+## Sixth round: instances of a type under an equation
+
+### Scope and calibration
+
+This section is in progress: I1 has been investigated; I2–I9 have not yet
+been run. No verdict is claimed for unrun places. The reference and baseline
+Rust compiler are from `45c4f78a54`. Temporary prints are confined to a
+scratch Rust build; the comparisons below use the unmodified baseline.
+
+Builds, serially:
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+CARGO_PROFILE_RELEASE_LTO=thin cargo build --release --manifest-path rewatch/Cargo.toml
+eval $(opam env)
+dune build --root .
+scripts/rust_compiler_shims.sh release
+export ROOT="$PWD"
+export RESCRIPT_RUNTIME="$ROOT/packages/@rescript/runtime"
+rewatch/target/release/rescript build-reference --bsc "$ROOT/_build/install/default/bin/bsc" packages/@rescript/runtime
+```
+
+Rust build output (final lines; the existing unused import warning is unchanged):
+
+```text
+warning: `rescript` (lib) generated 1 warning (1 duplicate)
+    Finished `release` profile [optimized] target(s) in 1m 49s
+```
+
+Dune exits 0, stdout and stderr:
+
+```text
+```
+
+Runtime preparation exits 0:
+
+```text
+OCaml reference build: 113 of 113 modules built
+```
+
+Every program is `Main.res` in its own temporary directory, with an empty
+`src` directory and `rescript.json` containing
+`{"name":"equation-search","sources":["."]}`. Each source has a final newline.
+The saved baseline executable is wrapped by `BASE_BSC`, which executes
+`base-rescript bsc "$@"`; the runtime environment above is required when
+moving that executable outside the build directory. An initial attempt
+without it printed `bsc: pass -runtime-path or set RESCRIPT_RUNTIME`; those
+attempts are setup failures, not compiler witnesses, and all were rerun.
+Commands, from each program's directory:
+
+```sh
+timeout 10 "$ROOT/_build/install/default/bin/bsc" -w +A -bs-jsx 4 -color never Main.res >ocaml.stdout 2>ocaml.stderr
+timeout 10 "$BASE_BSC" -w +A -bs-jsx 4 -color never Main.res >rust.stdout 2>rust.stderr
+```
+
+The flags are those of `scripts/test_error_output_parity.sh`. Status and
+complete diagnostics, including warnings, are compared after stripping SGR
+escapes. JavaScript is stdout and is compared after removing blank lines.
+Empty fences mean empty streams. The calibration cases below agree with
+their `super_errors/expected` files after stripping colours, replacing the
+fixture path by `Main.res`, and ignoring the expected file's trailing blank
+line convention. They are not counted as new search candidates.
+
+#### calibration-if
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => if true { y } else { 0 }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:33
+
+  2 │ let f = (type a, x: t<a>, y: a) =>
+  3 │   switch x {
+  4 │   | Int => if true { y } else { 0 }
+  5 │   }
+  6 │ 
+
+  This has type: int
+  But this if statement is expected to return: a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### calibration-array
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => [y, 0]
+  | Str => []
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:16
+
+  2 │ let f = (type a, x: t<a>, y: a) =>
+  3 │   switch x {
+  4 │   | Int => [y, 0]
+  5 │   | Str => []
+  6 │   }
+
+  This array item has type: int
+  But this array is expected to have items of type: a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  Arrays can only contain items of the same type.
+
+  Possible solutions:
+  - Convert all values in the array to the same type.
+  - Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, "hello", 15.5, true)
+
+```
+
+### I1 — common object fields
+
+Verdict: **CONDITION NOT REACHED**. Twelve candidates parsed; eight added
+members (03–06 and 09–12), and four entered `unify_object_fields` after a
+member had been added (06, 09–11). Zero established the full differing
+condition: each printed common left field had `member=None`, even where
+`rowlevel=1004` and `tracing=true`; 03–05 and 12 failed before the field loop.
+The membership prerequisite at `compiler/ml/ctype.ml:2490`, before
+unifying the common fields, was not satisfied in the Rust trace.
+
+A program must bring an already-member left field to `unify_fields` while
+tracing and give the shared row a level below that member's scope.
+Afterwards the attempted lowering must fail in OCaml while the omitted
+field-level update in Rust permits a distinct result, rather than both
+failing earlier during an enclosing level update.
+
+The Rust sites inspected are `unify_object_fields` and
+`unify_object_field_pairs` (`compiler-rust/src/types/ctype.rs:10229,10288`).
+Temporary prints at `push_gadt_instance` record every ADD, and the field
+loop records the actual field representative, set level, shared row level,
+and tracing flag before field unification. The entry print's `members`
+flag alone is not a claim that this field belongs to the set. Representative
+output from i1-09:
+
+```text
+EQPROBE SITE unify_object_fields members=true tracing=true
+EQPROBE I1 field="f" left=TypeExprRef(120) member=None rowlevel=1004 tracing=true
+```
+
+Candidates 09–11 differ, but are retained as **Found on the way**, not
+attributed to the unestablished I1 condition. There were no syntax failures
+in these twelve candidates and no OCaml internal errors.
+
+#### i1-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let g = (z: a) => {"f": z}
+    if true { g(y) } else { o }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:29
+
+  4 ┆ | Int => {
+  5 ┆   let g = (z: a) => {"f": z}
+  6 ┆   if true { g(y) } else { o }
+  7 ┆ }
+  8 ┆ }
+
+  This has type: {.."f": int}
+  But this if statement is expected to return: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let g = (z: a) => {"f": z}
+    if true { o } else { g(y) }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:26-29
+
+  4 ┆ | Int => {
+  5 ┆   let g = (z: a) => {"f": z}
+  6 ┆   if true { o } else { g(y) }
+  7 ┆ }
+  8 ┆ }
+
+  This has type: {"f": a}
+  But this if statement is expected to return: {.."f": int}
+  
+  The incompatible parts:
+    a (defined as int) vs int
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": if true { y } else { 0 }}
+    if true { p } else { o }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:15
+
+  4 ┆ | Int => {
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   if true { p } else { o }
+  7 ┆ }
+  8 ┆ }
+
+  This has type: {"f": a}
+  But this if statement is expected to return: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let g = (z: a) => z
+    let p = {"f": g(y)}
+    if true { p } else { o }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:15
+
+  5 ┆   let g = (z: a) => z
+  6 ┆   let p = {"f": g(y)}
+  7 ┆   if true { p } else { o }
+  8 ┆ }
+  9 ┆ }
+
+  This has type: {"f": a}
+  But this if statement is expected to return: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-05
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let g = (z: a) => z
+    if true { o } else { {"f": g(y)} }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:26-36
+
+  4 ┆ | Int => {
+  5 ┆   let g = (z: a) => z
+  6 ┆   if true { o } else { {"f": g(y)} }
+  7 ┆ }
+  8 ┆ }
+
+  This has type: {"f": a}
+  But this if statement is expected to return: {.."f": int}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-06
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": y}
+    ignore(p["f"] == 0)
+    if true { p } else { o }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:26
+
+  5 ┆   let p = {"f": y}
+  6 ┆   ignore(p["f"] == 0)
+  7 ┆   if true { p } else { o }
+  8 ┆ }
+  9 ┆ }
+
+  This has type: {.."f": int}
+  But this if statement is expected to return: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-07
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": y}
+    ignore(p["f"] + 1)
+    if true { o } else { p }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:26
+
+  5 ┆   let p = {"f": y}
+  6 ┆   ignore(p["f"] + 1)
+  7 ┆   if true { o } else { p }
+  8 ┆ }
+  9 ┆ }
+
+  This has type: {"f": a}
+  But this if statement is expected to return: {.."f": int}
+  
+  The incompatible parts:
+    a (defined as int) vs int
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-08
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let g = (z: a) => {"f": z, "g": 1}
+    if true { g(y) } else { o }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:29
+
+  4 ┆ | Int => {
+  5 ┆   let g = (z: a) => {"f": z, "g": 1}
+  6 ┆   if true { g(y) } else { o }
+  7 ┆ }
+  8 ┆ }
+
+  This has type: {.."f": int}
+  But this if statement is expected to return: {"f": a, "g": int}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-09
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": if true { y } else { 0 }}
+    ignore(p == o)
+    ()
+  }
+  }
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:17
+
+  4 ┆ | Int => {
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   ignore(p == o)
+  7 ┆   ()
+  8 ┆ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  Primitive_object.equal(p, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:6:12-17
+
+  4 ┆ | Int => {
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   ignore(p == o)
+  7 ┆   ()
+  8 ┆ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### i1-10
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": if true { y } else { 0 }}
+    ignore(o == p)
+    ()
+  }
+  }
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:17
+
+  4 ┆ | Int => {
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   ignore(o == p)
+  7 ┆   ()
+  8 ┆ }
+
+  This has type: {"f": a}
+  But it's being compared to something of type: {.."f": int}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  Primitive_object.equal(o, p);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:6:12-17
+
+  4 ┆ | Int => {
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   ignore(o == p)
+  7 ┆   ()
+  8 ┆ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### i1-11
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": if true { y } else { 0 }}
+    let h = (q: {.."f": a}) => q
+    ignore(h(p) == o)
+    ()
+  }
+  }
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:20
+
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   let h = (q: {.."f": a}) => q
+  7 ┆   ignore(h(p) == o)
+  8 ┆   ()
+  9 ┆ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  Primitive_object.equal(p, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:7:12-20
+
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   let h = (q: {.."f": a}) => q
+  7 ┆   ignore(h(p) == o)
+  8 ┆   ()
+  9 ┆ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### i1-12
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": if true { y } else { 0 }}
+    ignore(p["f"] == y)
+    if true { o } else { p }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:26
+
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   ignore(p["f"] == y)
+  7 ┆   if true { o } else { p }
+  8 ┆ }
+  9 ┆ }
+
+  This has type: {"f": a}
+  But this if statement is expected to return: {.."f": int}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+### Found on the way — comparison with an open object
+
+Candidates i1-09–11 expose an acceptance mismatch. Reducing 09 removes the
+final unit, the `ignore`, the `if` in the field, and the binding of the
+object: the difference remains. Replacing the open object annotation by a
+closed object makes both accept; deleting the annotation makes both
+reject; replacing the object by its scalar payload makes both accept.
+The equality variant `===` retains the mismatch without warning 102.
+All reduction runs are pasted below, including successful and unsuccessful
+simplifications; reduce-i1-09 is the smallest retained source in this search.
+
+Rust is at fault under the reference contract: it accepts an open-object
+comparison that OCaml refuses because an instance of `int` would escape
+its equation. Attribution to a particular omitted tracing/level-update
+site is not established by the Rust field trace, whose left member is
+`None`; this is not evidence that the specified I1 condition was reached.
+
+#### reduce-i1-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  let p = {"f": if true { y } else { 0 }}
+  p == o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  return Primitive_object.equal(p, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:5:3-8
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### reduce-i1-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {"f": int}) => switch x {
+| Int => {
+  let p = {"f": if true { y } else { 0 }}
+  p == o
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  return Primitive_object.equal(p, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:5:3-8
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### reduce-i1-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o) => switch x {
+| Int => {
+  let p = {"f": if true { y } else { 0 }}
+  p == o
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  This has type: 'a
+  But it's being compared to something of type: {"f": a}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+#### reduce-i1-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  let p = {"f": y}
+  p == o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = {"f": y}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  return Primitive_object.equal(p, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:5:3-8
+
+  3 │ | Int => {
+  4 │   let p = {"f": y}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### reduce-i1-05
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: int) => switch x {
+| Int => {
+  let p = if true { y } else { 0 }
+  p == o
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, o) {
+  return y === o;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### reduce-i1-06
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  let p = {"f": if true { y } else { 0 }}
+  p === o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:9
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p === o
+  6 │ }
+  7 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  return p === o;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### reduce-i1-07
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  let p = {"f": if true { y } else { 0 }}
+  p == o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  return Primitive_object.equal(p, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:5:3-8
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### reduce-i1-08
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  {"f": y} == o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:15
+
+  2 │ let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+  3 │ | Int => {
+  4 │   {"f": y} == o
+  5 │ }
+  6 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  return Primitive_object.equal({
+    f: y
+  }, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:4:3-15
+
+  2 │ let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+  3 │ | Int => {
+  4 │   {"f": y} == o
+  5 │ }
+  6 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### reduce-i1-09
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  {"f": y} === o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:16
+
+  2 │ let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+  3 │ | Int => {
+  4 │   {"f": y} === o
+  5 │ }
+  6 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, o) {
+  return ({
+    f: y
+  }) === o;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### reduce-i1-10
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  let p = {"f": y}
+  p === o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:9
+
+  3 │ | Int => {
+  4 │   let p = {"f": y}
+  5 │   p === o
+  6 │ }
+  7 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  return p === o;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### reduce-i1-11
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": a}) => switch x {
+| Int => {
+  {"f": y} == o
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  return Primitive_object.equal({
+    f: y
+  }, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:4:3-15
+
+  2 │ let f = (type a, x: t<a>, y: a, o: {.."f": a}) => switch x {
+  3 │ | Int => {
+  4 │   {"f": y} == o
+  5 │ }
+  6 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
