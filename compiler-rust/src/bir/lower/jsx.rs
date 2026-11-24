@@ -144,31 +144,27 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// X: compile_jsx. O(props + children + spelling bytes), after shared
     /// argument sequencing. Optional undefined props are consumed and omitted.
     /// Property keys go directly into the unit's pool. The operands after
-    /// the callee pass through `State::external_values`, because the
-    /// callee is built after them: two moves each, nothing allocated once
-    /// the vector has its capacity.
+    /// the callee are pushed on the operand stack as they come, and the
+    /// callee, built after them, is given apart (`Js::jsx_element`): one
+    /// move each, nothing allocated once the stack has its capacity.
     pub(super) fn compile_jsx(
         &mut self,
         jsx: &JsxElement,
         args: impl IntoIterator<Item = B::E>,
     ) -> B::E {
         let mut args = args.into_iter();
-        let tag = args.next().expect("JSX tag");
-        let spread = jsx.jsx_spread.then(|| args.next().expect("JSX spread"));
         let mut props = PropertySpan {
             start: crate::bir::pools::index(self.arena.pools.property_keys.len()), len: 0,
         };
-        // `Js::jsx` reads the callee as its first operand, and the callee is
-        // built last (built earlier, its module and variable would be
-        // registered before the key's runtime module). So the operands wait
-        // in the reused vector `external_values` until it is made: one more
-        // move each, no step. Owed by the interface before T6x-f: a `jsx`
-        // that takes the callee apart from its operands, as `call` does.
-        let mut values = std::mem::take(&mut self.external_values);
-        debug_assert!(values.is_empty());
-        values.push(tag);
-        if let Some(spread) = spread {
-            values.push(spread);
+        // The callee is built last (built earlier, its module and variable
+        // would be registered before the key's runtime module), so it is
+        // given to `Js::jsx_element` apart from the operands pushed here.
+        let mark = self.js.mark();
+        let tag = args.next().expect("JSX tag");
+        self.js.push(tag);
+        if jsx.jsx_spread {
+            let spread = args.next().expect("JSX spread");
+            self.js.push(spread);
         }
         for (name, optional) in &jsx.jsx_props {
             self.primitive_steps += 1;
@@ -179,16 +175,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let key = PropertyKey::Literal(self.arena.intern_text(name));
                 self.arena.pools.property_keys.push(key);
                 props.len += 1;
-                values.push(value);
+                self.js.push(value);
             }
         }
         for _ in 0..jsx.jsx_children.unwrap_or(0) {
             self.primitive_steps += 1;
-            values.push(args.next().expect("JSX child"));
+            let child = args.next().expect("JSX child");
+            self.js.push(child);
         }
         if jsx.jsx_key {
             let key = self.jsx_key(args.next().expect("JSX key"));
-            values.push(key);
+            self.js.push(key);
         }
         assert!(args.next().is_none(), "JSX argument count");
         let callee = self.jsx_callee(&jsx.jsx_ffi);
@@ -200,13 +197,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             multi: jsx.jsx_multi,
             fragment: jsx.jsx_fragment,
         }));
-        let mark = self.js.mark();
-        self.js.push(callee);
-        for value in values.drain(..) {
-            self.js.push(value);
-        }
-        self.external_values = values;
-        self.js.jsx(&mut self.arena, mark, info, jsx.jsx_children.is_some())
+        self.js.jsx_element(&mut self.arena, callee, mark, info, jsx.jsx_children.is_some())
     }
 
     /// X: external_optional_to_undefined_expr. O(member-spine depth) for a
@@ -241,15 +232,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
     }
 
-    /// A: is_okay_to_duplicate(false), with copying in the same walk. O(d)
-    /// for a d-deep member spine; one reusable stack, no per-node allocation.
-    /// A failed shape leaves the original key untouched and creates no nodes.
-    /// The spine holds the ids of the member reads, read by reference. A
-    /// reference is read with `var_of` before the kind (THREE_TREES 11.4,
-    /// "For T6v: a dotted global").
+    /// A: is_okay_to_duplicate(false), then the copy. O(d) for a d-deep
+    /// member spine: the walk here reads the shape, and the copy
+    /// (`Js::copy_members`) reads the chain again and makes its d + 1
+    /// nodes. A failed shape leaves the original key untouched and creates
+    /// no nodes. A reference is read with `var_of` before the kind
+    /// (THREE_TREES 11.4, "For T6v: a dotted global").
     fn duplicate_jsx_key(&mut self, key: &B::E) -> Option<B::E> {
-        let mut spine = std::mem::take(&mut self.scratch);
-        debug_assert!(spine.is_empty());
         let mut r = B::of(key);
         loop {
             self.primitive_steps += 1;
@@ -269,34 +258,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         .member_of(&self.arena, r)
                         .is_some_and(|(_, position)| position.get().is_some()) =>
                 {
-                    spine.push(NodeId(self.js.id(&self.arena, r)));
                     r = self.js.operand(&self.arena, r, 0);
                 }
                 (None, Kind::Qualified | Kind::Bool | Kind::Str | Kind::Number) => break,
                 (None, Kind::Template) if self.js.aux(&self.arena, r) == 1 => break,
-                _ => {
-                    spine.clear();
-                    self.scratch = spine;
-                    return None;
-                }
+                _ => return None,
             }
         }
-        // The key's chain is read again by id: a reference taken through
-        // `Js::operand` borrows the pools and cannot be held across
-        // `copy_leaf`, `dot` and `copy_cold`. These four `B::at` stay until
-        // the interface gives a copy of a member chain (owed before T6x-f).
-        let leaf = NodeId(self.js.id(&self.arena, r));
-        let mut copy = self.js.copy_leaf(&mut self.arena, B::at(leaf));
-        self.js.copy_cold(&mut self.arena, B::at(leaf), &mut copy);
-        for node in spine.drain(..).rev() {
-            let r = B::at(node);
-            let (name, position) = self.js.member_of(&self.arena, r).expect("a member read");
-            let tag = self.js.aux(&self.arena, r) != 0;
-            copy = self.js.dot(&mut self.arena, copy, name, position, tag);
-            self.js.copy_cold(&mut self.arena, B::at(node), &mut copy);
-        }
-        self.scratch = spine;
-        Some(copy)
+        // The shape ends at the first node that is not a member read, which
+        // is where the copy of the chain ends too.
+        Some(self.js.copy_members(&mut self.arena, B::of(key), |_| {}))
     }
 }
 
