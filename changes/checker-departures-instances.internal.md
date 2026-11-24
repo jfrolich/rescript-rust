@@ -1,0 +1,1 @@
+- Record the local-equation instance search, its calibration and open-object comparison counterexamples.
