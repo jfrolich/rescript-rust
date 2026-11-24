@@ -1363,7 +1363,7 @@ mod statements {
         b.exp(call)
     }
 
-    /// Decision 5: the references to a variable in a statement the caller
+    /// Decision 6: the references to a variable in a statement the caller
     /// holds are replaced where they are, through every node the builder
     /// makes; the count is returned; the walk stops at the last one asked
     /// for and reads nothing when asked for none.
@@ -1515,7 +1515,7 @@ mod statements {
         assert_eq!(behind(10_000) - behind(1_000), 9_000);
     }
 
-    /// Decision 6: the alias of a declaration is read through its id, and
+    /// Decision 7: the alias of a declaration is read through its id, and
     /// follows a substitution of its initialiser.
     #[test]
     fn the_variable_a_declaration_aliases_is_read_through_its_id() {

@@ -127,7 +127,7 @@ impl<B: JsStmt> StatementStack<B> {
     /// Cost: that of `statement_refs`, O(slots of the run + held
     /// statements): one step per slot, a dead range crossed in one, and
     /// one per held statement. (THREE_TREES 11.4, "T6x-e and T6x-f: the
-    /// fold reads where its rows are", decision 4: `export.rs::build_rows`
+    /// fold reads where its rows are", decision 5: `export.rs::build_rows`
     /// keeps the place of each row of the top level.)
     pub(super) fn placed_refs(&self, span: Span) -> impl Iterator<Item = (u32, &B::S)> + '_ {
         let (mut at, end) = (span.start as usize, span.end());

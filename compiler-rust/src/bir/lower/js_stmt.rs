@@ -338,13 +338,19 @@ pub trait JsStmt: Js {
     /// id. The facts of the nodes above a replaced reference are those of
     /// the implementation's own replacement (on rows `Bir::replace`); the
     /// caller replaces a strictly pure reference by a strictly pure
-    /// expression.
+    /// expression. The caller substitutes only a variable that is never
+    /// assigned (the export fold moves no declaration of
+    /// `LetKind::Variable`): what an implementation does with a
+    /// reference that is the target of an assignment is not specified
+    /// (rows replace it as any other `Var`; the builder passes it), and
+    /// a caller that knows how many references the statement holds
+    /// checks the number returned against it.
     ///
     /// One step per node of the statement the walk reads, until the last
     /// reference replaced: O(nodes of the statement) for one call. A
     /// caller that substitutes k variables in one statement of n nodes
     /// pays k times n. Allocates nothing once the implementation's work
-    /// stack has the statement's width and depth. (Decision 5:
+    /// stack has the statement's width and depth. (Decision 6:
     /// `export.rs::substitute_after`, for each later row that holds a use
     /// of a moved variable.)
     fn substitute(
@@ -363,7 +369,7 @@ pub trait JsStmt: Js {
     /// implementation's, kept where the declaration is made, and the node
     /// is not handed out. O(1) on rows; on an implementation that owns its
     /// nodes a search among the declarations whose initialiser is a
-    /// reference, O(log of their number). Counts no step. (Decision 6:
+    /// reference, O(log of their number). Counts no step. (Decision 7:
     /// `export.rs::alias_of`, a variable no row declares.)
     fn alias_at(&self, a: &Pools, id: u32) -> Option<VarId>;
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code

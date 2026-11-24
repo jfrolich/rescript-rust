@@ -5291,11 +5291,11 @@ implementation keeps in a table indexed by it.
 9. *The eight calls in three test helpers.* T6x-f removes the
    transition functions from the two traits, so no generic code can
    name one, and keeps them as functions of `Rows` compiled for tests:
-   the tests of `out.rs` (38 calls), `js_stmt_tests.rs` (12) and
+   the tests of `out.rs` (34 calls), `js_stmt_tests.rs` (12) and
    `js_tests.rs` (4) build rows on the arena and wrap them, and they are
    tests of rows. The three helpers are generic and go:
    `call.rs::call_node` (one use, an argument with an effect in the
-   test of `apply_with_arity`) becomes `call_values` over
+   test `arity_groups_match_legacy`) becomes `call_values` over
    `out::of_row`; `cond.rs::empty_block` and `raw_if` (the hand of
    `if_statement_is_simplify_if_for_every_rule`) become two arms of that
    hand written on the arena, as its `throw` and `break` are. No test
@@ -5357,6 +5357,92 @@ implementation keeps in a table indexed by it.
     T6x-f no longer waits for T6r: `names.rs` and `globals.rs` call no
     transition function (the 30 calls are `export.rs` 18, `jsx.rs` 4
     and the helpers' 8).
+
+**Corrections after the review of this turn** (the review of pull
+request 388; items 1 to 3 are made in place, the others are owed by the
+design turn that builds T6x-e3, e4 and f once and writes their prompts):
+
+1. Made: the doc comments of `JsStmt::substitute`, `JsStmt::alias_at`
+   and `StatementStack::placed_refs`, and of two tests of the builder,
+   cited the decision before their own (5, 6 and 4 for 6, 7 and 5).
+   Decision 9 counted 38 transition calls in the tests of `out.rs`;
+   there are 34 (7 `from_node`, 5 `node`, 20 `stmt_from_node`, 2
+   `stmt_node`). The one use of `call.rs::call_node` is in the test
+   `arity_groups_match_legacy`.
+2. Made: the doc comment of `JsStmt::substitute` says what the caller
+   promises about an assigned variable. The two bodies differ on a
+   reference that is the target of an assignment: rows replace it (it
+   is a `Var` node, and a site on trunk), the builder passes it (an
+   assignment target is not an expression there). The fold never asks
+   (a declaration of `LetKind::Variable` is not moved, in either of the
+   two functions that move one), so no test can tell; T6x-e4 checks the
+   number `substitute` returns against the number of uses the fold
+   recorded for the row, so that a difference stops the build instead
+   of leaving a reference.
+3. Made: the prompt of T6x-e2 names its changelog fragment and its
+   search for `external_values` says what it prints.
+4. Owed, decision 5 (the release of a removed row when the list is
+   made). It is not final as written: it names one reader that sees the
+   statement trunk had released (`mentions`), and there are others.
+   - `define` reads `vars.binder(var)` of the variable it declares, and
+     that variable can be the removed row's own: `move_reused_to_tail`
+     removes the first declaration that carries the export's name and
+     holds its value, and the arm after it tests `reused == export`, so
+     the two can be one variable. On trunk `release_row` has released
+     the declaration before `define` runs (`Bir::release` unbinds: the
+     binder is none and the variable's fact is `Unknown`), so `define`
+     binds the variable itself. With the release deferred the binder is
+     still there and `define` would bind a copy: another variable in
+     the exported tree.
+   - The table `row_of` is filled at the first call of a unit and
+     leaves out the rows removed before it. "The row keeps its entry"
+     therefore holds only for a row removed after the fill. A site in a
+     removed row of the top level filled later climbs to no row and is
+     skipped, which is right by accident; a site in a removed row
+     inside a block climbs to the block's row and is counted there.
+   - What `Bir::release` does at that moment besides freeing nodes: it
+     unbinds the declared variable and resets its fact, clears the
+     owner of a function header, marks every site below as released,
+     and runs `drain_dead`. Each needs its reader named or the sentence
+     that none reads it between the removal and the list.
+   The design turn builds T6x-e3 once and chooses, with the readers
+   shown: (a) the removal unbinds and marks at once and only the
+   handle's release waits; (b) a removed row that stands in a slot is
+   taken at once (a slot left `Dead(1)` is accepted by every function
+   of the stack; only an emptied HELD entry is not) and only a held one
+   waits; or (c) as written, with every reader changed. A test in which
+   a reused binding of the export's own variable moves is owed with it;
+   if the lowering's tests have one already (they compare with the
+   legacy export code), the build names it.
+5. Owed, decision 6. A test of `substitute` on a shape where the order
+   of the walk and trunk's order of sites differ (uses at two depths,
+   and inside a function literal), compared with trunk's replacement as
+   the flat test is; the steps of a call that stops at `uses` with
+   references left; and the debug assertion of item 2.
+6. Owed, decision 3 and 5: a removed row that stands inside a block has
+   no test through the lowering and no reason it cannot happen. The
+   row of T6x-e3 owes one of the two.
+7. Owed, the builder (test-only until T6v; none blocks T6x-e2):
+   `size_of` tests for `Property`, `Pending` and the alias entry;
+   `reserve` reserves neither `members` nor `aliases`; `realias`
+   removes from the middle of a vector (a shift of the entries after
+   it) without a step test; an alias entry outlives the release of its
+   declaration (T6e); and the push `declare` makes for every alias
+   declaration is paid by every unit for a read no unit of the corpora
+   makes, which T6v measures with the column of decision 8.
+8. Owed, small: a debug assertion where a place is made that a slot
+   index is below `StatementStack::HELD` (today a comment); the body of
+   pull request 388 did not list three changes of built code that
+   change no behaviour (`Rows::jsx` moved into `jsx_over`, the
+   builder's `dot` onto `dot_row`, the constant `HELD`).
+9. Not done by the turn: the probe prompt of T6r (K5).
+10. Checked in the review beyond the turn's own runs: the source
+    program of "What was measured", alone and with an alias used inside
+    the match and exported, builds in check mode on trunk with no
+    difference from the legacy backend and the JavaScript of the
+    reference compiler. That shows the program is lowered alike, not
+    which rows the fold writes for it: the block rows are known from
+    the turn's instrumented build and from the three hand-built tests.
 
 **Changes to earlier sections**, each with its reason:
 
@@ -7996,7 +8082,8 @@ and three sentences of the doc comment of `Js::jsx_element`; in
 src/bir/j/rows.rs the body of `jsx_element`, the deletion of `jsx` and
 of `Rows::jsx_over`, and two cells of the module's table; in
 src/bir/lower/js_tests.rs the two places that call `r.jsx(`; the
-changelog fragment. Nothing else. You add no function to a trait.
+changelog fragment `changes/three-trees-t6x-e2.internal.md`. Nothing
+else. You add no function to a trait.
 
 The probe. This file was converted once as a throw-away (draft pull
 request 383, commit cca7635c3). You may read it. Copy nothing from it:
@@ -8161,9 +8248,9 @@ slice, what is in brackets:
   nothing [`rows.rs:1` and `js.rs:1`].
 - `rg -n 'jsx_element\(' src/bir/lower src/bir/j | wc -l` prints 7 [4].
 - `rg -n 'copy_members\(' src/bir/lower/jsx.rs` prints one line [none].
-- `rg -n 'external_values' src/bir/lower/*.rs | wc -l`: the lines of
-  `ffi_args.rs`, `external.rs` and `mod.rs` only. The field stays: the
-  splice of `ffi_args.rs` uses it.
+- `rg -n 'external_values' src/bir/lower/*.rs` prints lines of
+  `ffi_args.rs`, `external.rs` and `mod.rs` only [and of `jsx.rs`]. The field
+  stays: the splice of `ffi_args.rs` uses it.
 - `python3 ../scripts/count_lowering_ids.py | grep '^| total' | head
   -1` printed `| total | 16033 | 89 | 15 | 26 | 3 | 2 | 11 | 6 | 2 | 2
   | 0 | 0 | 0 | 146 |`, and the row of `jsx.rs` `| 273 | 2 | 0 | 0 | 0
