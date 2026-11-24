@@ -2473,6 +2473,58 @@ mod tests {
         }
     }
 
+    /// THREE_TREES 11.4, "T6x-e and T6x-f: the fold reads where its rows
+    /// are", decision 13: the reused binding that moves stands
+    /// inside a block of the top level (a `let` in the arm of an untagged
+    /// match). It is taken out of its block and released, and the block
+    /// is dissolved around the place it left.
+    #[test]
+    fn a_removed_row_inside_a_block_is_taken_out_of_the_block() {
+        let mut a = LamArena::new();
+        let (local, export) = (id("x", 10), id("x", 20));
+        let value = member(&mut a, "Other", "f");
+        let block = exports(&mut a, &[export], &[value]);
+        let effect = call(&mut a, "x", 10);
+        let bound = member(&mut a, "Other", "f");
+        let arm = a.let_(LetKind::Strict, local, bound, effect);
+        let body = guarded(&mut a, arm);
+        let root = a.seq_raw(body, block);
+        let (blocks, arms) = block_rows(&a, root);
+        assert_eq!(arms[0].0, Arm::MovedReused);
+        assert_eq!(blocks[3], 1, "the block is flattened");
+        assert!(blocks[0] >= 1 && blocks[1] >= 2, "{blocks:?}");
+        let (_, text) = rule(a, root);
+        assert_eq!(text.matches("let x = ").count(), 1, "{text}");
+        assert!(text.contains("Other.f();") && !text.contains("x();"), "{text}");
+    }
+
+    /// Decision 13: the reused binding that moves is a held statement of
+    /// the stack (the run of an argument of a static exit with two
+    /// arguments is held in the argument's slot). The statements after it
+    /// in the hold are written where they stood.
+    #[test]
+    fn a_removed_row_that_is_held_is_released_and_the_hold_is_written() {
+        let mut a = LamArena::new();
+        let (local, export) = (id("x", 10), id("x", 20));
+        let value = member(&mut a, "Other", "f");
+        let block = exports(&mut a, &[export], &[value]);
+        let bound = member(&mut a, "Other", "f");
+        let read = call(&mut a, "x", 10);
+        let first = a.let_(LetKind::Strict, local, bound, read);
+        let second = call(&mut a, "h", 8);
+        let raise = a.static_raise(1, &[first, second]);
+        let (p, q) = (id("p", 30), id("q", 31));
+        let used = a.var(p);
+        let handler = call_with(&mut a, "k", 9, used);
+        let caught = a.static_catch(raise, 1, &[p, q], handler);
+        let root = a.seq_raw(caught, block);
+        let (_, arms) = block_rows(&a, root);
+        assert_eq!(arms[0].0, Arm::MovedReused);
+        let (_, text) = rule(a, root);
+        assert_eq!(text.matches("let x = ").count(), 1, "{text}");
+        assert!(text.contains("Other.f();") && !text.contains("x();"), "{text}");
+    }
+
     #[test]
     fn a_literal_export_is_inserted_before_equal_later_bindings() {
         // `let b = 1` is the end of the block and `b` is a later export.
