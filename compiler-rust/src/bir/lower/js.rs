@@ -259,10 +259,6 @@ pub trait Js {
     /// step per operand. Panics when the operands are not as many as the
     /// keys.
     fn object(&mut self, a: &mut Pools, mark: Mark, info: JsId) -> Self::E;
-    /// A JSX element with the header `info`. One step per operand. Panics
-    /// when the operands are not the callee, the tag and what the header
-    /// counts (a spread, the properties, the children, a key).
-    fn jsx(&mut self, a: &mut Pools, mark: Mark, info: JsId, has_children: bool) -> Self::E;
     /// A JSX element with the header `info`, its callee given apart from
     /// its operands, as [`Js::call`] takes a callee: `callee`, then the
     /// operands since `mark` (the tag and what the header counts: a
@@ -270,15 +266,15 @@ pub trait Js {
     /// the callee after the operands (built earlier, its module would be
     /// registered before the key's runtime module), so it pushes each
     /// operand as it is converted and gives the callee here. One step, and
-    /// one per operand, the callee counted as one: what [`Js::jsx`] counts
-    /// for the same element. On rows the callee is put below the operands
-    /// on the stack, which moves each operand once (4 bytes), and the list
-    /// is written once; an implementation that owns its nodes moves
+    /// one per operand, the callee counted as one. On rows the callee is
+    /// put below the operands on the stack, which moves each operand once
+    /// (4 bytes), and the list is written once; an implementation that
+    /// owns its nodes moves
     /// `callee` into the element and the operands off its stack, and moves
     /// nothing twice. No allocation once the operand stack has its
-    /// capacity. Panics as [`Js::jsx`] does. (THREE_TREES 11.4, "T6x-e and
-    /// T6x-f: the fold reads where its rows are", decision 1: slice T6x-e2
-    /// calls it from `jsx.rs::compile_jsx` and deletes [`Js::jsx`].)
+    /// capacity. Panics when the operands are not the tag and what the
+    /// header counts. (THREE_TREES 11.4, "T6x-e and T6x-f: the fold reads
+    /// where its rows are", decision 1: `jsx.rs::compile_jsx`.)
     fn jsx_element(&mut self, a: &mut Pools, callee: Self::E, mark: Mark, info: JsId, has_children: bool) -> Self::E;
 
     // ---- Taking apart, copying, releasing ----

@@ -385,12 +385,11 @@ fn the_constructors_with_a_descriptor_keep_it() {
         same(
             |r, u| {
                 let info = u.b.js_info(JsPayload::Jsx(Default::default()));
+                let callee = r.var(&mut u.b, u.f);
                 let mark = r.mark();
-                for variable in [u.f, u.x] {
-                    let value = r.var(&mut u.b, variable);
-                    r.push(value);
-                }
-                let jsx = r.jsx(&mut u.b, mark, info, has_children);
+                let tag = r.var(&mut u.b, u.x);
+                r.push(tag);
+                let jsx = r.jsx_element(&mut u.b, callee, mark, info, has_children);
                 assert_eq!((r.kind(&u.b, Rows::of(&jsx)), r.aux(&u.b, Rows::of(&jsx))), (Kind::Jsx, u8::from(has_children)));
             },
             |u| {
@@ -1135,13 +1134,12 @@ fn a_jsx_element_without_the_operands_of_its_header_is_refused() {
         multi: false,
         fragment: false,
     }));
-    let mark = r.mark();
     // The callee and the tag, and no value for the two properties.
-    for var in [u.f, u.x] {
-        let operand = r.var(&mut u.b, var);
-        r.push(operand);
-    }
-    done(r.jsx(&mut u.b, mark, info, false));
+    let callee = r.var(&mut u.b, u.f);
+    let mark = r.mark();
+    let tag = r.var(&mut u.b, u.x);
+    r.push(tag);
+    done(r.jsx_element(&mut u.b, callee, mark, info, false));
 }
 
 
