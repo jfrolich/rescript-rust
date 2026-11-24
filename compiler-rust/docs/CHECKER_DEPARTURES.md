@@ -21428,7 +21428,7 @@ from separate Rust and OCaml invocations.
 
 ### Scope and calibration
 
-This section is in progress: I1–I3 have been investigated; I4–I9 have not yet
+This section is in progress: I1–I4 have been investigated; I5–I9 have not yet
 been run. No verdict is claimed for unrun places. The reference and baseline
 Rust compiler are from `45c4f78a54`. Temporary prints are confined to a
 scratch Rust build; the comparisons below use the unmodified baseline.
@@ -24203,5 +24203,363 @@ exports.f = f;
 stderr:
 
 ```text
+```
+
+### I4 — variable unification tracing
+
+Verdict: **CONDITION NOT REACHED**. All eight candidates parsed, added a
+member, entered `unify_var` with members present, and agreed. Zero
+establish the missing-wrapper condition: fresh-left-variable calls on the
+locally abstract type have equal levels, while the `id`/`M.u` abbreviation
+calls observed with tracing off have the abbreviation on the left, not a
+fresh variable. Application lowering calls are already traced.
+
+A program must send a fresh left variable and an abbreviation of the local
+type through `unify_var` so its level update expands the abbreviation while
+the missing wrapper matters. A later lowering must then depend on that
+expansion's membership, rather than on membership created by another call.
+
+OCaml enables tracing around occurrence and level checks at
+`compiler/ml/ctype.ml:2759–2766`; Rust's `unify_var` calls the checks without
+that wrapper. `lower_args` at `compiler/ml/typecore.ml:2503–2512` invokes it
+for fresh variables, but application lowering is already wrapped in Rust.
+Temporary prints record both descriptors, levels and the tracing flag:
+
+```text
+EQPROBE I4 left=Tvar(None) level=2010 right=Tconstr { path: Pident(a/1005), args: TypeRefList(0x0, 0), abbrev: AbbrevMemoRef(37) } level=2010 tracing=false
+EQPROBE I4 left=Tconstr { path: Pident(id/1001), args: TypeRefList(0xe, 1), abbrev: AbbrevMemoRef(40) } level=2008 right=Tvar(None) level=2009 tracing=false
+```
+
+These are i4-01. Neither proves an expansion by the level update: the first
+has no lowering; the second takes full unification instead of the variable
+fast path. That unmet fast-path/expanding-update conjunction is at Rust
+`unify_var`'s `(true, _)` branch and OCaml's cited wrapper. Accepted cases
+05–07 and rejected cases 01–04, 08 are all retained below.
+
+#### i4-01
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>) => z
+  g(v)
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:3-6
+
+  5 │   let v = if true { y } else { 0 }
+  6 │   let g = (z: id<a>) => z
+  7 │   g(v)
+  8 │ }
+  9 │ }
+
+  This has type: id<a> (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (g(v) :> int)
+
+  
+
+```
+
+#### i4-02
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>) => z
+  if true { g(v) } else { 0 }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:13-16
+
+  5 │   let v = if true { y } else { 0 }
+  6 │   let g = (z: id<a>) => z
+  7 │   if true { g(v) } else { 0 }
+  8 │ }
+  9 │ }
+
+  This has type: id<a> (defined as int)
+  But this if statement is expected to return: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i4-03
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>) => z
+  [g(v)]
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:4-7
+
+  5 │   let v = if true { y } else { 0 }
+  6 │   let g = (z: id<a>) => z
+  7 │   [g(v)]
+  8 │ }
+  9 │ }
+
+  This array item has type: id<a> (defined as int)
+  But this array is expected to have items of type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  Arrays can only contain items of the same type.
+
+  Possible solutions:
+  - Convert all values in the array to the same type.
+  - Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, "hello", 15.5, true)
+
+```
+
+#### i4-04
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  module M = { type u = a }
+  let g = (z: M.u) => z
+  g(v)
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:8:3-6
+
+   6 │   module M = { type u = a }
+   7 │   let g = (z: M.u) => z
+   8 │   g(v)
+   9 │ }
+  10 │ }
+
+  This has type: M.u (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (g(v) :> int)
+
+  
+
+```
+
+#### i4-05
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  module M = { type u = a }
+  let p: M.u = v
+  [p]
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return [y];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i4-06
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>, n: int) => (z, n)
+  g(v, ...)
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return extra => [
+    y,
+    extra
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i4-07
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>) => z
+  let h = g
+  h(v) == 0
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y === 0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i4-08
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  module M = { type u<'x> = 'x }
+  let g = (z: M.u<a>) => z
+  g(v)
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:8:3-6
+
+   6 │   module M = { type u<'x> = 'x }
+   7 │   let g = (z: M.u<a>) => z
+   8 │   g(v)
+   9 │ }
+  10 │ }
+
+  This has type: M.u<a> (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (g(v) :> int)
+
+  
+
 ```
 
