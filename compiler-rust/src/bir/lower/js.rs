@@ -317,6 +317,26 @@ pub trait Js {
     /// of its cold data ([`Js::copy_cold`] gives that). O(1). Panics when
     /// `r` has an operand.
     fn copy_leaf(&mut self, a: &mut Pools, r: Self::Ref<'_>) -> Self::E;
+    // PROBE-ADD 2: a copy of a chain of member reads, its leaf first, each node with its cold data.
+    /// A copy of the member reads from `r` down to the first node that is
+    /// not one (a `Dot` of any position, a tag read too) and of that node,
+    /// which is a leaf: [`Js::copy_leaf`] of the leaf, then one [`Js::dot`]
+    /// per read from the innermost out, each with the name, position and
+    /// tag bit of its original, and each node given the cold data of its
+    /// original ([`Js::copy_cold`]) as it is made. `made` is given the id
+    /// of each node made, in that order (a key: `export.rs` forgets what it
+    /// remembered for a reused slot). No flag is set beyond what the
+    /// constructors set. The walk is the implementation's because a
+    /// reference taken with [`Js::operand`] borrows the pools and cannot be
+    /// held across the constructors. An implementation that owns its nodes
+    /// reads the chain under `r` (the caller's node, which stays whole) and
+    /// gives a new owned chain. One step per node made (the leaf and each
+    /// read), what `copy_leaf` and `dot` count; the chain is read once more
+    /// to find its leaf, which counts nothing; allocates nothing once the
+    /// implementation's work stack has the chain's depth. Panics when the
+    /// leaf has an operand. (`jsx.rs::duplicate_jsx_key`,
+    /// `export.rs::copy_replacement`.)
+    fn copy_members(&mut self, a: &mut Pools, r: Self::Ref<'_>, made: impl FnMut(u32)) -> Self::E;
     /// `e` is not used: its references and sites are given back. One step
     /// per node released.
     fn release(&mut self, a: &mut Pools, e: Self::E);

@@ -50,6 +50,7 @@
 //! | `take_operands` | each child `Bir::detach`ed and pushed on `Rows::operands`, last first; the node stays |
 //! | `refill` | `plain::node` of the view of `e`'s operation (`JOptional`, `JArray`, `JBlockLit`, `JObject`, `JDot`) over the operands since the mark with `e`'s `aux`, information, property and position; `plain::copy_cold` from `e`; `Bir::release` of `e` |
 //! | `copy_cold` | `plain::copy_cold`, then the character of `from` (`Node::js_char`) set on `to` when `from` has one |
+//! | `copy_members` (PROBE-ADD 2) | the `JDot`s from `r` down pushed on `Rows::work`, then `copy_leaf` and `copy_cold` of the first node that is not one, then for each read from the innermost out `dot` with its `property`, `position` and `aux != 0`, and `copy_cold`; `made` after each node; one step per node made |
 //! | `jsx_apart` (PROBE-ADD 1) | `callee` pushed and rotated to the mark (`slice::rotate_right(1)` of the operands since it), then the body of `jsx`: one step and one per operand, the callee one of them |
 //!
 //! Steps (`Js::steps`): one for every function that builds a node or takes
@@ -94,10 +95,11 @@ pub struct Rows {
     /// is cleared after each copy and exists so that a copy with labels
     /// allocates nothing in a warm unit.
     labels: Vec<(u32, u32)>,
-    /// The statements and expressions `effect_free` has still to read. A
-    /// work stack of that one walk, empty between calls and kept so that
-    /// the walk allocates only when a statement is wider and deeper than
-    /// any before it in the unit.
+    /// The statements and expressions `effect_free` has still to read, and
+    /// the member reads `copy_members` has still to copy. A work stack of
+    /// those two walks, empty between calls and kept so that a walk
+    /// allocates only when a tree is wider or deeper than any before it in
+    /// the unit.
     pub(super) work: Vec<NodeId>,
 }
 
@@ -671,6 +673,27 @@ impl Js for Rows {
             other => panic!("copy_leaf of a node with operands: {other:?}"),
         };
         self.leaf(a, view, aux)
+    }
+    fn copy_members(&mut self, a: &mut Pools, r: NodeId, mut made: impl FnMut(u32)) -> E {
+        let mut spine = std::mem::take(&mut self.work);
+        debug_assert!(spine.is_empty());
+        let mut at = r;
+        while let View::JDot { object, .. } = a.view(at) {
+            spine.push(at);
+            at = object;
+        }
+        let mut copy = self.copy_leaf(a, at);
+        self.copy_cold(a, at, &mut copy);
+        made(copy.0.0);
+        while let Some(read) = spine.pop() {
+            let View::JDot { property, position, .. } = a.view(read) else { unreachable!("a member read") };
+            let tag = a.node(read).aux() as u8 != 0;
+            copy = self.dot(a, copy, property, position, tag);
+            self.copy_cold(a, read, &mut copy);
+            made(copy.0.0);
+        }
+        self.work = spine;
+        copy
     }
     fn release(&mut self, a: &mut Pools, e: E) {
         self.steps += u64::from(a.release(e.0));

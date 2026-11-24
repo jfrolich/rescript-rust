@@ -952,11 +952,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
     }
 
-    /// A fresh copy of a replacement. A literal, a module member and a
-    /// variable are one node (`var`, or `copy_leaf`); a chain of static
-    /// field reads is one node per read (`copy_leaf` of its leaf, then one
-    /// `dot` per read, each with the cold data of the original). One step
-    /// per node; no allocation once `Tables::path` has its capacity.
+    /// A fresh copy of a replacement. A variable and a module member are one
+    /// node (`var`, or `copy_leaf`); a literal or a chain of static field
+    /// reads over one is `Js::copy_members`: one node per read and the
+    /// leaf, each with the cold data of the original. One step per node;
+    /// no allocation once the implementation's work stack has the chain's
+    /// depth.
     fn copy_replacement(&mut self, replacement: Replacement) -> B::E {
         match replacement {
             Replacement::Var(var) => {
@@ -972,31 +973,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 copy
             }
             Replacement::Node(node) => {
-                // The spine of static reads, innermost last.
-                let mut spine = std::mem::take(&mut self.coercion.path);
-                spine.clear();
-                // By id 2, and the leaf and each read again by id below:
-                // `copy_leaf`, `dot` and `copy_cold` take the pools mutably
-                // while a reference borrows them (a copy of a member chain).
-                let mut at = B::at(node);
-                while self.js.kind(&self.arena, at) == row::Kind::Dot {
-                    spine.push(NodeId(self.js.id(&self.arena, at)));
-                    at = self.js.operand(&self.arena, at, 0);
-                }
-                let leaf = B::at(NodeId(self.js.id(&self.arena, at)));
-                let mut copy = self.js.copy_leaf(&mut self.arena, leaf);
-                self.js.copy_cold(&mut self.arena, leaf, &mut copy);
-                self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
-                while let Some(read) = spine.pop() {
-                    let read = B::at(read);
-                    let (name, position) = self.js.member_of(&self.arena, read).expect("a static read");
-                    let tag = self.js.aux(&self.arena, read) != 0;
-                    copy = self.js.dot(&mut self.arena, copy, name, position, tag);
-                    self.js.copy_cold(&mut self.arena, read, &mut copy);
-                    self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
-                }
-                self.coercion.path = spine;
-                copy
+                // By id 2.
+                let row_of = &mut self.coercion.row_of;
+                self.js.copy_members(&mut self.arena, B::at(node), |id| Self::forget(row_of, id))
             }
         }
     }
@@ -1097,10 +1076,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// A node the fold built may take the slot of a released one: forget
     /// what `row_of` remembered for the slot. One write.
     fn built(&mut self, node: NodeId) -> NodeId {
-        if let Some(entry) = self.coercion.row_of.get_mut(node.index()) {
+        Self::forget(&mut self.coercion.row_of, node.0);
+        node
+    }
+
+    /// What `built` writes, on the table alone, for a copy that reports the
+    /// ids of the nodes it makes. One write.
+    fn forget(row_of: &mut [u32], id: u32) {
+        if let Some(entry) = row_of.get_mut(id as usize) {
             *entry = 0;
         }
-        node
     }
 
     /// coercion.ml:140-156 `Ident.rename`: a fresh variable with the name of
