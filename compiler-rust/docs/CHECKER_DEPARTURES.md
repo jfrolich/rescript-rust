@@ -21730,9 +21730,9 @@ from separate Rust and OCaml invocations.
 
 ### Scope and calibration
 
-This section is in progress: I1–I8 have been investigated; I9–I9 have not yet
-been run. No verdict is claimed for unrun places. The reference and baseline
-Rust compiler are from `45c4f78a54`. Temporary prints are confined to a
+All places, I1–I9, have been investigated. For I1–I8 the reference and
+baseline Rust compiler are from `45c4f78a54`; I9 used trunk `bb47dc1317`
+(its part gives its builds). Temporary prints are confined to a
 scratch Rust build; the comparisons below use the unmodified baseline.
 
 Builds, serially:
@@ -26333,3 +26333,2663 @@ stderr:
 ```text
 ```
 
+### I9 — the expansion of a failed trace
+
+Verdict: **CONDITION NOT REACHED**. Forty-seven candidates over the nine
+catching sites of `typecore.ml`. The print in `record_trace_expansions`
+fired for the caught failure itself in 15 of them (tagged template 3,
+coercion 6, `let module` 3, top-level unit 3). In 12 of these 15 the trace
+held an abbreviation without arguments that was expanded (`a` under an
+equation, or `myint`). In none was that expansion a member of an instance
+set, or reused or lowered after the failure. The two Rust binaries agree
+on every candidate apart from the text of reported unification errors.
+There the build with the empty body loses the printer's
+`(defined as int)` and its ambiguity line, because the printer reads the
+recorded expansions (calibration-if below).
+
+The question: after a caught unification failure, `expand_trace`
+(`compiler/ml/ctype.ml:1697-1701`, called at 2737 and 2767) expands every
+type of the trace with tracing off. The expansion of an abbreviation without
+arguments goes into the shared memo `simple_abbrevs`
+(`ctype.ml:194-204`), so a later node of the same abbreviation in the same
+environment would link to the same expansion node. That would be visible if
+that node were a member of an instance set (`update_level` refuses to lower
+it, `ctype.ml:587-589`) or were lowered by a later memo hit
+(`ctype.ml:1193-1202`). Rust does the same in `record_trace_expansions`
+(`compiler-rust/src/types/ctype.rs`, callers: `unify` at depth 0,
+`unify_var`, `force_subtype`, `subtype_error`). That function also feeds
+the error printer: `printtyp::expand_trace` reads the recorded expansion of
+each trace type.
+
+Three things keep the memo unseen, and the prints confirm each of them:
+
+1. When the failing unification starts in an environment with local
+   constraints, `check_trace_gadt_instances` turns tracing on and calls
+   `cleanup_abbrev` (`ctype.ml:178-184`). With tracing on, `proper_abbrevs`
+   uses each node's own memo, not `simple_abbrevs` (`ctype.ml:200-202`). So
+   `expand_trace` finds `simple_abbrevs` empty and makes a fresh expansion.
+   With tracing off it adds no member (`ctype.ml:1215-1227`), and
+   `try_expand_head` adds a chain only when the expansion is already a
+   member (`ctype.ml:1271-1276`). In all 51 calls the print showed
+   `tracing=false`, and every expanded abbreviation without arguments had
+   `exp_member=None`, including those whose own node was a member
+   (`member=Some(1007)` in co-14).
+2. At the one site that continues inside a function, the coercion trial
+   (`typecore.ml:3594-3604`), the failure is followed by `backtrack snap`.
+   That calls `cleanup_abbrev` (`compiler/ml/btype.ml:773-783`) and undoes
+   the logged level and instance-set changes. Rust's `restore_type_state`
+   also forgets memorized expansions. In co-13–18 the next memo hit on `a`
+   returns a new node (co-14: trace expansion `#99`, later hits `#101`).
+3. At the top-level unit check (`typecore.ml:5188-5203`), the warning is
+   followed by `end_def` and `generalize`, which sets `simple_abbrevs := Mnil`
+   (`ctype.ml:518-520`). A top-level environment has no instance set:
+   instance sets come only from the `init_env` of a function or match with
+   GADT patterns (`typecore.ml:4034-4040, 4819-4825`). In tl-02 and tl-03
+   the second expression's `myint` gets a new expansion (`#35`, `#53`), not
+   the first trace's (`#25`).
+
+The other catching sites raise an error at once (2784, 3751), cannot fail
+(2511, 4002), or catch a failure that does not pass through `expand_trace`
+(2500, 3692, 3706). The per-site parts below give the path condition.
+
+#### Builds and the print
+
+Reference: OCaml `bsc` from `dune build --root .` and the Rust release build,
+both of trunk `bb47dc1317` (this branch's compiler sources; the earlier
+parts used `45c4f78a54`). Two scratch Rust builds, never committed, built one
+after the other with
+`CARGO_PROFILE_RELEASE_LTO=thin cargo build --release --manifest-path rewatch/Cargo.toml`
+and saved outside the tree:
+
+- the **normal** build: trunk plus temporary prints. It prints each call of
+  `record_trace_expansions` (`I9PROBE CALL`), and for each trace type its
+  descriptor, level and membership, whether it expanded, whether it is an
+  abbreviation without arguments that expanded (`abbrev0`), and the
+  expansion's node, level and membership (`I9PROBE TY`). It also prints
+  every hit of the `simple_abbrevs` memo (`I9PROBE MEMOHIT`, with the
+  requesting level and the cached node's level before lowering), every
+  instance-set insertion (`I9PROBE ADD`), whether the coercion trial runs
+  and fails (`I9PROBE SITE coerce`), and the caught top-level unit failure
+  (`I9PROBE SITE toplevel-unit`). With the probe lines removed, its output
+  equals the unmodified trunk build on every candidate.
+- the **empty** build: trunk with the body of `record_trace_expansions`
+  removed (signature kept), plus the `MEMOHIT` and `ADD` prints:
+
+```diff
+@@ pub(crate) fn record_trace_expansions(
+     env: &Env,
+     trace: &[(TypeExprRef, TypeExprRef)],
+ ) {
+-    for &(t1, t2) in trace {
+-        for ty in [t1, t2] {
+-            let ty = ctx.repr(ty);
+-            let expansion = full_expand(ctx, env, ty);
+-            ctx.record_trace_expansion(ty, expansion);
+-        }
+-    }
+ }
+```
+
+Commands, per candidate, from its directory (layout as in "Scope and
+calibration"), with `RESCRIPT_RUNTIME` set as there; `B` is the OCaml `bsc`
+or a wrapper executing `<build>/rescript bsc "$@"`:
+
+```sh
+timeout 10 "$B" -w +A -bs-jsx 4 -color never Main.res >B.stdout 2>B.stderr
+```
+
+Diagnostics are compared after stripping SGR escapes and removing the
+`I9PROBE` lines, and JavaScript after removing blank lines. A unit whose
+typing fails is typed twice by Rust: a fast pass, then a pass that explains
+the failure with the same node numbers. The prints below are those of the
+first pass. "Fired at the site" counts only calls made for the caught
+failure: for the coercion, those between `SITE coerce gen=false` and
+`SITE coerce-trial failed=true`.
+
+#### Per catching site
+
+| OCaml site | construct | candidates | print fired at the site | abbreviation without arguments expanded | expansion a member, reused or lowered afterwards | the two Rust builds |
+|---|---|---|---|---|---|---|
+| `typecore.ml:2500` `is_ignore` | one-argument call of a `%ignore` external | 3 | 0 | 0 | 0 | agree |
+| `typecore.ml:2511` `lower_args` | any application | 3 | 0 | 0 | 0 | agree except la-03 (reported error text) |
+| `typecore.ml:2784` tagged template | ``tag`...` `` | 3 | 3 | 3 | 0 | agree |
+| `typecore.ml:3602` coercion trial | `(e :> t)`, `e` not generalizable | 20 | 6 | 6 | 0 | agree except co-04, co-09, dbg-01 (reported error text) |
+| `typecore.ml:3692` object get | `o["f"]` | 4 | 0 | 0 | 0 | agree |
+| `typecore.ml:3706` object set | `o["f"] = v` | 5 | 0 | 0 | 0 | agree |
+| `typecore.ml:3751` `let module` | `module M = {...}` in an expression | 3 | 3 | 0 | 0 | agree |
+| `typecore.ml:4002` optional parameter | `(~k=?) => ...` | 3 | 0 | 0 | 0 | agree except op-01, op-02 (reported error text) |
+| `typecore.ml:5190` top-level unit | an expression as a structure item | 3 | 3 | 3 | 0 | agree |
+
+Sites where the print cannot fire for the caught failure:
+
+- `typecore.ml:2500`: `filter_arrow_n` (`ctype.ml:2789-2805`) raises
+  `Unify []` itself on a wrong arity or label (2804), or from
+  `expand_head_trace`. The one `unify` on that path is `subst`'s `unify'`
+  (`ctype.ml:1129-1130`). It links a fresh stub to a fresh copy and fresh
+  parameters to the type's own arguments, whose levels do not exceed the
+  type's, so it does not fail.
+- `typecore.ml:2511`: `unify_var env (newvar ()) typ` fails only if
+  `update_level` refuses a member (`ctype.ml:587-589`), which needs a target
+  level below the instance set's level. A set's level is the level at
+  `init_env`, and the levels inside jump by 1000 (`typecore.ml:4034-4040`).
+  `lower_args` lowers to the current level, which is above every set of its
+  environment. A fresh variable cannot fail the occurrence check.
+- `typecore.ml:3692` and `3706`: `filter_method` and
+  `filter_object_field_for_write` (`ctype.ml:2841-2900`) raise `Unify []`
+  themselves (2899) or return `Error Owrite_missing` without raising
+  (2873, 2884). The remaining raises come from `expand_head_trace` (the
+  ambiguity at `ctype.ml:1225`) and from `update_level` on a fresh object.
+  None of them passes through `expand_trace`.
+- `typecore.ml:4002`: `typetexp.ml:328-329` wraps every optional parameter
+  type in `option`, and an inferred one is a fresh variable. The fresh `tv`
+  is created after `begin_def` when the environment has local constraints,
+  so linking it lowers nothing.
+- `typecore.ml:3751`: here the print fires, but the trace never holds an
+  abbreviation that can expand. Before raising, `update_level` replaces an
+  escaping abbreviation by its expansion (`ctype.ml:590-597`), so the trace
+  holds the escaping constructor `M.u` (lm-01–03). A refused member would
+  need the letmodule variable to sit below an instance set's level, and it
+  is created at the current level.
+- `typecore.ml:2784`: the print fires and the trace holds `a` or `myint`,
+  but the site raises `Tagged_template_non_tag` at once. That message prints
+  only the tag's type, so nothing follows that could see the memo.
+
+#### The two Rust builds differ on reported errors
+
+The empty build removes the recorded expansion that the printer uses. Any
+reported unification error whose trace holds an expandable type then prints
+differently. calibration-if (program and OCaml output in "Scope and
+calibration"): the OCaml compiler and the normal build print the
+calibration's expected output; the empty build prints:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:33
+
+  2 │ let f = (type a, x: t<a>, y: a) =>
+  3 │   switch x {
+  4 │   | Int => if true { y } else { 0 }
+  5 │   }
+  6 │ 
+
+  This has type: int
+  But this if statement is expected to return: a
+  This instance of a is ambiguous: it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+Exit status: OCaml 2, normal 2, empty 2. The same kind of change appears in co-04, co-09, dbg-01, la-03, op-01, op-02 below. None of these errors is a caught failure: each is the program's reported error.
+
+#### Site typecore.ml:2500 — `is_ignore`
+
+Candidates 3; print fired at the site 0; abbreviation without arguments expanded 0. A one-argument call of a `%ignore` external whose type is not a one-parameter unlabelled arrow makes `filter_arrow_n` raise, and `is_ignore` answers `false`; the ordinary application then reports the arity or label error.
+
+#### ig-01
+
+Two-parameter `%ignore` external applied to `y: a` in the case.
+
+```rescript
+type rec t<_> = Int: t<int>
+external ig2: (int, int) => unit = "%ignore"
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => ig2(y)
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:12-14
+
+  3 │ let f = (type a, x: t<a>, y: a) =>
+  4 │   switch x {
+  5 │   | Int => ig2(y)
+  6 │   }
+  7 │ 
+
+  This function call is incorrect.
+  The function has type:
+  (a, int) => unit
+  
+  - The function takes 2 unlabelled arguments, but is called with just 1
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE ADD ty=TypeExprRef(82) level=2007
+I9PROBE ADD ty=TypeExprRef(84) level=2007
+I9PROBE ADD ty=TypeExprRef(82) level=2007
+I9PROBE ADD ty=TypeExprRef(84) level=2007
+```
+
+#### ig-02
+
+The external's type is the abbreviation without arguments `ff`. It is expanded through `simple_abbrevs` with tracing off (the `MEMOHIT` lines), and the arity check raises. The `ADD` lines are the case's `a`.
+
+```rescript
+type ff = (int, int) => unit
+external ig3: ff = "%ignore"
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => ig3(y)
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:12-14
+
+  4 │ let f = (type a, x: t<a>, y: a) =>
+  5 │   switch x {
+  6 │   | Int => ig3(y)
+  7 │   }
+  8 │ 
+
+  This function call is incorrect.
+  The function has type:
+  ff
+  
+  - The function takes no unlabelled arguments, but is called with 1
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(102) path=ff level=2009 cached=TypeExprRef(109) cached_level=2009 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(102) path=ff level=2009 cached=TypeExprRef(109) cached_level=2009 cached_member=None tracing=false
+I9PROBE ADD ty=TypeExprRef(113) level=2009
+I9PROBE ADD ty=TypeExprRef(115) level=2009
+I9PROBE MEMOHIT ty=TypeExprRef(102) path=ff level=2009 cached=TypeExprRef(109) cached_level=2009 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(102) path=ff level=2009 cached=TypeExprRef(109) cached_level=2009 cached_member=None tracing=false
+I9PROBE ADD ty=TypeExprRef(113) level=2009
+I9PROBE ADD ty=TypeExprRef(115) level=2009
+```
+
+#### ig-03
+
+A labelled parameter: `filter_arrow_n` fails on the label.
+
+```rescript
+type rec t<_> = Int: t<int>
+external ig4: (~x: int) => unit = "%ignore"
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => ig4(y)
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:16
+
+  3 │ let f = (type a, x: t<a>, y: a) =>
+  4 │   switch x {
+  5 │   | Int => ig4(y)
+  6 │   }
+  7 │ 
+
+  The argument at this position should be labelled.
+  This function has type: (~x: int) => unit
+
+```
+
+Print (normal build): no line.
+
+#### Site typecore.ml:2511 — `lower_args`
+
+Candidates 3; print fired at the site 0; abbreviation without arguments expanded 0. Each applies a function whose parameter type is `a`, a member or its copy, so `lower_args` lowers it inside the case. la-01 and la-02 are accepted and the print does not fire. In la-03 the print fires for the program's reported error (the `if` result escaping its equation), not for `lower_args`. That reported error is where the two Rust builds differ.
+
+#### la-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let g = (z: a) => z
+      g(y) + 1
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y + 1 | 0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE ADD ty=TypeExprRef(85) level=2008
+I9PROBE ADD ty=TypeExprRef(88) level=2008
+```
+
+#### la-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, g: a => a) =>
+  switch x {
+  | Int => g(y) + 1
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, g) {
+  return g(y) + 1 | 0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE ADD ty=TypeExprRef(88) level=2009
+I9PROBE ADD ty=TypeExprRef(91) level=2009
+```
+
+#### la-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let g = (z: a) => if true { z } else { 0 }
+      g(y)
+    }
+  }
+```
+
+OCaml and Rust: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:7-10
+
+  4 ┆ | Int => {
+  5 ┆     let g = (z: a) => if true { z } else { 0 }
+  6 ┆     g(y)
+  7 ┆   }
+  8 ┆ }
+
+  This has type: a (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (g(y) :> int)
+
+  
+
+```
+
+Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:7-10
+
+  4 ┆ | Int => {
+  5 ┆     let g = (z: a) => if true { z } else { 0 }
+  6 ┆     g(y)
+  7 ┆   }
+  8 ┆ }
+
+  This has type: a
+  But it's expected to have type: 'a
+  This instance of a is ambiguous: it would escape the scope of its equation
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE ADD ty=TypeExprRef(81) level=2007
+I9PROBE ADD ty=TypeExprRef(85) level=2007
+I9PROBE ADD ty=TypeExprRef(91) level=2007
+I9PROBE ADD ty=TypeExprRef(91) level=2007
+I9PROBE ADD ty=TypeExprRef(94) level=2007
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(91) desc=Tconstr(a) level=2006 member=Some(1006) expanded=true abbrev0=true exp=TypeExprRef(99) exp_desc=Tconstr(int) exp_level=2006 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE MEMOHIT ty=TypeExprRef(91) path=a level=2006 cached=TypeExprRef(99) cached_level=2006 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(91) desc=Tconstr(a) level=2006 member=Some(1006) expanded=true abbrev0=true exp=TypeExprRef(99) exp_desc=Tconstr(int) exp_level=2006 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(97) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(97) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE ADD ty=TypeExprRef(81) level=2007
+I9PROBE ADD ty=TypeExprRef(85) level=2007
+I9PROBE ADD ty=TypeExprRef(91) level=2007
+I9PROBE ADD ty=TypeExprRef(91) level=2007
+I9PROBE ADD ty=TypeExprRef(94) level=2007
+```
+
+#### Site typecore.ml:2784 — tagged template
+
+Candidates 3; print fired at the site 3; abbreviation without arguments expanded 3; expansion a member, reused or lowered afterwards 0. The trace's `a` is itself a member (tt-01, tt-03), but its expansion is a fresh node, and the error is raised at once.
+
+#### tt-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => y`hello`
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:12
+
+  2 │ let f = (type a, x: t<a>, y: a) =>
+  3 │   switch x {
+  4 │   | Int => y`hello`
+  5 │   }
+  6 │ 
+
+  This value is used with tagged template (backtick) syntax, but it has type
+  a
+  which is not a taggedTemplate.
+  
+  Tagged template syntax now requires a value of type taggedTemplate<'param, 'output>:
+  
+    - To bind a JavaScript tag function, annotate the external with taggedTemplate<...> instead of using the removed @taggedTemplate decorator.
+    - To use a ReScript function as a tag, lift it with TaggedTemplate.make.
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE ADD ty=TypeExprRef(65) level=2007
+I9PROBE ADD ty=TypeExprRef(70) level=2007
+I9PROBE CALL 0 pairs=1 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(65) desc=Tconstr(a) level=2007 member=Some(1006) expanded=true abbrev0=true exp=TypeExprRef(72) exp_desc=Tconstr(int) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(68) desc=Tconstr(taggedTemplate) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(68) exp_desc=Tconstr(taggedTemplate) exp_level=2007 exp_member=None
+I9PROBE ADD ty=TypeExprRef(65) level=2007
+I9PROBE ADD ty=TypeExprRef(70) level=2007
+```
+
+#### tt-02
+
+Without an equation: `myint` is expanded through `simple_abbrevs` already during the failing unification (the `MEMOHIT` before the `TY` line).
+
+```rescript
+type myint = int
+let tg: myint = 1
+let s = tg`hello`
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:9-10
+
+  1 │ type myint = int
+  2 │ let tg: myint = 1
+  3 │ let s = tg`hello`
+  4 │ 
+
+  This value is used with tagged template (backtick) syntax, but it has type
+  myint
+  which is not a taggedTemplate.
+  
+  Tagged template syntax now requires a value of type taggedTemplate<'param, 'output>:
+  
+    - To bind a JavaScript tag function, annotate the external with taggedTemplate<...> instead of using the removed @taggedTemplate decorator.
+    - To use a ReScript function as a tag, lift it with TaggedTemplate.make.
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE CALL 0 pairs=1 tracing=false local=false
+I9PROBE MEMOHIT ty=TypeExprRef(22) path=myint level=1004 cached=TypeExprRef(27) cached_level=1004 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(22) desc=Tconstr(myint) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(27) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(25) desc=Tconstr(taggedTemplate) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(25) exp_desc=Tconstr(taggedTemplate) exp_level=1004 exp_member=None
+```
+
+#### tt-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let tg: a = y
+      tg`hello`
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:7-8
+
+  4 ┆ | Int => {
+  5 ┆     let tg: a = y
+  6 ┆     tg`hello`
+  7 ┆   }
+  8 ┆ }
+
+  This value is used with tagged template (backtick) syntax, but it has type
+  a
+  which is not a taggedTemplate.
+  
+  Tagged template syntax now requires a value of type taggedTemplate<'param, 'output>:
+  
+    - To bind a JavaScript tag function, annotate the external with taggedTemplate<...> instead of using the removed @taggedTemplate decorator.
+    - To use a ReScript function as a tag, lift it with TaggedTemplate.make.
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE ADD ty=TypeExprRef(72) level=2007
+I9PROBE ADD ty=TypeExprRef(77) level=2007
+I9PROBE CALL 0 pairs=1 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(72) desc=Tconstr(a) level=2007 member=Some(1006) expanded=true abbrev0=true exp=TypeExprRef(79) exp_desc=Tconstr(int) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(75) desc=Tconstr(taggedTemplate) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(75) exp_desc=Tconstr(taggedTemplate) exp_level=2007 exp_member=None
+I9PROBE ADD ty=TypeExprRef(72) level=2007
+I9PROBE ADD ty=TypeExprRef(77) level=2007
+```
+
+#### Site typecore.ml:3602 — the coercion trial
+
+Candidates 20; print fired at the site 6 (co-13–18); abbreviation without arguments expanded 6; expansion a member, reused or lowered afterwards 0. The trial runs only when the source is not generalizable. In a function with GADT patterns the parameters' types are generalized structurally, so a use of `y: a` or of `r: ref<a>` is a fresh copy, and co-01–12 and dbg-01–02 skip the trial (`SITE coerce gen=true`). A source that holds a parameter without annotation keeps a non-generic variable and runs the trial (co-13–18). After the failure, `backtrack` forgets the memo. Each later `MEMOHIT` on `a` returns a node other than the trace's expansion, and in co-14 that later node is lowered (`level=1004 cached_level=2007`). co-04, co-09 and dbg-01 are rejected for reasons outside the trial; their reported errors are where the two Rust builds differ.
+
+#### co-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => (y :> float)
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(67) path=a level=2006 cached=TypeExprRef(70) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(67) path=a level=2006 cached=TypeExprRef(70) cached_level=2006 cached_member=None tracing=false
+```
+
+#### co-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let z: a = y
+      let w = (z :> float)
+      w +. 1.0
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y + 1.0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(82) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(82) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let w = (y :> float)
+      let v = (y :> float)
+      (w, v, y + 1)
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return [
+    y,
+    y,
+    y + 1 | 0
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(69) path=a level=2007 cached=TypeExprRef(72) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(69) path=a level=2007 cached=TypeExprRef(72) cached_level=2007 cached_member=None tracing=false
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2007 cached=TypeExprRef(80) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2007 cached=TypeExprRef(80) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let w = (y :> float)
+      if true { y } else { 0 }
+    }
+  }
+```
+
+OCaml and Rust: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:28
+
+  4 ┆ | Int => {
+  5 ┆     let w = (y :> float)
+  6 ┆     if true { y } else { 0 }
+  7 ┆   }
+  8 ┆ }
+
+  This has type: int
+  But this if statement is expected to return: a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:28
+
+  4 ┆ | Int => {
+  5 ┆     let w = (y :> float)
+  6 ┆     if true { y } else { 0 }
+  7 ┆   }
+  8 ┆ }
+
+  This has type: int
+  But this if statement is expected to return: a
+  This instance of a is ambiguous: it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(68) path=a level=2007 cached=TypeExprRef(71) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(68) path=a level=2007 cached=TypeExprRef(71) cached_level=2007 cached_member=None tracing=false
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(79) desc=Tconstr(int) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(79) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(77) desc=Tconstr(a) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(82) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=1004 cached=TypeExprRef(82) cached_level=1004 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(77) desc=Tconstr(a) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(82) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(80) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(80) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(68) path=a level=2007 cached=TypeExprRef(71) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(68) path=a level=2007 cached=TypeExprRef(71) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-05
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => ({"f": y} :> {"f": float})
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return {
+    f: y
+  };
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(72) path=a level=2006 cached=TypeExprRef(79) cached_level=2006 cached_member=None tracing=false
+```
+
+#### co-06
+
+```rescript
+type v = A | B
+type rec t<_> = V: t<v>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | V => (y :> string)
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(69) path=a level=2009 cached=TypeExprRef(72) cached_level=2009 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(69) path=a level=2009 cached=TypeExprRef(72) cached_level=2009 cached_member=None tracing=false
+```
+
+#### co-07
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let r = ref(y)
+      (r.contents :> float)
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2006 cached=TypeExprRef(82) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2006 cached=TypeExprRef(82) cached_level=2006 cached_member=None tracing=false
+```
+
+#### co-08
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let r = ref(y)
+      let w = (r.contents :> float)
+      (w, r.contents + 1)
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  let r = y;
+  let w = r;
+  return [
+    w,
+    r + 1 | 0
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(84) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(84) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-09
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let r = ref(y)
+      let w = (r.contents :> float)
+      if true { r.contents } else { 0 }
+    }
+  }
+```
+
+OCaml and Rust: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:37
+
+  5 ┆     let r = ref(y)
+  6 ┆     let w = (r.contents :> float)
+  7 ┆     if true { r.contents } else { 0 }
+  8 ┆   }
+  9 ┆ }
+
+  This has type: int
+  But this if statement is expected to return: a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:37
+
+  5 ┆     let r = ref(y)
+  6 ┆     let w = (r.contents :> float)
+  7 ┆     if true { r.contents } else { 0 }
+  8 ┆   }
+  9 ┆ }
+
+  This has type: int
+  But this if statement is expected to return: a
+  This instance of a is ambiguous: it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(95) desc=Tconstr(int) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(95) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(91) desc=Tconstr(a) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(98) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE MEMOHIT ty=TypeExprRef(91) path=a level=1004 cached=TypeExprRef(98) cached_level=1004 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(91) desc=Tconstr(a) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(98) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(96) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(96) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-10
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let r = ref(y)
+      ({"f": r.contents} :> {"f": float})
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return {
+    f: y
+  };
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(82) path=a level=2006 cached=TypeExprRef(91) cached_level=2006 cached_member=None tracing=false
+```
+
+#### co-11
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, r: ref<a>) =>
+  switch x {
+  | Int => (r.contents :> float)
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, r) {
+  return r.contents;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2006 cached=TypeExprRef(82) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2006 cached=TypeExprRef(82) cached_level=2006 cached_member=None tracing=false
+```
+
+#### co-12
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, r: ref<a>) =>
+  switch x {
+  | Int => {
+      let w = (r.contents :> float)
+      r.contents = 3
+      w
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, r) {
+  let w = r.contents;
+  r.contents = 3;
+  return w;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+I9PROBE ADD ty=TypeExprRef(89) level=2007
+I9PROBE ADD ty=TypeExprRef(96) level=2007
+```
+
+#### dbg-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, r: ref<a>) =>
+  switch x {
+  | Int => (r.contents :> string)
+  }
+```
+
+OCaml and Rust: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:13-32
+
+  2 │ let f = (type a, x: t<a>, r: ref<a>) =>
+  3 │   switch x {
+  4 │   | Int => (r.contents :> string)
+  5 │   }
+  6 │ 
+
+  Type a = int is not a subtype of string 
+
+```
+
+Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:13-32
+
+  2 │ let f = (type a, x: t<a>, r: ref<a>) =>
+  3 │   switch x {
+  4 │   | Int => (r.contents :> string)
+  5 │   }
+  6 │ 
+
+  Type a is not a subtype of string 
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2006 cached=TypeExprRef(82) cached_level=2006 cached_member=None tracing=false
+I9PROBE CALL 0 pairs=1 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(82) desc=Tconstr(int) level=2006 member=None expanded=false abbrev0=false exp=TypeExprRef(82) exp_desc=Tconstr(int) exp_level=2006 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(72) desc=Tconstr(string) level=2006 member=None expanded=false abbrev0=false exp=TypeExprRef(72) exp_desc=Tconstr(string) exp_level=2006 exp_member=None
+I9PROBE CALL 1 pairs=1 tracing=false local=true
+I9PROBE TY call=1 ty=TypeExprRef(77) desc=Tconstr(a) level=2006 member=None expanded=true abbrev0=true exp=TypeExprRef(84) exp_desc=Tconstr(int) exp_level=2006 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(72) desc=Tconstr(string) level=2006 member=None expanded=false abbrev0=false exp=TypeExprRef(72) exp_desc=Tconstr(string) exp_level=2006 exp_member=None
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2006 cached=TypeExprRef(82) cached_level=2006 cached_member=None tracing=false
+```
+
+#### dbg-02
+
+```rescript
+let f = (r: ref<int>) => (r.contents :> float)
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(r) {
+  return r.contents;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+```
+
+#### co-13
+
+The trial unifies `(a, 'z)` with `(float, float)` and fails on `a`.
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, z) =>
+  switch x {
+  | Int => ((y, z) :> (float, float))
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, z) {
+  return [
+    y,
+    z
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=false
+I9PROBE ADD ty=TypeExprRef(77) level=2007
+I9PROBE ADD ty=TypeExprRef(81) level=2007
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(78) desc=Ttuple(TypeRefList(0xf, 2)) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(78) exp_desc=Ttuple(TypeRefList(0xf, 2)) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(72) desc=Ttuple(TypeRefList(0xb, 2)) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(72) exp_desc=Ttuple(TypeRefList(0xb, 2)) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(77) desc=Tconstr(a) level=2007 member=Some(1007) expanded=true abbrev0=true exp=TypeExprRef(83) exp_desc=Tconstr(int) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(66) desc=Tconstr(float) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(66) exp_desc=Tconstr(float) exp_level=2007 exp_member=None
+I9PROBE SITE coerce-trial failed=true
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2007 cached=TypeExprRef(85) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-14
+
+`z` is first linked to `a`. The trace's `a` (`#93`) is a member, and its expansion `#99` is a fresh node. After the backtrack, subtyping expands `a` to `#101`.
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, z) =>
+  switch x {
+  | Int => {
+      ignore(z == y)
+      ((y, z) :> (float, float))
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, z) {
+  return [
+    y,
+    z
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=false
+I9PROBE ADD ty=TypeExprRef(93) level=2007
+I9PROBE ADD ty=TypeExprRef(97) level=2007
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(94) desc=Ttuple(TypeRefList(0xf, 2)) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(94) exp_desc=Ttuple(TypeRefList(0xf, 2)) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(88) desc=Ttuple(TypeRefList(0xb, 2)) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(88) exp_desc=Ttuple(TypeRefList(0xb, 2)) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(93) desc=Tconstr(a) level=2007 member=Some(1007) expanded=true abbrev0=true exp=TypeExprRef(99) exp_desc=Tconstr(int) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(82) desc=Tconstr(float) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(82) exp_desc=Tconstr(float) exp_level=2007 exp_member=None
+I9PROBE SITE coerce-trial failed=true
+I9PROBE MEMOHIT ty=TypeExprRef(93) path=a level=2007 cached=TypeExprRef(101) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(76) path=a level=1004 cached=TypeExprRef(101) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(76) path=a level=1004 cached=TypeExprRef(101) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-15
+
+The failing pair is `z` (linked to the outer `a`, level 1004). Its expansion `#98` is reused once inside the same `expand_trace` call (the trace lists `a` twice), then never: the later hits return `#100`.
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, z) =>
+  switch x {
+  | Int => {
+      ignore(z == y)
+      ((z, y) :> (float, float))
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, z) {
+  return [
+    z,
+    y
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=false
+I9PROBE CALL 0 pairs=3 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(94) desc=Ttuple(TypeRefList(0xf, 2)) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(94) exp_desc=Ttuple(TypeRefList(0xf, 2)) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(88) desc=Ttuple(TypeRefList(0xb, 2)) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(88) exp_desc=Ttuple(TypeRefList(0xb, 2)) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(76) desc=Tconstr(a) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(98) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(82) desc=Tconstr(float) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(82) exp_desc=Tconstr(float) exp_level=1004 exp_member=None
+I9PROBE MEMOHIT ty=TypeExprRef(76) path=a level=1004 cached=TypeExprRef(98) cached_level=1004 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(76) desc=Tconstr(a) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(98) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(96) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(96) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE SITE coerce-trial failed=true
+I9PROBE MEMOHIT ty=TypeExprRef(76) path=a level=1004 cached=TypeExprRef(100) cached_level=1004 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(93) path=a level=2007 cached=TypeExprRef(100) cached_level=1004 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(93) path=a level=2007 cached=TypeExprRef(100) cached_level=1004 cached_member=None tracing=false
+```
+
+#### co-16
+
+After the trial fails, subtyping accepts the coercion and makes `z` a `float`. The `if` then rejects the program on `int` against `float`, a trace with no expandable type, which both builds print the same.
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, z) =>
+  switch x {
+  | Int => {
+      let p = ((y, z) :> (float, float))
+      if true { z } else { 0 }
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:28
+
+  4 ┆ | Int => {
+  5 ┆     let p = ((y, z) :> (float, float))
+  6 ┆     if true { z } else { 0 }
+  7 ┆   }
+  8 ┆ }
+
+  This has type: int
+  But this if statement is expected to return: float
+
+  if expressions must return the same type in all branches (if, else if, else).
+  
+  You can convert int to float with Int.toFloat.
+  If this is a literal, try a number with a trailing dot (e.g. 20.).
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE SITE coerce gen=false
+I9PROBE ADD ty=TypeExprRef(78) level=2008
+I9PROBE ADD ty=TypeExprRef(82) level=2008
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(79) desc=Ttuple(TypeRefList(0xf, 2)) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(79) exp_desc=Ttuple(TypeRefList(0xf, 2)) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(73) desc=Ttuple(TypeRefList(0xb, 2)) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(73) exp_desc=Ttuple(TypeRefList(0xb, 2)) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(78) desc=Tconstr(a) level=2008 member=Some(1007) expanded=true abbrev0=true exp=TypeExprRef(84) exp_desc=Tconstr(int) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(67) desc=Tconstr(float) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(67) exp_desc=Tconstr(float) exp_level=2008 exp_member=None
+I9PROBE SITE coerce-trial failed=true
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2008 cached=TypeExprRef(86) cached_level=2008 cached_member=None tracing=false
+I9PROBE CALL 1 pairs=1 tracing=false local=true
+I9PROBE TY call=1 ty=TypeExprRef(93) desc=Tconstr(int) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(93) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(70) desc=Tconstr(float) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(70) exp_desc=Tconstr(float) exp_level=1004 exp_member=None
+I9PROBE SITE coerce gen=false
+I9PROBE ADD ty=TypeExprRef(78) level=2008
+I9PROBE ADD ty=TypeExprRef(82) level=2008
+```
+
+#### co-17
+
+The equation's right side is the abbreviation without arguments `myint`.
+
+```rescript
+type myint = int
+type rec t<_> = Int: t<myint>
+let f = (type a, x: t<a>, y: a, z) =>
+  switch x {
+  | Int => ((y, z) :> (float, float))
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, z) {
+  return [
+    y,
+    z
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=false
+I9PROBE ADD ty=TypeExprRef(89) level=2008
+I9PROBE ADD ty=TypeExprRef(93) level=2008
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(90) desc=Ttuple(TypeRefList(0xf, 2)) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(90) exp_desc=Ttuple(TypeRefList(0xf, 2)) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(84) desc=Ttuple(TypeRefList(0xb, 2)) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(84) exp_desc=Ttuple(TypeRefList(0xb, 2)) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(89) desc=Tconstr(a) level=2008 member=Some(1008) expanded=true abbrev0=true exp=TypeExprRef(95) exp_desc=Tconstr(int) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(78) desc=Tconstr(float) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(78) exp_desc=Tconstr(float) exp_level=2008 exp_member=None
+I9PROBE SITE coerce-trial failed=true
+I9PROBE MEMOHIT ty=TypeExprRef(89) path=a level=2008 cached=TypeExprRef(97) cached_level=2008 cached_member=None tracing=false
+```
+
+#### co-18
+
+The coerced value is used afterwards outside the coercion.
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, z) =>
+  switch x {
+  | Int => {
+      let p = ((y, z) :> (float, float))
+      let (u, _) = p
+      (u, y)
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, z) {
+  return [
+    y,
+    y
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=false
+I9PROBE ADD ty=TypeExprRef(78) level=2008
+I9PROBE ADD ty=TypeExprRef(82) level=2008
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(79) desc=Ttuple(TypeRefList(0xf, 2)) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(79) exp_desc=Ttuple(TypeRefList(0xf, 2)) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(73) desc=Ttuple(TypeRefList(0xb, 2)) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(73) exp_desc=Ttuple(TypeRefList(0xb, 2)) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(78) desc=Tconstr(a) level=2008 member=Some(1007) expanded=true abbrev0=true exp=TypeExprRef(84) exp_desc=Tconstr(int) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(67) desc=Tconstr(float) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(67) exp_desc=Tconstr(float) exp_level=2008 exp_member=None
+I9PROBE SITE coerce-trial failed=true
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2008 cached=TypeExprRef(86) cached_level=2008 cached_member=None tracing=false
+```
+
+#### Site typecore.ml:3692 — object get
+
+Candidates 4; print fired at the site 0; abbreviation without arguments expanded 0. `filter_method` raises `Unify []` on the non-object expansion (og-01–03). In og-04 the object is a parameter without annotation, linked to `a` before the switch. That tries the other raising route, the ambiguity of a traced expansion (`ctype.ml:1225`); the outputs do not show which route ran. Neither route calls `expand_trace`.
+
+#### og-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => y["f"]
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:12
+
+  2 │ let f = (type a, x: t<a>, y: a) =>
+  3 │   switch x {
+  4 │   | Int => y["f"]
+  5 │   }
+  6 │ 
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(65) path=a level=2006 cached=TypeExprRef(67) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(65) path=a level=2006 cached=TypeExprRef(67) cached_level=2006 cached_member=None tracing=false
+```
+
+#### og-02
+
+```rescript
+type myint = int
+let f = (y: myint) => y["f"]
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:23
+
+  1 │ type myint = int
+  2 │ let f = (y: myint) => y["f"]
+  3 │ 
+
+  This expression has type myint
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(23) path=myint level=1002 cached=TypeExprRef(25) cached_level=1002 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(23) path=myint level=1002 cached=TypeExprRef(25) cached_level=1002 cached_member=None tracing=false
+```
+
+#### og-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let z: a = y
+      z["f"]
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:7
+
+  4 ┆ | Int => {
+  5 ┆     let z: a = y
+  6 ┆     z["f"]
+  7 ┆   }
+  8 ┆ }
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(72) path=a level=2006 cached=TypeExprRef(74) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(72) path=a level=2006 cached=TypeExprRef(74) cached_level=2006 cached_member=None tracing=false
+```
+
+#### og-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o) => {
+  ignore(o == y)
+  switch x {
+  | Int => o["f"]
+  }
+}
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:12
+
+  3 │   ignore(o == y)
+  4 │   switch x {
+  5 │   | Int => o["f"]
+  6 │   }
+  7 │ }
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(81) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(81) cached_level=2007 cached_member=None tracing=false
+```
+
+#### Site typecore.ml:3706 — object set
+
+Candidates 5; print fired at the site 0; abbreviation without arguments expanded 0. os-01–03 take the branch of `filter_object_field_for_write` that returns `Error Owrite_missing` without raising. os-04–05 try the raising route of og-04. The outputs cannot show which route the OCaml compiler took; in both, the Rust print does not fire.
+
+#### os-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => y["f"] = 1
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:12
+
+  2 │ let f = (type a, x: t<a>, y: a) =>
+  3 │   switch x {
+  4 │   | Int => y["f"] = 1
+  5 │   }
+  6 │ 
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(65) path=a level=2006 cached=TypeExprRef(67) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(65) path=a level=2006 cached=TypeExprRef(67) cached_level=2006 cached_member=None tracing=false
+```
+
+#### os-02
+
+```rescript
+type myint = int
+let f = (y: myint) => y["f"] = 1
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:23
+
+  1 │ type myint = int
+  2 │ let f = (y: myint) => y["f"] = 1
+  3 │ 
+
+  This expression has type myint
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(23) path=myint level=1002 cached=TypeExprRef(25) cached_level=1002 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(23) path=myint level=1002 cached=TypeExprRef(25) cached_level=1002 cached_member=None tracing=false
+```
+
+#### os-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let z: a = y
+      z["f"] = 1
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:7
+
+  4 ┆ | Int => {
+  5 ┆     let z: a = y
+  6 ┆     z["f"] = 1
+  7 ┆   }
+  8 ┆ }
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(72) path=a level=2006 cached=TypeExprRef(74) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(72) path=a level=2006 cached=TypeExprRef(74) cached_level=2006 cached_member=None tracing=false
+```
+
+#### os-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o) => {
+  ignore(o == y)
+  switch x {
+  | Int => o["f"] = 1
+  }
+}
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:12
+
+  3 │   ignore(o == y)
+  4 │   switch x {
+  5 │   | Int => o["f"] = 1
+  6 │   }
+  7 │ }
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(81) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(81) cached_level=2007 cached_member=None tracing=false
+```
+
+#### os-05
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o) => {
+  ignore(o == y)
+  switch x {
+  | Int => {
+      let p = o
+      p["f"] = 1
+    }
+  }
+}
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:7
+
+  5 ┆ | Int => {
+  6 ┆     let p = o
+  7 ┆     p["f"] = 1
+  8 ┆   }
+  9 ┆ }
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(81) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(81) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+```
+
+#### Site typecore.ml:3751 — `let module`
+
+Candidates 3; print fired at the site 3; abbreviation without arguments expanded 0. `update_level` has already replaced `M.t` by `M.u` before raising, so the trace holds `M.u` and a variable.
+
+#### lm-01
+
+```rescript
+let f = () => {
+  module M = {
+    type u = A
+    type t = u
+    let v: t = A
+  }
+  M.v
+}
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:3-5
+
+  5 │     let v: t = A
+  6 │   }
+  7 │   M.v
+  8 │ }
+  9 │ 
+
+  This has type: M.u
+  But it's expected to have type: 'a
+  The type constructor M.u would escape its scope
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE CALL 0 pairs=2 tracing=false local=false
+I9PROBE TY call=0 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(2) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(2) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(36) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(36) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+I9PROBE CALL 1 pairs=2 tracing=false local=false
+I9PROBE TY call=1 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(2) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(2) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(36) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(36) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+I9PROBE CALL 2 pairs=2 tracing=false local=false
+I9PROBE TY call=2 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(2) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(2) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(37) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(37) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+I9PROBE CALL 3 pairs=1 tracing=false local=false
+I9PROBE TY call=3 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=3 ty=TypeExprRef(2) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(2) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+```
+
+#### lm-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      module M = {
+        type u = A
+        type t = u
+        let v: t = A
+      }
+      ignore(y)
+      M.v
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:11:7-9
+
+   9 ┆     }
+  10 ┆     ignore(y)
+  11 ┆     M.v
+  12 ┆   }
+  13 ┆ }
+
+  This has type: M.u
+  But it's expected to have type: 'a
+  The type constructor M.u would escape its scope
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(105) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(105) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE CALL 1 pairs=2 tracing=false local=true
+I9PROBE TY call=1 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(105) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(105) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE CALL 2 pairs=2 tracing=false local=true
+I9PROBE TY call=2 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(106) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(106) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE CALL 3 pairs=1 tracing=false local=true
+I9PROBE TY call=3 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=3 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+```
+
+#### lm-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      module M = {
+        type u = A(int)
+        type t = u
+        let v: t = A(y)
+      }
+      M.v
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:10:7-9
+
+   8 ┆       let v: t = A(y)
+   9 ┆     }
+  10 ┆     M.v
+  11 ┆   }
+  12 ┆ }
+
+  This has type: M.u
+  But it's expected to have type: 'a
+  The type constructor M.u would escape its scope
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE ADD ty=TypeExprRef(96) level=2010
+I9PROBE ADD ty=TypeExprRef(99) level=2010
+I9PROBE ADD ty=TypeExprRef(96) level=2010
+I9PROBE ADD ty=TypeExprRef(101) level=2010
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(111) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(111) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE ADD ty=TypeExprRef(96) level=2010
+I9PROBE ADD ty=TypeExprRef(99) level=2010
+I9PROBE ADD ty=TypeExprRef(96) level=2010
+I9PROBE ADD ty=TypeExprRef(101) level=2010
+I9PROBE CALL 1 pairs=2 tracing=false local=true
+I9PROBE TY call=1 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(111) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(111) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE CALL 2 pairs=2 tracing=false local=true
+I9PROBE TY call=2 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(112) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(112) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE CALL 3 pairs=1 tracing=false local=true
+I9PROBE TY call=3 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=3 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+```
+
+#### Site typecore.ml:4002 — optional parameters
+
+Candidates 3; print fired at the site 0; abbreviation without arguments expanded 0. Optional parameters of type `a` inside the case, with an annotation, an abbreviation without arguments (`ff`) and an inferred type. In op-01 and op-02 the print fires for the program's reported error (a pattern on the option, an escaping instance), not for the site. Those reported errors are where the two Rust builds differ.
+
+#### op-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let g = (~k: a=?) => switch k { | Some(v) => v | None => y }
+      g() + 1
+    }
+  }
+```
+
+OCaml and Rust: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:16-20
+
+  3 ┆ switch x {
+  4 ┆ | Int => {
+  5 ┆     let g = (~k: a=?) => switch k { | Some(v) => v | None => y }
+  6 ┆     g() + 1
+  7 ┆   }
+
+  This pattern matches values of type a (defined as int)
+  but a pattern was expected which matches values of type option<'a>
+  
+  The value you're pattern matching on here is wrapped in an option, but you're trying to match on the actual value.
+  Wrap the highlighted pattern in Some() to make it work.
+
+```
+
+Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:16-20
+
+  3 ┆ switch x {
+  4 ┆ | Int => {
+  5 ┆     let g = (~k: a=?) => switch k { | Some(v) => v | None => y }
+  6 ┆     g() + 1
+  7 ┆   }
+
+  This pattern matches values of type a
+  but a pattern was expected which matches values of type option<'a>
+  
+  The value you're pattern matching on here is wrapped in an option, but you're trying to match on the actual value.
+  Wrap the highlighted pattern in Some() to make it work.
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE ADD ty=TypeExprRef(76) level=2008
+I9PROBE ADD ty=TypeExprRef(79) level=2008
+I9PROBE CALL 0 pairs=1 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(76) desc=Tconstr(a) level=2008 member=Some(1006) expanded=true abbrev0=true exp=TypeExprRef(81) exp_desc=Tconstr(int) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(72) desc=Tconstr(option) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(72) exp_desc=Tconstr(option) exp_level=2008 exp_member=None
+I9PROBE ADD ty=TypeExprRef(76) level=2008
+I9PROBE ADD ty=TypeExprRef(79) level=2008
+```
+
+#### op-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, g: (~k: a=?) => a) =>
+  switch x {
+  | Int => {
+      let h: (~k: a=?) => a = (~k=?) => switch k { | Some(v) => v | None => y }
+      (h(), g())
+    }
+  }
+```
+
+OCaml and Rust: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:8-10
+
+  4 ┆ | Int => {
+  5 ┆     let h: (~k: a=?) => a = (~k=?) => switch k { | Some(v) => v | None =
+    ┆ > y }
+  6 ┆     (h(), g())
+  7 ┆   }
+  8 ┆ }
+
+  This has type: a (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (h() :> int)
+
+  
+
+```
+
+Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:8-10
+
+  4 ┆ | Int => {
+  5 ┆     let h: (~k: a=?) => a = (~k=?) => switch k { | Some(v) => v | None =
+    ┆ > y }
+  6 ┆     (h(), g())
+  7 ┆   }
+  8 ┆ }
+
+  This has type: a
+  But it's expected to have type: 'a
+  This instance of a is ambiguous: it would escape the scope of its equation
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE ADD ty=TypeExprRef(139) level=2008
+I9PROBE ADD ty=TypeExprRef(143) level=2008
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(139) desc=Tconstr(a) level=2007 member=Some(1007) expanded=true abbrev0=true exp=TypeExprRef(149) exp_desc=Tconstr(int) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(135) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(135) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE MEMOHIT ty=TypeExprRef(139) path=a level=2007 cached=TypeExprRef(149) cached_level=2007 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(139) desc=Tconstr(a) level=2007 member=Some(1007) expanded=true abbrev0=true exp=TypeExprRef(149) exp_desc=Tconstr(int) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(147) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(147) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE ADD ty=TypeExprRef(139) level=2008
+I9PROBE ADD ty=TypeExprRef(143) level=2008
+```
+
+#### op-03
+
+```rescript
+type rec t<_> = Int: t<int>
+type ff = (~k: int=?) => int
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let h: ff = (~k=?) => switch k { | Some(v) => v | None => y }
+      h()
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE ADD ty=TypeExprRef(137) level=2008
+I9PROBE ADD ty=TypeExprRef(139) level=2008
+I9PROBE MEMOHIT ty=TypeExprRef(146) path=ff level=2008 cached=TypeExprRef(153) cached_level=2008 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(146) path=ff level=2008 cached=TypeExprRef(153) cached_level=2008 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(137) path=a level=2008 cached=TypeExprRef(206) cached_level=100000000 cached_member=None tracing=false
+```
+
+#### Site typecore.ml:5190 — the top-level unit check
+
+Candidates 3; print fired at the site 3; abbreviation without arguments expanded 3; expansion a member, reused or lowered afterwards 0. The warning (an error by default) does not stop typing: tl-02 and tl-03 report both expressions. The second expression's `myint` gets a new expansion (`#35`, `#53`) because `generalize` emptied `simple_abbrevs` after the first. The lowering in tl-03 (`level=1005 cached_level=1006`) happens during the second expression's own unification, before its trace.
+
+#### tl-01
+
+```rescript
+type myint = int
+let v: myint = 1
+v
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Warning number 109 (configured as error) 
+  Main.res:3:1
+
+  1 │ type myint = int
+  2 │ let v: myint = 1
+  3 │ v
+  4 │ 
+
+  This is at the top level and is expected to return `unit`. But it's returning `myint`.
+
+  In ReScript, anything at the top level must evaluate to `unit`. You can fix this by assigning the expression to a value, or piping it into the `ignore` function.
+
+  Possible solutions:
+  - Assigning to a value that is then ignored: `let _ = yourExpression`
+  - Piping into the built-in ignore function to ignore the result: `yourExpression->ignore`
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE CALL 0 pairs=1 tracing=false local=false
+I9PROBE MEMOHIT ty=TypeExprRef(21) path=myint level=1003 cached=TypeExprRef(25) cached_level=1003 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(21) desc=Tconstr(myint) level=1003 member=None expanded=true abbrev0=true exp=TypeExprRef(25) exp_desc=Tconstr(int) exp_level=1003 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(23) desc=Tconstr(unit) level=1003 member=None expanded=false abbrev0=false exp=TypeExprRef(23) exp_desc=Tconstr(unit) exp_level=1003 exp_member=None
+I9PROBE SITE toplevel-unit caught
+```
+
+#### tl-02
+
+```rescript
+type myint = int
+{
+  let v: myint = 1
+  v
+}
+(2: myint)
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Warning number 109 (configured as error) 
+  Main.res:3:3-4:3
+
+  1 │ type myint = int
+  2 │ {
+  3 │   let v: myint = 1
+  4 │   v
+  5 │ }
+  6 │ (2: myint)
+
+  This is at the top level and is expected to return `unit`. But it's returning `myint`.
+
+  In ReScript, anything at the top level must evaluate to `unit`. You can fix this by assigning the expression to a value, or piping it into the `ignore` function.
+
+  Possible solutions:
+  - Assigning to a value that is then ignored: `let _ = yourExpression`
+  - Piping into the built-in ignore function to ignore the result: `yourExpression->ignore`
+
+
+  Warning number 109 (configured as error) 
+  Main.res:6:2-9
+
+  4 │   v
+  5 │ }
+  6 │ (2: myint)
+  7 │ 
+
+  This is at the top level and is expected to return `unit`. But it's returning `myint`.
+
+  In ReScript, anything at the top level must evaluate to `unit`. You can fix this by assigning the expression to a value, or piping it into the `ignore` function.
+
+  Possible solutions:
+  - Assigning to a value that is then ignored: `let _ = yourExpression`
+  - Piping into the built-in ignore function to ignore the result: `yourExpression->ignore`
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE CALL 0 pairs=1 tracing=false local=false
+I9PROBE MEMOHIT ty=TypeExprRef(21) path=myint level=1002 cached=TypeExprRef(25) cached_level=1002 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(21) desc=Tconstr(myint) level=1002 member=None expanded=true abbrev0=true exp=TypeExprRef(25) exp_desc=Tconstr(int) exp_level=1002 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(23) desc=Tconstr(unit) level=1002 member=None expanded=false abbrev0=false exp=TypeExprRef(23) exp_desc=Tconstr(unit) exp_level=1002 exp_member=None
+I9PROBE SITE toplevel-unit caught
+I9PROBE MEMOHIT ty=TypeExprRef(30) path=myint level=1003 cached=TypeExprRef(35) cached_level=1003 cached_member=None tracing=false
+I9PROBE CALL 1 pairs=1 tracing=false local=false
+I9PROBE MEMOHIT ty=TypeExprRef(30) path=myint level=1003 cached=TypeExprRef(35) cached_level=1003 cached_member=None tracing=false
+I9PROBE TY call=1 ty=TypeExprRef(30) desc=Tconstr(myint) level=1003 member=None expanded=true abbrev0=true exp=TypeExprRef(35) exp_desc=Tconstr(int) exp_level=1003 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(36) desc=Tconstr(unit) level=1003 member=None expanded=false abbrev0=false exp=TypeExprRef(36) exp_desc=Tconstr(unit) exp_level=1003 exp_member=None
+I9PROBE SITE toplevel-unit caught
+```
+
+#### tl-03
+
+```rescript
+type myint = int
+{
+  let v: myint = 1
+  v
+}
+let g = (w: myint) => w
+(g(3): myint)
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Warning number 109 (configured as error) 
+  Main.res:3:3-4:3
+
+  1 │ type myint = int
+  2 │ {
+  3 │   let v: myint = 1
+  4 │   v
+  5 │ }
+  6 │ let g = (w: myint) => w
+
+  This is at the top level and is expected to return `unit`. But it's returning `myint`.
+
+  In ReScript, anything at the top level must evaluate to `unit`. You can fix this by assigning the expression to a value, or piping it into the `ignore` function.
+
+  Possible solutions:
+  - Assigning to a value that is then ignored: `let _ = yourExpression`
+  - Piping into the built-in ignore function to ignore the result: `yourExpression->ignore`
+
+
+  Warning number 109 (configured as error) 
+  Main.res:7:2-12
+
+  5 │ }
+  6 │ let g = (w: myint) => w
+  7 │ (g(3): myint)
+  8 │ 
+
+  This is at the top level and is expected to return `unit`. But it's returning `myint`.
+
+  In ReScript, anything at the top level must evaluate to `unit`. You can fix this by assigning the expression to a value, or piping it into the `ignore` function.
+
+  Possible solutions:
+  - Assigning to a value that is then ignored: `let _ = yourExpression`
+  - Piping into the built-in ignore function to ignore the result: `yourExpression->ignore`
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE CALL 0 pairs=1 tracing=false local=false
+I9PROBE MEMOHIT ty=TypeExprRef(21) path=myint level=1002 cached=TypeExprRef(25) cached_level=1002 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(21) desc=Tconstr(myint) level=1002 member=None expanded=true abbrev0=true exp=TypeExprRef(25) exp_desc=Tconstr(int) exp_level=1002 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(23) desc=Tconstr(unit) level=1002 member=None expanded=false abbrev0=false exp=TypeExprRef(23) exp_desc=Tconstr(unit) exp_level=1002 exp_member=None
+I9PROBE SITE toplevel-unit caught
+I9PROBE MEMOHIT ty=TypeExprRef(51) path=myint level=1005 cached=TypeExprRef(53) cached_level=1006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(47) path=myint level=1005 cached=TypeExprRef(53) cached_level=1006 cached_member=None tracing=false
+I9PROBE CALL 1 pairs=1 tracing=false local=false
+I9PROBE MEMOHIT ty=TypeExprRef(47) path=myint level=1005 cached=TypeExprRef(53) cached_level=1006 cached_member=None tracing=false
+I9PROBE TY call=1 ty=TypeExprRef(47) desc=Tconstr(myint) level=1005 member=None expanded=true abbrev0=true exp=TypeExprRef(53) exp_desc=Tconstr(int) exp_level=1005 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(58) desc=Tconstr(unit) level=1005 member=None expanded=false abbrev0=false exp=TypeExprRef(58) exp_desc=Tconstr(unit) exp_level=1005 exp_member=None
+I9PROBE SITE toplevel-unit caught
+```

@@ -1,1 +1,1 @@
-- Record the local-equation instance search, its calibration and open-object comparison counterexamples.
+- Record the local-equation instance search (I1–I9) with its calibration, its open-object and polymorphic-variant counterexamples (since fixed on trunk), and the check that expanding a failed unification's trace leaves nothing a later step can see.
