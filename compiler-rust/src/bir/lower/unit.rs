@@ -114,14 +114,19 @@ mod tests {
     // Each count includes the operand stack of `Rows`, the implementation
     // of the lowering's interface, reserved once in `State::new`: the one
     // allocation the interface adds to a unit (THREE_TREES 11.4, "T6: the
-    // interface" (a)).
+    // interface" (a)). The switches and the untagged unit read one lower
+    // since T6x-e3: `export.rs::build_rows` reads a block's statements by
+    // recursion and no longer pushes every statement of the top level
+    // through `Tables::path`, which nothing else allocates in these two
+    // units (`row_of` does in the other two). THREE_TREES 11.4, "T6x-e
+    // and T6x-f: the fold reads where its rows are", decision 10.
     #[test]
     fn full_unit_allocation_boundary_conditionals() {
         assert_unit_allocation_count("conditionals", 86);
     }
     #[test]
     fn full_unit_allocation_boundary_switches() {
-        assert_unit_allocation_count("switches", 103);
+        assert_unit_allocation_count("switches", 102);
     }
     #[test]
     fn full_unit_allocation_boundary_applications() {
@@ -129,7 +134,7 @@ mod tests {
     }
     #[test]
     fn full_unit_allocation_boundary_untagged() {
-        assert_unit_allocation_count("untagged", 156);
+        assert_unit_allocation_count("untagged", 155);
     }
 
     /// Import is outside measurement; fresh state construction, lowering,

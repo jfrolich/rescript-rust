@@ -133,13 +133,13 @@ pub trait JsStmt: Js {
     /// Whether the statement has a source location. O(1). (T6o.)
     fn stmt_located(&self, a: &Pools, s: &Self::S) -> bool;
     /// The id of the statement, read in place: what [`Js::owner`] gives for
-    /// its value, what [`JsStmt::block_ids`] gives for it once a block
-    /// holds it, and a key for [`Js::kind_of`]. It does not change while
+    /// its value, the id it has once a block holds it, and a key for
+    /// [`Js::kind_of`]. It does not change while
     /// the statement lives, and no other live statement has it. O(1): on
     /// rows the row; on the builder the `node_id` of the owned node, one
     /// load. (T6x-a: the statement stack keys its empty-block table by it,
-    /// since a slot is reused; `export.rs::build_rows` stores it for each
-    /// row of the top level.)
+    /// since a slot is reused; `export.rs::row_of` keys its table by the
+    /// id of each row's statement.)
     fn stmt_id(&self, a: &Pools, s: &Self::S) -> u32;
 
     // ---- Lists ----
@@ -267,8 +267,10 @@ pub trait JsStmt: Js {
     fn declared(&self, a: &Pools, s: &Self::S) -> Option<VarId>;
     /// The ids of the statements of a block, given to `sink` in order; the
     /// statements stay in the block. O(statements); counts no step (a
-    /// reader). Panics on a statement that is not a `Block`. (T6q:
-    /// `export.rs::build_rows`, the rows of a top-level block.)
+    /// reader). Panics on a statement that is not a `Block`. Compiled for
+    /// tests since T6x-e3: `export.rs::build_rows` reads a block with
+    /// [`JsStmt::block_len`] and [`JsStmt::with_block_stmt`].
+    #[cfg(test)]
     fn block_ids(&self, a: &Pools, s: &Self::S, sink: impl FnMut(u32));
     /// The number of statements of the block statement `block`, one that
     /// [`JsStmt::take_block_stmt`] took out counted: the bound of the
