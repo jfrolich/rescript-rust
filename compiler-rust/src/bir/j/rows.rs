@@ -7,9 +7,11 @@
 //! copy (`copy_fresh`, `copy_stmt`) and nothing else: the nodes are the
 //! pools' (`Pools` is the lowering's `Bir`).
 //!
-//! The transition functions, `of`, `reserve`, `steps`, `mark`, `push`,
-//! `pop` and `kind_of` are the representation; every other body is the row
-//! of the table below.
+//! `of`, `reserve`, `steps`, `mark`, `push`, `pop` and `kind_of` are the
+//! representation, as are the functions kept for the tests of rows
+//! (`from_node`, `node`, `at`, `push_list`: the interface has no
+//! transition function since T6x-f); every other body is the row of the
+//! table below.
 //!
 //! # What each body is
 //!
@@ -37,7 +39,6 @@
 //! | `id_bound` | the length of `Bir::nodes` |
 //! | `equal` | `bir::j::equal::equal` |
 //! | `is_callee` | the owner is a `JCall`, `JFlatCall` or `JNew` whose `callee` is the node, or a `JTagged` whose `tag` is |
-//! | `push_list` | `Rows::operands` extended by `Lists::get(list)` |
 //! | `keep_operand` | `child_at`, `Bir::detach` of the operand, `Bir::release` of the node |
 //! | `unpack_rev` | for the operands from the last to the first: `detach`, push; then `release` of the node |
 //! | `copy` | as `copy_fresh`, with a vector of its own for the binders, which it drops (the copies of the lowering that use it have none) |
@@ -66,7 +67,7 @@
 use crate::bir::j::{facts, norm, plain};
 use crate::bir::lower::js::{Js, Mark, Pools};
 use crate::bir::{
-    Cold, ConstId, Constant, FuncId, ImportId, JsId, JsPayload, ListId, NodeFlags, NodeId, Op, StrId,
+    Cold, ConstId, Constant, FuncId, ImportId, JsId, JsPayload, NodeFlags, NodeId, Op, StrId,
     VarId, View,
 };
 use crate::emit::row::{Kind, flag};
@@ -193,19 +194,6 @@ pub(crate) fn kind_of(op: Op) -> Kind {
 impl Js for Rows {
     type E = E;
     type Ref<'r> = NodeId;
-
-    #[inline]
-    fn from_node(node: NodeId) -> E {
-        E(node)
-    }
-    #[inline]
-    fn node(e: E) -> NodeId {
-        e.0
-    }
-    #[inline]
-    fn at<'r>(node: NodeId) -> Self::Ref<'r> {
-        node
-    }
 
     fn reserve(&mut self, operands: usize) {
         self.operands.reserve(operands);
@@ -508,10 +496,6 @@ impl Js for Rows {
     #[inline]
     fn pop(&mut self) -> E {
         E(self.operands.pop().expect("an operand"))
-    }
-    #[inline]
-    fn push_list(&mut self, a: &Pools, list: ListId) {
-        self.operands.extend_from_slice(a.lists.get(list));
     }
     fn call(&mut self, a: &mut Pools, callee: E, mark: Mark, info: JsId) -> E {
         let start = self.since(mark);
@@ -872,6 +856,31 @@ impl Js for Rows {
     fn int_mod(&mut self, a: &mut Pools, check: bool, left: E, right: E) -> E {
         self.steps += 1;
         E(norm::jm13_int32_mod(a, check, left.0, right.0))
+    }
+}
+
+/// For the tests of rows, which build rows on the arena and wrap them
+/// (`out.rs`, `js_tests.rs`, `js_stmt_tests.rs`): a handle is its row. No
+/// generic code can name these: they are not of the interface (THREE_TREES
+/// 11.4, "T6x-e and T6x-f: the fold reads where its rows are", decision 9).
+#[cfg(test)]
+impl Rows {
+    /// The handle of a J row built on the arena. O(1).
+    pub(crate) fn from_node(node: NodeId) -> E {
+        E(node)
+    }
+    /// The J row of a handle. O(1).
+    pub(crate) fn node(e: E) -> NodeId {
+        e.0
+    }
+    /// The reference of a J row built on the arena. O(1).
+    pub(crate) fn at(node: NodeId) -> NodeId {
+        node
+    }
+    /// The nodes of a pool list of detached J expressions, pushed as
+    /// operands in order. One move per node; counts no step.
+    pub(crate) fn push_list(&mut self, a: &Pools, list: crate::bir::ListId) {
+        self.operands.extend_from_slice(a.lists.get(list));
     }
 }
 

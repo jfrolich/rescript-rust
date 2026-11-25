@@ -1525,11 +1525,11 @@ pub fn jm13_int32_mod(b: &mut Bir, check_zero: bool, left: NodeId, right: NodeId
 
 /// J-M14, O:339 push_effect_expression. Split sequences left-to-right, drop
 /// strictly pure values, and preserve assignment locations carried by unit pairs.
+#[cfg(test)]
 pub fn jm14_push_effect_expression(b: &mut Bir, value: NodeId, statements: &mut Vec<NodeId>) {
     jm14_effect_expression(b, value, &mut |statement| statements.push(statement));
 }
-/// [`jm14_push_effect_expression`] that gives each statement to `sink` as
-/// it is made, in order, instead of collecting them. One step per comma
+/// J-M14 with each statement given to `sink` as it is made, in order. One step per comma
 /// operand of `value`; the spine is held in the arena's `effect_work`.
 pub fn jm14_effect_expression(b: &mut Bir, value: NodeId, sink: &mut impl FnMut(NodeId)) {
     let mut work = std::mem::take(&mut b.effect_work);

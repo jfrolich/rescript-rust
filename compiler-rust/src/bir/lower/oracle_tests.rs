@@ -1447,7 +1447,7 @@ fn a_copied_function_doubles_the_legacy_count_of_the_variables_declared_inside_i
     let row = crate::bir::lower::out::row_of(&state.arena, out.value.as_ref().unwrap());
     let copy = crate::bir::j::logic::copy_j(&mut state.arena, row);
     let statement = state.arena.new_node(View::SExp { value: copy }, 0);
-    state.statements.push(<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::stmt_from_node(statement));
+    state.statements.push(crate::bir::j::rows::Rows::stmt_from_node(statement));
     let lowered = state.complete(Cx::value(), Probed::Out(out));
     lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
     let scope = lowered.program.arena.js_scope.as_ref().unwrap();
@@ -1597,7 +1597,7 @@ fn new_text(build: impl Fn(&mut LamArena) -> Lam, resolver: Option<&crate::js_ir
     // As `bir_lower_oracle`: the statements, without a value.
     let out = state.realize(cx, probed);
     let run = state.statements.since(Span { start: out.stmts.start, len: 0 });
-    let list = <crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::list_id(state.statements.take_list(&mut state.js, &mut state.arena, run));
+    let list = crate::bir::j::rows::Rows::list_id(state.statements.take_list(&mut state.js, &mut state.arena, run));
     let lowered = state.finish(list, out.finished, Default::default());
     lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
     let bridge_j::Exported { mut program, qualified } = bridge_j::export_lowered(&lowered.program).unwrap();

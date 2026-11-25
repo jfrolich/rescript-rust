@@ -239,7 +239,7 @@ mod tests {
         let mut state = State::new(bridge::import_lambda(&a, root).unwrap());
         let value = state.arena.new_node(View::JNull, 0);
         let statement = state.arena.new_node(View::SDebugger, 0);
-        state.evaluation.statements.push(<crate::bir::j::rows::Rows as js_stmt::JsStmt>::stmt_from_node(statement));
+        state.evaluation.statements.push(crate::bir::j::rows::Rows::stmt_from_node(statement));
         state.evaluate_now(crate::bir::lower::out::of_row(value));
     }
 
@@ -445,7 +445,7 @@ mod tests {
             );
             let statement = state.arena.new_node(View::SExp { value }, 0);
             let start = state.statements.mark();
-            state.statements.push(<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::stmt_from_node(statement));
+            state.statements.push(crate::bir::j::rows::Rows::stmt_from_node(statement));
             state.statements.reserve();
             let text = state.arena.intern_text("v");
             let value = state.pure_expression(View::JStr { text }, 0);

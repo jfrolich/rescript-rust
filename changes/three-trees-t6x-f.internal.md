@@ -1,0 +1,1 @@
+- The backend lowering's interface no longer has transition functions between rows and handles; the implementation on rows keeps them for its own tests.

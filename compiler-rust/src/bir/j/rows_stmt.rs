@@ -4,8 +4,10 @@
 //! lowering makes today, so the rows written are today's rows. Deleted by
 //! the flip (T6s).
 //!
-//! Slice T6l built the bodies of the first table. The transition
-//! functions are the representation.
+//! Slice T6l built the bodies of the first table. The interface has no
+//! transition function since T6x-f; the four this file keeps for the
+//! tests of rows (`stmt_from_node`, `stmt_node`, `list_from`, `list_id`)
+//! are the representation.
 //!
 //! # What each body is
 //!
@@ -67,8 +69,7 @@
 //! a function literal, and one more per statement of each list it
 //! consumes; `list` one and one per statement; `take_at` one; `effect` and
 //! `effect_if_impure` one and one per statement given; `if_head` one (the
-//! runs count what they release and take). A reader and the transition
-//! functions count nothing.
+//! runs count what they release and take). A reader counts nothing.
 use super::rows::{E, Rows, kind_of};
 use super::{norm, plain};
 use crate::bir::lower::js::Pools;
@@ -94,23 +95,6 @@ impl S {
 impl JsStmt for Rows {
     type S = S;
     type L = ListId;
-
-    #[inline]
-    fn stmt_from_node(node: NodeId) -> S {
-        S(node)
-    }
-    #[inline]
-    fn stmt_node(s: S) -> NodeId {
-        s.0
-    }
-    #[inline]
-    fn list_from(list: ListId) -> ListId {
-        list
-    }
-    #[inline]
-    fn list_id(list: ListId) -> ListId {
-        list
-    }
 
     #[inline]
     fn stmt_kind(&self, a: &Pools, s: &S) -> Kind {
@@ -529,6 +513,28 @@ impl<R: Runs<Rows>> norm::IfLists for RunLists<'_, R> {
     #[inline]
     fn take(&mut self, b: &mut Pools, run: R::Run) -> ListId {
         self.runs.take(self.rows, b, run)
+    }
+}
+
+/// For the tests of rows (see the like block of `rows.rs`): a statement
+/// is its row and a list its pool list.
+#[cfg(test)]
+impl Rows {
+    /// The handle of a J statement built on the arena. O(1).
+    pub(crate) fn stmt_from_node(node: NodeId) -> S {
+        S(node)
+    }
+    /// The J row of a statement. O(1).
+    pub(crate) fn stmt_node(s: S) -> NodeId {
+        s.0
+    }
+    /// The list in flight of a pool list. O(1).
+    pub(crate) fn list_from(list: ListId) -> ListId {
+        list
+    }
+    /// The pool list of a list in flight. O(1).
+    pub(crate) fn list_id(list: ListId) -> ListId {
+        list
     }
 }
 
