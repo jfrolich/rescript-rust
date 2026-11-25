@@ -164,9 +164,7 @@ impl<B: JsStmt> StatementStack<B> {
     /// a statement is at least 4 bytes).
     pub(super) const HELD: u32 = 1 << 31;
     /// The statement at `place`, read in place. O(1). Panics when the
-    /// place holds no statement. (Slice T6x-e3 removes the attribute with
-    /// its first caller in `export.rs`.)
-    #[cfg(test)]
+    /// place holds no statement.
     pub(super) fn at_place(&self, place: u32) -> &B::S {
         if place & Self::HELD != 0 {
             return self.held[(place & !Self::HELD) as usize].as_ref().expect("held statement");
@@ -179,9 +177,7 @@ impl<B: JsStmt> StatementStack<B> {
     /// `at_place`, lent to be read through a function that takes the
     /// statement mutably (`JsStmt::lend_block_stmt`, `JsStmt::substitute`,
     /// `JsStmt::take_block_stmt` of a block). The statement stays at its
-    /// place: nothing is written into the slot. O(1). (Slice T6x-e3
-    /// removes the attribute with its first caller in `export.rs`.)
-    #[cfg(test)]
+    /// place: nothing is written into the slot. O(1).
     pub(super) fn at_place_mut(&mut self, place: u32) -> &mut B::S {
         if place & Self::HELD != 0 {
             return self.held[(place & !Self::HELD) as usize].as_mut().expect("held statement");
@@ -205,9 +201,7 @@ impl<B: JsStmt> StatementStack<B> {
     /// O(1): one write; counts no step and allocates nothing. Panics when
     /// the place holds no statement. (THREE_TREES 11.4, "T6x-e and T6x-f:
     /// the fold reads where its rows are", decision 13:
-    /// `export.rs::release_row`, a removed row of the top level. Slice
-    /// T6x-e3 removes the attribute with that caller.)
-    #[cfg(test)]
+    /// `export.rs::release_row`, a removed row of the top level.)
     pub(super) fn take_placed(&mut self, place: u32, stand_in: impl FnOnce() -> B::S) -> B::S {
         if place & Self::HELD != 0 {
             let held = self.held[(place & !Self::HELD) as usize].as_mut().expect("held statement");
