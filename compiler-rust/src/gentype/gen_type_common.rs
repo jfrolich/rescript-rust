@@ -255,16 +255,17 @@ pub enum Dep {
 pub mod scoped_package {
     use super::CompilerIdent;
 
-    // Taken from ext_namespace.ml in BuckleScript.
-    /// The module name a package name is turned into: alphanumeric runs
-    /// capitalized and joined, dropping `@`, `/` and `-`.
+    /// `Ext_namespace.namespace_of_package_name`: the namespace module a
+    /// package name is turned into, the build system's as well. Runs of
+    /// letters, digits and `_` are capitalized and joined, dropping `@`, `/`
+    /// and `-`: `@my_org/lib` is `My_orgLib`.
     pub fn namespace_of_package_name(s: &str) -> String {
         let mut buf = String::with_capacity(s.len());
 
         let mut capital = true;
         for ch in s.chars() {
             match ch {
-                'a'..='z' | 'A'..='Z' | '0'..='9' => {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => {
                     if capital {
                         buf.extend(ch.to_uppercase());
                     } else {
@@ -497,5 +498,24 @@ pub mod node_filename {
             .and_then(|s| s.to_str())
             .unwrap_or(path)
             .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scoped_package::{namespace_of_package_name, package_name_to_generated_module_name};
+
+    #[test]
+    fn package_names_become_the_build_systems_namespaces() {
+        assert_eq!(
+            namespace_of_package_name("@demo/some-library"),
+            "DemoSomeLibrary"
+        );
+        assert_eq!(namespace_of_package_name("@my_org/lib"), "My_orgLib");
+        assert_eq!(
+            package_name_to_generated_module_name("@my_org/lib").as_deref(),
+            Some("My_orgLib")
+        );
+        assert_eq!(package_name_to_generated_module_name("plain"), None);
     }
 }
