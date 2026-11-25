@@ -313,12 +313,11 @@ Consequences of "the keyword wins":
    `Belt` on separate lines, `type t = private` followed by `| A` on the next
    line (which is what the formatter prints for a long variant), and
    `constraint 'a = int` on its own line.
-3. An escaped name is the same token as the bare word, as `\"async"` is
-   today (12.3.1 reformats `\"async" (x) => x` to `async x => x`). A program
-   that parses today can therefore only parse differently if it uses one of
-   the ten words as an escaped name, directly in one of the positions above,
-   followed by a token that fits the keyword. Example: a bare statement
-   `\"open"` followed by a line starting with a module name.
+3. An escaped name stays a name. The scanner returns the same token for
+   `\"open"` and `open`, so the parser checks whether the token was written
+   escaped, and only reads the bare word as a keyword. A bare statement
+   `\"open"` followed by a line starting with a module name is two statements,
+   as it is today. No program that parses today parses differently.
 
 The backend needs no change. ReScript 12.3.1 already compiles all ten as
 escaped variable names; `private` is a reserved word in JavaScript strict mode
@@ -554,9 +553,17 @@ A punned row, argument or prop keeps its escape, because the pun names a
 variable: `{\"type": \"type", name}` is printed as `{\"type", name}` today and
 stays that way.
 
-The ten contextual keywords need no printer code. `print_ident_like` decides
-with `Token.is_keyword_txt`, which no longer knows them, so they print bare in
-every position, bindings and shorthands included.
+The ten contextual keywords print bare: `print_ident_like` decides with
+`Token.is_keyword_txt`, which no longer knows them. Four places need more,
+because a bare name there would read as the keyword:
+
+- a statement that is only `open`, `exception` or `external`, followed by a
+  line that fits the declaration, is printed escaped (`\"open"`).
+  Parentheses would not do: after a variant declaration, `(open)` on the next
+  line is read as the constructor's arguments, as `(x)` is today;
+- `let (rec as x) = ...`, where `let rec as x` would be recursive;
+- `exception (as)`, `exception (when)` and `exception (of)` in a pattern;
+- `type t = (private)`, an alias of a type named `private`.
 
 `res_outcome_printer.ml`, which prints types in error messages, hovers and
 generated interfaces, gets the same treatment for record fields and labels.
@@ -584,11 +591,10 @@ Part 1 is additive: every form it accepts is a syntax error today. `type_`
 with `@as("type")` keeps compiling, and so does `\"type"`. Nothing has to
 migrate.
 
-Part 2 keeps every program that uses the ten words as keywords parsing as it
-does today. The one way an existing program can parse differently is
-consequence 3 of Part 2: an escaped name such as `\"open"` placed directly in
-a keyword position. Syntax error messages that name one of the ten words as a
-reserved keyword change.
+Part 2 is additive too. Every program that uses the ten words as keywords
+parses as it does today, and an escaped name such as `\"open"` stays a name
+everywhere (consequence 3 of Part 2). Syntax error messages that name one of
+the ten words as a reserved keyword change.
 
 Code that uses the new syntax does not parse with older compilers, and the
 formatter of a new compiler rewrites escaped labels to the bare form. Both
@@ -682,10 +688,10 @@ Out of scope:
 
 1. **Contextual keywords as type names.** Because the scanner returns an
    identifier, `type open = int` and `type t = {mutable}` (a field `mutable`
-   of type `mutable`) parse as well. Accept that, or reject the ten words as
+   of type `mutable`) parse as well. Accept that, or reject the bare words as
    type names in the parser? Rejecting them removes the `private` case in
-   consequence 1 of Part 2 and the name reading of `type rec = int`, but makes
-   `type \"open" = int`, which compiles today, an error.
+   consequence 1 of Part 2 and the name reading of `type rec = int`;
+   `type \"open" = int`, which compiles today, keeps compiling either way.
 
 ## Implementation plan
 
