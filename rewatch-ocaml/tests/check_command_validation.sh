@@ -1618,11 +1618,16 @@ for implementation in rust ocaml; do
   fi
   normalize_project_path "$work/quiet-watch-$implementation.err" \
     "$work/quiet-watch-$implementation.err.norm" "$quiet_watch_project"
-  # macOS and Windows can report one write as several change events, and each
-  # rebuild reports the parse error again. Compare the distinct reports only.
+  # macOS and Windows can report one write as several change events. The
+  # watcher skips a rebuild when the file is unchanged, but a rebuild that sees
+  # the write half done would report the error again, so compare the distinct
+  # reports only. Each report starts with a blank line; the split is before it
+  # and must not cut a CRLF line ending.
   node -e '
     const fs = require("fs");
-    const blocks = fs.readFileSync(process.argv[1], "utf8").split(/^(?=  Syntax error!)/m);
+    const blocks = fs
+      .readFileSync(process.argv[1], "utf8")
+      .split(/(?<=\n)(?=\r?\n  Syntax error!\r?$)/m);
     const distinct = blocks.filter((block, i) => block !== blocks[i - 1]);
     fs.writeFileSync(process.argv[1], distinct.join(""));
   ' "$work/quiet-watch-$implementation.err.norm"
