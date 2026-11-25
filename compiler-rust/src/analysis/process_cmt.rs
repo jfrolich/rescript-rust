@@ -1109,6 +1109,23 @@ impl Processor<'_> {
                 let env = env.add_module(module_name);
                 self.for_type_module(module_name, &env, module_type)
             }
+            // The type checker wraps an alias used where it cannot stay an
+            // alias, e.g. `Make` in `Make(Arg)` after `module Make =
+            // Fn.MakeSet`, in an implicit constraint with the expanded
+            // signature. Keep the alias, so that paths through it resolve to
+            // the module it names.
+            tt::ModuleExprDesc::Tmod_constraint(
+                expr,
+                _,
+                tt::ModuleTypeConstraint::Tmodtype_implicit,
+                _,
+            ) if matches!(
+                self.ctx.ta.module_expr(*expr).mod_desc,
+                tt::ModuleExprDesc::Tmod_ident(..)
+            ) =>
+            {
+                self.for_module(env, &self.ctx.ta.module_expr(*expr).mod_desc, module_name)
+            }
             tt::ModuleExprDesc::Tmod_constraint(expr, typ, constraint, _) => {
                 let mod_kind =
                     self.for_module(env, &self.ctx.ta.module_expr(*expr).mod_desc, module_name);

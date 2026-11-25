@@ -52,6 +52,8 @@ struct ExtractedType {
     path: Path,
     decl: std::sync::Arc<TypeDeclaration>,
     env: QueryEnv,
+    /// The file that declares the type.
+    uri: String,
     loc: Loc,
 }
 
@@ -165,9 +167,14 @@ impl Hover<'_, '_> {
                     "Unable to resolve module reference {}",
                     path.name()
                 )),
-                Some((resolved, declared)) => {
-                    self.show_module(docstring, file, resolved.module, name, declared.as_ref())
-                }
+                // Continue in the file that declares the module the alias names.
+                Some((resolved, declared)) => self.show_module(
+                    docstring,
+                    resolved,
+                    resolved.module,
+                    name,
+                    declared.as_ref(),
+                ),
             },
         }
     }
@@ -229,11 +236,13 @@ impl Hover<'_, '_> {
             .filter_map(|path| {
                 let (env, declared) =
                     references::dig_constructor(self.session, &env_to_search, &path)?;
+                let uri = resolve_path::get_source_uri(self.session, &env, &declared.module_path);
                 Some(ExtractedType {
                     name: declared.name.txt.clone(),
-                    loc: declared.extent_loc,
+                    loc: resolve_path::type_declaration_loc(self.session, &env, declared),
                     decl: declared.item.decl.clone(),
                     env,
+                    uri,
                     path,
                 })
             })
@@ -268,11 +277,10 @@ impl Hover<'_, '_> {
             // Don't produce duplicate type definitions for recursive types.
             .filter(|t| types_seen.insert(format!("{}.{}", t.env, t.name)))
             .map(|t| {
-                let file = self.session.file(t.env.file);
                 let link = if self.supports_markdown_links
                     && !is_inline_record_definition(&t.decl, &t.path)
                 {
-                    go_to_definition_text(self.style, &file.uri, t.loc.start)
+                    go_to_definition_text(self.style, &t.uri, t.loc.start)
                 } else {
                     String::new()
                 };

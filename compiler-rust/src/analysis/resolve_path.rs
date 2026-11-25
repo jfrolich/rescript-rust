@@ -186,6 +186,73 @@ pub fn resolve_from_compiler_path<S: Session + ?Sized>(
     }
 }
 
+/// `resolve_module_alias`: [`resolve_module_from_compiler_path`], following
+/// module aliases such as `module Make = Fn.MakeSet` to the module they name.
+fn resolve_module_alias<S: Session + ?Sized>(
+    session: &S,
+    env: &QueryEnv,
+    path: &Path,
+) -> Option<(QueryEnv, Option<Declared<Module>>)> {
+    let mut result = resolve_module_from_compiler_path(session, env, path);
+    while let Some((
+        env,
+        Some(Declared {
+            item: Module::Ident(path),
+            ..
+        }),
+    )) = &result
+    {
+        result = resolve_module_from_compiler_path(session, env, path);
+    }
+    result
+}
+
+/// Where a type declaration is in its source. A declaration an `include`
+/// copied from another module's interface has no location in the Rust
+/// analysis, whose interfaces are compiled without them (its location reads
+/// as line 0), while OCaml's copy keeps the location the `.cmi` has: that of
+/// the declaration the include names, found here in that module, which is
+/// loaded from its source. Includes of includes are followed, a bounded
+/// number of times.
+pub fn type_declaration_loc<S: Session + ?Sized>(
+    session: &S,
+    env: &QueryEnv,
+    declared: &Declared<Type>,
+) -> Loc {
+    let mut declared = declared;
+    let mut env = env.clone();
+    for _ in 0..16 {
+        // A location the interface does not have reads as line 0, which no
+        // source position has.
+        if declared.extent_loc.start.line != 0 {
+            break;
+        }
+        let ModulePath::IncludedModule(path, _) = &declared.module_path else {
+            break;
+        };
+        let Some((module_env, module)) = resolve_module_alias(session, &env, path) else {
+            break;
+        };
+        let exported = match &module {
+            None => module_env.exported.clone(),
+            Some(Declared {
+                item: Module::Structure(structure),
+                ..
+            }) => structure.exported.clone(),
+            Some(_) => break,
+        };
+        let Some(source) = exported
+            .find(ExportedKind::Type, &declared.name.txt)
+            .and_then(|stamp| session.file(module_env.file).stamps.find_type(stamp))
+        else {
+            break;
+        };
+        declared = source;
+        env = module_env;
+    }
+    declared.extent_loc
+}
+
 /// `get_source_uri`.
 pub fn get_source_uri<S: Session + ?Sized>(
     session: &S,
@@ -195,12 +262,10 @@ pub fn get_source_uri<S: Session + ?Sized>(
     match path {
         ModulePath::File { uri, .. } => uri.clone(),
         ModulePath::NotVisible => session.file(env.file).uri.clone(),
-        ModulePath::IncludedModule(path, inner) => {
-            match resolve_module_from_compiler_path(session, env, path) {
-                None => get_source_uri(session, env, inner),
-                Some((env, _)) => session.file(env.file).uri.clone(),
-            }
-        }
+        ModulePath::IncludedModule(path, inner) => match resolve_module_alias(session, env, path) {
+            None => get_source_uri(session, env, inner),
+            Some((env, _)) => session.file(env.file).uri.clone(),
+        },
         ModulePath::ExportedModule { module_path, .. } => get_source_uri(session, env, module_path),
     }
 }
