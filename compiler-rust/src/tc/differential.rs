@@ -5531,6 +5531,11 @@ mod tests {
     /// against the OCaml arm before either side is followed (decision
     /// 18); a seed where today's checker departs from ctype.ml is pinned
     /// with its cause by the reviewer, not by the builder.
+    /// Each listed seed is then made again and run on both sides, and
+    /// its two outcomes must differ as the class of its list says
+    /// (`fits`). A seed that does not fit panics with the plan, the
+    /// seed, the list and the reason, after every seed of the plan was
+    /// asked.
     ///
     /// Reaches: R3m, R3e, R3f, R3n, R3g, R3i.
     #[test]
@@ -5549,6 +5554,36 @@ mod tests {
             let unknown = differing.iter().find(|(seed, _)| !known.contains(seed));
             assert!(seeds == known, "plan {with:#x}: {seeds:?}\n{}", unknown.map_or("", |(_, report)| report.as_str()));
             assert_eq!(coverage.cases + known.len(), programs as usize * 100);
+            let lists: &[(&str, &[u64], SeedClass)] = match at {
+                0 => &[],
+                1 => &[
+                    ("ROWS_OLD_EQUAL_DIFFERS", &ROWS_OLD_EQUAL_DIFFERS, SeedClass::Equal),
+                    ("ROWS_OLD_NIL_DIFFERS", &ROWS_OLD_NIL_DIFFERS, SeedClass::Nil),
+                ],
+                _ => &[
+                    ("UNIVARS_OLD_EQUAL_DIFFERS", &UNIVARS_OLD_EQUAL_DIFFERS, SeedClass::Equal),
+                    ("UNIVARS_OLD_NIL_DIFFERS", &UNIVARS_OLD_NIL_DIFFERS, SeedClass::Nil),
+                    ("UNIVARS_OLD_FREE_UNIVAR_DIFFERS", &UNIVARS_OLD_FREE_UNIVAR_DIFFERS, SeedClass::FreeUnivar),
+                ],
+            };
+            // `compare` runs both sides on these operations: no relation
+            // plan has `PATTERN`, which alone cuts them (`old_judges`).
+            let plan = Plan::new(Tier::Full, with);
+            let mut refused = Vec::new();
+            for &(list, seeds, class) in lists {
+                for &seed in seeds {
+                    let (program, ops) = case(plan, seed);
+                    let old = run_old(&program, plan, &ops);
+                    let new = run_new(&program, plan, &ops, Fault::None);
+                    if let Err(reason) = fits(class, &old, &new) {
+                        refused.push(format!(
+                            "plan {with:#x}, seed {seed}, {list}: {reason}\n--- operations\n{ops:?}\n--- old: failed {:?}\n{}--- new: failed {:?}\n{}",
+                            old.failed, old.form, new.failed, new.form
+                        ));
+                    }
+                }
+            }
+            assert!(refused.is_empty(), "{} listed seeds do not fit their class\n{}", refused.len(), refused.join("\n"));
         }
     }
 
