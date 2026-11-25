@@ -1,0 +1,1 @@
+- Probe of T6r (not for merge): the naming log, the replay of names, the return sites of a function and the external-shadow decision of the lowering read JavaScript nodes through the lowering's interface.

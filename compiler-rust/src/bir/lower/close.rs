@@ -7,7 +7,7 @@
 use super::js::{Js, Pools};
 use super::js_stmt::JsStmt;
 use super::scope::{Decision, VarFacts};
-use crate::bir::{FuncHeader, NodeId};
+use crate::bir::FuncHeader;
 use crate::emit::row::{Kind, flag};
 use crate::js_ir::op::UsedStats;
 use crate::lambda::lam_compat::LetKind;
@@ -44,13 +44,12 @@ pub(super) fn decide<B: JsStmt>(js: &B, bir: &mut Pools, list: B::L) {
     for at in (0..count).rev() {
         steps += 1;
         match js.kind_at(bir, list, at) {
-            Kind::Return => {
-                // `scope::return_sites` takes a row until T6r: the returned
-                // value is named by its id.
-                let value = js.with_stmt_at(bir, list, at, |statement| js.value_of(bir, statement).map(|value| js.id(bir, value)));
-                let value = NodeId(value.expect("a return has a value"));
-                super::scope::return_sites(bir, value, at + 1 == count)
-            }
+            Kind::Return => super::scope::with_return_sites(bir, |bir, writes| {
+                js.with_stmt_at(bir, list, at, |statement| {
+                    let value = js.value_of(bir, statement).expect("a return has a value");
+                    super::scope::return_sites(js, bir, value, at + 1 == count, writes)
+                })
+            }),
             Kind::Declare => {
                 let decision = js.with_stmt_at(bir, list, at, |statement| {
                     let var = js.declared(bir, statement).expect("a declaration declares");

@@ -773,7 +773,9 @@ pub(crate) fn simplify_if_head<L: IfLists>(
             let ret = p::node(b, View::SReturn { value: n }, 0);
             // This list never passes `StatementStack::take_list`: the
             // returned value may come from a run that was not copied.
-            crate::bir::lower::scope::return_sites(b, n, true);
+            crate::bir::lower::scope::with_return_sites(b, |b, writes| {
+                crate::bir::lower::scope::return_sites(&super::rows::Rows::default(), b, <super::rows::Rows as crate::bir::lower::js::Js>::at(n), true, writes)
+            });
             let then_ = b.lists.push(&[ret]);
             let else_ = b.lists.push(&[]);
             let statement = raw_if(b, test, then_, else_);
