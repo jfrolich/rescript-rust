@@ -227,7 +227,7 @@ impl<'p> ProjectSession<'p> {
     /// from that source.
     pub fn full_from_path(&self, path: &Path) -> Option<&Loaded> {
         let module_name = self.project.module_for_path(path)?;
-        let interface = path.to_string_lossy().ends_with('i');
+        let interface = super::uri::is_interface(&path.to_string_lossy());
         self.load(&module_name, interface)
     }
 }
