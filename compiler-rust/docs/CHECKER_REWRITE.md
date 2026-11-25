@@ -2321,15 +2321,18 @@ rewritten; its count after is at the end of that list.
 
 State after the tenth skeleton turn (trunk `f37ab8a73`). Merged between
 the two turns: R3s (pull request 382). `cargo test --lib tc::` before:
-341 passed, none ignored (seen: 1,166 seconds). After, on the skeleton
-as committed: the count is in the pull request of the turn, 343 passed
-and 8 ignored expected (two tests more that run today: the rigid
-expansion, the old side of the relation plans; the eight of R3i). What
+341 passed, none ignored (seen: 1,166 seconds). After, on the skeleton:
+342 passed, 1 failed, 8 ignored was seen (the check of the ignored
+tests found one of the new ones without `Reaches:` in its doc comment;
+corrected, and the check passes), so 343 passed and 8 ignored is what
+the skeleton reads; with the prototype in place and the ignored tests
+included, 351 passed, none failed, none ignored was seen (1,181
+seconds). What
 the tenth turn did is decisions 113 to 118 of 8.6 and section 8.12.
 
 | Slice | Decisions | Tests | Run in this turn |
 |---|---|---|---|
-| R3i | 113 to 118; 8.12 | eight ignored: four hand-built and the two step tests `relations_at_ten_thousand` and `relations_over_ten_thousand_fields_and_tags` in `r3_tests.rs`; `relation_plan_agrees_on_generated_cases` (25,000 cases) and `a_wrong_answer_of_a_relation_is_reported` in `differential.rs`; two that run today (`the_rigid_expansion_is_public_and_adds_the_chain`, `old_side_of_the_relation_plans_is_not_vacuous`) and the size test | all eight passed against a prototype of the 23 bodies (801 added lines, comments included), which is not in the tree; the fifth shape of `relations_at_ten_thousand` was seen not to end without the table of pairs. The whole filter was not run with the prototype in place |
+| R3i | 113 to 118; 8.12 | eight ignored: four hand-built and the two step tests `relations_at_ten_thousand` and `relations_over_ten_thousand_fields_and_tags` in `r3_tests.rs`; `relation_plan_agrees_on_generated_cases` (25,000 cases) and `a_wrong_answer_of_a_relation_is_reported` in `differential.rs`; two that run today (`the_rigid_expansion_is_public_and_adds_the_chain`, `old_side_of_the_relation_plans_is_not_vacuous`) and the size test | all eight passed against a prototype of the 23 bodies (801 added lines, comments included), which is not in the tree; the fifth shape of `relations_at_ten_thousand` was seen not to end without the table of pairs. The whole filter with the prototype in place: 351 passed, none ignored |
 | R3j | none | none | nothing: not designed |
 
 The ignored tests are checked mechanically
@@ -3602,8 +3605,8 @@ prototype's part is about 270).
 
 The prompt of R3i, written in the tenth skeleton turn. The two
 searches were run on the head that holds the skeleton and print what
-the prompt says. The prototype was run against the eight tests of the
-slice, not against the whole filter.
+the prompt says. With the prototype in place the whole filter with the
+ignored tests included read 351 passed, 0 failed, 0 ignored.
 
 ```text
 R3i. Every slice above it in the table of 8.1 is merged. Read section
@@ -3637,8 +3640,9 @@ relate_fields and moregen_row put their clash path in a closure that
 is called at once (write the cut of the frames out); all_distinct_vars
 turns a clash of a safe expansion into the unexpanded node with
 unwrap_or (a safe expansion does not clash: say so with the
-expression you choose, no panic); it was not run against the whole
-tc:: filter. Where your code differs from it, the doc comment decides.
+expression you choose, no panic); its bodies carry no doc comment of
+their own beyond the skeleton's. Where your code differs from it, the
+doc comment decides.
 
 Yours: the 23 bodies of src/tc/relate.rs that are `todo!("R3i")`:
 Checker::{moregeneral, duplicate_type, moregen, equal, matches,
@@ -6238,8 +6242,7 @@ tables).
      comments. One commit of bodies and one that removes the `ignore`
      lines, as R3s. Not done in the tenth turn: no source program was
      run through the two compilers (no OCaml build was at hand; the
-     three programs are in 8.12); the whole `tc::` filter was not run
-     with the prototype in place; the step tests were not seen to fail
+     programs are in 8.12); the step tests were not seen to fail
      with the renaming or the marks of `all_distinct_vars` replaced by a
      list scan (a step counts a frame, and a scan would have to count
      its own entries: the two shapes pin linearity of the frames only);
