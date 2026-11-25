@@ -478,6 +478,19 @@ let c = async () => ReactDOM.createRoot(await later())
 }
 
 #[test]
+fn a_written_coercion_or_constraint_is_an_argument_too() {
+    // The `:>` of the argument goes to a declaration of the class, and the
+    // argument site takes it from there, as with any other expression.
+    with_packages(
+        r#"
+let a = (input: WebAPI.input) => ReactDOM.createRoot((input :> WebAPI.element))
+let b = (el: WebAPI.element) => ReactDOM.createRoot((el: WebAPI.element))
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn outside_those_sites_the_coercion_is_written() {
     for program in [
         // The branches of an `if`: neither is the expected type of the other.

@@ -9088,6 +9088,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 opt_from_type_ref,
                 to_type_ref,
                 expected_ty,
+                context,
                 &expr.pexp_attributes,
             )
         }
@@ -9391,6 +9392,18 @@ fn rue_unify(
     context: Option<ClashSite>,
 ) -> TypeCoreResult<()> {
     let inst = crate::types::instance(tctx.type_ctx, expected_ty);
+    unify_expression_types_at_site(tctx, loc, exp_ty, inst, context)
+}
+
+/// `unify_expression_types` of an expression's own type with the type its
+/// site expects, the `unify_exp` of OCaml's `rue`.
+fn unify_expression_types_at_site(
+    tctx: &mut TypeCheckContext<'_>,
+    loc: LocIdx,
+    exp_ty: TypeExprRef,
+    inst: TypeExprRef,
+    context: Option<ClashSite>,
+) -> TypeCoreResult<()> {
     match unify_expression_types(tctx, loc, exp_ty, inst, context) {
         Ok(()) => Ok(()),
         // The site that asked for `expected_ty` gives the expression that
@@ -16840,6 +16853,7 @@ fn type_coerce(
     opt_from_type: Option<&crate::parser::ast::CoreType>,
     to_type: &crate::parser::ast::CoreType,
     expected_ty: TypeExprRef,
+    context: Option<ClashSite>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
@@ -16912,7 +16926,7 @@ fn type_coerce(
     // after the coercion check: `unify_exp` at the coercion's location
     // (`proper_exp_loc`) of `ty'` with `instance env ty_expected`.
     let inst_expected = instance_if_generic(ctx, expected_ty);
-    unify_expression_types(tctx, loc, to_ty, inst_expected, None)?;
+    unify_expression_types_at_site(tctx, loc, to_ty, inst_expected, context)?;
 
     // Return the inner expression with the coercion as exp_extra
     // The expression type becomes the target type after coercion
