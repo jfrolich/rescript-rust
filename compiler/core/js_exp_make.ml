@@ -357,7 +357,7 @@ let ocaml_fun ?immutable_mask ?directive ~return_unit ~async ~one_unit_arg
     source_loc = None;
   }
 
-let method_ ~async ~return_unit params body : t =
+let method_ ?directive ~async ~return_unit params body : t =
   let len = List.length params in
   {
     expression_desc =
@@ -369,7 +369,7 @@ let method_ ~async ~return_unit params body : t =
           env = Js_fun_env.make len;
           return_unit;
           async;
-          directive = None;
+          directive;
         };
     comment = None;
     source_loc = None;
@@ -1510,7 +1510,7 @@ let to_int32 (e : J.expression) : J.expression = int32_bor e zero_int_literal
 let string_comp (cmp : Lambda.comparison) (e0 : t) (e1 : t) =
   match (string_literal_semantic e0, string_literal_semantic e1) with
   | Some a0, Some a1 -> (
-    let equal = Ext_string.equal a0 a1 in
+    let equal = String.equal a0 a1 in
     match cmp with
     | Ceq -> bool equal
     | Cneq -> bool (Stdlib.not equal)
