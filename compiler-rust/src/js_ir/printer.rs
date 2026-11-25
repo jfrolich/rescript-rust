@@ -1394,13 +1394,22 @@ impl<'r> JsPrinter<'r> {
         }
         if this_binding.is_some() || !body.is_empty() || directive.is_some() {
             self.indent();
-            if let Some(this_binding) = this_binding {
-                self.newline();
-                self.write("let ");
-                self.write(this_binding);
-                self.write(" = this ");
-                self.semi();
-            }
+            // A directive must be the first statement of the body, so it
+            // comes before `let self = this` (js_dump.ml, `pp_function`).
+            let directive = match this_binding {
+                Some(this_binding) => {
+                    if directive.is_some() {
+                        self.print_function_directive(directive, true);
+                    }
+                    self.newline();
+                    self.write("let ");
+                    self.write(this_binding);
+                    self.write(" = this");
+                    self.semi();
+                    None
+                }
+                None => directive,
+            };
             if directive.is_some() || body_prints_any {
                 self.print_function_directive(directive, body_prints_any);
                 self.print_function_body(body, return_unit);
@@ -6778,7 +6787,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "function (amount) {\n  let me = this ;\n  return me;\n}"
+            "function (amount) {\n  let me = this;\n  return me;\n}"
         );
     }
 
@@ -6811,7 +6820,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "function methodWithThis(value) {\n  let self = this ;\n  return self;\n}"
+            "function methodWithThis(value) {\n  let self = this;\n  return self;\n}"
         );
     }
 

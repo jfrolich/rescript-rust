@@ -7064,6 +7064,12 @@ fn rewrite_method_callback_expression(
     arena: &mut ParseArena,
 ) -> Expression {
     let loc = expr.pexp_loc;
+    // `@directive` belongs to the JS function, which is the inner function
+    // passed to `unsafe_to_method`, where translcore reads it
+    // (bs_builtin_ppx.ml, the `Meth_callback` case).
+    let (fun_attrs, filtered_attrs): (Vec<Attribute>, Vec<Attribute>) = filtered_attrs
+        .into_iter()
+        .partition(|attr| arena.get_string(attr.0.txt) == "directive");
     let source_params = arena.nary_fun_params(fun).into_owned();
     let source_newtypes = arena.nary_fun_newtypes(fun).to_vec();
     let body = arena.nary_fun_body(fun);
@@ -7113,7 +7119,7 @@ fn rewrite_method_callback_expression(
             is_async,
         })),
         pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
+        pexp_attributes: fun_attrs.into(),
     };
 
     let js_oo = arena.ppx_js_oo_lident();
