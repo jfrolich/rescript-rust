@@ -165,50 +165,42 @@ fn is_decl_deprecated(attr: &decl::Attribute) -> bool {
     attr.attr_name.txt == "deprecated"
 }
 
-/// The reason of a found `@deprecated` attribute.
+/// The reason of a found `@deprecated` attribute, read as the compiler reads
+/// it for its warning (`Builtin_attributes.deprecated_of_attrs_with_migrate`,
+/// compiler/ml/builtin_attributes.ml:68-106): a record's first `reason`
+/// that is a string, and a record without one is not deprecated; any other
+/// payload is deprecated with its string, or with an empty message.
 fn parsed_deprecated_reason(
     arena: &ParseArena,
     payload: &Payload,
 ) -> Result<Option<String>, InvalidEscape> {
-    let Some(e) = payload_expression(payload) else {
-        return Ok(Some(String::new()));
-    };
-    if let Some(msg) = string_constant(arena, e)? {
-        return Ok(Some(msg));
-    }
-    let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(e));
-    match &expr.pexp_desc {
-        ExpressionDesc::Pexp_record(record) => {
-            // process_attributes.ml:25-33: every `reason` field is read, the
-            // last string kept.
-            let mut reason = String::new();
-            for field in arena.expr_field_list(record.0) {
-                if let Longident::Lident(txt) = arena.get_longident(field.lid.txt)
-                    && arena.get_string(*txt) == "reason"
-                    && let Some(msg) = string_constant(arena, field.expr)?
-                {
-                    reason = msg;
-                }
+    if let Some(e) = payload_expression(payload)
+        && let ExpressionDesc::Pexp_record(record) =
+            &crate::ast_payload::unwrap_braces(arena, arena.get_expr(e)).pexp_desc
+    {
+        for field in arena.expr_field_list(record.0) {
+            if let Longident::Lident(txt) = arena.get_longident(field.lid.txt)
+                && arena.get_string(*txt) == "reason"
+                && let Some(msg) = string_constant(arena, field.expr)?
+            {
+                return Ok(Some(msg));
             }
-            Ok(Some(reason))
         }
-        _ => Ok(None),
+        return Ok(None);
     }
+    // `string_of_opt_payload`.
+    let reason = crate::ast_payload::semantic_string_of_payload(arena, payload)
+        .map_err(|error| InvalidEscape::Parsed(error.loc))?;
+    Ok(Some(reason.unwrap_or_default()))
 }
 
-/// The reason of a found `@deprecated` declaration attribute.
+/// The reason of a found `@deprecated` declaration attribute, as the
+/// compiler reads it (see [`parsed_deprecated_reason`]).
 fn decl_deprecated_reason(attr: &decl::Attribute) -> Result<Option<String>, InvalidEscape> {
-    match &attr.attr_payload {
-        decl::AttributePayload::Deprecated { reason, .. } => match reason {
-            Ok(reason) => Ok(Some(reason.clone().unwrap_or_default())),
-            Err(loc) => Err(InvalidEscape::Decl(*loc)),
-        },
-        decl::AttributePayload::Empty => Ok(Some(String::new())),
-        payload => Ok(payload
-            .semantic_string()
-            .map_err(InvalidEscape::Decl)?
-            .map(str::to_string)),
-    }
+    attr.attr_payload
+        .deprecated_with_migrate()
+        .map(|deprecated| deprecated.map(|(reason, _)| reason.to_string()))
+        .map_err(InvalidEscape::Decl)
 }
 
 /// `find_editor_complete_from_attribute`.
@@ -300,5 +292,51 @@ pub fn new_declared<T>(
         deprecated,
         docstring,
         item,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reason the analysis reads from each `@@deprecated` of `source`.
+    fn deprecated_reasons(source: &str) -> Vec<Option<String>> {
+        let mut parser = crate::parser::Parser::new("Deprecated.res", source);
+        let items = crate::parser::module::parse_structure(&mut parser);
+        assert!(!parser.has_errors());
+        let arena = parser.into_arena();
+        items
+            .iter()
+            .map(|item| match &item.pstr_desc {
+                crate::parser::ast::StructureItemDesc::Pstr_attribute(attribute) => {
+                    let attributes = [(**attribute).clone()];
+                    find_deprecated_attribute(Attrs::Parsed(&attributes, &arena)).unwrap()
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// As the compiler reads it for its warning: a record without `reason`
+    /// is not deprecated, its first `reason` is the message, and any other
+    /// payload is deprecated.
+    #[test]
+    fn deprecated_reads_as_the_compiler_reads_it() {
+        assert_eq!(
+            deprecated_reasons(
+                "@@deprecated(\"old\")\n\
+                 @@deprecated\n\
+                 @@deprecated({reason: \"first\", reason: \"second\"})\n\
+                 @@deprecated({migrate: f()})\n\
+                 @@deprecated(42)\n"
+            ),
+            vec![
+                Some("old".to_string()),
+                Some(String::new()),
+                Some("first".to_string()),
+                None,
+                Some(String::new()),
+            ]
+        );
     }
 }
