@@ -420,18 +420,24 @@ impl Log {
     /// Step 2 of `close` over the sites `[from, to)`: one step each, and
     /// `unprinted` for each live one in a unit that preserves JSX.
     fn read_sites<B: Js>(&mut self, js: &B, bir: &Pools, idents: &[crate::ident::Ident], row: u32, from: u32, to: u32) {
-        let scope = bir.js_scope.as_ref().expect("lowering scope");
-        let (sites, entries) = (&scope.sites, &scope.site_entries);
-        for at in from as usize..to as usize {
+        let sites = &bir.js_scope.as_ref().expect("lowering scope").sites;
+        for site in &sites[from as usize..to as usize] {
             self.steps += 1;
-            let node = sites[at].node;
-            if node == NodeId(u32::MAX) {
+            if site.node == NodeId(u32::MAX) {
                 continue;
             }
-            if self.jsx_preserve && self.unprinted(js, bir, idents, node.0) {
+            if self.jsx_preserve && self.unprinted(js, bir, idents, site.node.0) {
                 continue;
             }
-            self.join(row, entries[at]);
+            // PROBE-GAP 3: the variable or the import of a site, which is an
+            // id; `Js::kind_of` gives its kind and nothing reads its payload
+            // by id (the second form of step 3 records it in the site).
+            let entry = match bir.view(site.node) {
+                crate::bir::View::Var { var } => FreeRef::var(var),
+                crate::bir::View::JQualified { module, .. } => FreeRef::import(module),
+                _ => unreachable!("a site is a reference"),
+            };
+            self.join(row, entry);
         }
     }
 

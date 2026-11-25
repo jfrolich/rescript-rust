@@ -91,11 +91,6 @@ pub(crate) struct Scope {
     pub(crate) uses: Vec<Uses>,
     /// One per `Var` and per `JQualified` node ever built, in creation order.
     pub(crate) sites: Vec<Site>,
-    /// The variable or the import of each site, written where the
-    /// reference is built: what the naming log's close reads of a site, so
-    /// that it reads no node. 4 bytes a site; a release writes nothing here
-    /// (it clears `Site::node`, which the close tests). Dense by site.
-    pub(crate) site_entries: Vec<super::names::FreeRef>,
     /// The last site of each variable plus one, zero for none. Dense by VarId.
     pub(crate) site_heads: Vec<u32>,
     /// Dense by VarId.
@@ -122,7 +117,6 @@ impl Scope {
     #[cfg(test)]
     pub(super) fn reserve_repeat(&mut self) {
         self.sites.reserve(self.sites.len());
-        self.site_entries.reserve(self.site_entries.len());
         self.site_heads.reserve(self.site_heads.len());
         self.uses.reserve(self.uses.len());
         self.facts.reserve(self.facts.len());
@@ -180,34 +174,21 @@ impl Scope {
     }
 
     /// Record the reference `node` of `var` where it is built. Returns the
-    /// site's index, which the node keeps. Cost: two pushes and two writes.
+    /// site's index, which the node keeps. Cost: one push and two writes.
     pub(crate) fn site(&mut self, var: VarId, node: NodeId) -> u32 {
         let index = u32::try_from(self.sites.len()).expect("site capacity");
         let head = &mut self.site_heads[var.index()];
         self.sites.push(Site { node, next: *head });
         *head = index + 1;
-        self.site_entry(super::names::FreeRef::var(var));
         index
     }
 
     /// Record the reference `node` to an imported module where it is built.
-    /// Returns the site's index, which the node keeps. Cost: two pushes.
-    pub(crate) fn import_site(&mut self, module: crate::bir::ImportId, node: NodeId) -> u32 {
+    /// Returns the site's index, which the node keeps. Cost: one push.
+    pub(crate) fn import_site(&mut self, node: NodeId) -> u32 {
         let index = u32::try_from(self.sites.len()).expect("site capacity");
         self.sites.push(Site { node, next: 0 });
-        self.site_entry(super::names::FreeRef::import(module));
         index
-    }
-
-    /// Push the entry of the site just pushed on `sites`. The column takes
-    /// the capacity `sites` has (which the lowering reserves for the unit's
-    /// nodes) when it is full, so it allocates once per unit while `sites`
-    /// does not grow. Cost: one comparison and one push.
-    fn site_entry(&mut self, entry: super::names::FreeRef) {
-        if self.site_entries.len() == self.site_entries.capacity() {
-            self.site_entries.reserve_exact(self.sites.capacity() - self.site_entries.len());
-        }
-        self.site_entries.push(entry);
     }
 
     /// Account for one constructed or released Var occurrence. Cost: O(1).
