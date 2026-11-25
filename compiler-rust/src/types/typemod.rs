@@ -7872,9 +7872,14 @@ fn lookup_module_alias_by_lid(
                 pers_env,
                 ctx,
                 |components| {
-                    components
-                        .lookup_module(submod_name, ctx)
-                        .and_then(|(_, _, md)| alias_of_module_type(&md.md_type))
+                    let (_, _, md) = components.lookup_module(submod_name, ctx)?;
+                    let (alias_presence, _) = alias_of_module_type(&md.md_type)?;
+                    // The target under the prefix of the components, as
+                    // `Env.find_module` returns it (compiler/ml/env.ml:
+                    // components substitute their items' paths): an alias
+                    // `module AliasSet = MakeSet` of `Src` is `Src.MakeSet`.
+                    let target = components.lookup_module_alias_target(submod_name, false, ctx)?;
+                    Some((alias_presence, target))
                 },
             )
             .flatten()
