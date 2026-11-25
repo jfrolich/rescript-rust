@@ -733,7 +733,16 @@ struct Held<S> {
     first: u32,
     literals: u32,
     bodies: u32,
+    /// Where the bindings that cover the whole statement start (a loop's
+    /// variable, the declarations of a switch's cases): `Globals::leave`
+    /// when it is staged.
+    cover: u32,
 }
+
+/// `Frame::leave` of a list walked for the external-shadow decision only:
+/// the body of a literal the names do not enter (without a closed row, or
+/// eta-reduced), and everything below it.
+const QUIET: u32 = u32::MAX - 1;
 
 /// Storage the replay reuses between units.
 pub(crate) struct Scratch<B: JsStmt> {
@@ -878,6 +887,7 @@ pub(crate) fn replay<B: JsStmt>(
     printed: &mut Printed,
 ) -> Replayed {
     let log = std::mem::take(&mut bir.js_scope.as_mut().expect("lowering scope").names);
+    let mut globals = std::mem::take(&mut bir.js_scope.as_mut().expect("lowering scope").globals);
     let variables = bir.vars.len();
     let imports = bir.pools.j_modules.len();
     tables.begin(variables + imports, program.raw);
@@ -886,7 +896,18 @@ pub(crate) fn replay<B: JsStmt>(
     printed.modules.clear();
     printed.modules.resize(imports, None);
     printed.finishes.clear();
-    let mut replay = Replay { js: &mut *js, bir: &mut *bir, idents, log: &log, tables, scratch, printed, done: Replayed::default() };
+    let mut replay = Replay {
+        js: &mut *js,
+        bir: &mut *bir,
+        idents,
+        log: &log,
+        tables,
+        scratch,
+        printed,
+        done: Replayed::default(),
+        globals: &mut globals,
+        quiet: 0,
+    };
     for &import in program.imports {
         replay.name_import(import);
     }
@@ -933,7 +954,9 @@ pub(crate) fn replay<B: JsStmt>(
     }
     replay.done.unnamed_references = unnamed;
     let done = replay.done;
-    bir.js_scope.as_mut().expect("lowering scope").names = log;
+    let scope = bir.js_scope.as_mut().expect("lowering scope");
+    scope.names = log;
+    scope.globals = globals;
     done
 }
 
@@ -955,6 +978,10 @@ struct Replay<'a, 'b, B: JsStmt> {
     scratch: &'b mut Scratch<B>,
     printed: &'b mut Printed,
     done: Replayed,
+    /// The external-shadow decision's tables, taken out of the scope.
+    globals: &'b mut super::globals::Globals,
+    /// Open `QUIET` frames.
+    quiet: u32,
 }
 
 impl<B: JsStmt> Replay<'_, '_, B> {
@@ -969,18 +996,29 @@ impl<B: JsStmt> Replay<'_, '_, B> {
         self.scratch.staged.clear();
         self.scratch.literals.clear();
         let list = self.js.body(self.bir, root, 0);
-        self.scratch.frames.push(Frame { list, at: 0, leave: ScopeId::NONE.0 });
+        self.push_frame(Frame { list, at: 0, leave: ScopeId::NONE.0 });
+        if self.globals.active {
+            self.globals.enter_list(&*self.js, self.bir, list);
+        }
         while let Some(&frame) = self.scratch.frames.last() {
             let len = self.js.len(self.bir, frame.list);
             if frame.at < len {
                 self.scratch.frames.last_mut().expect("the frame read").at += 1;
-                self.done.statements += 1;
+                if self.quiet == 0 {
+                    self.done.statements += 1;
+                }
                 let statement = self.js.take_at(self.bir, frame.list, frame.at);
                 self.statement(statement);
                 continue;
             }
             self.scratch.frames.pop();
-            if frame.leave != ScopeId::NONE.0 {
+            if self.globals.active {
+                let mark = self.globals.frames.pop().expect("a frame's mark");
+                self.globals.leave(mark);
+            }
+            if frame.leave == QUIET {
+                self.quiet -= 1;
+            } else if frame.leave != ScopeId::NONE.0 {
                 self.tables.leave();
             }
             self.done.moves += len as usize;
@@ -992,6 +1030,15 @@ impl<B: JsStmt> Replay<'_, '_, B> {
                 return;
             }
             self.give(rebuilt);
+        }
+    }
+
+    /// Open a frame; with the external-shadow decision active, note where
+    /// its bindings start. O(1).
+    fn push_frame(&mut self, frame: Frame<B::L>) {
+        self.scratch.frames.push(frame);
+        if self.globals.active {
+            self.globals.frames.push(self.globals.mark());
         }
     }
 
@@ -1027,18 +1074,41 @@ impl<B: JsStmt> Replay<'_, '_, B> {
             let body = held.next - held.literals;
             if body < held.bodies {
                 held.next += 1;
-                if held.kind == Kind::Try && body == 1 {
-                    let catch = self.js.binder(self.bir, &held.statement);
-                    if let Some(var) = catch {
-                        self.name(var);
-                    }
+                let kind = held.kind;
+                let catch = if kind == Kind::Try && body == 1 { self.js.binder(self.bir, &held.statement) } else { None };
+                if let Some(var) = catch
+                    && self.quiet == 0
+                {
+                    self.name(var);
+                }
+                if self.globals.active && kind == Kind::Switch && body == 0 {
+                    self.enter_cases();
                 }
                 let held = self.scratch.held.last_mut().expect("a held statement");
+                let explicit = kind == Kind::Block && self.js.stmt_aux(self.bir, &held.statement) == 1;
                 let list = self.js.body(self.bir, &mut held.statement, body);
-                self.scratch.frames.push(Frame { list, at: 0, leave: ScopeId::NONE.0 });
+                self.push_frame(Frame { list, at: 0, leave: if self.quiet != 0 { QUIET } else { ScopeId::NONE.0 } });
+                if self.quiet != 0 {
+                    self.quiet += 1;
+                }
+                if self.globals.active {
+                    // The scope of a catch variable is its handler; a
+                    // list's declarations cover it, but those of an
+                    // explicit block are counted in the list it is spliced
+                    // into, and those of a case in the whole switch.
+                    if let Some(var) = catch {
+                        self.globals.enter(var);
+                    }
+                    if !explicit && kind != Kind::Switch {
+                        self.globals.enter_list(&*self.js, self.bir, list);
+                    }
+                }
                 return;
             }
-            let Held { mut statement, first, literals, .. } = self.scratch.held.pop().expect("a held statement");
+            let Held { mut statement, first, literals, cover, .. } = self.scratch.held.pop().expect("a held statement");
+            if self.globals.active {
+                self.globals.leave(cover);
+            }
             if literals != 0 {
                 // PROBE-GAP 7: `functions` lends each literal's list to a
                 // visitor while the implementation is borrowed, so a body
@@ -1065,7 +1135,13 @@ impl<B: JsStmt> Replay<'_, '_, B> {
     /// `finish` for a range loop, the descent of `functions`, one push.
     fn statement(&mut self, mut statement: B::S) {
         let kind = self.js.stmt_kind(self.bir, &statement);
+        let quiet = self.quiet != 0;
+        if quiet && matches!(kind, Kind::Declare | Kind::Rest) && self.declaration(&statement) == Declaration::Omit {
+            self.scratch.staged.push(statement);
+            return;
+        }
         match kind {
+            _ if quiet => {}
             Kind::Declare => match self.declaration(&statement) {
                 // Not printed: nothing below it is named.
                 Declaration::Omit => {
@@ -1113,6 +1189,17 @@ impl<B: JsStmt> Replay<'_, '_, B> {
             }
             _ => {}
         }
+        let cover = self.globals.mark();
+        if self.globals.active {
+            if matches!(kind, Kind::ForRange | Kind::ForOf | Kind::ForAwaitOf) {
+                let var = self.js.binder(self.bir, &statement).expect("a loop binds");
+                self.globals.enter(var);
+            }
+            let Replay { js, bir, globals, .. } = &mut *self;
+            let before = js.steps();
+            js.globals(bir, &mut statement, |var| globals.qualifies(var));
+            self.globals.steps += (self.js.steps() - before) as usize;
+        }
         let first = self.scratch.literals.len();
         {
             let Replay { js, bir, scratch, .. } = &mut *self;
@@ -1123,10 +1210,13 @@ impl<B: JsStmt> Replay<'_, '_, B> {
         let literals = index(self.scratch.literals.len() - first);
         let bodies = self.js.bodies(self.bir, &statement);
         if literals == 0 && bodies == 0 {
+            if self.globals.active {
+                self.globals.leave(cover);
+            }
             self.scratch.staged.push(statement);
             return;
         }
-        self.scratch.held.push(Held { statement, kind, next: 0, first: index(first), literals, bodies });
+        self.scratch.held.push(Held { statement, kind, next: 0, first: index(first), literals, bodies, cover });
         self.advance();
     }
 
@@ -1211,12 +1301,12 @@ impl<B: JsStmt> Replay<'_, '_, B> {
     /// list (and the binder), one `Tables::add` per parameter and for the
     /// binder, `Tables::enter`, one push.
     fn literal(&mut self, header: FuncId, list: B::L) -> bool {
-        let Some(scope) = self.log.scope(header) else { return false };
-        let row = scope.0;
-        let info = self.log.rows[row as usize];
-        if info.flags & ScopeRow::CLOSED == 0 {
-            return false;
+        let named = self.quiet == 0 && self.log.scope(header).is_some_and(|scope| self.log.rows[scope.0 as usize].flags & ScopeRow::CLOSED != 0);
+        if !named {
+            return self.quiet_literal(header, list);
         }
+        let row = self.log.scope(header).expect("a closed row").0;
+        let info = self.log.rows[row as usize];
         self.done.scopes += 1;
         let held = self.scratch.held.last().expect("a held statement");
         let statement = &held.statement;
@@ -1253,7 +1343,7 @@ impl<B: JsStmt> Replay<'_, '_, B> {
         self.tables.enter(&self.scratch.reservation);
         if eta {
             self.tables.leave();
-            return false;
+            return self.quiet_literal(header, list);
         }
         let function = self.bir.function(info.function);
         let method = function.flags & crate::bir::FuncHeader::METHOD != 0;
@@ -1263,8 +1353,50 @@ impl<B: JsStmt> Replay<'_, '_, B> {
             }
             self.name(self.bir.function_parameter(info.function, i));
         }
-        self.scratch.frames.push(Frame { list, at: 0, leave: row });
+        self.push_frame(Frame { list, at: 0, leave: row });
+        if self.globals.active {
+            self.enter_parameters(header);
+            self.globals.enter_list(&*self.js, self.bir, list);
+        }
         true
+    }
+
+    /// The body of a literal the names do not enter, walked for the
+    /// external-shadow decision alone when it is active: a `QUIET` frame,
+    /// its parameters and its declarations entered. Returns whether a frame
+    /// was opened. O(1) and `enter_list`.
+    fn quiet_literal(&mut self, header: FuncId, list: B::L) -> bool {
+        if !self.globals.active {
+            return false;
+        }
+        self.push_frame(Frame { list, at: 0, leave: QUIET });
+        self.quiet += 1;
+        self.enter_parameters(header);
+        self.globals.enter_list(&*self.js, self.bir, list);
+        true
+    }
+
+    /// The parameters of `header` bind in its function. One
+    /// `Globals::enter` each.
+    fn enter_parameters(&mut self, header: FuncId) {
+        for i in 0..self.bir.function(header).params.len() {
+            let param = self.bir.function_parameter(header, i);
+            self.globals.enter(param);
+        }
+    }
+
+    /// The declarations of every case of the held `switch`, entered before
+    /// its first case is walked: a declaration in a case covers all of
+    /// them, not the scrutinee. Each case's list is taken and put back
+    /// (`body`, `set_body`) to be read. Cost: two steps of the
+    /// implementation per case and `enter_list`.
+    fn enter_cases(&mut self) {
+        let held = self.scratch.held.last_mut().expect("a held switch");
+        for case in 0..held.bodies {
+            let list = self.js.body(self.bir, &mut held.statement, case);
+            self.globals.enter_list(&*self.js, self.bir, list);
+            self.js.set_body(self.bir, &mut held.statement, case, list);
+        }
     }
 
     /// Reserve one entry of a literal's reservation and keep it for

@@ -2,26 +2,26 @@
 //! references to JavaScript globals print as `globalThis.name` because a
 //! binding around them prints with the global's name. The legacy pass is
 //! `lambda/js_pass_external_shadow.rs`; this takes the same decision once,
-//! when the unit's root block exists, from what the lowering recorded where
-//! it wrote it: a binder node per variable (`VarTable::binder`), a site per
-//! reference (`Scope::sites`), the parent of every node, and a count of live
-//! references per imported module. No statement body is read.
-use crate::bir::{Bir, NodeId, Op, VarId, View};
+//! when the unit's root block exists. `decide` builds the table of names
+//! from what the lowering recorded (a binder per variable, the site heads,
+//! a count of live references per imported module); the decision is then
+//! made in the naming replay's walk (`names::replay`, "T6: the interface"
+//! (d)): the walk keeps, per referenced global name, the number of the
+//! bindings of that name that cover the place it is at, and a reference
+//! found by `JsStmt::globals` is qualified when that number is not zero or
+//! an imported module prints with the name.
+use super::js::Pools;
+use super::js_stmt::JsStmt;
+use crate::bir::{Bir, VarId};
+use crate::emit::row::Kind;
 use crate::ident::Ident;
 use crate::name::Name;
-
-/// A binding whose scope covers its node's whole subtree, a walk that found
-/// one above, or a node above which there is none.
-const CLEAR: u32 = 1;
-const SHADOWED: u32 = 2;
-/// A `switch` whose cases declare the name: covers the case blocks, not the
-/// discriminant.
-const CASES: u32 = 3;
 
 /// One referenced global name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Row {
-    /// The last binding that prints with the name, plus one; zero for none.
+    /// The bindings that print with the name and cover the place the
+    /// replay's walk is at.
     binding: u32,
     /// The last referenced global variable with the name, plus one.
     global: u32,
@@ -29,13 +29,16 @@ pub(crate) struct Row {
     imported: bool,
 }
 
-/// A link of a row's chain: a binder node or a global variable, and the
-/// link before it plus one.
+/// A link of a row's chain of global variables: the variable, and the link
+/// before it plus one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Link {
     item: u32,
     next: u32,
 }
+
+/// `Globals::of_var`: the variable is a referenced global (else a binder).
+const GLOBAL: u32 = 1 << 31;
 
 /// The tables of the decision, kept on the lowering's scope so that a
 /// second unit of the same arena allocates nothing.
@@ -49,11 +52,20 @@ pub(crate) struct Globals {
     names: hashbrown::HashMap<Name, u32, ahash::RandomState>,
     rows: Vec<Row>,
     links: Vec<Link>,
-    /// Per node: `epoch << 2 | CLEAR, SHADOWED or CASES`. Allocated when the
-    /// first binding prints with a referenced global's name.
-    marks: Vec<u32>,
-    epoch: u32,
-    /// Variables read, bindings marked and ancestors read.
+    /// Per variable, when some row is bound: its row plus one, with
+    /// `GLOBAL` for a referenced global; zero for a variable of no row.
+    /// Sized to the variables only in a unit where a binding or an import
+    /// prints with a referenced global's name.
+    of_var: Vec<u32>,
+    /// A binding or an import prints with a referenced global's name: the
+    /// replay's walk counts and decides.
+    pub(crate) active: bool,
+    /// The rows of the bindings the walk has entered, innermost last.
+    covering: Vec<u32>,
+    /// Per open list of the walk, where its bindings start in `covering`.
+    pub(crate) frames: Vec<u32>,
+    /// Variables read, bindings entered and left, statements scanned for
+    /// declarations, and the nodes the descent of `JsStmt::globals` read.
     pub(crate) steps: usize,
     /// References that print as `globalThis.name`.
     pub(crate) qualified: usize,
@@ -84,24 +96,95 @@ impl Globals {
         self.links.push(Link { item, next: head });
         self.links.len() as u32
     }
+
+    /// Where the bindings entered from here on start: the mark to give
+    /// `leave`. O(1).
+    pub(crate) fn mark(&self) -> u32 {
+        self.covering.len() as u32
+    }
+
+    /// The walk enters the scope of `var`'s binding: when the variable
+    /// prints with a referenced global's name, that row's count rises.
+    /// O(1): one read of `of_var`, and one step and one push for a binding
+    /// of a row.
+    pub(crate) fn enter(&mut self, var: VarId) {
+        let Some(&entry) = self.of_var.get(var.index()) else { return };
+        if entry == 0 || entry & GLOBAL != 0 {
+            return;
+        }
+        let row = entry - 1;
+        self.steps += 1;
+        self.rows[row as usize].binding += 1;
+        self.covering.push(row);
+    }
+
+    /// The walk leaves the scopes of the bindings entered since `mark`. One
+    /// step per binding left.
+    pub(crate) fn leave(&mut self, mark: u32) {
+        while self.covering.len() > mark as usize {
+            let row = self.covering.pop().expect("a binding entered");
+            self.steps += 1;
+            self.rows[row as usize].binding -= 1;
+        }
+    }
+
+    /// The decision for a reference to `var` at the place the walk is at:
+    /// a referenced global whose name a binding around it or an imported
+    /// module prints with. O(1).
+    pub(crate) fn qualifies(&mut self, var: VarId) -> bool {
+        let Some(&entry) = self.of_var.get(var.index()) else { return false };
+        if entry & GLOBAL == 0 {
+            return false;
+        }
+        let row = self.rows[((entry & !GLOBAL) - 1) as usize];
+        let qualified = row.binding != 0 || row.imported;
+        self.qualified += usize::from(qualified);
+        qualified
+    }
+
+    /// The declarations a list binds, entered before its statements are
+    /// walked: those of its statements and of the explicit blocks among
+    /// them, which the flatten pass splices into the list (the legacy
+    /// decision climbed from such a declaration to the list's block). One
+    /// step per statement read; a block statement is read where it is
+    /// (`JsStmt::with_stmt_at`, `JsStmt::with_block_stmt`), and the read
+    /// recurses as deep as explicit blocks nest.
+    pub(crate) fn enter_list<B: JsStmt>(&mut self, js: &B, a: &Pools, list: B::L) {
+        for at in 0..js.len(a, list) {
+            js.with_stmt_at(a, list, at, |statement| self.enter_declarations(js, a, statement));
+        }
+    }
+
+    /// `enter_list` for one statement. See there.
+    fn enter_declarations<B: JsStmt>(&mut self, js: &B, a: &Pools, statement: &B::S) {
+        self.steps += 1;
+        if let Some(var) = js.declared(a, statement) {
+            self.enter(var);
+        }
+        if js.stmt_kind(a, statement) == Kind::Block && js.stmt_aux(a, statement) == 1 {
+            for at in 0..js.block_len(a, statement) {
+                js.with_block_stmt(a, statement, at, |inner| self.enter_declarations(js, a, inner));
+            }
+        }
+    }
 }
 
-/// Decide every reference to a JavaScript global of the finished unit and
-/// set the bit of the ones the legacy pass would qualify
-/// (`Bir::qualify_global`). `idents` gives the identifier a variable prints
-/// as, by origin.
+/// Build the table of the decision for the finished unit: the rows of the
+/// referenced global names, the bindings and imports that print with one,
+/// and, when there is any, the row of each variable (`of_var`) the replay's
+/// walk reads. `idents` gives the identifier a variable prints as, by
+/// origin. The references are decided by the walk (`names::replay`).
 ///
 /// Cost. A unit that references no JavaScript global: one read per variable
 /// (its site head). Otherwise also one read per variable with a binder and
-/// one lookup of its printed name, and one read per import. Only when a
-/// binding or a live import prints with a referenced global's name: one
-/// mark per such binding (plus one step per explicit block around a
-/// declaration), and per site of that name its ancestors up to the first
-/// marked node, each read at most twice per name (the second read marks it
-/// with the result), so the sites of one name cost at most two reads per
-/// node of the unit together. Nothing is allocated when the tables have
-/// their capacity. The tests in this file assert the counts at 10,000
-/// references and at 10,000 bindings.
+/// one lookup of its printed name, and one read per import; when a binding
+/// or a live import prints with a referenced global's name, one write per
+/// variable (`of_var`) and one per global variable of a row. Nothing is
+/// allocated when the tables have their capacity. The walk's cost is
+/// `names::replay`'s: one step per binding of a row entered and left, one
+/// per statement scanned for declarations, and the descent of
+/// `JsStmt::globals` over every statement it walks; nothing in a unit
+/// where no row is bound.
 pub(crate) fn decide(bir: &mut Bir, idents: &[Ident]) {
     let Some(mut scope) = bir.js_scope.take() else { return };
     let mut globals = std::mem::take(&mut scope.globals);
@@ -109,6 +192,10 @@ pub(crate) fn decide(bir: &mut Bir, idents: &[Ident]) {
     globals.rows.clear();
     globals.links.clear();
     globals.raw.clear();
+    globals.of_var.clear();
+    globals.covering.clear();
+    globals.frames.clear();
+    globals.active = false;
     let ident = |bir: &Bir, var: usize| idents.get(bir.vars.j_origin[var].index()).copied();
     let variables = bir.vars.len();
     globals.steps += variables;
@@ -127,31 +214,40 @@ pub(crate) fn decide(bir: &mut Bir, idents: &[Ident]) {
         }
     }
     if !globals.rows.is_empty() {
-        let bound = bindings(bir, &scope, &mut globals, idents);
-        if bound {
-            rows(bir, &scope, &mut globals);
+        globals.active = bindings(bir, &scope, &mut globals, idents);
+        if globals.active {
+            for row in 0..globals.rows.len() {
+                let mut at = globals.rows[row].global;
+                while at != 0 {
+                    let Link { item, next } = globals.links[at as usize - 1];
+                    at = next;
+                    globals.of_var[item as usize] = GLOBAL | (row as u32 + 1);
+                }
+            }
         }
     }
     scope.globals = globals;
     bir.js_scope = Some(scope);
 }
 
-/// Step 2: chain every binder that prints with a referenced global's name
-/// to its row, and flag the rows an imported module binds. Returns whether
+/// Step 2: the row of every binder that prints with a referenced global's
+/// name (`of_var`), and the rows an imported module binds. Returns whether
 /// any row is bound. One step per variable with a binder and per import.
 fn bindings(bir: &Bir, scope: &super::scope::Scope, globals: &mut Globals, idents: &[Ident]) -> bool {
     use crate::js_ir::printer::convert_ident_atom;
+    globals.of_var.resize(bir.vars.len(), 0);
     let mut bound = false;
     for var in 0..bir.vars.len() {
-        let Some(binder) = bir.vars.binder(VarId(var as u32)) else { continue };
+        if bir.vars.binder(VarId(var as u32)).is_none() {
+            continue;
+        }
         globals.steps += 1;
         let Some(ident) = idents.get(bir.vars.j_origin[var].index()) else { continue };
         if ident.is_js() {
             continue;
         }
         if let Some(&row) = globals.names.get(&convert_ident_atom(ident.name_atom())) {
-            let head = globals.rows[row as usize].binding;
-            globals.rows[row as usize].binding = globals.link(head, binder.0);
+            globals.of_var[var] = row + 1;
             bound = true;
         }
     }
@@ -168,113 +264,11 @@ fn bindings(bir: &Bir, scope: &super::scope::Scope, globals: &mut Globals, ident
     bound
 }
 
-/// Steps 3 and 4, one name at a time: mark the scope of each binding, then
-/// decide each site. See `decide` for the cost.
-fn rows(bir: &mut Bir, scope: &super::scope::Scope, globals: &mut Globals) {
-    if globals.marks.len() < bir.nodes.len() {
-        globals.marks.resize(bir.nodes.len(), 0);
-    }
-    for row in 0..globals.rows.len() {
-        let Row { binding, global, imported } = globals.rows[row];
-        if binding == 0 && !imported {
-            continue;
-        }
-        globals.epoch += 1;
-        let epoch = globals.epoch;
-        let mut at = binding;
-        while at != 0 {
-            let Link { item, next } = globals.links[at as usize - 1];
-            at = next;
-            globals.steps += 1;
-            if let Some((node, kind)) = binding_scope(bir, NodeId(item), &mut globals.steps) {
-                globals.marks[node.index()] = epoch << 2 | kind;
-            }
-        }
-        let mut at = global;
-        while at != 0 {
-            let Link { item, next } = globals.links[at as usize - 1];
-            at = next;
-            let mut site = scope.site_heads[item as usize];
-            while site != 0 {
-                let super::scope::Site { node, next } = scope.sites[site as usize - 1];
-                site = next;
-                if node == NodeId(u32::MAX) {
-                    continue;
-                }
-                if imported || shadowed(bir, globals, epoch, node) {
-                    bir.qualify_global(node);
-                    globals.qualified += 1;
-                }
-            }
-        }
-    }
-}
-
-/// The node whose subtree a binding covers, as the legacy pass reads the
-/// program after the flatten pass, and how it covers it. A declaration: its
-/// nearest enclosing block that is not an explicit block statement (the
-/// flatten pass splices those into the list they stand in), or the `switch`
-/// when that block is a case. A parameter: the function. A loop variable:
-/// the loop statement. A catch variable: the handler block. One step per
-/// explicit block around a declaration; constant otherwise.
-fn binding_scope(bir: &Bir, binder: NodeId, steps: &mut usize) -> Option<(NodeId, u32)> {
-    match bir.view(binder) {
-        View::SDecl { .. } | View::SRest { .. } => {
-            let mut block = bir.parents[binder.index()]?;
-            while bir.node(block).op() == Op::SBlock && bir.node(block).aux() != 0 {
-                *steps += 1;
-                block = bir.parents[block.index()]?;
-            }
-            match bir.parents[block.index()] {
-                Some(parent) if bir.node(parent).op() == Op::SSwitch => Some((parent, CASES)),
-                _ => Some((block, SHADOWED)),
-            }
-        }
-        View::JFun { .. } | View::SForRange { .. } | View::SForOf { .. } | View::SForAwaitOf { .. } => Some((binder, SHADOWED)),
-        View::STry { parts, exception: Some(_) } => Some((parts[1], SHADOWED)),
-        _ => None,
-    }
-}
-
-/// Whether a marked scope of `epoch` is above `site`. Reads the ancestors
-/// up to the first one marked in this epoch, then marks the ones it passed
-/// with the result. At a `switch` marked for its cases the walk stops only
-/// when it arrived from a case block.
-fn shadowed(bir: &Bir, globals: &mut Globals, epoch: u32, site: NodeId) -> bool {
-    let (mut node, mut from) = (site, site);
-    let (result, stop) = loop {
-        globals.steps += 1;
-        let mark = globals.marks[node.index()];
-        if mark >> 2 == epoch {
-            match mark & 3 {
-                CLEAR => break (false, Some(node)),
-                SHADOWED => break (true, Some(node)),
-                _ if from != node && bir.node(from).op() == Op::SBlock => break (true, Some(node)),
-                _ => {}
-            }
-        }
-        match bir.parents[node.index()] {
-            Some(parent) => (from, node) = (node, parent),
-            None => break (false, None),
-        }
-    };
-    let memo = epoch << 2 | if result { SHADOWED } else { CLEAR };
-    let mut node = Some(site);
-    while node != stop {
-        let at = node.expect("a node below the stop").index();
-        globals.steps += 1;
-        if globals.marks[at] >> 2 != epoch {
-            globals.marks[at] = memo;
-        }
-        node = bir.parents[at];
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bir::lower::scope::Scope;
+    use crate::bir::{NodeId, View};
     use crate::ident::IdentFlags;
     use crate::lambda::lam_compat::LetKind;
 
