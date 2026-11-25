@@ -41,7 +41,7 @@
 //! the flip). It is a parameter of every function, beside the
 //! implementation, so that a call borrows two fields of the lowering's
 //! state and not the state.
-use crate::bir::{Bir, ConstId, FuncId, ImportId, JsId, ListId, NodeId, StrId, VarId};
+use crate::bir::{Bir, ConstId, FuncId, ImportId, JsId, StrId, VarId};
 use crate::emit::row::Kind;
 use crate::js_ir::BinOp;
 use crate::js_ir::arena::FieldPos;
@@ -65,15 +65,6 @@ pub trait Js {
     type Ref<'r>: Copy
     where
         Self: 'r;
-
-    // ---- The transition (deleted by T6x with their last call) ----
-
-    /// The handle of a J row built outside the interface. O(1).
-    fn from_node(node: NodeId) -> Self::E;
-    /// The J row of a handle, for a caller that is not converted. O(1).
-    fn node(e: Self::E) -> NodeId;
-    /// The reference of a J row built outside the interface. O(1).
-    fn at<'r>(node: NodeId) -> Self::Ref<'r>;
 
     // ---- The implementation ----
 
@@ -234,12 +225,6 @@ pub trait Js {
     fn push(&mut self, operand: Self::E);
     /// The last operand pushed. O(1). Panics on an empty stack.
     fn pop(&mut self) -> Self::E;
-    /// Transition (deleted by T6x with its last call): the nodes of a pool
-    /// list of detached J expressions that a caller that is not converted
-    /// built, pushed as operands in order. One move per node; counts no
-    /// step, as [`Js::push`] counts none. (T6p: `external.rs` gets the
-    /// operands of a call from `prim.rs` as a pool list.)
-    fn push_list(&mut self, a: &Pools, list: ListId);
     /// `callee(operands since mark)` with the call information `info`. One
     /// step per operand.
     fn call(&mut self, a: &mut Pools, callee: Self::E, mark: Mark, info: JsId) -> Self::E;

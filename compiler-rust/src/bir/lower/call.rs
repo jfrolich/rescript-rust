@@ -370,24 +370,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         Some(AritySpan { start, len: arities.len() as u32 })
     }
 
-    /// C:1144 compile_apply_call_inner: the call constructor performs no rewrite.
-    /// Cost: O(A): one move and one step per argument.
-    /// The row form of `call_values`, for a test that builds its
-    /// arguments as rows: it wraps the callee and each argument and turns
-    /// the call back.
-    #[cfg(test)]
-    pub(super) fn call_node(
-        &mut self,
-        callee: NodeId,
-        args: &[NodeId],
-        info: crate::js_ir::CallInfo,
-    ) -> NodeId {
-        let args = args.iter().map(|&arg| B::from_node(arg));
-        B::node(self.call_values(B::from_node(callee), args, info))
-    }
-
-    /// `call_node` on handles: `callee(args)`, the constructor performs no
-    /// rewrite. O(A): one move and one step per argument; allocates
+    /// C:1144 compile_apply_call_inner: `callee(args)`; the constructor
+    /// performs no rewrite. O(A): one move and one step per argument; allocates
     /// nothing in a warm unit.
     pub(super) fn call_values(
         &mut self,
@@ -508,7 +492,8 @@ mod tests {
                         let value = state.pure_expression(View::JNull, 0);
                         let old = exp::null(&mut legacy.j);
                         if effectful {
-                            args.push(state.call_node(value, &[], Default::default()));
+                            let call = state.call_values(crate::bir::lower::out::of_row(value), std::iter::empty(), Default::default());
+                            args.push(crate::bir::lower::out::row(call));
                             old_args.push(exp::call(old, &[], Default::default(), &mut legacy.j));
                         } else {
                             args.push(value);

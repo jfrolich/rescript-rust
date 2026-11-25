@@ -1257,7 +1257,7 @@ mod tests {
                     }
                     super::super::View::Const { .. } => Ok(ProbePlan::Ready(Probed::Out(Out {
                         stmts: Span::default(),
-                        value: Some(<crate::bir::j::rows::Rows as js::Js>::from_node(node)),
+                        value: Some(crate::bir::j::rows::Rows::from_node(node)),
                         finished: Finished::False,
                     }))),
                     other => panic!("unexpected test source: {other:?}"),

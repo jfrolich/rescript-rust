@@ -355,13 +355,6 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
     }
 
-    /// B:1225 block of no statement: an explicit empty block.
-    #[cfg(test)]
-    fn empty_block(&mut self) -> NodeId {
-        let list = self.js.list(&mut self.arena, 0, std::iter::empty());
-        B::stmt_node(self.js.explicit_block(&mut self.arena, list))
-    }
-
     /// Forget two consumed runs, the upper one first so that both are popped
     /// when they are the top of the stack.
     fn kill(&mut self, first: Span, second: Span) {
@@ -417,13 +410,6 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             return Err(test);
         }
         Ok(self.js.keep_operand(&mut self.arena, test, 0))
-    }
-
-    /// `if (test) yes else no` with both lists as given: no rule of J-S3.
-    #[cfg(test)]
-    fn raw_if(&mut self, test: NodeId, yes: crate::bir::ListId, no: crate::bir::ListId) -> NodeId {
-        let statement = self.js.if_plain(&mut self.arena, B::from_node(test), B::list_from(yes), B::list_from(no));
-        B::stmt_node(statement)
     }
 
     /// B:1575 simplify_if as one statement. Each run is copied into the
@@ -1604,7 +1590,10 @@ mod tests {
                     .state
                     .arena
                     .new_node(View::SContinue { label: None }, 0),
-                'o' => self.state.empty_block(),
+                'o' => {
+                    let list = self.state.arena.lists.push(&[]);
+                    self.state.arena.explicit_block_from_list(list)
+                }
                 'i' | 'j' => {
                     let test = self.var(1);
                     let yes = self.assign(2);
@@ -1615,7 +1604,10 @@ mod tests {
                         vec![]
                     };
                     let no = self.state.arena.lists.push(&no);
-                    self.state.raw_if(test, yes, no)
+                    // Both blocks as given: no rule of J-S3.
+                    let then_ = self.state.arena.block_from_list(yes);
+                    let else_ = self.state.arena.block_from_list(no);
+                    self.state.arena.new_node(View::SIf { condition: test, then_, else_: Some(else_) }, 0)
                 }
                 _ => unreachable!(),
             }
@@ -1630,7 +1622,7 @@ mod tests {
             for kind in kinds.chars() {
                 let statement = self.statement(kind);
                 let slot = self.state.statements.mark().start;
-                self.state.statements.push(<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::stmt_from_node(statement));
+                self.state.statements.push(crate::bir::j::rows::Rows::stmt_from_node(statement));
                 if kind == 'o' {
                     self.state.statements.note_empty_block(slot, statement.0);
                 }
@@ -1668,7 +1660,7 @@ mod tests {
         let (yes, no) = (hand.list(0, yes), hand.list(1, no));
         let test = hand.test(test);
         let statement = pooled_if(&mut hand.state.arena, test, yes, no);
-        hand.state.statements.push(<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::stmt_from_node(statement));
+        hand.state.statements.push(crate::bir::j::rows::Rows::stmt_from_node(statement));
         hand.text(None)
     }
 
@@ -1742,7 +1734,7 @@ mod tests {
             vec![pooled_if(arena, test, then_, else_)]
         };
         for statement in statements {
-            hand.state.statements.push(<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::stmt_from_node(statement));
+            hand.state.statements.push(crate::bir::j::rows::Rows::stmt_from_node(statement));
         }
         hand.text(None)
     }

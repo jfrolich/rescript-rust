@@ -36,7 +36,7 @@
 //! that consumes a list costs one step per statement of the list (it
 //! adopts each once). Nothing here allocates in a warm unit.
 use super::js::{Js, Pools};
-use crate::bir::{FuncId, ListId, NodeId, StrId, SwitchId, VarId};
+use crate::bir::{FuncId, StrId, SwitchId, VarId};
 use crate::emit::row::Kind;
 use crate::lambda::LamLoc;
 use crate::lambda::lam_compat::LetKind;
@@ -100,18 +100,6 @@ pub trait JsStmt: Js {
     type S;
     /// A statement list in flight. `Copy`; at most 8 bytes.
     type L: Copy;
-
-    // ---- The transition (deleted by T6x with their last call) ----
-
-    /// The handle of a J statement built outside the interface. O(1).
-    fn stmt_from_node(node: NodeId) -> Self::S;
-    /// The J row of a statement, for a caller that is not converted. O(1).
-    fn stmt_node(s: Self::S) -> NodeId;
-    /// The list of a pool list made outside the interface (by
-    /// `StatementStack::take_list`). O(1).
-    fn list_from(list: ListId) -> Self::L;
-    /// The pool list of a list, for a caller that is not converted. O(1).
-    fn list_id(list: Self::L) -> ListId;
 
     // ---- Reading a statement in hand ----
 
