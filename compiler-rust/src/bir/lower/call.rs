@@ -444,13 +444,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     full_args.push(param);
                 }
                 // The callee and the arguments were built before the
-                // function's scope opened and move into it (G10). T6r:
-                // `names::adopt` takes a row, read here by its id.
-                let node = NodeId(self.js.id(&self.arena, B::of(&callee)));
-                super::names::adopt(&mut self.arena, &self.idents, node);
+                // function's scope opened and move into it (G10).
+                super::names::adopt(&self.js, &mut self.arena, &self.idents, &callee);
                 for value in &full_args[..remaining] {
-                    let node = NodeId(self.js.id(&self.arena, B::of(value)));
-                    super::names::adopt(&mut self.arena, &self.idents, node);
+                    super::names::adopt(&self.js, &mut self.arena, &self.idents, value);
                 }
                 let call = self.call_values(callee, full_args.drain(..), full);
                 self.eta_arguments = full_args;

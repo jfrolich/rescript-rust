@@ -31,7 +31,9 @@
 //! The lowering calls `open`, `close` and `adopt`, and `replay` when the
 //! unit is complete; check mode compares the names with the pass. The
 //! names are not printed yet.
+use super::js::{Js, Pools};
 use crate::bir::{Bir, FuncId, ImportId, NodeId, Op, VarId};
+use crate::emit::row::Kind;
 use crate::emit::{Printed, Subject, Tables};
 use crate::name::Name;
 
@@ -160,8 +162,6 @@ pub(crate) struct Log {
     run: Vec<FreeRef>,
     /// The closed direct children of the open scopes, innermost run last.
     children: Vec<Child>,
-    /// The nodes `adopt` has still to read. Empty between calls.
-    pending: Vec<NodeId>,
     /// The unit preserves JSX (`-bs-jsx-preserve`): the printer writes an
     /// element as `<tag ...>` and does not print its runtime callee, nor
     /// the tag of an empty fragment. Such an operand is not a reference
@@ -465,35 +465,43 @@ impl Log {
         }
     }
 
-    /// `adopt` on the log taken out of `bir` (see `adopt`). Cost:
-    /// `size_imports`; one step per node of the subtree of `node`, where a
+    /// `adopt` on the log taken out of `bir` (see `adopt`): the node
+    /// `value` and what is below it, read through `Js` (`kind`; `var_of`
+    /// of a reference, `qualified_of` of a module reference,
+    /// `function_of` of a literal; `arity` and `operand` of any other
+    /// node). Cost: one step per node of the subtree of `value`, where a
     /// function literal is not entered but costs one step per entry of its
     /// free list; `unprinted` per reference in a unit that preserves JSX.
-    /// The stack `pending` is kept across calls and `run` takes at most one
-    /// push per entry joined; both allocate only when they grow.
-    fn adopt(&mut self, bir: &Bir, idents: &[crate::ident::Ident], node: NodeId) {
-        let row = self.open.last().expect("adopt inside an open function scope").row;
-        self.size_imports(bir);
-        debug_assert!(self.pending.is_empty());
-        self.pending.push(node);
-        while let Some(node) = self.pending.pop() {
-            self.steps += 1;
-            self.adopted_nodes += 1;
-            match bir.view(node) {
-                crate::bir::View::Var { .. } | crate::bir::View::JQualified { .. }
-                    if self.jsx_preserve && self.unprinted(bir, idents, node) => {}
-                crate::bir::View::Var { var } => self.join(row, FreeRef::var(var)),
-                crate::bir::View::JQualified { module, .. } => self.join(row, FreeRef::import(module)),
-                crate::bir::View::JFun { header, .. } => {
-                    let scope = self.scope(header).expect("an adopted function literal is closed");
-                    let literal = self.rows[scope.0 as usize];
-                    assert!(literal.flags & ScopeRow::CLOSED != 0, "an adopted function literal is closed");
-                    for i in literal.free_start..literal.free_start + literal.free_len {
-                        self.steps += 1;
-                        self.join(row, self.free[i as usize]);
-                    }
+    /// The operands of a node are read last first, as the stack of the row
+    /// form popped them. `run` takes at most one push per entry joined.
+    fn adopt_node<'r, B: Js>(&mut self, js: &B, a: &'r Pools, idents: &[crate::ident::Ident], row: u32, value: B::Ref<'r>) {
+        self.steps += 1;
+        self.adopted_nodes += 1;
+        match js.kind(a, value) {
+            Kind::Var | Kind::Qualified if self.jsx_preserve && self.unprinted(a, idents, NodeId(js.id(a, value))) => {}
+            Kind::Var => self.join(row, FreeRef::var(js.var_of(a, value).expect("a reference has a variable"))),
+            Kind::Qualified => {
+                let (module, _) = js.qualified_of(a, value).expect("a module reference has a module");
+                self.join(row, FreeRef::import(module));
+            }
+            Kind::Fun => {
+                let header = js.function_of(a, value).expect("a function literal has a header");
+                let scope = self.scope(header).expect("an adopted function literal is closed");
+                let literal = self.rows[scope.0 as usize];
+                assert!(literal.flags & ScopeRow::CLOSED != 0, "an adopted function literal is closed");
+                for i in literal.free_start..literal.free_start + literal.free_len {
+                    self.steps += 1;
+                    self.join(row, self.free[i as usize]);
                 }
-                view => view.children_into(&mut self.pending),
+            }
+            // PROBE-GAP 2: a stack of references kept between calls (the
+            // `pending` stack of the row form): `Js::Ref` borrows the pools;
+            // the operands are read by a recursive call, as deep as the
+            // expression.
+            _ => {
+                for i in (0..js.arity(a, value)).rev() {
+                    self.adopt_node(js, a, idents, row, js.operand(a, value, i));
+                }
             }
         }
     }
@@ -607,11 +615,14 @@ pub(crate) fn close(bir: &mut Bir, idents: &[crate::ident::Ident], function: Fun
 /// printed; one step per member above the reference, one per property key,
 /// one per member of the tag's chain. Cost of `adopt`: one step per node of the subtree outside function literals, one
 /// per function literal and one per free entry of each; `adopted_nodes`
-/// grows by the nodes read. Nothing is allocated once `pending` has its
-/// capacity. Asserts that a function scope is open.
-pub(crate) fn adopt(bir: &mut Bir, idents: &[crate::ident::Ident], node: NodeId) {
+/// grows by the nodes read. Nothing is allocated (the walk is a recursive
+/// call per operand, PROBE-GAP 2). Asserts that a function scope is open.
+/// `value` is the handle of the moved expression, read by reference.
+pub(crate) fn adopt<B: Js>(js: &B, bir: &mut Pools, idents: &[crate::ident::Ident], value: &B::E) {
     let mut log = std::mem::take(&mut bir.js_scope.as_mut().expect("lowering scope").names);
-    log.adopt(bir, idents, node);
+    let row = log.open.last().expect("adopt inside an open function scope").row;
+    log.size_imports(bir);
+    log.adopt_node(js, bir, idents, row, B::of(value));
     bir.js_scope.as_mut().expect("lowering scope").names = log;
 }
 
@@ -1316,7 +1327,6 @@ mod tests {
         assert!(log.rows.is_empty() && log.free.is_empty() && log.of_function.is_empty());
         assert!(log.places.is_empty() && log.seen_import.is_empty());
         assert!(log.open.is_empty() && log.run.is_empty() && log.children.is_empty());
-        assert!(log.pending.is_empty());
         assert_eq!((log.steps, log.adopted_nodes), (0, 0));
         let scratch = Scratch::default();
         assert!(scratch.marks.is_empty() && scratch.next.is_empty() && scratch.frames.is_empty() && scratch.reservation.is_empty());
@@ -1339,6 +1349,7 @@ mod tests {
         assert_eq!(log.steps, 0);
     }
 
+    use crate::bir::j::rows::Rows;
     use crate::bir::lower::scope::Scope;
     use crate::bir::{VarSpan, View};
     use crate::ident::{Ident, IdentFlags};
@@ -2359,7 +2370,7 @@ mod tests {
         open(&mut u.b);
         let fresh = u.local("param");
         let inner = u.header(Some(fresh), 1);
-        adopt(&mut u.b, &u.idents, moved);
+        adopt(&Rows::default(), &mut u.b, &u.idents, &Rows::from_node(moved));
         let own = u.b.new_node(View::Var { var: fresh }, 0);
         let call = u.b.new_node(View::JArray { values: &[moved, own] }, 0);
         let result = u.ret(call);
@@ -2415,7 +2426,7 @@ mod tests {
         let fresh = u.local("param");
         let inner = u.header(Some(fresh), 1);
         let before = (u.log().steps, u.log().adopted_nodes);
-        adopt(&mut u.b, &u.idents, literal);
+        adopt(&Rows::default(), &mut u.b, &u.idents, &Rows::from_node(literal));
         let cost = [u.log().steps - before.0, u.log().adopted_nodes - before.1];
         let own = u.b.new_node(View::Var { var: fresh }, 0);
         let call = u.b.new_node(View::JArray { values: &[literal, own] }, 0);
@@ -2457,7 +2468,7 @@ mod tests {
         open(&mut u.b);
         let arg = u.b.new_node(View::Var { var: p }, 0);
         open(&mut u.b);
-        adopt(&mut u.b, &u.idents, arg);
+        adopt(&Rows::default(), &mut u.b, &u.idents, &Rows::from_node(arg));
         let header = u.b.switch_header(crate::bir::SwitchInput {
             keys: Vec::new(),
             clauses: Vec::new(),
@@ -2484,7 +2495,7 @@ mod tests {
         open(&mut u.b);
         let module = u.b.new_node(View::JQualified { module: ImportId(0), member: None }, 0);
         open(&mut u.b);
-        adopt(&mut u.b, &u.idents, module);
+        adopt(&Rows::default(), &mut u.b, &u.idents, &Rows::from_node(module));
         let result = u.ret(module);
         let inner = u.header(None, 0);
         let (function, inner_scope) = u.function(inner, &[result]);
@@ -2514,7 +2525,7 @@ mod tests {
         };
         open(&mut u.b);
         let before = (u.log().steps, u.log().adopted_nodes);
-        adopt(&mut u.b, &u.idents, moved);
+        adopt(&Rows::default(), &mut u.b, &u.idents, &Rows::from_node(moved));
         let cost = [u.log().steps - before.0, u.log().adopted_nodes - before.1];
         let result = u.ret(moved);
         let inner = u.header(None, 0);

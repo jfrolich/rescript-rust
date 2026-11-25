@@ -320,10 +320,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 });
         }
         // The scrutinee was built before the function's scope opened and
-        // moves into it (G10). `names::adopt` takes the row, read by its id
-        // until T6r.
-        let site = NodeId(self.js.id(&self.arena, B::of(&arg)));
-        super::names::adopt(&mut self.arena, &self.idents, site);
+        // moves into it (G10).
+        super::names::adopt(&self.js, &mut self.arena, &self.idents, &arg);
         let header = self.arena.switch_record(crate::bir::SwitchRecord {
             constants: keys.len,
             keys,
