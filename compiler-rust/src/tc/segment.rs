@@ -393,7 +393,9 @@ pub enum BlockTypeRow {
     Function,
     Object,
     Unknown,
-    Class { name: u32, ancestors: Range },
+    /// A class: its module (`NONE` for a global) and path, and its
+    /// ancestors, a range of `indices` holding a module and a path each.
+    Class { module: u32, name: u32, ancestors: Range },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShapeRow {

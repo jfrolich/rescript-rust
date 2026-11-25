@@ -37,6 +37,7 @@ use super::path::{NOPOS, Path, PathView};
 use super::printtyp::{Printtyp, print_out_module_type};
 use super::type_expr::{GENERIC_LEVEL, RowField, TypeDesc, TypeExprRef};
 use super::variant_runtime::{
+    ClassName,
     Block, BlockType, ConstructorCase, Instance, Layout, TaggedBlock, ValueShape,
 };
 use crate::parse_arena::ParseArena;
@@ -98,7 +99,11 @@ fn block_type_text(block_type: &BlockType) -> String {
         BlockType::Instance(Instance::Array(_)) => "Instance(Array)".to_string(),
         BlockType::Instance(Instance::Class {
             name, ancestors, ..
-        }) => format!("Instance({name} extends {ancestors:?})"),
+        }) => format!(
+            "Instance({} extends {:?})",
+            name.to_key(),
+            ancestors.iter().map(ClassName::to_key).collect::<Vec<_>>()
+        ),
         BlockType::Number
         | BlockType::String
         | BlockType::Bigint

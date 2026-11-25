@@ -51,11 +51,6 @@ pub struct SigReadContext<'a> {
     location_positions: AHashMap<u32, Position>,
     /// `Recognized_as` blocks and the cons cells of class ancestors.
     shape_blocks: AHashMap<usize, (OcamlValue, crate::types::ShapeAllocation)>,
-    /// Class name strings, by string allocation.
-    shape_strings: AHashMap<(u64, u32), crate::types::ShapeString>,
-    /// The payload strings of `@instanceOf` attributes read so far, by
-    /// string allocation: the class names they are.
-    attribute_strings: AHashMap<(u64, u32), crate::types::ShapeString>,
 }
 
 /// The address of a marshalled block's fields, which identifies the block.
@@ -78,8 +73,6 @@ impl<'a> SigReadContext<'a> {
             location_blocks: AHashMap::new(),
             location_positions: AHashMap::new(),
             shape_blocks: AHashMap::new(),
-            shape_strings: AHashMap::new(),
-            attribute_strings: AHashMap::new(),
         }
     }
 
@@ -444,18 +437,18 @@ impl<'a> SigReadContext<'a> {
             return B::Instance(I::Array(self.shape_block(value)));
         };
         let block = self.shape_block(value);
-        let name_string = self.shape_string(&class[0]);
+        let name_string = self.shape_class_name(&class[0]);
         let mut ancestors = Vec::new();
         let mut ancestor_blocks = Vec::new();
         let mut cell = &class[1];
         while let OcamlValue::Block(0, cons) = cell {
-            ancestors.push(cons[0].as_string().to_string());
+            ancestors.push(read_class_name(&cons[0]));
             let allocation = self.shape_block(cell);
-            ancestor_blocks.push((allocation, self.shape_string(&cons[0])));
+            ancestor_blocks.push((allocation, self.shape_class_name(&cons[0])));
             cell = &cons[1];
         }
         B::Instance(I::Class {
-            name: class[0].as_string().to_string(),
+            name: read_class_name(&class[0]),
             ancestors,
             blocks: crate::types::ClassBlocks {
                 block,
@@ -1140,15 +1133,6 @@ impl SigReadContext<'_> {
             .filter_map(|attr| match attr {
                 OcamlValue::Block(_, fields) if !fields.is_empty() => {
                     let attr_name = self.read_attribute_name(&fields[0]);
-                    if attr_name.txt == "instanceOf"
-                        && let Some(allocation) = fields
-                            .get(1)
-                            .and_then(payload_semantic_string)
-                            .and_then(|semantic| semantic.allocation())
-                    {
-                        let string = crate::types::ShapeString::attribute(self.ctx, attr_name.loc);
-                        self.attribute_strings.insert(allocation, string);
-                    }
                     let payload = if fields.len() > 1 {
                         if attr_name.txt == "deprecated" {
                             read_deprecated_attribute_payload(&fields[1], &mut |loc| {
@@ -1194,23 +1178,9 @@ impl SigReadContext<'_> {
             .1
     }
 
-    /// A class name: the payload string of an `@instanceOf` read before it,
-    /// or a string of its own.
-    fn shape_string(&mut self, value: &OcamlValue) -> crate::types::ShapeString {
-        use crate::types::ShapeString;
-        let OcamlValue::String(string) = value else {
-            panic!("a class name string")
-        };
-        let Some(allocation) = string.allocation() else {
-            return ShapeString::Allocation(self.ctx.fresh_shape_allocation());
-        };
-        if let Some(string) = self.attribute_strings.get(&allocation) {
-            return *string;
-        }
-        *self
-            .shape_strings
-            .entry(allocation)
-            .or_insert_with(|| ShapeString::Allocation(self.ctx.fresh_shape_allocation()))
+    /// A class name record `{module_; path}`, a block of its own.
+    fn shape_class_name(&mut self, value: &OcamlValue) -> crate::types::ShapeString {
+        crate::types::ShapeString::Allocation(self.shape_block(value))
     }
 
     fn read_arg_label(&mut self, value: &OcamlValue) -> ArgLabel {
@@ -1649,13 +1619,10 @@ pub(crate) fn decode_variant_block_type(value: &OcamlValue) -> crate::types::Var
         OcamlValue::Block(0, fields) => B::Instance(match &fields[0] {
             OcamlValue::Int(0) => I::Array(crate::types::ShapeAllocation::fresh()),
             OcamlValue::Block(0, class) => {
-                let ancestors: Vec<String> = class[1]
-                    .as_list()
-                    .iter()
-                    .map(|ancestor| ancestor.as_string().to_string())
-                    .collect();
+                let ancestors: Vec<crate::types::ClassName> =
+                    class[1].as_list().iter().map(|name| read_class_name(name)).collect();
                 I::Class {
-                    name: class[0].as_string().to_string(),
+                    name: read_class_name(&class[0]),
                     blocks: crate::types::ClassBlocks::fresh(ancestors.len()),
                     ancestors,
                 }
@@ -1678,24 +1645,16 @@ fn decode_value_shape(value: &OcamlValue) -> crate::types::ValueShape {
 
 /// The semantic string of a `PStr [Pstr_eval (Pexp_constant (Pconst_string
 /// (Valid {source; semantic})), _)]` payload.
-fn payload_semantic_string(payload: &OcamlValue) -> Option<&super::marshal_reader::OcamlString> {
-    fn find(v: &OcamlValue, depth: usize) -> Option<&super::marshal_reader::OcamlString> {
-        if depth > 12 {
-            return None;
-        }
-        match v {
-            OcamlValue::Block(2, fields) if fields.len() == 1 => match &fields[0] {
-                OcamlValue::Block(0, literal) => match literal.as_ref() {
-                    [OcamlValue::String(_), OcamlValue::String(semantic)] => Some(semantic),
-                    _ => None,
-                },
-                other => find(other, depth + 1),
-            },
-            OcamlValue::Block(_, fields) => fields.iter().find_map(|field| find(field, depth + 1)),
-            _ => None,
-        }
+/// A `Variant_runtime.Instance.class_name`: `{module_: string option; path:
+/// string}`.
+fn read_class_name(value: &OcamlValue) -> crate::types::ClassName {
+    let OcamlValue::Block(0, fields) = value else {
+        panic!("a class name record, not {value:?}")
+    };
+    crate::types::ClassName {
+        module_: fields[0].as_option().map(|module_| module_.as_string().to_string()),
+        path: fields[1].as_string().to_string(),
     }
-    find(payload, 0)
 }
 
 #[cfg(test)]
@@ -1784,45 +1743,23 @@ mod tests {
         ));
     }
 
-    /// A class's blocks read twice are one value, and its name is the
-    /// payload string of the `@instanceOf` attribute it was read from.
+    /// A decoded shape keeps the identity of its blocks: the same block read
+    /// twice is one shape, a block with equal contents is another, and the
+    /// class name is a record of its own (`{module_; path}`).
     #[test]
-    fn decoded_shapes_keep_block_and_attribute_string_identity() {
-        use crate::cmi::marshal_reader::OcamlString;
-        use crate::types::{ShapeString, ValueShape, VariantBlockType, VariantInstance};
+    fn decoded_shapes_keep_block_and_class_name_identity() {
+        use crate::types::{ClassName, ShapeString, ValueShape, VariantBlockType, VariantInstance};
         let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
         let mut reader = SigReadContext::new(&ctx);
-        let position = || {
-            block(
-                0,
-                vec![
-                    OcamlValue::String("source.res".into()),
-                    OcamlValue::Int(1),
-                    OcamlValue::Int(0),
-                    OcamlValue::Int(2),
-                ],
-            )
-        };
-        let loc = block(0, vec![position(), position(), OcamlValue::Int(0)]);
-        let name = OcamlValue::String(OcamlString::decoded("A", (3 << 32) | 1));
-        // (({txt = "instanceOf"; loc}, PStr [Pstr_eval (Pexp_constant
-        // (Pconst_string (Valid {source; semantic})))]), loc)
-        let literal = block(0, vec![OcamlValue::String("A".into()), name.clone()]);
-        let expression = block(0, vec![block(2, vec![block(2, vec![literal])])]);
-        let payload = block(0, vec![block(0, vec![expression, OcamlValue::Int(0)])]);
-        let attribute = block(
+        // `{module_ = Some "three"; path = "Mesh"}`
+        let name = block(
             0,
             vec![
-                block(
-                    0,
-                    vec![OcamlValue::String("instanceOf".into()), loc.clone()],
-                ),
-                payload,
-                loc,
+                block(0, vec![OcamlValue::String("three".into())]),
+                OcamlValue::String("Mesh".into()),
             ],
         );
-        let attrs = reader.read_attributes(&block(0, vec![attribute, OcamlValue::Int(0)]));
-        let class = block(0, vec![block(0, vec![name, OcamlValue::Int(0)])]);
+        let class = block(0, vec![block(0, vec![name.clone(), OcamlValue::Int(0)])]);
         let shape = block(0, vec![class.clone()]);
         let read = |reader: &mut SigReadContext<'_>, value| match reader.read_value_shape(value) {
             ValueShape::RecognizedAs(shape) => *shape,
@@ -1833,16 +1770,24 @@ mod tests {
         let other = read(&mut reader, &block(0, vec![class.clone()]));
         assert_eq!(first.blocks, again.blocks);
         assert_ne!(first.blocks, other.blocks);
-        let blocks = |shape: &crate::types::RecognizedShape| match &shape.block_type {
-            VariantBlockType::Instance(VariantInstance::Class { blocks, .. }) => blocks.clone(),
+        let class_of = |shape: &crate::types::RecognizedShape| match &shape.block_type {
+            VariantBlockType::Instance(VariantInstance::Class { name, blocks, .. }) => {
+                (name.clone(), blocks.clone())
+            }
             other => panic!("{other:?}"),
         };
-        assert_eq!(blocks(&first).block, blocks(&other).block);
+        let (first_name, first_blocks) = class_of(&first);
+        let (_, other_blocks) = class_of(&other);
         assert_eq!(
-            blocks(&first).name,
-            ShapeString::attribute(&ctx, attrs[0].attr_name.loc)
+            first_name,
+            ClassName {
+                module_: Some("three".to_string()),
+                path: "Mesh".to_string(),
+            }
         );
-        assert!(matches!(blocks(&first).name, ShapeString::Attribute { .. }));
+        assert_eq!(first_blocks.block, other_blocks.block);
+        assert_eq!(first_blocks.name, other_blocks.name);
+        assert!(matches!(first_blocks.name, ShapeString::Allocation(_)));
     }
 
     /// An unmarshalled block is one heap block however many fields point to

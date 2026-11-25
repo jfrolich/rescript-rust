@@ -22,7 +22,7 @@ use crate::types::path::Path;
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typemod::{AstUntaggedVariantError, TypeModError, TypeModResult};
 use crate::types::variant_runtime::{
-    Block, BlockType, ClassBlocks, Configuration, ConstructorCase, Instance, Layout, LiteralTag,
+    Block, BlockType, ClassBlocks, ClassName, Configuration, ConstructorCase, Instance, Layout, LiteralTag,
     ShapeAllocation, ShapeBlocks, ShapeString, Tag, TaggedBlock, ValueShape,
 };
 
@@ -33,8 +33,8 @@ use crate::types::variant_runtime::{
 pub(crate) enum RuntimeAnnotation {
     /// Values that are never `undefined`.
     NotUndefined,
-    /// Instances of the global class at this path.
-    InstanceOf(String),
+    /// Instances of this class: a global, or with `@module`, an export.
+    InstanceOf(ClassName),
     /// Values with this `typeof`.
     TypeOf(BlockType),
 }
@@ -42,6 +42,35 @@ pub(crate) enum RuntimeAnnotation {
 const NOT_UNDEFINED: &str = "notUndefined";
 const INSTANCE_OF: &str = "instanceOf";
 const TYPE_OF: &str = "typeOf";
+
+/// Where an `@instanceOf` class is found, as for an external.
+const CLASS_MODULE: &str = "module";
+const CLASS_SCOPE: &str = "scope";
+
+/// ast_untagged_variants.ml `invalid_scope`: why the properties of a
+/// `@scope` cannot lead to an `@instanceOf` class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidScope {
+    /// The payload is not a string or a tuple of identifiers.
+    NotProperties,
+    /// Without `@module`, the first property is a global, which is named
+    /// like this keyword.
+    KeywordGlobal(String),
+    /// The first property is `globalThis`.
+    ScopeThroughGlobalThis,
+}
+
+/// ast_untagged_variants.ml `missing_class`: why a declaration with
+/// `@module` or `@scope` has no `@instanceOf` class for them to locate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MissingClass {
+    /// An abstract type or an abbreviation.
+    NoAnnotation,
+    /// Names the `@typeOf` or `@notUndefined` it has instead.
+    OtherAnnotation(&'static str),
+    /// A record, a variant or an extensible type.
+    RepresentedType,
+}
 
 /// ast_untagged_variants.ml `unsupported_class`: why a syntactically valid
 /// `@instanceOf` path is still not accepted.
@@ -82,28 +111,30 @@ fn unsupported_class(name: &str) -> Option<UnsupportedClass> {
     }
 }
 
+/// ast_untagged_variants.ml `is_identifier`.
+fn is_identifier(segment: &str) -> bool {
+    fn is_start(c: u8) -> bool {
+        c.is_ascii_alphabetic() || c == b'_' || c == b'$'
+    }
+    let bytes = segment.as_bytes();
+    !bytes.is_empty()
+        && is_start(bytes[0])
+        && bytes.iter().all(|c| c.is_ascii_digit() || is_start(*c))
+}
+
+/// ast_untagged_variants.ml `is_export_path`: a path of properties of a
+/// module's exports, such as `default` or `shapes.Mesh`; properties may be
+/// named like keywords.
+fn is_export_path(name: &str) -> bool {
+    name.split('.').all(is_identifier)
+}
+
 /// ast_untagged_variants.ml `is_class_path`: a dot-separated list of
 /// identifiers whose first one is not a JavaScript keyword. Properties may be
 /// named like keywords.
 fn is_class_path(name: &str) -> bool {
-    fn is_start(c: u8) -> bool {
-        c.is_ascii_alphabetic() || c == b'_' || c == b'$'
-    }
-    fn is_identifier(segment: &str) -> bool {
-        let bytes = segment.as_bytes();
-        !bytes.is_empty()
-            && is_start(bytes[0])
-            && bytes.iter().all(|c| c.is_ascii_digit() || is_start(*c))
-    }
-    let mut segments = name.split('.');
-    match segments.next() {
-        Some(global) => {
-            is_identifier(global)
-                && !crate::js_ir::printer::is_js_keyword(global)
-                && segments.all(is_identifier)
-        }
-        None => false,
-    }
+    let global = name.split('.').next().unwrap_or_default();
+    is_export_path(name) && !crate::js_ir::printer::is_js_keyword(global)
 }
 
 pub(crate) fn runtime_attribute_name(annotation: &RuntimeAnnotation) -> &'static str {
@@ -124,7 +155,17 @@ fn typeof_name(block_type: &BlockType) -> &'static str {
 fn runtime_annotation_to_string(annotation: &RuntimeAnnotation) -> String {
     match annotation {
         RuntimeAnnotation::NotUndefined => format!("@{NOT_UNDEFINED}"),
-        RuntimeAnnotation::InstanceOf(name) => format!("@{INSTANCE_OF}(\"{name}\")"),
+        RuntimeAnnotation::InstanceOf(ClassName {
+            module_: None,
+            path,
+        }) => format!("@{INSTANCE_OF}(\"{path}\")"),
+        RuntimeAnnotation::InstanceOf(ClassName {
+            module_: Some(module_),
+            path,
+        }) => format!(
+            "@{CLASS_MODULE}(\"{}\") @{INSTANCE_OF}(\"{path}\")",
+            crate::string_literal::encode_js_string(module_)
+        ),
         RuntimeAnnotation::TypeOf(block_type) => {
             format!("@{TYPE_OF}(\"{}\")", typeof_name(block_type))
         }
@@ -145,7 +186,11 @@ pub(crate) fn describe_declared_values(block_type: Option<&BlockType>) -> String
         })) => {
             format!(
                 "instances of {name}, a subclass of {}",
-                ancestors.join(" and ")
+                ancestors
+                    .iter()
+                    .map(ClassName::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" and ")
             )
         }
         Some(BlockType::Instance(Instance::Array(_))) => "arrays".to_string(),
@@ -161,7 +206,124 @@ pub(crate) struct AnnotationAttribute<'a> {
     /// `Ast_payload.semantic_string_of_payload`, or the location of the
     /// template it raises on.
     pub semantic: Result<Option<String>, Location>,
+    /// For a `@scope`, ast_untagged_variants.ml `strings_of_payload`: the
+    /// strings of a payload such as `"a"` or `("a", "b")`.
+    pub strings: Option<Vec<String>>,
     pub loc: Location,
+}
+
+/// Whether `process_runtime_annotation` reads the attribute named `name`.
+pub(crate) fn is_annotation_attribute(name: &str) -> bool {
+    matches!(
+        name,
+        NOT_UNDEFINED | INSTANCE_OF | TYPE_OF | CLASS_MODULE | CLASS_SCOPE
+    )
+}
+
+/// Whether `name` is `@scope`, whose payload `strings_of_payload` reads.
+pub(crate) fn is_scope_attribute(name: &str) -> bool {
+    name == CLASS_SCOPE
+}
+
+/// ast_untagged_variants.ml `class_of_attributes`: the class at the path
+/// `name` of `@instanceOf(name)`, read through the properties of `@scope` in
+/// `attrs`, among the exports of the module of `@module` or else among the
+/// globals. `name` is `None` when the payload of `@instanceOf` is not a
+/// string; `loc` is the `@instanceOf`'s.
+fn class_of_attributes(
+    loc: Location,
+    attrs: &[AnnotationAttribute<'_>],
+    name: Option<String>,
+    attribute_loc: impl Fn(Location) -> Location,
+) -> AnnotationResult<ClassName> {
+    let attribute = |txt: &str| -> AnnotationResult<Option<&AnnotationAttribute<'_>>> {
+        let mut found = attrs.iter().filter(|attr| attr.name == txt);
+        match (found.next(), found.next()) {
+            (None, _) => Ok(None),
+            (Some(attr), None) => Ok(Some(attr)),
+            (Some(_), Some(second)) => Err(AnnotationError::Untagged(
+                attribute_loc(second.loc),
+                AstUntaggedVariantError::DuplicateRuntimeAnnotation(txt.to_string()),
+            )),
+        }
+    };
+    let module_ = match attribute(CLASS_MODULE)? {
+        None => None,
+        Some(attr) => match attr.semantic.clone().map_err(AnnotationError::InvalidStringEscape)? {
+            Some(module_) if !module_.is_empty() => Some(module_),
+            _ => {
+                return Err(AnnotationError::Untagged(
+                    attribute_loc(attr.loc),
+                    AstUntaggedVariantError::InvalidClassModule,
+                ));
+            }
+        },
+    };
+    let scopes = match attribute(CLASS_SCOPE)? {
+        None => Vec::new(),
+        Some(attr) => {
+            let invalid = |reason| {
+                AnnotationError::Untagged(
+                    attribute_loc(attr.loc),
+                    AstUntaggedVariantError::InvalidClassScope(reason),
+                )
+            };
+            match &attr.strings {
+                Some(scopes) if !scopes.is_empty() && scopes.iter().all(|s| is_identifier(s)) => {
+                    // Without `@module`, the first property is a global.
+                    if module_.is_none() {
+                        if scopes[0] == "globalThis" {
+                            return Err(invalid(InvalidScope::ScopeThroughGlobalThis));
+                        }
+                        if crate::js_ir::printer::is_js_keyword(&scopes[0]) {
+                            return Err(invalid(InvalidScope::KeywordGlobal(scopes[0].clone())));
+                        }
+                    }
+                    scopes.clone()
+                }
+                _ => return Err(invalid(InvalidScope::NotProperties)),
+            }
+        }
+    };
+    let path_of = |name: &str| {
+        let mut path = scopes.join(".");
+        if !path.is_empty() {
+            path.push('.');
+        }
+        path.push_str(name);
+        path
+    };
+    match (module_, name) {
+        // Any export can be a class.
+        (Some(module_), Some(name)) if is_export_path(&name) => Ok(ClassName {
+            module_: Some(module_),
+            path: path_of(&name),
+        }),
+        (Some(module_), _) => Err(AnnotationError::Untagged(
+            loc,
+            AstUntaggedVariantError::InvalidModuleClass(module_),
+        )),
+        (None, Some(name)) => {
+            let path = path_of(&name);
+            if !is_class_path(&path) {
+                return Err(AnnotationError::Untagged(
+                    loc,
+                    AstUntaggedVariantError::InvalidInstanceOf,
+                ));
+            }
+            match unsupported_class(&path) {
+                None => Ok(ClassName::global(path)),
+                Some(reason) => Err(AnnotationError::Untagged(
+                    loc,
+                    AstUntaggedVariantError::UnsupportedInstanceOf(path, reason),
+                )),
+            }
+        }
+        (None, None) => Err(AnnotationError::Untagged(
+            loc,
+            AstUntaggedVariantError::InvalidInstanceOf,
+        )),
+    }
 }
 
 pub(crate) type AnnotationResult<T> = Result<T, AnnotationError>;
@@ -183,40 +345,35 @@ impl From<(Location, AstUntaggedVariantError)> for AnnotationError {
 
 /// ast_untagged_variants.ml `process_runtime_annotation`: the
 /// `@notUndefined`, `@instanceOf` or `@typeOf` annotation among `attrs`,
-/// validated. An attribute without a location is reported at `loc`.
+/// validated, with the `@module` and `@scope` of an `@instanceOf`. An
+/// attribute without a location is reported at `loc`.
 pub(crate) fn process_runtime_annotation<'a>(
     attrs: impl IntoIterator<Item = AnnotationAttribute<'a>>,
     loc: Location,
 ) -> AnnotationResult<Option<RuntimeAnnotation>> {
+    let attrs: Vec<AnnotationAttribute<'a>> = attrs.into_iter().collect();
+    // ast_untagged_variants.ml `attribute_loc`.
+    let attribute_loc = |attr_loc: Location| if attr_loc.is_none() { loc } else { attr_loc };
     let mut annotations = Vec::new();
-    for attr in attrs {
-        let attr_loc = if attr.loc.is_none() { loc } else { attr.loc };
+    for attr in &attrs {
+        let attr_loc = attribute_loc(attr.loc);
         let annotation = if attr.name == NOT_UNDEFINED {
             RuntimeAnnotation::NotUndefined
         } else if attr.name == INSTANCE_OF {
-            match attr
+            let name = attr
                 .semantic
-                .map_err(AnnotationError::InvalidStringEscape)?
-            {
-                Some(name) if is_class_path(&name) => match unsupported_class(&name) {
-                    None => RuntimeAnnotation::InstanceOf(name),
-                    Some(reason) => {
-                        return Err(AnnotationError::Untagged(
-                            attr_loc,
-                            AstUntaggedVariantError::UnsupportedInstanceOf(name, reason),
-                        ));
-                    }
-                },
-                _ => {
-                    return Err(AnnotationError::Untagged(
-                        attr_loc,
-                        AstUntaggedVariantError::InvalidInstanceOf,
-                    ));
-                }
-            }
+                .clone()
+                .map_err(AnnotationError::InvalidStringEscape)?;
+            RuntimeAnnotation::InstanceOf(class_of_attributes(
+                attr_loc,
+                &attrs,
+                name,
+                attribute_loc,
+            )?)
         } else if attr.name == TYPE_OF {
             match attr
                 .semantic
+                .clone()
                 .map_err(AnnotationError::InvalidStringEscape)?
             {
                 Some(name) => match BlockType::of_typeof(&name) {
@@ -269,10 +426,18 @@ pub(crate) fn decl_annotation_attributes<'a>(
             .semantic_string()
             .map(|semantic| semantic.map(str::to_string))
             .map_err(|loc| ctx.resolve_loc(loc)),
-        loc: if attr.attr_name.txt == NOT_UNDEFINED
-            || attr.attr_name.txt == INSTANCE_OF
-            || attr.attr_name.txt == TYPE_OF
-        {
+        strings: if is_scope_attribute(&attr.attr_name.txt) {
+            match &attr.attr_payload {
+                crate::types::decl::AttributePayload::StrTuple(strings) => Some(strings.clone()),
+                payload => match payload.semantic_string() {
+                    Ok(Some(string)) => Some(vec![string.to_string()]),
+                    Ok(None) | Err(_) => None,
+                },
+            }
+        } else {
+            None
+        },
+        loc: if is_annotation_attribute(&attr.attr_name.txt) {
             ctx.resolve_loc(attr.attr_name.loc)
         } else {
             Location::none()
@@ -321,14 +486,36 @@ pub(crate) fn check_runtime_annotation<'a>(
     is_abstract_or_abbreviation: bool,
     attrs: impl IntoIterator<Item = AnnotationAttribute<'a>>,
 ) -> TypeModResult<()> {
-    match process_runtime_annotation(attrs, loc).map_err(annotation_error)? {
-        None => Ok(()),
-        Some(_) if is_abstract_or_abbreviation => Ok(()),
-        Some(annotation) => Err(annotation_error((
+    let attrs: Vec<AnnotationAttribute<'a>> = attrs.into_iter().collect();
+    // `@module` and `@scope` say where the class of an `@instanceOf` is
+    // found, so they need one.
+    let locations: Vec<(String, Location)> = attrs
+        .iter()
+        .filter(|attr| attr.name == CLASS_MODULE || attr.name == CLASS_SCOPE)
+        .map(|attr| (attr.name.to_string(), attr.loc))
+        .collect();
+    let annotation = process_runtime_annotation(attrs, loc).map_err(annotation_error)?;
+    if let Some(annotation) = &annotation
+        && !is_abstract_or_abbreviation
+    {
+        return Err(annotation_error((
             loc,
             AstUntaggedVariantError::RuntimeAnnotationOnRepresentedType(
-                runtime_attribute_name(&annotation).to_string(),
+                runtime_attribute_name(annotation).to_string(),
             ),
+        )));
+    }
+    let missing = match &annotation {
+        Some(RuntimeAnnotation::InstanceOf(_)) => return Ok(()),
+        Some(annotation) => MissingClass::OtherAnnotation(runtime_attribute_name(annotation)),
+        None if is_abstract_or_abbreviation => MissingClass::NoAnnotation,
+        None => MissingClass::RepresentedType,
+    };
+    match locations.into_iter().next() {
+        None => Ok(()),
+        Some((attribute, attr_loc)) => Err(annotation_error((
+            if attr_loc.is_none() { loc } else { attr_loc },
+            AstUntaggedVariantError::ClassLocationWithoutClass(attribute, missing),
         ))),
     }
 }
@@ -432,21 +619,8 @@ pub(crate) fn declaration_shape(
                 )
             }
             Some(RuntimeAnnotation::InstanceOf(name)) => {
-                // The name is the attribute's payload string.
-                let name_string = decl
-                    .type_attributes
-                    .iter()
-                    .find(|attr| attr.attr_name.txt == INSTANCE_OF)
-                    .map(|attr| match &attr.attr_payload {
-                        // A backquoted string decodes to a fresh string.
-                        crate::types::decl::AttributePayload::SemanticString(payload)
-                            if payload.template =>
-                        {
-                            ShapeString::Allocation(ctx.fresh_shape_allocation())
-                        }
-                        _ => ShapeString::attribute(ctx, attr.attr_name.loc),
-                    })
-                    .expect("an @instanceOf annotation is an attribute");
+                // `class_of_attributes` builds a record of its own.
+                let name_string = ShapeString::Allocation(ctx.fresh_shape_allocation());
                 let (ancestors, ancestor_blocks) =
                     match decl.type_manifest.and_then(|m| recognized_as(ctx, env, m)) {
                         Some(BlockType::Instance(Instance::Class {
@@ -570,7 +744,7 @@ fn at_most_one_of_kind(kind: &BlockType) -> String {
         BlockType::Instance(Instance::Array(_)) => {
             "an array, a tuple or a record represented as an array".to_string()
         }
-        BlockType::Instance(instance) => format!("an instance of {}", instance.as_str()),
+        BlockType::Instance(instance) => format!("an instance of {}", instance.to_ocaml_string()),
         BlockType::Function => "a function type".to_string(),
         BlockType::String => "a string type".to_string(),
         BlockType::Number => "a number type (int or float)".to_string(),
@@ -825,7 +999,7 @@ pub(crate) fn check_manifest_annotation(
                         if decl.type_private == PrivateFlag::Public =>
                     {
                         error(AstUntaggedVariantError::ClassOnPublicAbbreviation(
-                            name.clone(),
+                            name.to_string(),
                         ))
                     }
                     _ => Ok(()),
@@ -851,7 +1025,7 @@ pub(crate) fn check_manifest_annotation(
                     ancestors,
                     ..
                 }) => (
-                    ancestor.clone(),
+                    ancestor.to_string(),
                     std::iter::once(ancestor)
                         .chain(ancestors)
                         .collect::<Vec<_>>(),
@@ -861,17 +1035,19 @@ pub(crate) fn check_manifest_annotation(
             };
             if decl.type_private == PrivateFlag::Public {
                 error(AstUntaggedVariantError::SubclassOfPublicAbbreviation(
-                    name.clone(),
+                    name.to_string(),
                     superclass,
                 ))
-            } else if ancestors.contains(name) {
-                error(AstUntaggedVariantError::ClassTwiceInChain(name.clone()))
+            } else if ancestors.contains(&name) {
+                error(AstUntaggedVariantError::ClassTwiceInChain(name.to_string()))
             } else {
                 Ok(())
             }
         }
-        (RuntimeAnnotation::InstanceOf(name), Some(BlockType::Instance(Instance::Array(_)))) => {
-            error(AstUntaggedVariantError::SubclassOfArray(name.clone()))
+        (RuntimeAnnotation::InstanceOf(_), Some(BlockType::Instance(Instance::Array(_)))) => {
+            error(AstUntaggedVariantError::SubclassOfArray(
+                runtime_annotation_to_string(&outer),
+            ))
         }
         (RuntimeAnnotation::InstanceOf(_) | RuntimeAnnotation::TypeOf(_), Some(inner)) => {
             let recognized_by = match &inner {

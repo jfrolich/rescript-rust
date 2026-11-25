@@ -195,7 +195,8 @@ impl Metadata {
                 instances += 1;
                 if let Instance::Class { name, ancestors: parents, .. } = instance {
                     names += 1 + parents.len();
-                    bytes += name.len() + parents.iter().map(String::len).sum::<usize>();
+                    bytes += name.to_key().len()
+                        + parents.iter().map(|parent| parent.to_key().len()).sum::<usize>();
                     ancestors += parents.len();
                 }
             }
@@ -367,9 +368,10 @@ impl Metadata {
                     Instance::Class {
                         name, ancestors, ..
                     } => {
-                        let name = self.intern(name);
+                        // `ClassName::to_key`: one text per class name.
+                        let name = self.intern(&name.to_key());
                         for ancestor in ancestors {
-                            let id = self.intern(ancestor);
+                            let id = self.intern(&ancestor.to_key());
                             self.ancestors.push(id);
                         }
                         Some(name)

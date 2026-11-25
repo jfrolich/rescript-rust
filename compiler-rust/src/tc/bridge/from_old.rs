@@ -94,7 +94,8 @@ use crate::types::path::{Path, PathView};
 use crate::types::shared_store::SharedGraph;
 use crate::types::type_expr::{GENERIC_LEVEL, RowField, TypeDesc, TypeExprRef};
 use crate::types::variant_runtime::{
-    Block, BlockType, ConstructorCase, Instance, LayoutRef, LiteralTag, TaggedBlock, ValueShape,
+    Block, BlockType, ClassName, ConstructorCase, Instance, LayoutRef, LiteralTag, TaggedBlock,
+    ValueShape,
 };
 
 const _: () = assert!(GENERIC_LEVEL as u32 == GENERIC);
@@ -570,6 +571,19 @@ impl<'g> Convert<'g> {
             Some(text) => self.string(text),
             None => NONE,
         }
+    }
+
+    /// Amortized O(names): a contiguous range of `indices`, a module
+    /// (`NONE` for a global) and a path for each class name.
+    fn class_names(&mut self, names: &'g [ClassName]) -> Range {
+        let start = self.rows.indices.len() as u32;
+        for name in names {
+            let module = self.opt_string(name.module_.as_deref());
+            self.rows.indices.push(module);
+            let path = self.string(&name.path);
+            self.rows.indices.push(path);
+        }
+        tail(self.rows.indices.len(), start)
     }
 
     /// Amortized O(strings): a contiguous range of `indices`, each a string.
@@ -1617,8 +1631,9 @@ impl<'g> Convert<'g> {
             BlockType::Instance(Instance::Class {
                 name, ancestors, ..
             }) => BlockTypeRow::Class {
-                name: self.string(name),
-                ancestors: self.string_list(ancestors),
+                module: self.opt_string(name.module_.as_deref()),
+                name: self.string(&name.path),
+                ancestors: self.class_names(ancestors),
             },
             BlockType::Symbol => BlockTypeRow::Symbol,
             BlockType::Function => BlockTypeRow::Function,

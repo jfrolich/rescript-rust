@@ -95,6 +95,30 @@ pub fn semantic_string_of_payload(
     }
 }
 
+/// ast_untagged_variants.ml `strings_of_payload`: the strings of a payload
+/// such as `"a"` or `("a", "b")`; `None` when one of them is not a string.
+pub fn strings_of_payload(
+    arena: &ParseArena,
+    payload: &Payload,
+) -> Result<Option<Vec<String>>, PayloadError> {
+    let Some(expression) = unwrapped_payload_expression(arena, payload) else {
+        return Ok(None);
+    };
+    match &expression.pexp_desc {
+        ExpressionDesc::Pexp_tuple(items) => {
+            let mut strings = Vec::with_capacity(items.len());
+            for item in arena.expr_list(*items).iter() {
+                match semantic_string_of_expression(arena, arena.get_expr(*item))? {
+                    Some(string) => strings.push(string),
+                    None => return Ok(None),
+                }
+            }
+            Ok(Some(strings))
+        }
+        _ => Ok(semantic_string_of_expression(arena, expression)?.map(|s| vec![s])),
+    }
+}
+
 /// OCaml `Ast_payload.string_literal_of_expression`: the string literal an
 /// expression denotes, keeping its source spelling. A non-interpolated
 /// backquoted string gets canonical quoted spelling.

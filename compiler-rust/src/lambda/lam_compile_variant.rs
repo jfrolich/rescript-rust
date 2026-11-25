@@ -217,14 +217,22 @@ where
 }
 
 impl LambdaCompiler {
-    fn class_constructor(&mut self, name: &str) -> Expr {
-        let mut parts = name.split('.');
-        let global = parts.next().expect("class path has global");
-        let mut expr = JE::var(Ident::create_persistent(global), &mut self.j);
-        for property in parts {
-            expr = self.static_index(expr, property);
-        }
-        expr
+    /// lam_compile_external_call.ml `class_constructor`: the constructor of
+    /// a class, read like the value of an external: a global path, such as
+    /// `Intl.Locale`, is a global with properties, so that a binding that
+    /// shadows the global's name is noticed; an export of a module is
+    /// imported as `@module` imports it.
+    fn class_constructor(&mut self, name: &crate::types::ClassName) -> Expr {
+        let mut scopes: Vec<String> = name.path.split('.').map(str::to_string).collect();
+        let last = scopes.pop().expect("a class path has a name");
+        let module_name = name.module_.as_ref().map(|bundle| {
+            crate::types::external_ffi_types::ExternalModuleName {
+                bundle: bundle.clone(),
+                module_bind_name: crate::types::external_ffi_types::ModuleBindName::PhintNothing,
+                import_attributes: None,
+            }
+        });
+        self.translate_scoped_module_value(module_name.as_ref(), &last, &scopes)
     }
 
     fn is_instance_of(&mut self, instance: &crate::types::VariantInstance, expr: Expr) -> Expr {

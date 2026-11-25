@@ -86,7 +86,8 @@ use crate::types::type_expr::{
     RowFieldRef, TypeArg, TypeArgLabel, TypeArgList, TypeDesc, TypeExprRef, TypeRefList,
 };
 use crate::types::variant_runtime::{
-    Block, BlockType, ClassBlocks, Configuration, ConstructorCase, ConstructorReference, Instance,
+    Block, BlockType, ClassBlocks, ClassName, Configuration, ConstructorCase, ConstructorReference,
+    Instance,
     Layout, LayoutRef, LiteralTag, ShapeAllocation, ShapeBlocks, Tag, TaggedBlock, ValueShape,
 };
 
@@ -473,6 +474,14 @@ impl<'s> Rebuild<'s> {
     }
 
     /// O(total length): owned strings of a range of `indices`.
+    /// A class name from its module (`NONE` for a global) and path.
+    fn class_name(&self, module: u32, path: u32) -> ClassName {
+        ClassName {
+            module_: (module != NONE).then(|| self.text(module).to_owned()),
+            path: self.text(path).to_owned(),
+        }
+    }
+
     fn string_list(&self, range: Range) -> Vec<String> {
         slice(&self.pools.indices, range)
             .iter()
@@ -670,10 +679,17 @@ impl<'s> Rebuild<'s> {
             BlockTypeRow::Bigint => BlockType::Bigint,
             BlockTypeRow::Boolean => BlockType::Boolean,
             BlockTypeRow::Array => BlockType::Instance(Instance::Array(ShapeAllocation::fresh())),
-            BlockTypeRow::Class { name, ancestors } => BlockType::Instance(Instance::Class {
-                name: self.text(name).to_owned(),
-                ancestors: self.string_list(ancestors),
-                blocks: ClassBlocks::fresh(ancestors.len as usize),
+            BlockTypeRow::Class {
+                module,
+                name,
+                ancestors,
+            } => BlockType::Instance(Instance::Class {
+                name: self.class_name(module, name),
+                ancestors: slice(&self.pools.indices, ancestors)
+                    .chunks_exact(2)
+                    .map(|pair| self.class_name(pair[0], pair[1]))
+                    .collect(),
+                blocks: ClassBlocks::fresh(ancestors.len as usize / 2),
             }),
             BlockTypeRow::Symbol => BlockType::Symbol,
             BlockTypeRow::Function => BlockType::Function,
@@ -3022,6 +3038,7 @@ mod tests {
             BlockTypeRow::Object,
             BlockTypeRow::Unknown,
             BlockTypeRow::Class {
+                module: NONE,
                 name: text,
                 ancestors: strings,
             },
@@ -3334,9 +3351,12 @@ mod tests {
             assert_eq!(rebuild.literal(*row), expected);
         }
         let class = BlockType::Instance(Instance::Class {
-            name: owned("text"),
-            ancestors: vec![owned("text"), owned("other")],
-            blocks: ClassBlocks::fresh(2),
+            name: ClassName::global("text"),
+            ancestors: vec![ClassName {
+                module_: Some(owned("text")),
+                path: owned("other"),
+            }],
+            blocks: ClassBlocks::fresh(1),
         });
         let expected_blocks = [
             BlockType::Number,

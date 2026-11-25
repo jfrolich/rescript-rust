@@ -1067,6 +1067,13 @@ impl KeyEncode for crate::types::variant_runtime::Instance {
     }
 }
 
+impl KeyEncode for crate::types::variant_runtime::ClassName {
+    fn encode(&self, out: &mut KeyOut<'_>) {
+        self.module_.encode(out);
+        self.path.encode(out);
+    }
+}
+
 impl KeyEncode for crate::types::variant_runtime::LiteralTag {
     fn encode(&self, out: &mut KeyOut<'_>) {
         match self {

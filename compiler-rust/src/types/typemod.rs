@@ -4829,6 +4829,12 @@ fn check_declaration_runtime_annotation(
             name: arena.get_string(name.txt),
             semantic: crate::ast_payload::semantic_string_of_payload(arena, payload)
                 .map_err(|error| arena.to_location(error.loc)),
+            strings: if crate::types::variant_layout::is_scope_attribute(arena.get_string(name.txt))
+            {
+                crate::ast_payload::strings_of_payload(arena, payload).ok().flatten()
+            } else {
+                None
+            },
             loc: arena.to_location(name.loc),
         }
     });
@@ -5642,6 +5648,16 @@ pub enum AstUntaggedVariantError {
     },
     /// An `@instanceOf` payload that is not the name of a global class.
     InvalidInstanceOf,
+    /// An `@instanceOf` payload that is not the name of a class the module
+    /// of `@module` exports.
+    InvalidModuleClass(String),
+    /// A `@module` on an `@instanceOf` type that names no module.
+    InvalidClassModule,
+    /// A `@scope` on an `@instanceOf` type that cannot lead to a class.
+    InvalidClassScope(crate::types::variant_layout::InvalidScope),
+    /// A `@module` or `@scope`, by name, on a declaration without an
+    /// `@instanceOf` class for it to locate, and why.
+    ClassLocationWithoutClass(String, crate::types::variant_layout::MissingClass),
     /// An `@instanceOf` class, by name, that cannot be used, and why.
     UnsupportedInstanceOf(String, crate::types::variant_layout::UnsupportedClass),
     /// An `@typeOf` payload that is not a `typeof` result, if it is a string.
@@ -5663,7 +5679,8 @@ pub enum AstUntaggedVariantError {
     /// An annotation that contradicts the one of the abbreviated type, both
     /// as printed.
     RuntimeAnnotationContradictsManifest(String, String),
-    /// An `@instanceOf` class, by name, on an abbreviation of an array type.
+    /// An `@instanceOf` annotation, as printed, on an abbreviation of an
+    /// array type.
     SubclassOfArray(String),
     /// A class, by name, declared as a public abbreviation of its
     /// superclass, by name.
@@ -5714,6 +5731,43 @@ impl AstUntaggedVariantError {
             AstUntaggedVariantError::InvalidInstanceOf => {
                 "@instanceOf expects the name of a global class, such as @instanceOf(\"Date\") or @instanceOf(\"Intl.Locale\").".to_string()
             }
+            AstUntaggedVariantError::InvalidModuleClass(module_) => format!(
+                "@instanceOf expects the name of a class that \"{}\" exports, such as @instanceOf(\"Mesh\"), or @instanceOf(\"default\") for its default export.",
+                crate::string_literal::encode_js_string(module_)
+            ),
+            AstUntaggedVariantError::InvalidClassModule => {
+                "@module on an @instanceOf type expects the module that exports the class, such as @module(\"three\") or @module(\"./shapes.js\").".to_string()
+            }
+            AstUntaggedVariantError::InvalidClassScope(reason) => {
+                use crate::types::variant_layout::InvalidScope;
+                match reason {
+                    InvalidScope::NotProperties => "@scope on an @instanceOf type expects the properties the class is read through, such as @scope(\"THREE\") or @scope((\"lib\", \"shapes\")).".to_string(),
+                    InvalidScope::KeywordGlobal(global) => format!(
+                        "Without @module, the first property of @scope is a global, which cannot be named like the keyword \"{global}\"."
+                    ),
+                    InvalidScope::ScopeThroughGlobalThis => "Remove \"globalThis\" from @scope: the compiler reads the class through globalThis itself where a local binding shadows it.".to_string(),
+                }
+            }
+            AstUntaggedVariantError::ClassLocationWithoutClass(attribute, missing) => {
+                use crate::types::variant_layout::MissingClass;
+                let names = if attribute == "module" {
+                    "the module a class is imported from"
+                } else {
+                    "the properties a class is read through"
+                };
+                let advice = match missing {
+                    MissingClass::NoAnnotation => format!(
+                        " too. Add @instanceOf with the name of the class, or remove @{attribute}."
+                    ),
+                    MissingClass::OtherAnnotation(annotation) => format!(
+                        ", and this type has @{annotation} instead. Remove @{attribute}, or write @instanceOf instead of @{annotation} if its values are instances of a class."
+                    ),
+                    MissingClass::RepresentedType => format!(
+                        ", which only abstract types and type abbreviations can have. Remove @{attribute}."
+                    ),
+                };
+                format!("@{attribute} on a type declaration names {names}, so it needs @instanceOf{advice}")
+            }
             AstUntaggedVariantError::UnsupportedInstanceOf(name, reason) => {
                 use crate::types::variant_layout::UnsupportedClass;
                 match reason {
@@ -5763,8 +5817,8 @@ impl AstUntaggedVariantError {
             AstUntaggedVariantError::RuntimeAnnotationContradictsManifest(outer, inner) => format!(
                 "This annotation, {outer}, contradicts the abbreviated type, whose values are recognized by {inner}."
             ),
-            AstUntaggedVariantError::SubclassOfArray(name) => format!(
-                "@instanceOf(\"{name}\") cannot describe the values of an array type: they are recognized by Array.isArray, and subclasses of Array are not supported."
+            AstUntaggedVariantError::SubclassOfArray(annotation) => format!(
+                "{annotation} cannot describe the values of an array type: they are recognized by Array.isArray, and subclasses of Array are not supported."
             ),
             AstUntaggedVariantError::ClassOnPublicAbbreviation(name) => format!(
                 "A class must be declared on an abstract type or a private abbreviation: write `= private ...`, so that values of the abbreviated type are not instances of {name} without a coercion, and another abbreviation cannot declare them instances of another class."

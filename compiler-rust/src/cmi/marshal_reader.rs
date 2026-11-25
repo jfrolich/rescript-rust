@@ -57,21 +57,15 @@ pub enum OcamlValue {
     Float(f64),
 }
 
-/// Owned string contents with the allocation identity recorded by the decoder.
-/// Cloning a marshal back-reference retains its token, not just equal text.
-/// Synthetic values have no allocation evidence.
+/// Owned string contents.
 #[derive(Debug, Clone)]
 pub struct OcamlString {
     text: String,
-    allocation: u64,
 }
 
 impl From<String> for OcamlString {
     fn from(text: String) -> Self {
-        Self {
-            text,
-            allocation: 0,
-        }
+        Self { text }
     }
 }
 
@@ -89,25 +83,9 @@ impl std::ops::Deref for OcamlString {
 }
 
 impl OcamlString {
-    /// A string decoded at `allocation` (scope in the high half).
-    #[cfg(test)]
-    pub(crate) fn decoded(text: &str, allocation: u64) -> Self {
-        Self {
-            text: text.to_string(),
-            allocation,
-        }
-    }
-
     /// The string's text.
     pub fn as_str(&self) -> &str {
         &self.text
-    }
-
-    pub(crate) fn allocation(&self) -> Option<(u64, u32)> {
-        (self.allocation != 0).then_some((
-            self.allocation & 0xffff_ffff_0000_0000,
-            self.allocation as u32,
-        ))
     }
 }
 
@@ -285,7 +263,6 @@ pub struct MarshalReader {
     /// Each object is assigned an index as it's read; shared references
     /// refer back to earlier objects by distance.
     obj_table: Vec<OcamlValue>,
-    string_scope: u32,
 }
 
 impl MarshalReader {
@@ -295,16 +272,7 @@ impl MarshalReader {
     }
 
     fn decoded_string(&mut self, text: String) -> OcamlValue {
-        if self.string_scope == 0 {
-            // Reuse the checked owner namespace: no pointer identity or new
-            // process-global allocator is needed for decoded string scopes.
-            self.string_scope = crate::types::decl_loc::next_table_owner();
-        }
-        let index = u32::try_from(self.obj_table.len()).expect("marshal object table exhausted");
-        OcamlValue::String(OcamlString {
-            text,
-            allocation: ((self.string_scope as u64) << 32) | index as u64,
-        })
+        OcamlValue::String(OcamlString { text })
     }
 
     /// Read a marshalled value from bytes (including magic + header).
@@ -330,7 +298,6 @@ impl MarshalReader {
         let _size_64 = read_u32_be(reader)?;
 
         self.obj_table.clear();
-        self.string_scope = 0;
         // Every object takes at least one byte of payload, so `data_len`
         // bounds a corrupt `obj_count`.
         self.obj_table.reserve(obj_count.min(data_len) as usize);
@@ -599,50 +566,6 @@ fn read_i64_be<R: Read>(reader: &mut R) -> Result<i64, io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn decoded_strings_retain_sharing_without_equating_contents() {
-        fn allocation(value: &OcamlValue) -> Option<(u64, u32)> {
-            let OcamlValue::String(value) = value else {
-                panic!("string")
-            };
-            value.allocation()
-        }
-        for encoded in [
-            vec![0x21, b'x'],
-            vec![CODE_STRING8, 1, b'x'],
-            vec![CODE_STRING32, 0, 0, 0, 1, b'x'],
-            vec![0x20],
-        ] {
-            let mut payload = vec![0xb0]; // tuple of three strings
-            payload.extend(&encoded);
-            payload.extend([CODE_SHARED8, 1]);
-            payload.extend(&encoded);
-            let mut reader = MarshalReader::new();
-            let value = reader.read_value(&mut Cursor::new(&payload)).unwrap();
-            let (_, fields) = value.as_block();
-            assert!(allocation(&fields[0]).is_some());
-            assert_eq!(allocation(&fields[0]), allocation(&fields[1]));
-            assert_eq!(fields[0].as_string(), fields[2].as_string());
-            assert_ne!(allocation(&fields[0]), allocation(&fields[2]));
-            assert_eq!(allocation(&fields[0]), allocation(&fields[0].clone()));
-            let other = MarshalReader::new()
-                .read_value(&mut Cursor::new(&payload))
-                .unwrap();
-            assert_ne!(allocation(&fields[0]), allocation(&other.as_block().1[0]));
-
-            let mut header = Vec::from(MAGIC_NUMBER_SMALL.to_be_bytes());
-            for n in [payload.len() as u32, 3, 0, 0] {
-                header.extend(n.to_be_bytes());
-            }
-            header.extend(&payload);
-            let reset = reader.read_from_bytes(&header).unwrap();
-            assert_ne!(allocation(&fields[0]), allocation(&reset.as_block().1[0]));
-            drop(reader);
-            assert_eq!(allocation(&fields[0]), allocation(&fields[1]));
-        }
-        assert_eq!(allocation(&OcamlValue::String("x".into())), None);
-    }
 
     #[test]
     fn short_debug_truncates_on_char_boundary() {
