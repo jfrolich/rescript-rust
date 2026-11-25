@@ -297,7 +297,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     header
                 };
                 let mut value = self.js.function(&mut self.arena, header, body);
-                super::names::close(&mut self.arena, &self.idents, header);
+                super::names::close(&self.js, &mut self.arena, &self.idents, &value);
                 if let Some(loc) = source_loc {
                     self.js.locate(&mut self.arena, &mut value, loc);
                 }

@@ -459,7 +459,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     crate::lambda::LamLoc::NONE,
                 );
                 let function = self.js.function(&mut self.arena, header, body);
-                super::names::close(&mut self.arena, &self.idents, header);
+                super::names::close(&self.js, &mut self.arena, &self.idents, &function);
                 return function;
             } else {
                 return self.call_values(callee, args, crate::js_ir::CallInfo::default());

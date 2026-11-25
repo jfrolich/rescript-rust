@@ -340,7 +340,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             crate::lambda::LamLoc::NONE,
         );
         let callee = self.js.function(&mut self.arena, header, body);
-        super::names::close(&mut self.arena, &self.idents, header);
+        super::names::close(&self.js, &mut self.arena, &self.idents, &callee);
         self.call_values(callee, std::iter::empty(), Default::default())
     }
 

@@ -175,6 +175,20 @@ pub(crate) struct Log {
     /// sort, rows copied, nodes adopted and free entries taken over by
     /// `adopt`.
     pub(crate) steps: usize,
+    /// PROBE: calls of the functions of `Js` that read by id, made by the
+    /// naming log (and, from step 5, the replay and the external-shadow
+    /// decision), for the report of the probe.
+    pub(crate) by_id: ReadsById,
+}
+
+/// PROBE: calls of `Js::owner`, `Js::kind_of`, `Js::is_callee` and
+/// `Js::id_bound` by the converted files.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReadsById {
+    pub(crate) owner: usize,
+    pub(crate) kind_of: usize,
+    pub(crate) is_callee: usize,
+    pub(crate) id_bound: usize,
 }
 
 impl Log {
@@ -309,7 +323,8 @@ impl Log {
     /// pass over the parameters). Pushes at most R entries on `free` and
     /// one `Child`, and `set_scope` may grow `of_function`: these pools
     /// allocate when they grow; the run is truncated back to its start.
-    fn close(&mut self, bir: &Bir, idents: &[crate::ident::Ident], function: FuncId) -> ScopeId {
+    fn close<B: Js>(&mut self, js: &B, bir: &Pools, idents: &[crate::ident::Ident], literal: B::Ref<'_>) -> ScopeId {
+        let function = js.function_of(bir, literal).expect("close after the function literal is built");
         let open = self.open.pop().expect("a function scope is open");
         let row = open.row;
         self.size_imports(bir);
@@ -326,7 +341,7 @@ impl Log {
         let mut child = children;
         while let Some(&Child { start, end: stop, row: closed }) = self.children.get(child) {
             self.steps += 1;
-            self.read_sites(bir, idents, row, at, start);
+            self.read_sites(js, bir, idents, row, at, start);
             at = stop;
             child += 1;
             // A child whose literal is still there gives its free entries
@@ -343,7 +358,7 @@ impl Log {
                 self.join(row, self.free[i as usize]);
             }
         }
-        self.read_sites(bir, idents, row, at, end);
+        self.read_sites(js, bir, idents, row, at, end);
         // 3. The free entries of the run, compacted in place.
         let first = (!header.params.is_empty()).then(|| FreeRef::var(bir.function_parameter(function, 0)));
         let mut flags = ScopeRow::CLOSED;
@@ -388,8 +403,7 @@ impl Log {
         }
         self.run.truncate(start);
         let free_len = index(self.free.len()) - free_start;
-        let node = bir.func_owners[function.index()].expect("close after the function literal is built");
-        if eta_shape(bir, node) {
+        if eta_shape(js, bir, literal) {
             flags |= ScopeRow::ETA;
         }
         self.rows[row as usize] = ScopeRow { function, free_start, free_len, flags };
@@ -405,16 +419,19 @@ impl Log {
 
     /// Step 2 of `close` over the sites `[from, to)`: one step each, and
     /// `unprinted` for each live one in a unit that preserves JSX.
-    fn read_sites(&mut self, bir: &Bir, idents: &[crate::ident::Ident], row: u32, from: u32, to: u32) {
+    fn read_sites<B: Js>(&mut self, js: &B, bir: &Pools, idents: &[crate::ident::Ident], row: u32, from: u32, to: u32) {
         let sites = &bir.js_scope.as_ref().expect("lowering scope").sites;
         for site in &sites[from as usize..to as usize] {
             self.steps += 1;
             if site.node == NodeId(u32::MAX) {
                 continue;
             }
-            if self.jsx_preserve && self.unprinted(bir, idents, site.node) {
+            if self.jsx_preserve && self.unprinted(js, bir, idents, site.node.0) {
                 continue;
             }
+            // PROBE-GAP 3: the variable or the import of a site, which is an
+            // id; `Js::kind_of` gives its kind and nothing reads its payload
+            // by id (the second form of step 3 records it in the site).
             let entry = match bir.view(site.node) {
                 crate::bir::View::Var { var } => FreeRef::var(var),
                 crate::bir::View::JQualified { module, .. } => FreeRef::import(module),
@@ -438,26 +455,35 @@ impl Log {
     /// node, `jsx::printed_form`: one step per property key and one per
     /// member of the tag's chain and its base (pinned by
     /// `a_jsx_tag_chain_of_ten_thousand_members_costs_three_steps_a_member`).
-    fn unprinted(&mut self, bir: &Bir, idents: &[crate::ident::Ident], reference: NodeId) -> bool {
+    fn unprinted<B: Js>(&mut self, js: &B, bir: &Pools, idents: &[crate::ident::Ident], reference: u32) -> bool {
         use crate::bir::View;
         let mut top = reference;
         let jsx = loop {
-            let Some(parent) = bir.parents[top.index()] else { return false };
-            match bir.nodes[parent.index()].op() {
-                Op::JDot => {
+            self.by_id.owner += 1;
+            let Some(parent) = js.owner(bir, top) else { return false };
+            self.by_id.kind_of += 1;
+            match js.kind_of(bir, parent) {
+                Kind::Dot => {
                     self.steps += 1;
                     top = parent;
                 }
-                Op::JJsx => break parent,
+                Kind::Jsx => break parent,
                 _ => return false,
             }
         };
-        let View::JJsx { values, .. } = bir.view(jsx) else { unreachable!("a JSX node") };
-        let (callee, tag) = (values[0] == top, values[1] == top);
+        // PROBE-GAP 4: whether `top` is operand 0 (the runtime callee) or 1
+        // (the tag) of the JSX element `jsx`: `Js::is_callee` answers for a
+        // call, a `new` and a tagged template, not for a JSX element, and no
+        // function gives the operand index of an id.
+        let View::JJsx { values, .. } = bir.view(NodeId(jsx)) else { unreachable!("a JSX node") };
+        let (callee, tag) = (values[0].0 == top, values[1].0 == top);
         if !callee && !tag {
             return false;
         }
-        let form = super::jsx::printed_form(bir, idents, jsx, &mut self.spelling, &mut self.steps);
+        // PROBE-GAP 5: `jsx::printed_form` (not converted) reads the element
+        // by its id; through the interface it needs a reference of the
+        // element, which a climb by id does not give.
+        let form = super::jsx::printed_form(bir, idents, NodeId(jsx), &mut self.spelling, &mut self.steps);
         match form {
             super::jsx::PrintedForm::Runtime => false,
             super::jsx::PrintedForm::Element => callee,
@@ -478,7 +504,7 @@ impl Log {
         self.steps += 1;
         self.adopted_nodes += 1;
         match js.kind(a, value) {
-            Kind::Var | Kind::Qualified if self.jsx_preserve && self.unprinted(a, idents, NodeId(js.id(a, value))) => {}
+            Kind::Var | Kind::Qualified if self.jsx_preserve && self.unprinted(js, a, idents, js.id(a, value)) => {}
             Kind::Var => self.join(row, FreeRef::var(js.var_of(a, value).expect("a reference has a variable"))),
             Kind::Qualified => {
                 let (module, _) = js.qualified_of(a, value).expect("a module reference has a module");
@@ -557,8 +583,8 @@ pub(crate) fn open(bir: &mut Bir) -> ScopeId {
     ScopeId(row)
 }
 
-/// The innermost open scope closes: call it once the `JFun` with header
-/// `function` is built (after `loop_function_body` and after the header
+/// The innermost open scope closes: call it once the function literal
+/// `literal` is built (its header is read from it, `Js::function_of`) (after `loop_function_body` and after the header
 /// without the unit parameter was allocated), so that the function's
 /// parameters, body and node are the printed ones.
 ///
@@ -583,9 +609,9 @@ pub(crate) fn open(bir: &mut Bir) -> ScopeId {
 /// of the sort; nothing is allocated once the vectors have their capacity. A
 /// site is read at one close only, so the sites cost one step each over the
 /// whole unit, whatever the nesting.
-pub(crate) fn close(bir: &mut Bir, idents: &[crate::ident::Ident], function: FuncId) -> ScopeId {
+pub(crate) fn close<B: Js>(js: &B, bir: &mut Pools, idents: &[crate::ident::Ident], literal: &B::E) -> ScopeId {
     let mut log = std::mem::take(&mut bir.js_scope.as_mut().expect("lowering scope").names);
-    let scope = log.close(bir, idents, function);
+    let scope = log.close(js, bir, idents, B::of(literal));
     bir.js_scope.as_mut().expect("lowering scope").names = log;
     scope
 }
@@ -632,36 +658,45 @@ pub(crate) fn adopt<B: Js>(js: &B, bir: &mut Pools, idents: &[crate::ident::Iden
 /// with a variable or module member as callee and exactly the parameters as
 /// arguments, in order. Cost: one step per parameter; the body is not read
 /// beyond its one statement.
-pub(crate) fn eta_shape(bir: &Bir, function: NodeId) -> bool {
+pub(crate) fn eta_shape<B: Js>(js: &B, bir: &Pools, literal: B::Ref<'_>) -> bool {
     use crate::bir::View;
     use crate::js_ir::{CallArity, CallKind};
-    let View::JFun { body, header } = bir.view(function) else { return false };
+    let Some(header) = js.function_of(bir, literal) else { return false };
     let attributes = bir.function_attributes(header);
     if bir.function(header).flags & crate::bir::FuncHeader::METHOD != 0 || attributes.async_ || attributes.directive.is_some() {
         return false;
     }
+    // PROBE-GAP 6: the body of a function literal read by reference (its
+    // statements and the value of one): `Js` reads a literal's header and
+    // no function of `Js` or `JsStmt` reaches its body from a reference.
+    let View::JFun { body, .. } = bir.view(NodeId(js.id(bir, literal))) else { return false };
     let View::SBlock { statements: &[statement] } = bir.view(body) else { return false };
     let View::SReturn { value } = bir.view(statement) else { return false };
-    let View::JCall { callee, args, info } = bir.view(value) else { return false };
-    let callee = match bir.view(callee) {
-        View::Var { var } => Some(var),
-        View::JQualified { .. } => None,
+    let value = B::at(value);
+    if js.kind(bir, value) != Kind::Call {
+        return false;
+    }
+    let callee = js.operand(bir, value, 0);
+    let callee = match js.kind(bir, callee) {
+        Kind::Var => js.var_of(bir, callee),
+        Kind::Qualified => None,
         _ => return false,
     };
     let params = bir.function(header).params.len();
-    if args.len() != params {
+    if js.arity(bir, value) as usize != params + 1 {
         return false;
     }
-    for (i, &arg) in args.iter().enumerate() {
+    for i in 0..params {
         let param = bir.function_parameter(header, i);
-        if !matches!(bir.view(arg), View::Var { var } if var == param) || callee == Some(param) {
+        let arg = js.operand(bir, value, i as u32 + 1);
+        if js.var_of(bir, arg) != Some(param) || callee == Some(param) {
             return false;
         }
     }
+    let Some(info) = js.info_of(bir, value) else { return false };
     let crate::bir::JsPayload::Call(info) = bir.javascript(info) else { return false };
     matches!(info.kind, CallKind::MlCall | CallKind::BuiltinRuntime) && info.arity == CallArity::Full
 }
-
 /// What the program scope names besides its statements, in the pass's order
 /// (`Names::collect`): the imported modules that are neither dynamic nor
 /// unresolved, then the reservations of export coercion, then the
@@ -1413,7 +1448,7 @@ mod tests {
         fn function(&mut self, header: FuncId, statements: &[NodeId]) -> (NodeId, ScopeId) {
             let body = self.block(statements);
             let function = self.b.new_node(View::JFun { body, header }, 0);
-            (function, close(&mut self.b, &self.idents, header))
+            (function, close(&Rows::default(), &mut self.b, &self.idents, &Rows::from_node(function)))
         }
         fn log(&self) -> &Log {
             &self.b.js_scope.as_ref().unwrap().names
@@ -1771,7 +1806,7 @@ mod tests {
     fn a_function_that_returns_no_call_is_closed_and_not_eta() {
         let (u, statement, [f, g], _) = nested(true);
         let View::SDecl { value: Some(function), .. } = u.b.view(statement) else { unreachable!() };
-        assert!(!eta_shape(&u.b, function));
+        assert!(!eta_shape(&Rows::default(), &u.b, function));
         for scope in [f, g] {
             assert_eq!(u.flags(scope) & (ScopeRow::CLOSED | ScopeRow::ETA), ScopeRow::CLOSED);
         }

@@ -86,7 +86,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             LamLoc::NONE,
         );
         let callback = self.js.function(&mut self.arena, header, body);
-        super::names::close(&mut self.arena, &self.idents, header);
+        super::names::close(&self.js, &mut self.arena, &self.idents, &callback);
         let then = self.member(import, "then");
         let info = self.arena.js_info(crate::bir::JsPayload::Call(Default::default()));
         let mark = self.js.mark();
