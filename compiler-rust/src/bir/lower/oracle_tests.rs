@@ -1977,7 +1977,7 @@ fn names_agree(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::Modul
 fn names_agree_printing(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, inline: bool, jsx_preserve: bool) -> crate::emit::NameStats {
     let (stats, replayed) = names_of(arena, root, resolver, inline, jsx_preserve);
     assert_eq!((stats.name_differences, stats.finish_differences, stats.free_differences), (0, 0, 0), "{stats:?}");
-    assert_eq!((replayed.ambiguous_orders, replayed.unnamed_references), (0, 0), "{replayed:?}");
+    assert_eq!(replayed.unnamed_references, 0, "{replayed:?}");
     assert_eq!(stats.names_replayed, stats.names_pass, "{stats:?}");
     stats
 }

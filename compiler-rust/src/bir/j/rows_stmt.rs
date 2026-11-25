@@ -455,6 +455,101 @@ impl JsStmt for Rows {
         (E(condition), S(then_), else_.map(S))
     }
 
+    // ---- PROBE (T6r) ----
+
+    // PROBE-ADD 1: O(1): one read of the node.
+    fn bodies(&self, a: &Pools, s: &S) -> u32 {
+        match a.view(s.0) {
+            View::SBlock { .. }
+            | View::SWhile { .. }
+            | View::SForRange { .. }
+            | View::SForRangeExisting { .. }
+            | View::SForOf { .. }
+            | View::SForAwaitOf { .. } => 1,
+            View::SIf { else_, .. } => 1 + u32::from(else_.is_some()),
+            View::STry { parts, .. } => parts.len() as u32,
+            View::SSwitch { actions, .. } => actions.len() as u32,
+            _ => 0,
+        }
+    }
+    // PROBE-ADD 2: O(1): the `ListId` of the block that is the list (a
+    // `switch` has one block per action); one step. The statements stay
+    // the block's.
+    fn body(&mut self, a: &mut Pools, s: &mut S, index: u32) -> ListId {
+        self.steps += 1;
+        let block = Self::body_block(a, s, index);
+        a.node(block).block_list_id().expect("a body is a block")
+    }
+    // PROBE-ADD 3: O(1): the block is written over `body` with its own
+    // flags and `aux`; its statements' parents are the block already
+    // (`take_at` detaches nothing on rows). One step.
+    fn set_body(&mut self, a: &mut Pools, s: &mut S, index: u32, body: ListId) {
+        self.steps += 1;
+        let block = Self::body_block(a, s, index);
+        Self::set_block_list(a, block, body);
+    }
+    // PROBE-ADD 4: one step per expression node read, on `Rows::work`.
+    fn functions(&mut self, a: &mut Pools, s: &mut S, mut visit: impl FnMut(FuncId, &mut ListId)) {
+        debug_assert!(self.work.is_empty());
+        Self::push_expressions(a, s.0, &mut self.work);
+        while let Some(node) = self.work.pop() {
+            self.steps += 1;
+            match a.view(node) {
+                View::JFun { body, header } => {
+                    let old = a.node(body).block_list_id().expect("a function body is a block");
+                    let mut list = old;
+                    visit(header, &mut list);
+                    if list != old {
+                        Self::set_block_list(a, body, list);
+                    }
+                }
+                view => Self::push_children(a, view, &mut self.work),
+            }
+        }
+    }
+    // PROBE-ADD 5: one step per expression node read, on `Rows::work`;
+    // `Bir::qualify_global` of a reference `visit` decides.
+    fn globals(&mut self, a: &mut Pools, s: &mut S, mut visit: impl FnMut(VarId) -> bool) {
+        debug_assert!(self.work.is_empty());
+        Self::push_expressions(a, s.0, &mut self.work);
+        while let Some(node) = self.work.pop() {
+            self.steps += 1;
+            match a.view(node) {
+                View::JFun { .. } => {}
+                View::Var { var } => {
+                    if visit(var) {
+                        a.qualify_global(node);
+                    }
+                }
+                view => Self::push_children(a, view, &mut self.work),
+            }
+        }
+    }
+    // PROBE-ADD 6: O(1): one read of the node.
+    fn binder(&self, a: &Pools, s: &S) -> Option<VarId> {
+        match a.view(s.0) {
+            View::SDecl { var, .. }
+            | View::SRest { var, .. }
+            | View::SForRange { var, .. }
+            | View::SForOf { var, .. }
+            | View::SForAwaitOf { var, .. } => Some(var),
+            View::STry { exception, .. } => exception,
+            _ => None,
+        }
+    }
+    // PROBE-ADD 7: the descriptor of the `SRest` and one read per field.
+    fn rest_fields(&self, a: &Pools, s: &S, mut visit: impl FnMut(VarId)) {
+        let View::SRest { info, .. } = a.view(s.0) else { return };
+        if let crate::bir::JsPayload::Rest(fields) = a.javascript(info) {
+            for field in a.rest_fields(*fields) {
+                if let Some(binding) = field.binding {
+                    visit(binding);
+                }
+            }
+        }
+    }
+
+
     fn exp_rule(&mut self, a: &mut Pools, value: E) -> S {
         self.steps += 1;
         S(norm::js1_exp(a, value.0))
@@ -532,6 +627,64 @@ impl<R: Runs<Rows>> norm::IfLists for RunLists<'_, R> {
 }
 
 impl Rows {
+    /// PROBE (T6r): the block statement that is list `index` of `s`. O(1).
+    fn body_block(a: &Pools, s: &S, index: u32) -> NodeId {
+        let i = index as usize;
+        match a.view(s.0) {
+            View::SBlock { .. } if i == 0 => Some(s.0),
+            View::SIf { then_, .. } if i == 0 => Some(then_),
+            View::SIf { else_: Some(else_), .. } if i == 1 => Some(else_),
+            View::SWhile { body, .. } if i == 0 => Some(body),
+            View::SForRange { parts, .. }
+            | View::SForRangeExisting { parts, .. }
+            | View::SForOf { parts, .. }
+            | View::SForAwaitOf { parts, .. }
+                if i == 0 =>
+            {
+                Some(parts[parts.len() - 1])
+            }
+            View::STry { parts, .. } => Some(parts[i]),
+            View::SSwitch { actions, .. } => Some(actions[i]),
+            _ => None,
+        }
+        .unwrap_or_else(|| panic!("statement list {index} of a statement without it"))
+    }
+    /// PROBE (T6r): the block `block` over the statements of `list`, with
+    /// its flags and its `aux`. O(1).
+    fn set_block_list(a: &mut Pools, block: NodeId, list: ListId) {
+        let node = a.node(block);
+        let mut new = if node.aux() != 0 {
+            crate::bir::node::Node::explicit_block_list(list)
+        } else {
+            crate::bir::node::Node::block_list(list)
+        };
+        new.set_flags(node.flags());
+        a.nodes[block.index()] = new;
+    }
+    /// PROBE (T6r): the children of the statement `statement` that are
+    /// expressions, pushed last first. O(children).
+    fn push_expressions(a: &Pools, statement: NodeId, work: &mut Vec<NodeId>) {
+        // A descent holds at most every node of the arena: the stack takes
+        // that capacity once, so that it does not grow with a wide
+        // expression (one allocation per unit, four bytes a node).
+        if work.capacity() < a.nodes.len() {
+            work.reserve_exact(a.nodes.len() - work.len());
+        }
+        let view = a.view(statement);
+        for at in (0..view.child_count()).rev() {
+            let child = view.child_at(at);
+            if !is_statement(a.node(child).op()) {
+                work.push(child);
+            }
+        }
+    }
+    /// PROBE (T6r): the children of an expression, pushed last first.
+    /// O(children).
+    fn push_children(_: &Pools, view: View<'_>, work: &mut Vec<NodeId>) {
+        for at in (0..view.child_count()).rev() {
+            work.push(view.child_at(at));
+        }
+    }
     /// Entry `index` of the `statements` of the `SBlock` `block`. O(1).
     /// Panics on a statement that is not a block, on an index outside it
     /// and on an entry the block no longer holds (a hole).
@@ -555,6 +708,31 @@ impl Rows {
         self.steps += self.len(a, list) as u64;
         a.block_from_list(list)
     }
+}
+
+/// PROBE (T6r): whether nodes of `op` are statements. O(1).
+fn is_statement(op: crate::bir::Op) -> bool {
+    use crate::bir::Op;
+    matches!(
+        op,
+        Op::SBlock
+            | Op::SDecl
+            | Op::SExp
+            | Op::SIf
+            | Op::SWhile
+            | Op::SForRangeExisting
+            | Op::SForRange
+            | Op::SForOf
+            | Op::SForAwaitOf
+            | Op::SSwitch
+            | Op::SReturn
+            | Op::SThrow
+            | Op::STry
+            | Op::SBreak
+            | Op::SContinue
+            | Op::SDebugger
+            | Op::SRest
+    )
 }
 
 #[cfg(test)]

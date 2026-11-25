@@ -405,6 +405,48 @@ pub trait JsStmt: Js {
     /// is not an `If`. (T6n: `cond.rs::merge_tail_guard`.)
     fn take_if(&mut self, a: &mut Pools, s: Self::S) -> (Self::E, Self::S, Option<Self::S>);
 
+    // ---- PROBE (T6r): the replay of names over the final lists ----
+
+    // PROBE-ADD 1: O(1).
+    /// The number of statement lists `s` holds, in print order: one for a
+    /// block (its statements), a `while`, a loop and a `switch` (its
+    /// actions); one or two for an `if`; the body, the handler and the
+    /// finaliser a `try` has. Zero for any other statement.
+    fn bodies(&self, a: &Pools, s: &Self::S) -> u32;
+    // PROBE-ADD 2: O(1).
+    /// List `index` of `s` ([`JsStmt::bodies`]), taken out of it until
+    /// [`JsStmt::set_body`] puts a list back: its statements are taken with
+    /// [`JsStmt::take_at`] and made a list again. Panics when `index` is not
+    /// below `bodies`.
+    fn body(&mut self, a: &mut Pools, s: &mut Self::S, index: u32) -> Self::L;
+    // PROBE-ADD 3: O(1); the list is adopted, not copied.
+    /// `body` becomes list `index` of `s`, in place of the one
+    /// [`JsStmt::body`] took. Panics when `index` is not below `bodies`.
+    fn set_body(&mut self, a: &mut Pools, s: &mut Self::S, index: u32, body: Self::L);
+    // PROBE-ADD 4: one step per expression node of `s` read (on rows every
+    // node outside the statement's lists and below no literal; the design's
+    // `HAS_FUN` would prune it), counted in `Js::steps`.
+    /// The function literals among the expressions of `s` (not those of its
+    /// lists, not those inside another literal), in print order: `visit` is
+    /// given each literal's header and the list of its body, which it may
+    /// replace by another list.
+    fn functions(&mut self, a: &mut Pools, s: &mut Self::S, visit: impl FnMut(FuncId, &mut Self::L));
+    // PROBE-ADD 5: as `functions`; counted in `Js::steps`.
+    /// The references to variables among the expressions of `s` (not those
+    /// of its lists, not those inside a literal), in print order: `visit`
+    /// is given each one's variable, and `true` makes the reference print
+    /// as `globalThis.name`.
+    fn globals(&mut self, a: &mut Pools, s: &mut Self::S, visit: impl FnMut(VarId) -> bool);
+    // PROBE-ADD 6: O(1).
+    /// The variable `s` binds: that of a `Declare` or a `Rest`, the
+    /// variable of a range loop and of a loop over an iterable, the
+    /// exception of a `try` with a handler. `None` for any other statement.
+    fn binder(&self, a: &Pools, s: &Self::S) -> Option<VarId>;
+    // PROBE-ADD 7: one call of `visit` per field with a binding.
+    /// The variables the fields of a `Rest` bind, in order; nothing for any
+    /// other statement.
+    fn rest_fields(&self, a: &Pools, s: &Self::S, visit: impl FnMut(VarId));
+
     // ---- Rules of BACKEND_LOWERING 6 ----
 
     /// J-S1: the statement of a value used for its effect. Its cost: one

@@ -435,7 +435,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     call_arity_index: std::collections::HashMap<(crate::bir::ImportId, crate::bir::StrId), Option<call::AritySpan>>,
     eta_arguments: Vec<B::E>,
     /// The storage of the naming log's replay (`replay_names`).
-    names: names::Storage,
+    names: names::Storage<B>,
     calls: Vec<Option<call::Plan>>,
     tail_order: Vec<VarId>,
     rec_members: Vec<rec::Member<B::S, B::L>>,
@@ -900,18 +900,23 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
             })
             .map(|index| crate::bir::ImportId(index as u32)));
         storage.imports.sort_by(|a, b| crate::lambda::lam_compile::module_sort_cmp(&modules[a.index()], &modules[b.index()]));
+        // T6r probe: the replay takes the pools mutably, so the raw names
+        // are taken out of the scope for the call and put back.
+        let raw = std::mem::take(&mut self.arena.js_scope.as_mut().expect("lowering scope").globals.raw);
         let names::Storage { tables, scratch, imports, reservations } = &mut storage;
         let program = names::Program {
             imports,
             reservations,
             exports: &self.coercion.selected,
-            raw: &scope.globals.raw,
+            raw: &raw,
         };
         // The names of the variables are written in the arena's own
         // column (`Vars::printed`, one entry per variable, unused until
         // now): the replay borrows it and gives it back.
         printed.names = std::mem::take(&mut self.arena.vars.printed);
-        let replayed = names::replay(&self.arena, root, &self.idents, &program, tables, scratch, printed);
+        let mut root = B::stmt_from_node(root);
+        let replayed = names::replay(&mut self.js, &mut self.arena, &mut root, &self.idents, &program, (tables, scratch), printed);
+        self.arena.js_scope.as_mut().expect("lowering scope").globals.raw = raw;
         self.arena.vars.printed = std::mem::take(&mut printed.names);
         // The named imports leave with the unit; the rest of the storage
         // stays the state's.
