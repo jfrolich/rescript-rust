@@ -5542,8 +5542,8 @@ mod tests {
             let seeds: Vec<u64> = differing.iter().map(|(seed, _)| *seed).collect();
             let mut known: Vec<u64> = match at {
                 0 => Vec::new(),
-                1 => [&ROWS_OLD_EQUAL_DIFFERS[..], &ROWS_OLD_NIL_DIFFERS[..], &ROWS_UNCLASSIFIED[..]].concat(),
-                _ => [&UNIVARS_OLD_EQUAL_DIFFERS[..], &UNIVARS_OLD_NIL_DIFFERS[..], &UNIVARS_UNCLASSIFIED[..]].concat(),
+                1 => [&ROWS_OLD_EQUAL_DIFFERS[..], &ROWS_OLD_NIL_DIFFERS[..]].concat(),
+                _ => [&UNIVARS_OLD_EQUAL_DIFFERS[..], &UNIVARS_OLD_NIL_DIFFERS[..], &UNIVARS_OLD_FREE_UNIVAR_DIFFERS[..]].concat(),
             };
             known.sort_unstable();
             let unknown = differing.iter().find(|(seed, _)| !known.contains(seed));
@@ -5579,13 +5579,6 @@ mod tests {
     /// pattern is then one node with a `Tnil` of the subject. The
     /// answers agree; the old form has fewer `nil` nodes of their own.
     const ROWS_OLD_NIL_DIFFERS: [u64; 4] = [32000157, 54000224, 69000217, 84000296];
-    /// Seeds that differ and were NOT classified in the tenth skeleton
-    /// turn (8.6, decision 117): the reviewer reads them against the
-    /// OCaml arms before R3i is accepted. 81000256: after a
-    /// `moregeneral` with `inst_nongen` that joined two `Reither`
-    /// fields and a later unification, the old side prints one type
-    /// more in a field of the pattern.
-    const ROWS_UNCLASSIFIED: [u64; 1] = [81000256];
     /// As [`ROWS_OLD_EQUAL_DIFFERS`], on the plan with universal
     /// variables.
     const UNIVARS_OLD_EQUAL_DIFFERS: [u64; 16] = [
@@ -5594,12 +5587,18 @@ mod tests {
     ];
     /// As [`ROWS_OLD_NIL_DIFFERS`], on the plan with universal variables.
     const UNIVARS_OLD_NIL_DIFFERS: [u64; 3] = [5000060, 12000099, 14000052];
-    /// Not classified (decision 117). 5000086 and 13000118 were read:
-    /// `moregeneral` with `inst_nongen` of a weak variable against a
-    /// FREE universal variable, which `moregen_occur` refuses (`occur_univar
-    /// env ty`, compiler/ml/ctype.ml:2917-2918) and today's checker
-    /// accepts and links; 16000113 and 20000085 were not read.
-    const UNIVARS_UNCLASSIFIED: [u64; 4] = [5000086, 13000118, 16000113, 20000085];
+    /// Seeds on which TODAY'S CHECKER differs from OCaml in
+    /// `moregen_occur`: `moregeneral` with `inst_nongen` of a weak
+    /// variable against a FREE universal variable. OCaml refuses it
+    /// (`occur_univar env ty`, compiler/ml/ctype.ml:2917-2918, called
+    /// unconditionally; with no binder entered a `Tunivar` raises,
+    /// 1584-1585: `if not (Type_set.mem ty bound) then raise (Unify
+    /// [(ty, newgenvar ())])`); types/ctype.rs `moregen_occur` runs
+    /// `occur_univar` only `if !univars.pairs.is_empty()`, so with no
+    /// scope open it accepts and links the weak variable. Both read in
+    /// full in the tenth skeleton turn: old `moregeneral = true`, new
+    /// `false`.
+    const UNIVARS_OLD_FREE_UNIVAR_DIFFERS: [u64; 2] = [5000086, 13000118];
 
     /// The plan of the cases of GADT instances.
     const INSTANCE_PLAN: u16 = PATTERN_PLAN | INSTANCES;

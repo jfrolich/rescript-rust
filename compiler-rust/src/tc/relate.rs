@@ -143,8 +143,16 @@ impl Checker {
     /// empty memo and asks no memo (`Tconstr (type_path s p, List.map
     /// (typexp s) tl, ref Mnil)`, subst.ml:172), so a copy of a
     /// constructor without arguments is a new node and never a link to
-    /// a memorized one; `Graph::restore`, which puts the levels of `ty`
-    /// back. The
+    /// a memorized one. `Graph::restore`, which puts the levels of `ty`
+    /// back, runs BETWEEN the copy and that pass: the pass opens a
+    /// source row whose row variable the copy shares, so that the two
+    /// have one reference a `Reither` field (`let e = if keep then e
+    /// else ref None`, btype.ml:374), and that opening must outlive the
+    /// function (corrected in the tenth turn: with the restore last, the
+    /// source was unopened again and `set_row_field e1 (Reither (c2,
+    /// [], m2, e2))` of `moregen_row_field` wrote a reference the
+    /// subject did not hold; 8.6, decision 117). The pass reads handles
+    /// (`first`), not levels. The
     /// caller, `moregeneral`, passes a type none of whose nodes is
     /// generic (an instance made at `GENERIC - 1`). Cost: one step a
     /// node visited and one trail entry a level written, one step a node

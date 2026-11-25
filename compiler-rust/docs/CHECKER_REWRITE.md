@@ -2182,7 +2182,7 @@ it stops and reports a reproduction.
 | R3r | Pattern mode: `mcomp`, the two arms that try and fall back, the package fallback, a total `duplicate` (8.9). Merged (pull request 361; `tc::` 306 passed, none ignored) | `rows.rs`, `unify.rs` | R3h | R3i, R3j, R3q | 450 |
 | R3q | `instance_poly` and `instance_label`: the copy that goes through free universal variables without sharing (`copy_sep`), and the fixed-row rule of `copy_row` only it reaches (8.6, decision 47; 8.10). Merged (pull request 370; `tc::` 324 passed, none ignored) | `rows.rs` | R3n, R3g | R3h, R3i, R3j | 500 |
 | R3s | The ambiguity of GADT instances: tracing, the instance sets and the three places of the kernel that read them; a nullary constructor's own memo while tracing (8.6, decisions 72 and 97 to 112; 8.11). Merged (pull request 382; `tc::` 341 passed, none ignored) | `unify.rs`, `expand.rs`, three lines of `rows.rs` | R3r | R3i, R3j | 350 |
-| R3i | `moregeneral`, `equal`, `matches`: one loop for `moregen` and `eqtype` on the frames of unification, `rigidify`, the renaming as a table (8.6, decisions 113 to 118; 8.12). Issued in the tenth skeleton turn: 23 bodies, 8 ignored tests, a prompt in 8.4 | `relate.rs` | R3s | R3j | 900 |
+| R3i | `moregeneral`, `equal`, `matches`: one loop for `moregen` and `eqtype` on the frames of unification, `rigidify`, the renaming as a table (8.6, decisions 113 to 118; 8.12). Issued in the tenth skeleton turn: 23 bodies, 9 ignored tests, a prompt in 8.4 | `relate.rs` | R3s | R3j | 900 |
 | R3j | Subtyping without the declaration-directed coercions. NOT designed: the tenth skeleton turn ended in R3i (8.12, "What the tenth turn did not do") | `relate.rs` | R3s | R3i | 600 (not measured) |
 | K2 | The hot paths of unification, no behaviour change (8.7) | `unify.rs` | R3c | every slice above | 150 |
 
@@ -2332,7 +2332,7 @@ the tenth turn did is decisions 113 to 118 of 8.6 and section 8.12.
 
 | Slice | Decisions | Tests | Run in this turn |
 |---|---|---|---|
-| R3i | 113 to 118; 8.12 | eight ignored: four hand-built and the two step tests `relations_at_ten_thousand` and `relations_over_ten_thousand_fields_and_tags` in `r3_tests.rs`; `relation_plan_agrees_on_generated_cases` (25,000 cases) and `a_wrong_answer_of_a_relation_is_reported` in `differential.rs`; two that run today (`the_rigid_expansion_is_public_and_adds_the_chain`, `old_side_of_the_relation_plans_is_not_vacuous`) and the size test | all eight passed against a prototype of the 23 bodies (801 added lines, comments included), which is not in the tree; the fifth shape of `relations_at_ten_thousand` was seen not to end without the table of pairs. The whole filter with the prototype in place: 351 passed, none ignored |
+| R3i | 113 to 118; 8.12 | nine ignored: five hand-built and the two step tests `relations_at_ten_thousand` and `relations_over_ten_thousand_fields_and_tags` in `r3_tests.rs`; `relation_plan_agrees_on_generated_cases` (25,000 cases) and `a_wrong_answer_of_a_relation_is_reported` in `differential.rs`; two that run today (`the_rigid_expansion_is_public_and_adds_the_chain`, `old_side_of_the_relation_plans_is_not_vacuous`) and the size test | all nine passed against a prototype of the 23 bodies (803 added lines, comments included), which is not in the tree; the fifth shape of `relations_at_ten_thousand` was seen not to end without the table of pairs. The whole filter with the first prototype in place: 351 passed, none ignored; with the corrected one and the ninth test, the count is in the pull request |
 | R3j | none | none | nothing: not designed |
 
 The ignored tests are checked mechanically
@@ -3605,8 +3605,9 @@ prototype's part is about 270).
 
 The prompt of R3i, written in the tenth skeleton turn. The two
 searches were run on the head that holds the skeleton and print what
-the prompt says. With the prototype in place the whole filter with the
-ignored tests included read 351 passed, 0 failed, 0 ignored.
+the prompt says. With the first prototype in place the whole filter
+with the ignored tests included read 351 passed, 0 failed, 0 ignored;
+the corrected prototype and the ninth test came after that run.
 
 ```text
 R3i. Every slice above it in the table of 8.1 is merged. Read section
@@ -3632,10 +3633,11 @@ unify_package, package_end, occur_univar} and field_repr,
 each_field_types, cell_repr, cell_mutable.
 
 A prototype of this slice was written in the design turn and the
-eight tests of the slice passed against it. It is not in the
+nine tests of the slice passed against it. It is not in the
 repository; it is a comment on pull request 393 (one fenced diff
-against the skeleton, each body under a line `// R3I-PROTOTYPE`). You
-MAY read it. Three things it does are NOT yours to copy:
+against the skeleton, each body under a line `// R3I-PROTOTYPE`; take
+the LAST comment that holds one: the earlier two have the fault of
+decision 117 in duplicate_type). You MAY read it. Three things it does are NOT yours to copy:
 relate_fields and moregen_row put their clash path in a closure that
 is called at once (write the cut of the frames out); all_distinct_vars
 turns a clash of a safe expansion into the unexpanded node with
@@ -3662,19 +3664,19 @@ Before your first commit, from the repository root:
 prints compiler-rust/src/tc/relate.rs:23;
   grep -c '#\[ignore = "R3i build"\]' compiler-rust/src/tc/*.rs | grep -v ':0$'
 prints compiler-rust/src/tc/differential.rs:2 and
-compiler-rust/src/tc/r3_tests.rs:6. When you end, both print nothing.
+compiler-rust/src/tc/r3_tests.rs:7. When you end, both print nothing.
 
 Commits, in this order, each pushed:
 1. The 23 bodies. Run `cargo test --manifest-path
    compiler-rust/Cargo.toml --lib tc:: -- --include-ignored` in the
    background with its output in a file (it takes about twenty
-   minutes; poll it): every test passes, the eight of this slice
-   included, and the last line reads 351 passed, 0 failed, 0 ignored
-   (the 343 that pass before your first edit and the eight). Never
+   minutes; poll it): every test passes, the nine of this slice
+   included, and the last line reads 352 passed, 0 failed, 0 ignored
+   (the 343 that pass before your first edit and the nine). Never
    report a count you did not see.
-2. The eight `#[ignore = "R3i build"]` lines removed; nothing else in
+2. The nine `#[ignore = "R3i build"]` lines removed; nothing else in
    a test changed. The same command without `-- --include-ignored`
-   then reads 351 passed, 0 failed, 0 ignored.
+   then reads 352 passed, 0 failed, 0 ignored.
 End your turn after the second commit is pushed.
 
 Steps (`#[cfg(test)] super::steps::tick()`): one a frame
@@ -3695,9 +3697,9 @@ The hand-built tests are the judge, each with the OCaml lines it
 follows. If a test fails where your code does what the cited lines
 say, stop and report the test with the lines: do not change the test.
 A seed listed in ROWS_OLD_EQUAL_DIFFERS, ROWS_OLD_NIL_DIFFERS,
-UNIVARS_OLD_EQUAL_DIFFERS or UNIVARS_OLD_NIL_DIFFERS differs for the
-reason its doc comment gives; ROWS_UNCLASSIFIED and
-UNIVARS_UNCLASSIFIED are the reviewer's. You act on none of them; a
+UNIVARS_OLD_EQUAL_DIFFERS, UNIVARS_OLD_NIL_DIFFERS or
+UNIVARS_OLD_FREE_UNIVAR_DIFFERS differs for the reason its doc
+comment gives. You act on none of them; a
 seed that is not listed and differs is read against the lines of 8.12
 and reported: you pin none.
 
@@ -3733,11 +3735,13 @@ for `related`; the renaming as a list that is searched; a generation
 of `marks` held across expand_head, unify, occur, occur_univar, lower
 or copy; a reference node or a partner node pushed as a child
 (row_children reads the chain of references); Checker::duplicate or
-Checker::copy in place of duplicate_type's own copy; a field's
+Checker::copy in place of duplicate_type's own copy; the restore of
+duplicate_type after its pass over the copied nodes (it runs between
+the copy and the pass: decision 117); a field's
 mutability cell written or linked; a trace built; a new FrameKind; a
 change of a signature, of a doc comment's stated cost, of a test or
 of a seed list; a change under src/types. At most 900 lines of code
-added outside doc comments (the prototype's part is 801, comments
+added outside doc comments (the prototype's part is 803, comments
 inside bodies included).
 ```
 
@@ -6226,23 +6230,50 @@ tables).
      - Today's copy keeps `Tnil` as it keeps a variable, where
        `Subst.typexp` copies it: 7 seeds (`ROWS_OLD_NIL_DIFFERS`,
        `UNIVARS_OLD_NIL_DIFFERS`); the answers agree.
-     - Five seeds are NOT classified (`ROWS_UNCLASSIFIED`,
-       `UNIVARS_UNCLASSIFIED`). Two were read: today's `moregen_occur`
-       does not refuse a free universal variable (`occur_univar env
-       ty`, ctype.ml:2917-2918). One (81000256) shows one type more in
-       a `Reither` field on the old side after a `moregeneral` with
-       `inst_nongen` and a later unification; it and two others were
-       not read against the OCaml arms. They are the reviewer's before
-       R3i is accepted; the builder acts on none of them.
+     - Five seeds were pinned unclassified at the end of the first
+       turn and are decided (second turn of the tenth). Three were the
+       DESIGN's fault (16000113, 20000085, 81000256): `duplicate_type`
+       restored its speculation after the pass that shares the
+       references of a row (`Checker::copy_refs` opens the source row
+       when the copy keeps its row variable), so the source was
+       unopened again and its fields had references the copy did not
+       hold. In OCaml the copy keeps them (`let e = if keep then e else
+       ref None`, btype.ml:374, with `keep = not dup`, subst.ml:213),
+       and `set_row_field e1 (Reither (c2, [], m2, e2))`
+       (ctype.ml:3080) then joins the pattern's field to the SUBJECT's.
+       Today's checker was right. The restore now runs between the
+       copy and the pass; test
+       `the_copy_of_the_subject_shares_the_references_of_its_rows`
+       (fails on the first prototype); the three seeds agree and are in
+       no list. Two are today's checker (5000086, 13000118,
+       `UNIVARS_OLD_FREE_UNIVAR_DIFFERS`): `moregen_occur` calls
+       `occur_univar env ty` unconditionally (ctype.ml:2917-2918), and
+       with no binder entered a `Tunivar` raises (1584-1585);
+       types/ctype.rs runs it only `if !univars.pairs.is_empty()`, so it
+       accepts a weak variable against a free universal variable.
+       No seed is unclassified.
+     - What the mechanical classification of the 75 other seeds tests:
+       both sides fail at the same operation or at none and print the
+       same number of lines, and EITHER every line is the same or is
+       `equal = false` on the old side and `equal = true` on the new
+       (the `EQUAL` lists), OR every answer line is the same and the
+       new form has more occurrences of `nil` than the old (the `NIL`
+       lists). Read in full: 1000013, 3000021, 4000062 and 2000018 of
+       the first class (each has a unification of two rows before the
+       `equal`), 32000157, 54000224 and 5000060 of the second (the old
+       side prints a `nil` of the subject as a back reference to the
+       pattern's). The second condition is loose: it would also take a
+       case whose forms differ elsewhere while a `nil` count differs;
+       the 4 of the 7 not read are pinned on it alone.
      The plain relation plan (10,000 cases) has no difference.
 
 118. **The size and the order of the build; what the turn did not do.**
-     The prototype is 801 added lines (comments inside bodies
+     The prototype is 803 added lines (comments inside bodies
      included): the limit of the slice is 900 lines of code outside doc
      comments. One commit of bodies and one that removes the `ignore`
-     lines, as R3s. Not done in the tenth turn: no source program was
-     run through the two compilers (no OCaml build was at hand; the
-     programs are in 8.12); the step tests were not seen to fail
+     lines, as R3s. Not done in the tenth turn: the source programs of
+     8.12 were run through the OCaml compiler only (second turn), not
+     through the Rust one; the step tests were not seen to fail
      with the renaming or the marks of `all_distinct_vars` replaced by a
      list scan (a step counts a frame, and a scan would have to count
      its own entries: the two shapes pin linearity of the frames only);
@@ -8440,18 +8471,59 @@ mode (decision 113), which folds at every call with a constant mode.
 Per call, each body's doc comment states its cost; the two step tests
 pin them as relations between 1,000 and 10,000.
 
-**Source programs** for the three relations (to be run through both
-compilers by the reviewer or the builder's reviewer; they were NOT run
-in the tenth turn, decision 118):
+**Source programs** for the three relations, each run through the
+OCaml compiler in the second turn of the tenth (`bsc -nostdlib
+-nopervasives -bs-no-builtin-ppx -color never`, built from this tree);
+the Rust compiler was not run on them. The first `matches_bad` of the
+first turn (`type u<'b> = t<'b>`) is ACCEPTED by OCaml, and a use
+outside a recursive group (`type bad = t<string>`) is refused by
+`Typetexp` before `matches` is asked; the program below is the one
+that reaches typedecl.ml:815.
 
 ```text
 moregeneral_ok    module M: { let f: int => int } = { let f = x => x }
+    accepted (exit 0; JavaScript printed)
+
 moregeneral_bad   module M: { let f: 'a => 'a } = { let f = (x: int) => x }
+    We've found a bug for you!
+    moregeneral_bad.res:1:33-57
+    1 │ module M: { let f: 'a => 'a } = { let f = (x: int) => x }
+    Signature mismatch:
+    Actual declaration (moregeneral_bad.res:1:39):
+      let f: int => int
+    Expected declaration (moregeneral_bad.res:1:13-27):
+      let f: 'a => 'a
+    (exit 2)
+
 equal_ok          module M: { type t = (int, string) } = { type u = int; type t = (u, string) }
+    accepted (exit 0)
+
 equal_bad         module M: { type t = int } = { type u = private int; type t = u }
-matches_bad       type t<'a> = 'a constraint 'a = int
-                  type u<'b> = t<'b>
+    We've found a bug for you!
+    equal_bad.res:1:30-65
+    1 │ module M: { type t = int } = { type u = private int; type t = u }
+    Signature mismatch:
+    Actual declaration (equal_bad.res:1:54-63):
+      type t = u
+    Expected declaration (equal_bad.res:1:13-24):
+      type t = int
+    (exit 2)
+
+matches_bad       type rec u = U(t<string>)
+                  and t<'a> = 'a constraint 'a = int
+    We've found a bug for you!
+    matches_bad.res:1:16-24
+    1 │ type rec u = U(t<string>)
+    2 │ and t<'a> = 'a constraint 'a = int
+    Constraints are not satisfied in this type.
+    Type t<string> should be an instance of t<int>
+    (exit 2)
 ```
+
+(Blank lines of the output are left out.) The outputs agree with the
+tables above: `moregeneral` refuses an interface more general than its
+implementation, `equal` does not expand a private abbreviation, and
+`matches` refuses `t<string>` against `t<int>`.
 
 **What the tenth turn did not do**: decision 118. **R3j** (`subtype`,
 `force_subtype`, `enlarge_type`) keeps its three signatures and

@@ -7545,9 +7545,9 @@ fn the_rigid_expansion_is_public_and_adds_the_chain() {
 ///
 /// Witnesses, schemes built generic by hand: (1) `'a => 'a` is more
 /// general than `int => int` and not the other way round (a value
-/// description against its interface, includecore.ml:47; the source
-/// programs of 8.12 were NOT run through the two compilers in the tenth
-/// skeleton turn: no OCaml build was at hand). (2)
+/// description against its interface, includecore.ml:47; the programs
+/// `moregeneral_ok` and `moregeneral_bad` of 8.12, with OCaml's output
+/// there). (2)
 /// `'a => 'b` is more general than `'c => 'c`, and `'c => 'c` is not
 /// more general than `'a => 'b`: the second `'c` is a link by then. (3)
 /// A weak variable `w` (level 2) in the pattern `w => w`: without
@@ -7621,7 +7621,7 @@ fn moregeneral_instantiates_what_may_be_and_keeps_its_links() {
 /// `myint` equals `int` (the public abbreviation expands); a private
 /// abbreviation does not equal its manifest (`expand_head_rigid` is
 /// public: a type declaration against its manifest, includecore.ml:
-/// 380-392; not run through the two compilers, as above); two lists of
+/// 380-392; `equal_ok` and `equal_bad` of 8.12); two lists of
 /// different lengths are not equal. After every
 /// call the nodes that existed before it are what they were (the
 /// expansions are undone), and no frame, scope or trace entry is left.
@@ -7690,8 +7690,8 @@ fn equal_renames_bijectively_and_restores() {
 /// become one) or `(int, 'd)` (one is instantiated); `(int, int)`
 /// matches `('c, 'd)`: the variables of the SECOND argument may be
 /// instantiated. The constraint of a type parameter that would
-/// instantiate it is refused this way (typedecl.ml:815; not run
-/// through the two compilers, as above). After every call every node
+/// instantiate it is refused this way (typedecl.ml:815; `matches_bad`
+/// of 8.12, with OCaml's output). After every call every node
 /// is what it was, in both modes, and `unexplained_failure` is not set.
 ///
 /// Bodies: `matches`, `rigidify` (variables), `all_distinct_vars` (both
@@ -7899,4 +7899,60 @@ fn relations_over_ten_thousand_fields_and_tags() {
         assert!(l <= s * 14, "shape {at}: {s} steps at 1,000, {l} at 10,000");
         assert!(*s >= 1_000, "shape {at} is vacuous: {s}");
     }
+}
+
+/// The copy `moregeneral` makes of its subject shares the references of
+/// a row whose row variable it shares, so that a field of the pattern
+/// joined to a field of the copy is joined to the subject's own field.
+///
+/// ```text
+/// (* compiler/ml/subst.ml:191-213, typexp_rec, a variant *)
+///             let dup =
+///               s.for_saving || more.level = generic_level || static_row row
+///               || match more.desc with Tconstr _ -> true | _ -> false
+///             ...
+///             let row = copy_row (typexp_rec s) true row (not dup) more' in
+/// (* compiler/ml/btype.ml:374, copy_row *)
+///           let e = if keep then e else ref None in
+/// (* compiler/ml/ctype.ml:3077-3080, moregen_row *)
+///           | Reither (c1, tl1, _, e1), Reither (c2, tl2, m2, e2) ->
+///             if e1 != e2 then (
+///               if c1 && not c2 then raise (Unify []);
+///               set_row_field e1 (Reither (c2, [], m2, e2));
+/// ```
+///
+/// Witness (generated seeds 16000113, 20000085 and 81000256 of the
+/// relation plans, which differed from today's checker until the
+/// correction): pattern and subject are two nodes of `[< #B(int)]`, not
+/// generic, each over its own row variable. `moregeneral` with
+/// `inst_nongen` answers `true`, and afterwards the field `#B` of the
+/// pattern ends in the unresolved reference the field of the SUBJECT
+/// ends in (`e2` is the subject's own: `keep`). Fails on the first
+/// prototype, whose `duplicate_type` restored its speculation after the
+/// pass that opens the source row: the subject was unopened again and
+/// `e2` was a reference only the copy held.
+///
+/// Bodies: `duplicate_type` (the order of the restore and the pass),
+/// `moregen_row` (`may_inst`), `moregen_row_field` (the `Reither` arm).
+///
+/// Reaches: R3f, R3n, R3i.
+#[test]
+#[ignore = "R3i build"]
+fn the_copy_of_the_subject_shares_the_references_of_its_rows() {
+    let mut c = checker(Mode::Success);
+    let row = |c: &mut Checker| {
+        let (int, more) = (constr_at(c, 2, INT, &[]), var_at(c, 2));
+        variant_at(c, 2, &[("B", Tag::Either(false, Some(int), false))], more, true, NONE)
+    };
+    let (pattern, subject) = (row(&mut c), row(&mut c));
+    assert!(c.moregeneral(true, pattern, subject));
+    let end = |c: &mut Checker, ty: Ty| {
+        let (fields, _, _) = read_row(c, ty);
+        assert_eq!(fields.len(), 1);
+        assert!(matches!(fields[0].1.kind, RowFieldKind::Either { .. }));
+        fields[0].1.end
+    };
+    let (e1, e2) = (end(&mut c, pattern), end(&mut c, subject));
+    assert_ne!(e2, Ty(NONE), "the subject's row was opened to share its reference");
+    assert_eq!(e1, e2);
 }
