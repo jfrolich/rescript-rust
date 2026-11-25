@@ -5131,7 +5131,10 @@ implementation keeps in a table indexed by it.
    reads, on rows and on the builder. Probe sites:
    `jsx.rs::duplicate_jsx_key`, `export.rs::copy_replacement`.
 
-3. *The statements of a block the caller holds.* Four functions of
+3. *The statements of a block the caller holds.* (Decision 14 corrects
+   the last part: the final list takes the statements of a dissolved
+   block out in a pass before the list is written, not while it is
+   written.) Four functions of
    `JsStmt`, each O(1): `block_len`; `with_block_stmt` (a read by
    reference, as `with_stmt_at` reads a list in flight);
    `lend_block_stmt` (the statement lent with the implementation and
@@ -5188,7 +5191,11 @@ implementation keeps in a table indexed by it.
    `copy_value(s, cold, ..)` is dropped with its `bool`. On the builder
    `S::value` already borrows the statement only.
 
-5. *The stack names places; nothing is taken out by one.*
+5. *The stack names places; nothing is taken out by one.* (Decision
+   13 replaces the second half: a removed row is released at once, as
+   on trunk, and `StatementStack::take_placed` takes it out by its
+   place. What stands of this decision: the places, the two readers,
+   and that no held entry is ever emptied.)
    `StatementStack::placed_refs` gives each statement of a run with
    its place (a slot, or an index among the held statements with bit
    31 set), and `at_place` and `at_place_mut` read one. The probe's
@@ -5649,10 +5656,12 @@ the allocation counts of `unit.rs` 86, 103, 86, 156.
     (`Bir::replace`), so each node keeps its id whatever the order.
     What differs is the site table: each copy is a new `Var` and gets
     the next site, so the copies' sites are in the order they were
-    made. Two readers walk sites: `mentions`, which sets flags and
-    counts by row and is the same for any order, and the naming log's
+    made. Three readers walk sites: `mentions`, which sets flags and
+    counts by row and is the same for any order; the naming log's
     `close` (`names.rs`, `read_sites`), which joins each site into a run
-    that it then sorts (`ident_order`). So neither body was changed and
+    that it then sorts (`ident_order`); and `globals::decide`, which
+    tests whether a variable has a site and qualifies each live site by
+    itself. So neither body was changed and
     the doc comment of `JsStmt::substitute` stands. The builder has no
     function literal; its test of the six shapes compares printed
     text, which no order changes.
@@ -5747,7 +5756,8 @@ the allocation counts of `unit.rs` 86, 103, 86, 156.
       self-test fails above `CEILING`, 26 today; T6x-e3 lowers it to
       21 and T6x-e4 to 8, each in the commit that removes the calls.
     - In T6x-f: no call may be left (`calls == 0`); neither trait may
-      declare one of the seven names; and each of them in `rows.rs` and
+      declare one of the eight names (the seven the script counts and
+      `push_list`); and each of them in `rows.rs` and
       `rows_stmt.rs` must stand in an impl under `#[cfg(test)]`. The
       flag goes. After the slice the compiler holds the first line
       itself (generic code cannot name a function no trait declares,
@@ -5769,6 +5779,81 @@ the allocation counts of `unit.rs` 86, 103, 86, 156.
     3,735-module application. The builder (`emit/builder.rs`) was not
     touched by any of the three builds: it has no transition function,
     and its owed items (item 7 of the corrections) stay T6v's.
+
+**Corrections after the review of the ninth turn** (the review of pull
+request 390; items 1 to 6 are made in place, the others are owed):
+
+1. Made: decisions 3 and 5 say where they stand that decisions 14 and
+   13 replace part of them.
+2. Made: the doc comment of `StatementStack::placed_refs` said that no
+   function takes a statement out by its place; `take_placed` does. The
+   doc comment of `take_placed` says what a second take of a place
+   gives.
+3. Made: the check the prompt of T6x-f puts into
+   `count_lowering_ids.py` covered the seven names the script counts
+   and not `push_list`, the eighth function that leaves the traits (the
+   first pass put `fn push_list` back into `Js` on the build and the
+   self-test still passed). The prompt's code reads `T+['push_list']`
+   in both checks. Run in the review on the three throw-away builds
+   applied in order: the self-test passes on the build, stops with "a
+   trait of the lowering declares a transition function" when
+   `push_list` is declared in `Js`, and stops with "is not in an impl
+   compiled for tests" when the attribute is taken off the `impl Rows`
+   of `rows.rs`.
+4. Made: each of the three prompts says that the task wins where a
+   common block disagrees and names the places (the stand-in and the
+   staging against the list of T6x-a; the allocation counts after
+   T6x-e3; `Instruction count` as a report; the check-mode figure). The
+   prompt of T6x-e3 said its first search prints 11 lines on trunk; it
+   prints 9. The prompt of T6x-f says the builder may read its
+   throw-away and that the script's hunks of it do not apply. The probe
+   prompt of T6r says what happens to a function that loses its last
+   production caller.
+5. Made: decision 16 named two readers of the site lists. There is a
+   third, `globals::decide` (`globals.rs`): it tests whether a variable
+   has any site and qualifies each live site by itself, so its result
+   does not depend on their order either.
+6. Made: the test `a_removed_row_that_is_held_is_released_and_the_hold_is_written`
+   asserts the arm and the printed text and not that the removed row
+   stood in a hold (on trunk a row has no place to read). The prompt of
+   T6x-e3 has the builder show it on the built slice: with the test of
+   the `HELD` bit taken out of `coerced_list` the test must fail.
+7. Owed, by the next design turn of T6, as tests: the assertion itself
+   in that test, and in `a_removed_row_inside_a_block_is_taken_out_of_the_block`
+   that the removed row is a nested one (after T6x-e3 a row has a place
+   and `Row::NESTED` to read, through a record compiled for tests as
+   `Coerced::blocks` is); a run in which a slot taken by `take_placed`
+   stands beside a dead range, on either side (both shapes were read
+   against `last_at`, `take_run_rev`, `trim` and the forward readers in
+   the review and hold; no test builds them); the staging of decision
+   14 with a dissolved block of 1,000 and of 10,000 statements (the
+   test of the final list grows the statements after the block, and its
+   count of moved statements is the list's length, so it cannot see the
+   second move).
+8. Owed, to the coordinator, not to a builder: a check-mode build of
+   the 3,735-module application after T6x-f is merged (the three
+   throw-away builds ran check mode over the runtime and `tests/tests`
+   only, with a debug build).
+9. Read in the review and accepted as built: decision 13 (the three
+   cases; the stand-in has one owner at each moment: the stack, then
+   the final list's `blocks`, then `release_stmt`; a removed row that
+   stands in a slot gives nothing to the run; no reader of the run
+   comes between a removal and the final list). Decision 14 (the
+   statements of a dissolved block are moved twice, `blocks` is
+   reserved once in a unit that is flattened and not at all in one that
+   is not). Decision 16 (the first copy is made before the uses and
+   becomes the value of the tail's declaration; trunk makes it after
+   them; both make one copy and one per use, and a copy of the copy is
+   the copy of the original, cold data included, because the same two
+   functions make both; `row_of` is moved out of the tables for the
+   length of `substitute_after` and of `copy_row_value`, and nothing
+   called in between reads it). `JsStmt::block_ids` compiled for tests.
+   The ceiling of the script. T6x-e4 and T6x-f as one commit each
+   (T6x-e4 is about 570 changed lines and gets a first-pass review).
+10. Not rerun in the review: the three builds' test filters, clippy and
+    check mode (the throw-away diffs were applied and compared with the
+    prompts' code and end-state searches by the first pass, without a
+    compiler).
 
 **Changes to earlier sections**, each with its reason:
 
@@ -8705,7 +8790,22 @@ request 383, commits 861411754 and 8f1a9c8e6) and once more by the
 design turn (the comment on pull request 390). You may read both. Copy
 nothing from the probe: it has `StatementStack::take_place`, which was
 refused, and other names (`with_block_stmt_at`, `with_block_stmt_mut`,
-`take_from_block`). Where this task gives code, the task is right.
+`take_from_block`). Copy nothing from pull request 383; from the
+comment on pull request 390 you may copy. Where this task gives code,
+the task is right.
+
+Where the common blocks and this task disagree, the task wins. Four
+places are known. (1) The block of T6x-a1 to T6x-a4 counts "a
+placeholder statement kept in a slot or a field" and "a staging vector"
+as failure: the stand-in of a held removed row (decision 13) and
+`Tables::blocks` as this task gives them are neither, they are the
+design. (2) That block holds the four allocation counts of unit.rs at
+86, 103, 86, 156: after commit 1 of this task they are 86, 102, 86,
+155, as the task says. (3) `Instruction count` is read and reported as
+this task says, not held at the block's +0.02%. (4) The block's
+check-mode figure (`scripts/compare_build_instructions.py`) is not
+yours to produce: CI `Backend bridge coverage` is the gate of check
+mode.
 
 Commits, in this order, each compiling and passing the three filters on
 its own (the design turn built them in this order), each pushed when
@@ -9224,7 +9324,16 @@ End state, run from compiler-rust and paste the output. On the design
 turn's throw-away head each printed what is given; on trunk before the
 slice, what is in brackets:
 - `rg -n 'B::stmt_from_node|arena\.(detach|release)\(' src/bir/lower/export.rs`
-  prints one line, in `alias_of` [11 lines].
+  prints one line, in `alias_of` [9 lines].
+- The test of a held removed row is seen to fail without the branch it
+  is there for. This is a check you do NOT commit. In `coerced_list`
+  replace the condition `bits & Row::REMOVED != 0 && place &
+  StatementStack::<B>::HELD == 0` by `bits & Row::REMOVED != 0`, run
+  `cargo test --manifest-path compiler-rust/Cargo.toml --lib
+  a_removed_row_that_is_held_is_released_and_the_hold_is_written`,
+  paste the line that fails, and put the condition back. If the test
+  PASSES with the condition changed, the removed row of that test is
+  not held: stop and report it, do not change the test.
 - `rg -n '\.stmt\b|statement_refs|block_ids|self\.scratch' src/bir/lower/export.rs`
   prints nothing.
 - `rg -c 'By id' src/bir/lower/export.rs` prints 11 [19].
@@ -9370,6 +9479,16 @@ it is this slice built once. The probe of pull request 383 (commit
 ed23e65e7) has the positions but not the substitution, and its
 `JsStmt::copy_value` does not exist. Where this task gives code, the
 task is right.
+
+Where the common blocks and this task disagree, the task wins. Three
+places are known. (1) The block of T6x-a1 to T6x-a4 holds the four
+allocation counts of unit.rs at 86, 103, 86, 156: since T6x-e3 they are
+86, 102, 86, 155, and those hold here. (2) `Instruction count` is read
+and reported as this task says, not held at the block's +0.02%. (3) The
+block's check-mode figure (`scripts/compare_build_instructions.py`) is
+not yours to produce: CI `Backend bridge coverage` is the gate of check
+mode. This slice is one commit of about 570 changed lines; it is not
+cut, for the reason the task gives.
 
 One commit (the design turn built it as one: the positions change the
 signature of `replacement`, `copy_replacement` and `same_reusable_value`,
@@ -10261,6 +10380,21 @@ functions under `#[cfg(test)]`; `cargo test --manifest-path
 compiler-rust/Cargo.toml --lib bir::lower` reads 585 passed, `--lib
 bir::j` 73, `--lib emit::builder` 41, none ignored.
 
+The probe. Read the comment `// T6X-THROWAWAY f` on pull request 390:
+it is this slice built once, on the build of T6x-e4. Its two hunks of
+scripts/count_lowering_ids.py were made before the script had `CEILING`
+and do not apply: for the script, write what this task gives. Where
+this task gives code, the task is right.
+
+Where the common blocks and this task disagree, the task wins. Three
+places are known. (1) The block of T6x-a1 to T6x-a4 holds the four
+allocation counts of unit.rs at 86, 103, 86, 156: since T6x-e3 they are
+86, 102, 86, 155, and those hold here. (2) `Instruction count` is read
+and reported as this task says, not held at the block's +0.02%. (3) The
+block's check-mode figure (`scripts/compare_build_instructions.py`) is
+not yours to produce: CI `Backend bridge coverage` is the gate of check
+mode.
+
 Yours: in src/bir/lower/js.rs the deletion of `from_node`, `node`, `at`
 and `push_list` and one `use`; in src/bir/lower/js_stmt.rs the deletion
 of `stmt_from_node`, `stmt_node`, `list_from` and `list_id` and one
@@ -10412,11 +10546,11 @@ assertion `calls>0 or '--no-calls-left'`; in their place
                # declare no transition function, so generic code cannot name one; the
                # implementation on rows keeps them for its tests only.
                assert calls==0, f'{calls} transition calls in src/bir/lower: none may be left'
-               declared=[(f,k) for f in ('js','js_stmt') for k in T if re.search(r'\n\s*fn '+k+r'\b', non_test(open(f'src/bir/lower/{f}.rs').read()))]
+               declared=[(f,k) for f in ('js','js_stmt') for k in T+['push_list'] if re.search(r'\n\s*fn '+k+r'\b', non_test(open(f'src/bir/lower/{f}.rs').read()))]
                assert not declared, f'a trait of the lowering declares a transition function: {declared}'
                for f in ('rows','rows_stmt'):
                    t=open(f'src/bir/j/{f}.rs').read()
-                   for m in re.finditer(r'\n([^\n]*)\n[^\n]*fn ('+'|'.join(T)+r')\b', t):
+                   for m in re.finditer(r'\n([^\n]*)\n[^\n]*fn ('+'|'.join(T+['push_list'])+r')\b', t):
                        start=t.rfind('\nimpl', 0, m.start())
                        assert t[:start].rstrip().endswith('#[cfg(test)]'), f'{f}.rs: `{m.group(2)}` is not in an impl compiled for tests'
 
@@ -10447,7 +10581,9 @@ what is in brackets:
   self-test must stop with "a trait of the lowering declares a
   transition function"), and remove `#[cfg(test)]` above the new `impl
   Rows` of rows_stmt.rs (it must stop with "is not in an impl compiled
-  for tests").
+  for tests"). The first check holds `push_list` too, which the script
+  does not count as a call: `fn push_list(&mut self, a: &Pools, list:
+  u32);` added to `pub trait Js` must stop the self-test the same way.
 
 Tests. You edit the eight lines and the two helpers' uses named above
 and nothing else in a test; no test is added or deleted and no expected
@@ -10538,6 +10674,10 @@ Rules of a probe:
 - No cost notes, no changelog discipline beyond one fragment, no `allow`
   attribute. A test is edited only so that it compiles; no expected
   value changes. If one would, leave the test failing and report it.
+- A function that loses its last production caller by a step: compile
+  it for tests (`#[cfg(test)]`) if a test still calls it, else delete
+  it, in a commit of its own that the report lists. Never an `allow`,
+  never a warning left.
 - One commit per step below, pushed when made. After each: `cargo check
   --all-targets --manifest-path compiler-rust/Cargo.toml`, and `cargo
   test --manifest-path compiler-rust/Cargo.toml --lib bir::lower` and

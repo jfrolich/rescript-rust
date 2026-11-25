@@ -121,14 +121,17 @@ impl<B: JsStmt> StatementStack<B> {
     /// `statement_refs` with the place of each statement: its slot, or its
     /// index among the held statements with [`StatementStack::HELD`] set.
     /// A place names its statement for `at_place` and `at_place_mut` until
-    /// the run is taken or killed: nothing moves a statement of a run that
-    /// is complete, and no function takes a statement out by its place, so
-    /// the invariant of `Slot::DeadEnd` and the holds are as they were.
+    /// the run is taken or killed, or the statement is taken out by its
+    /// place (`take_placed`): nothing moves a statement of a run that is
+    /// complete, and `take_placed` leaves the other places as they were
+    /// (a slot becomes one dead slot, a hold keeps its length), so the
+    /// invariant of `Slot::DeadEnd` and the holds are as they were.
     /// Cost: that of `statement_refs`, O(slots of the run + held
     /// statements): one step per slot, a dead range crossed in one, and
     /// one per held statement. (THREE_TREES 11.4, "T6x-e and T6x-f: the
-    /// fold reads where its rows are", decision 5: `export.rs::build_rows`
-    /// keeps the place of each row of the top level.)
+    /// fold reads where its rows are", decisions 5 and 13:
+    /// `export.rs::build_rows` keeps the place of each row of the top
+    /// level.)
     pub(super) fn placed_refs(&self, span: Span) -> impl Iterator<Item = (u32, &B::S)> + '_ {
         let (mut at, end) = (span.start as usize, span.end());
         let (mut inner, mut inner_end) = (0usize, 0usize);
@@ -196,6 +199,9 @@ impl<B: JsStmt> StatementStack<B> {
     /// `stand_in` makes, which the run gives in its stead when it is taken
     /// and which the caller of `take_run` releases. `stand_in` is called
     /// for a held statement only. The other places of the run stay valid.
+    /// A place is taken once: a slot taken twice panics, a held place
+    /// taken twice gives the stand-in and is not told from a first take
+    /// (the caller marks what it took; the fold sets `Row::REMOVED`).
     /// O(1): one write; counts no step and allocates nothing. Panics when
     /// the place holds no statement. (THREE_TREES 11.4, "T6x-e and T6x-f:
     /// the fold reads where its rows are", decision 13:
