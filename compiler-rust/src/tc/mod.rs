@@ -43,7 +43,7 @@ pub mod canonical;
 // allowance from the module it completes (CHECKER_REWRITE.md, "R3 as
 // designed").
 pub mod expand;
-#[allow(dead_code, unused_variables, clippy::ptr_arg)]
+#[allow(dead_code, unused_variables, unused_imports, unused_mut, clippy::ptr_arg)]
 pub mod relate;
 #[allow(dead_code, unused_variables, clippy::ptr_arg)]
 pub mod rows;

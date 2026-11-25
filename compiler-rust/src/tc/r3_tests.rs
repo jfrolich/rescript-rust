@@ -7466,3 +7466,493 @@ fn a_type_on_the_way_stays_on_the_way_when_its_expansion_joins_a_set() {
     assert!(small >= 1_000, "{small}");
     assert!(large <= 11 * small, "{small} {large}");
 }
+
+// ---------------------------------------------------------------------
+// R3i: `moregeneral`, `equal`, `matches` (CHECKER_REWRITE 8.12).
+// ---------------------------------------------------------------------
+
+use super::expand::PRIVATE;
+
+/// `expand_head_rigid` is the PUBLIC expansion, with rigid variants and
+/// with the chain of GADT instances:
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:3184-3189 *)
+/// let expand_head_rigid env ty =
+///   let old = !(rigid_variants ()) in
+///   rigid_variants () := true;
+///   let ty' = expand_head env ty in
+///   rigid_variants () := old;
+///   ty'
+/// (* compiler/ml/ctype.ml:1283-1289, expand_head: try_expand_safe, the
+///    public expansion *)
+/// (* compiler/ml/ctype.ml:1271-1276, try_expand_head *)
+///   (match Env.gadt_instance_level env ty' with
+///   | None -> ()
+///   | Some lv -> Env.add_gadt_instance_chain env lv ty);
+/// ```
+///
+/// Since R3b [`ExpandMode::Rigid`] expanded private abbreviations
+/// (`matches!(mode, Opt | Rigid)`); corrected in the tenth skeleton turn
+/// (8.6, decision 113). (a) `type myint = private int`: `Rigid` leaves the
+/// node, `Opt` expands it, and the flag `rigid_variants` is what it was
+/// after the call. (b) Under the equation `n0 := int` a node whose
+/// expansion is a member of the case's set joins that set when it is
+/// expanded in `Rigid`, as in `Safe`
+/// (`expanding_a_head_into_a_set_adds_the_chain_whatever_the_flag`).
+/// Fails without the correction: (a) reads `INT` for the rigid head.
+#[test]
+fn the_rigid_expansion_is_public_and_adds_the_chain() {
+    let mut c = checker(Mode::Success);
+    c.types.rows[MYINT as usize].flags = PRIVATE;
+    let node = constr(&mut c, MYINT, &[]);
+    assert_eq!(c.expand_head(node, ExpandMode::Rigid).unwrap(), node);
+    assert!(!c.extras.rigid_variants);
+    let public = constr(&mut c, A, &[]);
+    let head = c.expand_head(public, ExpandMode::Rigid).unwrap();
+    assert_eq!(path(&mut c, head), INT);
+    let head = c.expand_head(node, ExpandMode::Opt).unwrap();
+    assert_eq!(path(&mut c, head), INT);
+
+    let mut c = case_checker(Mode::Success);
+    used_at_int(&mut c);
+    let z = constr(&mut c, N0, &[]);
+    let first = c.traced(|c| c.expand_head(z, ExpandMode::Unif)).unwrap();
+    let fresh = constr(&mut c, MYINT, &[]);
+    c.memorize(fresh, first, false);
+    assert_eq!(c.instance_level(fresh), 0);
+    assert_eq!(c.expand_head(fresh, ExpandMode::Rigid).unwrap(), first);
+    assert_eq!(c.instance_level(fresh), CASE);
+    assert!(!c.extras.rigid_variants);
+}
+
+/// `moregeneral` instantiates the variables `may_instantiate` allows and
+/// no other, and takes no snapshot.
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:2921-2923 *)
+/// let may_instantiate inst_nongen t1 =
+///   if inst_nongen then t1.level <> generic_level - 1
+///   else t1.level = generic_level
+/// (* compiler/ml/ctype.ml:2934-2937, moregen *)
+///         | Tvar _, _ when may_instantiate inst_nongen t1 ->
+///           moregen_occur env t1.level t2;
+///           occur env t1 t2;
+///           link_type t1 t2
+/// (* compiler/ml/ctype.ml:2905, moregen_occur *)
+///       if is_Tvar ty && ty.level >= generic_level - 1 then raise Occur;
+/// ```
+///
+/// Witnesses, schemes built generic by hand: (1) `'a => 'a` is more
+/// general than `int => int` and not the other way round (a value
+/// description against its interface, includecore.ml:47; the programs
+/// `moregeneral_ok` and `moregeneral_bad` of 8.12, with OCaml's output
+/// there). (2)
+/// `'a => 'b` is more general than `'c => 'c`, and `'c => 'c` is not
+/// more general than `'a => 'b`: the second `'c` is a link by then. (3)
+/// A weak variable `w` (level 2) in the pattern `w => w`: without
+/// `inst_nongen` it is not instantiated (`false`, `w` still a
+/// variable); with it, `w` is linked to the subject's `int` and STAYS
+/// linked after the call: no speculation (ctype.ml:3104-3124 has no
+/// snapshot). (4) With `inst_nongen` a weak variable is not instantiated
+/// to a type that holds a generic variable of the subject (`raise
+/// Occur`): `false`. The level is what it was after every call, and no
+/// frame, scope or trace entry is left.
+///
+/// Bodies: `moregeneral`, `duplicate_type`, `moregen`, `relate_run`,
+/// `relate_frames` (Pair), `moregen_pair` (arms 1, 2 and 5),
+/// `moregen_occur` (the walk, the clash, the skipped walk),
+/// `relate_children` (arrows).
+///
+/// Reaches: R3i.
+#[test]
+#[ignore = "R3i build"]
+fn moregeneral_instantiates_what_may_be_and_keeps_its_links() {
+    let mut c = checker(Mode::Explain);
+    let identity = |c: &mut Checker| {
+        let a = var_at(c, GENERIC);
+        arrow_at(c, GENERIC, &[a], a)
+    };
+    let ints = |c: &mut Checker| {
+        let (i, j) = (constr_at(c, GENERIC, INT, &[]), constr_at(c, GENERIC, INT, &[]));
+        arrow_at(c, GENERIC, &[i], j)
+    };
+    let (general, special) = (identity(&mut c), ints(&mut c));
+    let level = c.g.level;
+    assert!(c.moregeneral(false, general, special));
+    assert!(!c.moregeneral(false, special, general));
+    let (a, b) = (var_at(&mut c, GENERIC), var_at(&mut c, GENERIC));
+    let two = arrow_at(&mut c, GENERIC, &[a], b);
+    assert!(c.moregeneral(false, two, general));
+    assert!(!c.moregeneral(false, general, two));
+    // The schemes themselves are untouched: every link went to a copy.
+    assert_eq!((c.g.repr(a), c.g.repr(b)), (a, b));
+    // A weak variable.
+    let w = var_at(&mut c, 2);
+    let weak = arrow_at(&mut c, 2, &[w], w);
+    assert!(!c.moregeneral(false, weak, special));
+    assert_eq!(c.g.repr(w), w);
+    assert!(c.moregeneral(true, weak, special));
+    assert_eq!(path(&mut c, w), INT);
+    let w = var_at(&mut c, 2);
+    let weak = arrow_at(&mut c, 2, &[w], w);
+    assert!(!c.moregeneral(true, weak, general));
+    assert_eq!(c.g.repr(w), w);
+    assert_eq!((c.g.level, c.frames.len(), c.scopes.len(), c.trace.len()), (level, 0, 0, 0));
+}
+
+/// `equal` with and without a renaming, and what it leaves.
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:3209-3215, eqtype *)
+///         | Tvar _, Tvar _ when rename -> (
+///           try
+///             normalize_subst subst;
+///             if List.assq t1 !subst != t2 then raise (Unify [])
+///           with Not_found ->
+///             if List.exists (fun (_, t) -> t == t2) !subst then raise (Unify []);
+///             subst := (t1, t2) :: !subst)
+/// (* compiler/ml/ctype.ml:3361-3369: the snapshot restored on every exit *)
+/// ```
+///
+/// Witnesses: `('a, 'b)` and `('c, 'd)` are equal up to a renaming and
+/// not without one; `('a, 'a)` and `('c, 'd)` are not (a key has one
+/// partner), nor `('a, 'b)` and `('c, 'c)` (a partner has one key);
+/// `myint` equals `int` (the public abbreviation expands); a private
+/// abbreviation does not equal its manifest (`expand_head_rigid` is
+/// public: a type declaration against its manifest, includecore.ml:
+/// 157, in `type_manifest`; `equal_ok` and `equal_bad` of 8.12); two lists of
+/// different lengths are not equal. After every
+/// call the nodes that existed before it are what they were (the
+/// expansions are undone), and no frame, scope or trace entry is left.
+///
+/// Bodies: `equal`, `relate_run`, `relate_frames`, `eqtype_pair` (all
+/// five arms), `rename_pair` (the three outcomes), `relate_children`.
+///
+/// Reaches: R3i.
+#[test]
+#[ignore = "R3i build"]
+fn equal_renames_bijectively_and_restores() {
+    let mut c = checker(Mode::Explain);
+    let pair = |c: &mut Checker, same: bool| {
+        let a = var_at(c, GENERIC);
+        let b = if same { a } else { var_at(c, GENERIC) };
+        tuple_at(c, GENERIC, &[a, b])
+    };
+    let (ab, cd, aa, cc) = (pair(&mut c, false), pair(&mut c, false), pair(&mut c, true), pair(&mut c, true));
+    let myint = constr_at(&mut c, GENERIC, MYINT, &[]);
+    let int = constr_at(&mut c, GENERIC, INT, &[]);
+    let before = c.g.nodes.clone();
+    assert!(c.equal(true, &[ab], &[cd]));
+    assert!(!c.equal(false, &[ab], &[cd]));
+    assert!(c.equal(false, &[ab], &[ab]));
+    assert!(!c.equal(true, &[aa], &[cd]));
+    assert!(!c.equal(true, &[ab], &[cc]));
+    assert!(c.equal(true, &[aa], &[cc]));
+    assert!(c.equal(true, &[ab, aa], &[cd, cc]));
+    assert!(!c.equal(true, &[ab, ab], &[cd, cc]));
+    assert!(!c.equal(true, &[ab], &[cd, cc]));
+    assert!(c.equal(false, &[myint], &[int]));
+    assert_eq!(c.g.nodes[..before.len()], before[..]);
+    // The expansion above wrote nothing that is logged, so the memo of
+    // `myint` is still there (`backtrack` cleans the memos only after a
+    // logged change, compiler/ml/btype.ml:776-779): forget it by hand
+    // before the declaration is changed under the test.
+    assert_ne!(c.memo.live, 0);
+    c.cleanup_abbrev();
+    c.types.rows[MYINT as usize].flags = PRIVATE;
+    assert!(!c.equal(false, &[myint], &[int]));
+    assert_eq!(c.g.nodes[..before.len()], before[..]);
+    assert_eq!((c.frames.len(), c.scopes.len(), c.trace.len(), c.saved.len()), (0, 0, 0, 0));
+}
+
+/// `matches` unifies without instantiating a variable of its first
+/// argument, and restores.
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:3167-3179 *)
+/// let matches env ty ty' =
+///   let snap = snapshot () in
+///   let vars = rigidify ty in
+///   cleanup_abbrev ();
+///   let ok =
+///     try
+///       unify env ty ty';
+///       all_distinct_vars env vars
+///     with Unify _ -> false
+///   in
+///   backtrack snap;
+///   ok
+/// ```
+///
+/// Witnesses: `('a, 'b)` matches `('c, 'd)` (its variables stay two
+/// distinct variables) and does not match `('c, 'c)` (two of them
+/// become one) or `(int, 'd)` (one is instantiated); `(int, int)`
+/// matches `('c, 'd)`: the variables of the SECOND argument may be
+/// instantiated. The constraint of a type parameter that would
+/// instantiate it is refused this way (typedecl.ml:815; `matches_bad`
+/// of 8.12, with OCaml's output). After every call every node
+/// is what it was, in both modes, and `unexplained_failure` is not set.
+///
+/// Bodies: `matches`, `rigidify` (variables), `all_distinct_vars` (both
+/// passes, both refusals).
+///
+/// Reaches: R3i.
+#[test]
+#[ignore = "R3i build"]
+fn matches_instantiates_nothing_of_its_first_argument() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let pair = |c: &mut Checker, same: bool| {
+            let a = var_at(c, 2);
+            let b = if same { a } else { var_at(c, 2) };
+            tuple_at(c, 2, &[a, b])
+        };
+        let (ab, cd, cc) = (pair(&mut c, false), pair(&mut c, false), pair(&mut c, true));
+        let (i, d) = (constr_at(&mut c, 2, INT, &[]), var_at(&mut c, 2));
+        let int_d = tuple_at(&mut c, 2, &[i, d]);
+        let (i, j) = (constr_at(&mut c, 2, INT, &[]), constr_at(&mut c, 2, INT, &[]));
+        let ints = tuple_at(&mut c, 2, &[i, j]);
+        let before = c.g.nodes.clone();
+        assert!(c.matches(ab, cd));
+        assert!(!c.matches(ab, cc));
+        assert!(!c.matches(ab, int_d));
+        assert!(c.matches(ints, cd));
+        assert!(c.matches(cc, ab));
+        assert_eq!(c.g.nodes[..before.len()], before[..], "{mode:?}");
+        assert!(!c.unexplained_failure);
+        assert_eq!((c.frames.len(), c.trace.len(), c.rigid_vars.len()), (0, 0, 0));
+    }
+}
+
+/// `rigidify` makes a row that ends in a variable a fixed one, so that
+/// `matches` does not let it gain a tag.
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:3136-3147, rigidify_rec *)
+///     | Tvariant row ->
+///       let row = row_repr row in
+///       let more = repr row.row_more in
+///       (if is_Tvar more && not (row_fixed row) then
+///          let more' = newty2 more.level more.desc in
+///          let row' =
+///            {row with row_fixed = true; row_fields = []; row_more = more'}
+///          in
+///          link_type more (newty2 ty.level (Tvariant row')));
+///       iter_row (rigidify_rec vars) row;
+///       (* only consider the row variable if the variant is not static *)
+///       if not (static_row row) then rigidify_rec vars (row_more row)
+/// ```
+///
+/// Witnesses: the open row `[> #A]` matches another `[> #A]` and does
+/// not match `[> #A | #B]` (it would gain `#B`, and its row is fixed).
+/// After each call the row variable is a variable again and the nodes
+/// that existed before are what they were.
+///
+/// Bodies: `rigidify` (the row arm, the link), `row_children`,
+/// `all_distinct_vars`.
+///
+/// Reaches: R3f, R3i.
+#[test]
+#[ignore = "R3i build"]
+fn matches_does_not_let_a_row_gain_a_tag() {
+    let mut c = checker(Mode::Success);
+    let open = |c: &mut Checker, tags: &[(&str, Tag)]| {
+        let more = var_at(c, 2);
+        (variant_at(c, 2, tags, more, false, NONE), more)
+    };
+    let (a1, more1) = open(&mut c, &[("A", Tag::Present(None))]);
+    let (a2, _) = open(&mut c, &[("A", Tag::Present(None))]);
+    let (ab, _) = open(&mut c, &[("A", Tag::Present(None)), ("B", Tag::Present(None))]);
+    let before = c.g.nodes.clone();
+    assert!(c.matches(a1, a2));
+    assert!(!c.matches(a1, ab));
+    assert_eq!(c.g.nodes[more1.0 as usize].tag(), VAR);
+    assert_eq!(c.g.nodes[..before.len()], before[..]);
+}
+
+/// The step relations of R3i, each between n = 1,000 and n = 10,000 (a
+/// linear walk reads at most eleven times the steps), and a shared type
+/// that only the pair table keeps linear.
+///
+/// 1. `equal` with `rename` of two tuples of n distinct variables: the
+///    loop of `relate_frames` and n calls of `rename_pair`, whose table
+///    is O(1) a pair where OCaml's `List.assq` and `List.exists` scan
+///    (ctype.ml:3212-3214).
+/// 2. `equal` of two chains n deep (`chain`): no machine stack, 16
+///    bytes of frame a level.
+/// 3. `matches` of a tuple of n variables against another: the walk of
+///    `rigidify` and the two passes of `all_distinct_vars`, where
+///    OCaml's `List.memq` scans (ctype.ml:3161).
+/// 4. `moregeneral` of a tuple of n generic variables against a tuple
+///    of n `int`: `duplicate_type`, the loop, n links.
+/// 5. `equal` of `d(40)` with a copy of it, `d(k) = (d(k-1), d(k-1))`
+///    sharing its one child: 41 pairs with the table of pairs
+///    (`Type_pairs`, ctype.ml:3224-3226), two frames each and the
+///    restore, and 2^40 without: at most 500 steps.
+///
+/// Bodies: every body of the slice that has a loop over pairs or
+/// variables; the loops over the fields and tags of rows are run wide
+/// by `relations_over_ten_thousand_fields_and_tags`.
+///
+/// Reaches: R3i.
+#[test]
+#[ignore = "R3i build"]
+fn relations_at_ten_thousand() {
+    fn wide_vars(c: &mut Checker, n: u32, level: u32) -> Ty {
+        let vars: Vec<Ty> = (0..n).map(|_| var_at(c, level)).collect();
+        tuple_at(c, level, &vars)
+    }
+    let run = |n: u32| -> [u64; 4] {
+        let mut c = checker(Mode::Success);
+        let (l, r) = (wide_vars(&mut c, n, GENERIC), wide_vars(&mut c, n, GENERIC));
+        let renamed = steps::scope(|| assert!(c.equal(true, &[l], &[r])));
+        let (l, r) = (chain(&mut c, n), chain(&mut c, n));
+        let deep = steps::scope(|| assert!(c.equal(false, &[l], &[r])));
+        let (l, r) = (wide_vars(&mut c, n, 2), wide_vars(&mut c, n, 2));
+        let matched = steps::scope(|| assert!(c.matches(l, r)));
+        let general = wide_vars(&mut c, n, GENERIC);
+        let ints: Vec<Ty> = (0..n).map(|_| constr_at(&mut c, GENERIC, INT, &[])).collect();
+        let special = tuple_at(&mut c, GENERIC, &ints);
+        let more = steps::scope(|| assert!(c.moregeneral(false, general, special)));
+        [renamed, deep, matched, more]
+    };
+    let (small, large) = (run(1_000), run(10_000));
+    for (at, (s, l)) in small.iter().zip(large).enumerate() {
+        assert!(l <= s * 11, "shape {at}: {s} steps at 1,000, {l} at 10,000");
+        assert!(*s >= 1_000, "shape {at} is vacuous: {s}");
+    }
+    // 5. Sharing.
+    let mut c = checker(Mode::Success);
+    let shared = |c: &mut Checker| {
+        let mut ty = constr_at(c, GENERIC, INT, &[]);
+        for _ in 0..40 {
+            ty = tuple_at(c, GENERIC, &[ty, ty]);
+        }
+        ty
+    };
+    let (l, r) = (shared(&mut c), shared(&mut c));
+    let count = steps::scope(|| assert!(c.equal(false, &[l], &[r])));
+    assert!(count <= 500, "{count}");
+}
+
+/// The loops of R3i over the fields of an object and the tags of a row,
+/// each between n = 1,000 and n = 10,000 (the names are sorted: at most
+/// fourteen times the steps).
+///
+/// 1. `equal` of two closed objects of n fields listed in opposite
+///    orders: `relate_fields` (one merge step a field) and n
+///    `relate_field` frames.
+/// 2. `moregeneral` of an open object of no field against a closed one
+///    of n: `relate_fields` builds n fields for the pattern's rest
+///    (`build_fields`, ctype.ml:3002-3003).
+/// 3. `equal` of two closed rows of n present tags in opposite orders:
+///    `eqtype_row`.
+/// 4. `moregeneral` of the open row `[> ]` (a generic row variable)
+///    against a closed row of n tags: `moregen_row` builds one node for
+///    the n tags the pattern lacks (ctype.ml:3065-3068).
+/// 5. `matches` of a row of n tags, each with a variable as its
+///    argument, against a copy of it: `rigidify` through
+///    `row_children`.
+///
+/// Reaches: R3e, R3f, R3i.
+#[test]
+#[ignore = "R3i build"]
+fn relations_over_ten_thousand_fields_and_tags() {
+    let labels = |prefix: &str, n: u32| -> Vec<String> { (0..n).map(|at| format!("{prefix}{at:05}")).collect() };
+    let run = |n: u32| -> [u64; 5] {
+        let mut c = checker(Mode::Success);
+        c.g.level = GENERIC;
+        let int = constr_at(&mut c, GENERIC, INT, &[]);
+        let names = labels("f", n);
+        let forward: Vec<(&str, bool, Ty)> = names.iter().map(|label| (label.as_str(), false, int)).collect();
+        let backward: Vec<(&str, bool, Ty)> = forward.iter().rev().copied().collect();
+        let (nil1, nil2) = (nil_at(&mut c, GENERIC), nil_at(&mut c, GENERIC));
+        let (left, _) = obj(&mut c, &backward, nil1);
+        let (right, _) = obj(&mut c, &forward, nil2);
+        let fields = steps::scope(|| assert!(c.equal(false, &[left], &[right])));
+        let rest = var_at(&mut c, GENERIC);
+        let (open, _) = obj(&mut c, &[], rest);
+        let built = steps::scope(|| assert!(c.moregeneral(false, open, right)));
+        let names = labels("t", n);
+        let forward: Vec<(&str, Tag)> = names.iter().map(|l| (l.as_str(), Tag::Present(None))).collect();
+        let backward: Vec<(&str, Tag)> = forward.iter().rev().copied().collect();
+        let (rm1, rm2) = (var_at(&mut c, GENERIC), var_at(&mut c, GENERIC));
+        let left = variant_at(&mut c, GENERIC, &backward, rm1, true, NONE);
+        let right = variant_at(&mut c, GENERIC, &forward, rm2, true, NONE);
+        let tags = steps::scope(|| assert!(c.equal(false, &[left], &[right])));
+        let more = var_at(&mut c, GENERIC);
+        let open = variant_at(&mut c, GENERIC, &[], more, false, NONE);
+        let gained = steps::scope(|| assert!(c.moregeneral(false, open, right)));
+        c.g.level = 2;
+        let with_vars = |c: &mut Checker| {
+            let tags: Vec<(&str, Tag)> = names.iter().map(|l| (l.as_str(), Tag::Present(Some(var_at(c, 2))))).collect();
+            let more = var_at(c, 2);
+            variant_at(c, 2, &tags, more, false, NONE)
+        };
+        let (left, right) = (with_vars(&mut c), with_vars(&mut c));
+        let rigid = steps::scope(|| assert!(c.matches(left, right)));
+        [fields, built, tags, gained, rigid]
+    };
+    let (small, large) = (run(1_000), run(10_000));
+    for (at, (s, l)) in small.iter().zip(large).enumerate() {
+        assert!(l <= s * 14, "shape {at}: {s} steps at 1,000, {l} at 10,000");
+        assert!(*s >= 1_000, "shape {at} is vacuous: {s}");
+    }
+}
+
+/// The copy `moregeneral` makes of its subject shares the references of
+/// a row whose row variable it shares, so that a field of the pattern
+/// joined to a field of the copy is joined to the subject's own field.
+///
+/// ```text
+/// (* compiler/ml/subst.ml:191-213, typexp_rec, a variant *)
+///             let dup =
+///               s.for_saving || more.level = generic_level || static_row row
+///               || match more.desc with Tconstr _ -> true | _ -> false
+///             ...
+///             let row = copy_row (typexp_rec s) true row (not dup) more' in
+/// (* compiler/ml/btype.ml:374, copy_row *)
+///           let e = if keep then e else ref None in
+/// (* compiler/ml/ctype.ml:3071-3074, moregen_row *)
+///           | Reither (c1, tl1, _, e1), Reither (c2, tl2, m2, e2) ->
+///             if e1 != e2 then (
+///               if c1 && not c2 then raise (Unify []);
+///               set_row_field e1 (Reither (c2, [], m2, e2));
+/// ```
+///
+/// Witness (generated seeds 16000113, 20000085 and 81000256 of the
+/// relation plans, which differed from today's checker until the
+/// correction): pattern and subject are two nodes of `[< #B(int)]`, not
+/// generic, each over its own row variable. `moregeneral` with
+/// `inst_nongen` answers `true`, and afterwards the field `#B` of the
+/// pattern ends in the unresolved reference the field of the SUBJECT
+/// ends in (`e2` is the subject's own: `keep`). Fails on the first
+/// prototype, whose `duplicate_type` restored its speculation after the
+/// pass that opens the source row: the subject was unopened again and
+/// `e2` was a reference only the copy held.
+///
+/// Bodies: `duplicate_type` (the order of the restore and the pass),
+/// `moregen_row` (`may_inst`), `moregen_row_field` (the `Reither` arm).
+///
+/// Reaches: R3f, R3n, R3i.
+#[test]
+#[ignore = "R3i build"]
+fn the_copy_of_the_subject_shares_the_references_of_its_rows() {
+    let mut c = checker(Mode::Success);
+    let row = |c: &mut Checker| {
+        let (int, more) = (constr_at(c, 2, INT, &[]), var_at(c, 2));
+        variant_at(c, 2, &[("B", Tag::Either(false, Some(int), false))], more, true, NONE)
+    };
+    let (pattern, subject) = (row(&mut c), row(&mut c));
+    assert!(c.moregeneral(true, pattern, subject));
+    let end = |c: &mut Checker, ty: Ty| {
+        let (fields, _, _) = read_row(c, ty);
+        assert_eq!(fields.len(), 1);
+        assert!(matches!(fields[0].1.kind, RowFieldKind::Either { .. }));
+        fields[0].1.end
+    };
+    let (e1, e2) = (end(&mut c, pattern), end(&mut c, subject));
+    assert_ne!(e2, Ty(NONE), "the subject's row was opened to share its reference");
+    assert_eq!(e1, e2);
+}

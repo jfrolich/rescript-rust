@@ -716,7 +716,7 @@ impl Checker {
     /// O(1): the descriptor row of an extended node, or `Nil` for a node
     /// that is not extended (what ends a list either way).
     #[inline]
-    fn field_descriptor(&self, node: Node) -> ExtraDescriptor {
+    pub(super) fn field_descriptor(&self, node: Node) -> ExtraDescriptor {
         if node.head & EXTENDED != 0 {
             self.extras.descriptors[node.a as usize]
         } else {
@@ -995,7 +995,7 @@ impl Checker {
 
     /// O(1): the cell of field node `field`.
     #[inline]
-    fn cell_of(&self, field: Ty) -> Ty {
+    pub(super) fn cell_of(&self, field: Ty) -> Ty {
         let node = self.g.nodes[field.0 as usize];
         match self.extras.descriptors[node.a as usize] {
             ExtraDescriptor::Field { mutability, .. } => Ty(mutability),
@@ -1672,7 +1672,7 @@ impl Checker {
     /// two compares of the caller. (CHECKER_REWRITE 8.6, decision 60)
     #[cold]
     #[inline(never)]
-    fn drop_name_children(&mut self, home: Ty, row: VariantRow) {
+    pub(super) fn drop_name_children(&mut self, home: Ty, row: VariantRow) {
         if self.g.mode == Mode::Explain {
             let node = self.g.nodes[home.0 as usize];
             let extra = self.saved.len() as u32;
@@ -1697,7 +1697,7 @@ impl Checker {
     /// before the clash and `unify3`'s handler puts back the left
     /// descriptor only, ctype.ml:2436-2438). O(slots of the node), one
     /// list of that length.
-    fn forget_name_children(&mut self, home: Ty, row: VariantRow) {
+    pub(super) fn forget_name_children(&mut self, home: Ty, row: VariantRow) {
         let node = self.g.nodes[home.0 as usize];
         let b = self.g.lists.len() as u32;
         self.g
@@ -1715,7 +1715,7 @@ impl Checker {
     /// ([`field_repr`]; its home is opened, so every `Reither` field of it
     /// has its reference slot).
     #[inline]
-    fn field_now_at(&self, at: usize) -> FieldRepr {
+    pub(super) fn field_now_at(&self, at: usize) -> FieldRepr {
         let field = self.extras.row_scratch[at];
         field_repr(&self.g, field.ty.0, u32::MAX, self.extras.row_fields[field.at as usize])
     }
@@ -1743,7 +1743,7 @@ impl Checker {
     /// `RowFieldRow` a field and those slots; two row loads per field
     /// (one to count the slots, one to fill them), no allocation beyond
     /// the pools.
-    fn build_variant(
+    pub(super) fn build_variant(
         &mut self,
         fields: std::ops::Range<usize>,
         more: Ty,
@@ -2356,7 +2356,7 @@ impl Checker {
     /// OCaml's order ([`each_field_types`]), appended to
     /// `extras.row_scratch` as the `ty` of a [`FieldRef`]. O(types +
     /// chain), no allocation once the scratch has the capacity.
-    fn read_types(&mut self, home: u32, field: RowFieldRow) {
+    pub(super) fn read_types(&mut self, home: u32, field: RowFieldRow) {
         let scratch = &mut self.extras.row_scratch;
         each_field_types(&self.g, home, u32::MAX, field, |types| {
             scratch.extend(types.iter().map(|&ty| FieldRef { name: 0, at: 0, ty }));

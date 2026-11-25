@@ -2181,9 +2181,9 @@ it stops and reports a reproduction.
 | R3h | Pattern mode: state, equations, `reify`, the binding walk of pattern mode, the arms without a backtrack, the fixed-row rule of `copy_refs` (8.9). Merged (pull request 356; `tc::` 298 passed, 7 ignored for R3r) | `rows.rs`, `unify.rs`, `expand.rs` | R3n, R3g | R3i, R3j, R3q | 700 |
 | R3r | Pattern mode: `mcomp`, the two arms that try and fall back, the package fallback, a total `duplicate` (8.9). Merged (pull request 361; `tc::` 306 passed, none ignored) | `rows.rs`, `unify.rs` | R3h | R3i, R3j, R3q | 450 |
 | R3q | `instance_poly` and `instance_label`: the copy that goes through free universal variables without sharing (`copy_sep`), and the fixed-row rule of `copy_row` only it reaches (8.6, decision 47; 8.10). Merged (pull request 370; `tc::` 324 passed, none ignored) | `rows.rs` | R3n, R3g | R3h, R3i, R3j | 500 |
-| R3s | The ambiguity of GADT instances: tracing, the instance sets and the three places of the kernel that read them; a nullary constructor's own memo while tracing (8.6, decisions 72 and 97 to 112; 8.11). Issued in the ninth skeleton turn: 25 bodies, 13 ignored tests, a prompt in 8.4 | `unify.rs`, `expand.rs`, three lines of `rows.rs` | R3r | R3i, R3j | 350 |
-| R3i | `moregeneral`, `equal`, `matches` | `relate.rs` | R3n, R3g | R3h, R3j | 600 |
-| R3j | Subtyping without the declaration-directed coercions | `relate.rs` | R3n, R3g | R3h, R3i | 600 |
+| R3s | The ambiguity of GADT instances: tracing, the instance sets and the three places of the kernel that read them; a nullary constructor's own memo while tracing (8.6, decisions 72 and 97 to 112; 8.11). Merged (pull request 382; `tc::` 341 passed, none ignored) | `unify.rs`, `expand.rs`, three lines of `rows.rs` | R3r | R3i, R3j | 350 |
+| R3i | `moregeneral`, `equal`, `matches`: one loop for `moregen` and `eqtype` on the frames of unification, `rigidify`, the renaming as a table (8.6, decisions 113 to 118; 8.12). Issued in the tenth skeleton turn: 23 bodies, 9 ignored tests, a prompt in 8.4 | `relate.rs` | R3s | R3j | 900 |
+| R3j | Subtyping without the declaration-directed coercions. NOT designed: the tenth skeleton turn ended in R3i (8.12, "What the tenth turn did not do") | `relate.rs` | R3s | R3i | 600 (not measured) |
 | K2 | The hot paths of unification, no behaviour change (8.7) | `unify.rs` | R3c | every slice above | 150 |
 
 State after the second skeleton turn (kept for the record; the third
@@ -2318,6 +2318,22 @@ rewritten; its count after is at the end of that list.
 | Slice | Decisions | Tests | Run in this turn |
 |---|---|---|---|
 | R3s | 97 to 112; 8.11 | thirteen ignored: eleven hand-built and the step test `instance_sets_at_ten_thousand` in `r3_tests.rs`, `instance_plan_agrees_on_generated_cases` in `differential.rs`; one that runs today (`old_checker_refuses_a_member_below_its_scope`) and the size tests | all thirteen passed against a prototype of the 25 bodies (about 270 lines of code), which is not in the tree; each of the four shapes of the step test and three hand-built tests were seen to fail with their structure broken (decision 112) |
+
+State after the tenth skeleton turn (trunk `f37ab8a73`). Merged between
+the two turns: R3s (pull request 382). `cargo test --lib tc::` before:
+341 passed, none ignored (seen: 1,166 seconds). After, on the skeleton:
+342 passed, 1 failed, 8 ignored was seen (the check of the ignored
+tests found one of the new ones without `Reaches:` in its doc comment;
+corrected, and the check passes), so 343 passed and 8 ignored is what
+the skeleton reads; with the prototype in place and the ignored tests
+included, 351 passed, none failed, none ignored was seen (1,181
+seconds). What
+the tenth turn did is decisions 113 to 118 of 8.6 and section 8.12.
+
+| Slice | Decisions | Tests | Run in this turn |
+|---|---|---|---|
+| R3i | 113 to 118; 8.12 | nine ignored: five hand-built and the two step tests `relations_at_ten_thousand` and `relations_over_ten_thousand_fields_and_tags` in `r3_tests.rs`; `relation_plan_agrees_on_generated_cases` (25,000 cases) and `a_wrong_answer_of_a_relation_is_reported` in `differential.rs`; two that run today (`the_rigid_expansion_is_public_and_adds_the_chain`, `old_side_of_the_relation_plans_is_not_vacuous`) and the size test | all nine passed against a prototype of the 23 bodies (803 added lines, comments included), which is not in the tree; the fifth shape of `relations_at_ten_thousand` was seen not to end without the table of pairs. The whole filter with the first prototype in place: 351 passed, none ignored; with the corrected one and the ninth test, the count is in the pull request |
+| R3j | none | none | nothing: not designed |
 
 The ignored tests are checked mechanically
 (`differential::tests::ignored_tests_name_the_slices_they_reach`): each
@@ -2632,8 +2648,10 @@ its generator extension and old-side vacuity test (first commit); the
 order, the mutability cells. R3f: the fresh row for the missing tags is
 made once; closedness and the row name as ctype.ml:2560-2600. R3h: the pair set only
 here; an equation writes one `TypeTable` row and cleans the memos. R3i:
-every relation restores its speculation. R3j: the constraints are
-returned, not unified inside the walk.
+`equal` and `matches` restore their speculation; `moregeneral` has none,
+as in OCaml (8.6, decision 114, which corrects this sentence and the
+last line of "A snapshot in `Mode::Success`" in decision 6 of 8.2). R3j:
+the constraints are returned, not unified inside the walk.
 
 ### 8.4 The build prompts
 
@@ -3585,10 +3603,167 @@ src/types. At most 350 lines of code added outside comments (the
 prototype's part is about 270).
 ```
 
+The prompt of R3i, written in the tenth skeleton turn. The two
+searches were run on the head that holds the skeleton and print what
+the prompt says. With the first prototype in place the whole filter
+with the ignored tests included read 351 passed, 0 failed, 0 ignored;
+the corrected prototype and the ninth test came after that run.
+
+```text
+R3i. Every slice above it in the table of 8.1 is merged. Read section
+8.12 and section 8.6, decisions 113 to 118; compiler/ml/ctype.ml
+314-397 (flatten_fields, associate_fields, merge_row_fields,
+filter_row_fields), 496, 1544-1600 (unify_univar, occur_univar),
+1656-1679, 2901-3124, 3126-3198, 3200-3380; compiler/ml/btype.ml 112-170, 229-265, 753-804;
+compiler/ml/subst.ml 132-215; in src/tc/relate.rs everything; in
+src/tc/unify.rs the doc comments of Frame, FrameKind, PairSet and of
+the fields of Checker, and the doc comments AND bodies of
+Checker::{unify, unify_distinct, push_children, occur, restore,
+fresh_marks, push_pair, push_lists}; in src/tc/expand.rs
+Checker::{expand_head, expand_head_rigid, copy, link_memorized,
+memorized_node, lower, cleanup_abbrev}; in src/tc/level.rs
+Graph::children; in src/tc/rows.rs the comment "The reference of a
+variant field" and Checker::{flatten_fields, build_field, cell_of,
+open_row, flatten_row, merge_rows, unify_row, row_is_fixed, set_more,
+resolve, settle, resolve_either, unify_row_field, read_types,
+field_now_at, build_variant, drop_name_children,
+forget_name_children, reify_row, duplicate, copy_refs, dup_cell,
+begin_cell_session, end_cell_session, enter_poly, unify_univar,
+unify_package, package_end, occur_univar} and field_repr,
+each_field_types, cell_repr, cell_mutable.
+
+A prototype of this slice was written in the design turn and the
+nine tests of the slice passed against it. It is not in the
+repository; it is a comment on pull request 393 (one fenced diff
+against the skeleton, each body under a line `// R3I-PROTOTYPE`; take
+the LAST comment that holds one, issue comment 7164565630: the
+earlier two have the fault of decision 117 in duplicate_type; the
+review corrected line numbers of ctype.ml in the skeleton's doc
+comments after it was posted, so where a line it cites differs from
+the skeleton's, the skeleton is right). You MAY read it. Three things it does are NOT yours to copy:
+relate_fields and moregen_row put their clash path in a closure that
+is called at once (write the cut of the frames out); all_distinct_vars
+turns a clash of a safe expansion into the unexpanded node with
+unwrap_or (a safe expansion does not clash: say so with the
+expression you choose, no panic); its bodies carry no doc comment of
+their own beyond the skeleton's. Where your code differs from it, the
+doc comment decides.
+
+Yours: the 23 bodies of src/tc/relate.rs that are `todo!("R3i")`:
+Checker::{moregeneral, duplicate_type, moregen, equal, matches,
+relate_run, relate_frames, moregen_pair, eqtype_pair, relate_children,
+moregen_occur, is_variant, row_children, rigidify, all_distinct_vars,
+rename_pair, normalize_renaming, relate_fields, relate_field,
+moregen_row, filter_fields, moregen_row_field, eqtype_row}. Not yours:
+Checker::{subtype, force_subtype, enlarge_type} (R3j: they stay
+`todo!("R3j")`), the functions may_instantiate and ordered, the
+allowance on `mod relate` in mod.rs (R3j removes it), and everything
+else under src/tc, the seed lists of differential.rs included. If a
+function you must call is not visible from relate.rs, stop and report
+it.
+
+Before your first commit, from the repository root:
+  grep -c 'todo!("R3i")' compiler-rust/src/tc/*.rs | grep -v ':0$'
+prints compiler-rust/src/tc/relate.rs:23;
+  grep -c '#\[ignore = "R3i build"\]' compiler-rust/src/tc/*.rs | grep -v ':0$'
+prints compiler-rust/src/tc/differential.rs:2 and
+compiler-rust/src/tc/r3_tests.rs:7. When you end, both print nothing.
+
+Commits, in this order, each pushed:
+1. The 23 bodies. Run `cargo test --manifest-path
+   compiler-rust/Cargo.toml --lib tc:: -- --include-ignored` in the
+   background with its output in a file (it takes about twenty
+   minutes; poll it): every test passes, the nine of this slice
+   included, and the last line reads 352 passed, 0 failed, 0 ignored
+   (the 343 that pass before your first edit and the nine). Never
+   report a count you did not see.
+2. The nine `#[ignore = "R3i build"]` lines removed; nothing else in
+   a test changed. The same command without `-- --include-ignored`
+   then reads 352 passed, 0 failed, 0 ignored.
+End your turn after the second commit is pushed.
+
+Steps (`#[cfg(test)] super::steps::tick()`): one a frame
+relate_frames pops; one a node moregen_occur, duplicate_type (also one
+a node its pass after the copy reads) and rigidify mark; one a field
+row_children reads; one a merge step of relate_fields; one a field
+filter_fields reads and one a field of r1 and r2 eqtype_row reads;
+one an entry of each pass of all_distinct_vars; one an entry of the
+first loop of normalize_renaming (the scan for a link; its rewrite
+counts none).
+
+Relations to hold: every tc:: test that passed before passes
+unchanged; after every call of a relation `frames`, `saved`, `scopes`
+and `trace` have the lengths they had (the tests assert it);
+`equal` and `matches` leave every node that existed before the call
+as it was; a unit that calls no relation reaches none of your bodies.
+
+The first statement of `moregen` and of `equal`:
+  debug_assert!(self.scopes.is_empty(), "a relation entered with a scope of universal variables open");
+OCaml empties its list of scopes there (ctype.ml:3093, 3363) and does
+not put the old value back; cutting `scopes` back to its length at
+the entry is the same only when that length is zero. The prototype
+does not have the assertion. If it fails in a test, stop and report
+the test: do not take it out and do not change the test.
+
+The hand-built tests are the judge, each with the OCaml lines it
+follows. If a test fails where your code does what the cited lines
+say, stop and report the test with the lines: do not change the test.
+A seed listed in ROWS_OLD_EQUAL_DIFFERS, ROWS_OLD_NIL_DIFFERS,
+UNIVARS_OLD_EQUAL_DIFFERS, UNIVARS_OLD_NIL_DIFFERS or
+UNIVARS_OLD_FREE_UNIVAR_DIFFERS differs for the reason its doc
+comment gives. You act on none of them; a
+seed that is not listed and differs is read against the lines of 8.12
+and reported: you pin none.
+
+Report, before and after, the five unification operations of tc_kernel
+(unify_vars, unify_ground1, unify_ground3, unify_datatype2,
+unify_abbrev2, each minus its build_ twin) and instance7, copy7 and
+checker_instance7, saying which commit each column was built from.
+No target is set (decision 46); the slice adds no line to a function
+they run.
+
+Before each push, from compiler-rust, both print no warning:
+  cargo clippy --all-targets -- -D warnings
+  RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+(a public doc comment must not link a private item; a list in a doc
+comment is indented as clippy asks). In your report, name each loop of
+your bodies with the shape of relations_at_ten_thousand or of
+relations_over_ten_thousand_fields_and_tags that runs it 10,000
+times; the loops no shape runs that often are the walk of
+moregen_occur (every shape calls it at the generic level, which skips
+it), the common tags of moregen_row with its static scan and
+moregen_row_field, the chain of variant
+nodes in row_children and duplicate_type, the types of one field in
+moregen_row_field and eqtype_row, the expansions of eqtype_row and
+relate_fields, and the entries of normalize_renaming: name them as
+such (the reviewer adds their tests: you do not add or change a test).
+
+If git push or gh answers HTTP 401: commit locally, end the turn, and
+say exactly what is local and at which commit.
+
+Shortcuts that count as failure: a speculation in moregeneral or
+moregen; equal or matches returning on a path that does not restore;
+a recursion in any body (the frames, Graph::work); a `Vec`, a hash
+map or a `Box` made in a call (the scratch vectors of Checker and
+Extras exist); a second pair table, or `pairs` or `compatible` used
+for `related`; the renaming as a list that is searched; a generation
+of `marks` held across expand_head, unify, occur, occur_univar, lower
+or copy; a reference node or a partner node pushed as a child
+(row_children reads the chain of references); Checker::duplicate or
+Checker::copy in place of duplicate_type's own copy; the restore of
+duplicate_type after its pass over the copied nodes (it runs between
+the copy and the pass: decision 117); a field's
+mutability cell written or linked; a trace built; a new FrameKind; a
+change of a signature, of a doc comment's stated cost, of a test or
+of a seed list; a change under src/types. At most 900 lines of code
+added outside doc comments (the prototype's part is 803, comments
+inside bodies included).
+```
+
 The prompt of K2 is in section 8.7. The last prompt below is superseded by
 decision 5 of 8.6: no builder starts a slice from it. R3e, R3f, R3n, R3g
-and R3p, R3h, R3r, R3q and R3s have their own prompts above it; R3i and
-R3j have none.
+and R3p, R3h, R3r, R3q, R3s and R3i have their own prompts above it; R3j
+has none.
 
 ```text
 R3e..R3j. First commit, before any body: extend
@@ -5944,6 +6119,190 @@ in 8.4). `cargo test --lib tc::` after, with trunk `8b9bf5a8e` (R3q
 merged) merged: 325 passed, none failed, 13 ignored, the thirteen
 tests of R3s.
 
+**Decided in the tenth skeleton turn** (R3i; section 8.12 has the
+tables).
+
+113. **`ExpandMode::Rigid` is the public expansion** (built in the tenth
+     turn, commit "the rigid expansion is the public one"). OCaml:
+
+     ```text
+     (* compiler/ml/ctype.ml:3184-3189 *)
+     let expand_head_rigid env ty =
+       let old = !(rigid_variants ()) in
+       rigid_variants () := true;
+       let ty' = expand_head env ty in
+       rigid_variants () := old;
+       ty'
+     ```
+
+     `expand_head` is `try_expand_head try_expand_safe` (1283-1289):
+     public abbreviations, a clash of a step is `Cannot_expand`, and the
+     chain of GADT instances is added (1271-1276). Since R3b `Rigid`
+     counted as private in three places of `expand.rs`. Now
+     `Checker::expand_head` sends `Rigid` to `expand_head_rigid`, which
+     sets `Extras::rigid_variants`, runs the `Safe` expansion and puts
+     the flag back; the three tests read `mode == ExpandMode::Opt`.
+     `rigid_variants` is read at ctype.ml:2666 only (`unify_row_field`'s
+     `redo`), which an expansion reaches when it unifies a constrained
+     parameter. Test: `the_rigid_expansion_is_public_and_adds_the_chain`.
+     This pays item 12 of the list after the ninth turn.
+
+114. **`moregeneral` takes no snapshot; `equal` and `matches` take
+     one.** `moregeneral` (ctype.ml:3104-3124) saves and restores the
+     current level and nothing else. What `moregen` writes: links of
+     the variables of the pattern's instance (new nodes, held by nothing
+     afterwards), with `inst_nongen` links of the pattern's variables
+     that are NOT generic, which `instance` shares with the scheme
+     (`may_instantiate`, 2921-2923: every level but `generic_level - 1`),
+     levels of the subject's copy (`update_level` in `moregen_occur`),
+     and resolved references of the pattern's rows (`set_row_field e1`,
+     3069-3086). The one caller is `Includecore.value_descriptions`
+     (includecore.ml:47), always with `inst_nongen = true`: a weak
+     variable of an implementation is instantiated by its interface and
+     stays so. Today's checker has the same form (types/ctype.rs
+     `moregeneral`: no snapshot). The kernel follows: no speculation,
+     which is also the cheaper form in `Mode::Success` (no trail). The
+     memo of constructors without arguments keeps the expansions made in
+     the two copies until the next cleanup, as OCaml's does. This
+     corrects two sentences that listed `moregeneral` among the places
+     that undo: 8.2, decision 6 ("A snapshot in `Mode::Success`") and
+     8.3 ("R3i: every relation restores its speculation").
+
+     `equal` (`eqtype_list`, 3361-3369) backtracks on every exit, and
+     `matches` (3167-3179) snapshots BEFORE `rigidify` and backtracks
+     after either answer: one `Graph::speculate` each, closed with
+     `Checker::restore`.
+
+115. **What the memos hold after `equal` and `matches` is not compared.**
+     OCaml's `backtrack` cleans the memos only when a change was LOGGED
+     since the snapshot (btype.ml:776-779), and a write to a node made
+     after the snapshot is not logged (`log_type`: `if ty.id <=
+     !last_snapshot`). `Checker::restore` cleans them when the trail
+     grew, and inside a speculation the kernel logs every write: a
+     compressed path, the link of a new parameter, an opened row. So
+     after an `equal` that expanded a type with arguments the kernel has
+     forgotten the memo of constructors without arguments where OCaml
+     keeps it; after one that expanded only constructors without
+     arguments both keep it (`equal_renames_bijectively_and_restores`
+     shows that case). Today's checker takes no snapshot in `equal` at
+     all and never cleans. The difference is the identity of a later
+     copy of a nullary abbreviation (O11), which is in no contract.
+     The harness therefore forgets the memos on both sides after
+     `Op::Equal` and `Op::Matches`. Open (question 2 of the pull
+     request): make `Checker::restore` exact by counting only trail
+     entries of nodes older than the speculation that are not a
+     compression and whose level, tag or `a` changed.
+
+116. **One loop, the frames of unification, no trace.** Every caller of
+     the three relations reads a boolean (includecore.ml:47, 92, 127,
+     131, 154, 157, 392, 429, 481, 488, 571, 583, 584, 726, 737;
+     typedecl.ml:815, 911, 1017, 1224, 1738; typecore.ml:879;
+     ctype.ml:4351), so no trace is built and a clash of a callee cuts
+     `Checker::trace` back to its length at the entry (decision 25).
+     `moregen` and `eqtype` are `Checker::relate_frames` with a
+     `Relation` (2 bytes) passed down, over `Checker::frames` with the
+     frame kinds unification has: `Pair`, `LeavePoly`, `PackageEnd`,
+     `Field`, `RowField`. So `enter_poly`, `unify_univar` (R3g),
+     `unify_package` and `package_end` (R3p, `PackageDecls`) and
+     `push_children` are called as they are. The visited pairs are
+     `Checker::related`, a hash set of ORDERED pairs (`Type_pairs` keys
+     the pair as given), a field of its own: `pairs` and `compatible`
+     belong to pattern mode. It is cleared at the entry of each relation
+     (`Type_pairs.create`). A hash set because no dense index of a pair
+     of nodes exists. `moregen` keeps OCaml's order of work (a field or
+     tag is a frame, popped where OCaml reaches it), because what it
+     links stays; `eqtype` restores everything and pushes the pairs of a
+     row at once.
+
+     Three kernel forms replace OCaml lists, with the same answers:
+     the renaming of `eqtype` (`subst`, searched with `List.assq` and
+     `List.exists`: O(variables) a pair) is `Checker::renaming`, one
+     12-byte row a node live by a generation, O(1) a pair;
+     `normalize_subst` (3191-3198, a scan a pair) runs only when the
+     trail grew since the last pair of variables; `all_distinct_vars`
+     (3156-3165, `List.memq`) is two passes, the expansions first and
+     then one generation of marks. `rigidify_rec`'s `List.memq ty !vars`
+     is always false for a node met for the first time (the walk marks),
+     so it is not built.
+
+117. **`duplicate_type` is not `Checker::duplicate`; today's checker is
+     the judge of the answers, and is set aside by name in three
+     places.** The generated cases found, in order:
+     - `Checker::duplicate` (R3h) copies variables; `Subst.type_expr
+       Subst.identity` keeps them (subst.ml:135-143). `moregeneral`
+       needs the second: `Checker::duplicate_type` (R3i). Its copy also
+       asks no memo (`Tconstr (type_path s p, args, ref Mnil)`,
+       subst.ml:172), where `Checker::copy` links a constructor without
+       arguments to a memorized node; and the row variable of a static
+       row becomes a new generic variable (`dup`, subst.ml:191-207).
+       Today's checker was right on all three and the first prototype
+       wrong.
+     - Today's `equal` answers `false` for two rows of which the right
+       one was extended by a unification: it expands the FIELD
+       `right.row_more` where OCaml expands `row_more row2`, the
+       function that follows the chain (ctype.ml:3327). 68 seeds
+       (`ROWS_OLD_EQUAL_DIFFERS`, `UNIVARS_OLD_EQUAL_DIFFERS`).
+     - Today's copy keeps `Tnil` as it keeps a variable, where
+       `Subst.typexp` copies it: 7 seeds (`ROWS_OLD_NIL_DIFFERS`,
+       `UNIVARS_OLD_NIL_DIFFERS`); the answers agree.
+     - Five seeds were pinned unclassified at the end of the first
+       turn and are decided (second turn of the tenth). Three were the
+       DESIGN's fault (16000113, 20000085, 81000256): `duplicate_type`
+       restored its speculation after the pass that shares the
+       references of a row (`Checker::copy_refs` opens the source row
+       when the copy keeps its row variable), so the source was
+       unopened again and its fields had references the copy did not
+       hold. In OCaml the copy keeps them (`let e = if keep then e else
+       ref None`, btype.ml:374, with `keep = not dup`, subst.ml:213),
+       and `set_row_field e1 (Reither (c2, [], m2, e2))`
+       (ctype.ml:3074) then joins the pattern's field to the SUBJECT's.
+       Today's checker was right. The restore now runs between the
+       copy and the pass; test
+       `the_copy_of_the_subject_shares_the_references_of_its_rows`
+       (fails on the first prototype); the three seeds agree and are in
+       no list. Two are today's checker (5000086, 13000118,
+       `UNIVARS_OLD_FREE_UNIVAR_DIFFERS`): `moregen_occur` calls
+       `occur_univar env ty` unconditionally (ctype.ml:2917-2918), and
+       with no binder entered a `Tunivar` raises (1584-1585);
+       types/ctype.rs runs it only `if !univars.pairs.is_empty()`, so it
+       accepts a weak variable against a free universal variable.
+       No seed is unclassified.
+     - What the mechanical classification of the 75 other seeds tests:
+       both sides fail at the same operation or at none and print the
+       same number of lines, and EITHER every line is the same or is
+       `equal = false` on the old side and `equal = true` on the new
+       (the `EQUAL` lists), OR every answer line is the same and the
+       new form has more occurrences of `nil` than the old (the `NIL`
+       lists). Read in full: 1000013, 3000021, 4000062 and 2000018 of
+       the first class (each has a unification of two rows before the
+       `equal`), 32000157, 54000224 and 5000060 of the second (the old
+       side prints a `nil` of the subject as a back reference to the
+       pattern's). The second condition is loose: it would also take a
+       case whose forms differ elsewhere while a `nil` count differs;
+       the 4 of the 7 not read are pinned on it alone.
+     The plain relation plan (10,000 cases) has no difference.
+
+118. **The size and the order of the build; what the turn did not do.**
+     The prototype is 803 added lines (comments inside bodies
+     included): the limit of the slice is 900 lines of code outside doc
+     comments. One commit of bodies and one that removes the `ignore`
+     lines, as R3s. Not done in the tenth turn: the source programs of
+     8.12 were run through the OCaml compiler only (second turn), not
+     through the Rust one; the step tests were not seen to fail
+     with the renaming or the marks of `all_distinct_vars` replaced by a
+     list scan (a step counts a frame, and a scan would have to count
+     its own entries: the two shapes pin linearity of the frames only);
+     no hand-built test reaches `normalize_renaming` past its first
+     compare, the package arm, the arm of universal variables, the
+     `Reither` arms of `moregen_row_field`, `filter_fields` with
+     `erase`, or the two expansions of `eqtype_row` and `relate_fields`
+     (the generated cases reach rows, fields and universal variables;
+     nothing reaches packages); the bench table of `tc_kernel` was not
+     taken; R3j and every item of J3 but decision 113.
+
+State at the end of the tenth turn: R3i is issued (8.12; its prompt is
+in 8.4). R3j has no design.
+
 
 ### 8.7 The hot paths of unification (K2)
 
@@ -7769,7 +8128,7 @@ turn that makes the skeleton of R3s (5 to 11); accepted as they are
    debug assertion where a constructor node is made and a test that a
    constrained declaration's arguments arrive unified.
    State: still owed, to the next design turn; the ninth turn ended
-   with H1 and did not look at it.
+   with H1 and the tenth in R3i (decision 118); neither looked at it.
 6. OWED, G1 (a) and (b): below a node that was met again on the way,
    `non_recursive_abbrev` and `occur_pattern` remember nothing and
    enter a node once a path, as OCaml does everywhere (its set is the
@@ -7780,19 +8139,19 @@ turn that makes the skeleton of R3s (5 to 11); accepted as they are
    "exponential in the depth of sharing below a met node, as OCaml on
    every shared type".
    State: still owed, to the next design turn; the ninth turn ended
-   with H1 and did not look at it.
+   with H1 and the tenth in R3i (decision 118); neither looked at it.
 7. OWED, G1 (c): the in-line walk of `lower_scoped` pushes the name
    arguments of every inner node of a chain; OCaml's `iter_row`
    visits only the name of the row whose `more` is not a variant
    (btype.ml:237-240). The code before this turn lowered them too. A
    case with a named inner node, or the reason none exists.
    State: still owed, to the next design turn; the ninth turn ended
-   with H1 and did not look at it.
+   with H1 and the tenth in R3i (decision 118); neither looked at it.
 8. OWED, G1 (b), as the turn recorded: the expansion of a constructor
    is tested with its own frame on the way, where OCaml's handler
    uses the outer set (ctype.ml:1401).
    State: still owed, to the next design turn; the ninth turn ended
-   with H1 and did not look at it.
+   with H1 and the tenth in R3i (decision 118); neither looked at it.
 9. OWED, R3q: OCaml's `instance_label` calls `instance_poly`, which
    opens a copy session inside the label's, and a mutability cell is
    duplicated once a session (btype.ml:421-425, 465); the kernel runs
@@ -7804,13 +8163,14 @@ turn that makes the skeleton of R3s (5 to 11); accepted as they are
    node identity does not depend on it; the doc comment says so.
    State: still owed, to the design turn after R3q's merge (pull
    request 370, merged during the ninth turn), with what its review
-   lists; the ninth turn did not look at it.
+   lists; neither the ninth nor the tenth turn looked at it.
 10. OWED, tests: two step tests were not seen to fail
     (`matching_the_fields_of_a_fixed_row_is_one_step_a_field`; shape 3
     of `instance_poly_at_ten_thousand`); `Op::InstancePoly` in the
     harness, judged by today's checker, as the first commit after R3q
     is built.
-    State: still owed, to the next design turn, all three parts.
+    State: still owed, to the next design turn, all three parts; the
+    tenth turn ended in R3i (decision 118).
 11. OWED, R3s: the skeleton, tests, prototype and prompt; the three
     points of decision 104. The guard of the arm of two locally
     abstract types stays as decision 65 left it for R5c.
@@ -7821,7 +8181,7 @@ turn that makes the skeleton of R3s (5 to 11); accepted as they are
     to the next design turn: the two lowerings under tracing, the
     chain of a nullary copy through a parent with arguments, a member
     that is a variable, and the step tests of four loops (decisions
-    109 and 112).
+    109 and 112): still owed after the tenth turn.
 12. Accepted: the R3q entry of
     `ignored_tests_name_the_slices_they_reach` names R3h and R3r (its
     tests build on the checker of pattern mode); `#[inline(always)]`
@@ -7848,21 +8208,25 @@ designed differs from OCaml, where one is known.
    (added, empty until the build) and `EXPLAINED_INSTANCES_DIFFER`
    (renamed) say so. Decision 79's reading of 20,000,132 was nearer
    than decision 110's.
+   State: made in the review it names (on trunk).
 2. Made, built code: `expand_head` added the chain of instances in
    every mode but `Unif`. `expand_head_opt` has no chain step
    (`try_expand_head_opt`, ctype.ml:1319-1321), and `mcomp` expands in
    `Opt`. The guard now leaves `Opt` out: one compare of a register
    where a head expanded. No test runs it (item 11).
+   State: made in the review it names (on trunk).
 3. Made, the build prompt of R3s in 8.4: the count the builder must
    see (338); the test run in the background; the ranges 1113-1135,
    1319-1336, 1697-1701, 2732-2737 and env.ml 1802-1811; what of the
    prototype is not the builder's to copy (it deletes four size
    assertions and keeps the test of `resume_frames`); the three lists
    of seeds; what is not in the slice.
+   State: made in the review it names (on trunk).
 4. Made, text: decision 108 (what a backtrack keeps), decision 112
    (the prototype ran with the test of `resume_frames` in place), the
    row of `expand_head` in the table of sites, the doc comment of
    `unify_distinct_from` (`late` is a value at its second call).
+   State: made in the review it names (on trunk).
 5. OWED, the expansion of a failed trace (item 1). The kernel has no
    counterpart of `expand_trace`: after a unification that fails under
    tracing, OCaml's shared memo holds the expansion of each nullary
@@ -7872,6 +8236,8 @@ designed differs from OCaml, where one is known.
    two lists emptied of those seeds. "Not observable in a
    compilation" is not shown: typecore.ml goes on after a caught
    `Unify` in several places (2496-2499 is one).
+   State: still owed, to the next design turn; the tenth turn ended
+   in R3i (decision 118) and did not look at it.
 6. OWED, three places where the kernel as designed ACCEPTS where
    OCaml refuses, each with a hand-built case and then its build:
    the lowerings under tracing (`unify_fields`, ctype.ml:2490;
@@ -7884,27 +8250,37 @@ designed differs from OCaml, where one is known.
    are not generic too, each copied member joining. None may be open
    when the new checker is first allowed to accept a unit with a
    local constraint (the gate of R5c).
+   State: still owed, to the next design turn; the tenth turn ended
+   in R3i (decision 118) and did not look at it.
 7. OWED, decision 109, the chain through a parent with arguments:
    the kernel makes a node where OCaml links, and `has_own_expansion`
    reads false where `has_cached_expansion` reads through `Mlink`
    (btype.ml:618), so the kernel links at once (ctype.ml:2248-2257)
    where OCaml goes to unify2. A case, or the reason the answers are
    the same.
+   State: still owed, to the next design turn; the tenth turn ended
+   in R3i (decision 118) and did not look at it.
 8. OWED, decision 108: a second `Safe` or `Opt` expansion of a node
    refused once under tracing, where the first touched no older node:
    OCaml expands (the memo stayed), the kernel refuses again. A case
    through `expand_head`, or the reason the node is never asked twice.
+   State: still owed, to the next design turn; the tenth turn ended
+   in R3i (decision 118) and did not look at it.
 9. OWED, decision 107: `copy_in` adds a copy to the scope in which it
    found the member; OCaml adds it to the first scope of that level
    (`List.assoc lv` in `add_gadt_instances`, env.ml:1324-1329). They differ when two visible
    scopes have one level and the member is in the outer one: the
    lookup answers the same level, but OCaml's addition leaves with
    the inner environment. A case with two scopes at one level.
+   State: still owed, to the next design turn; the tenth turn ended
+   in R3i (decision 118) and did not look at it.
 10. OWED, `unify_pair`: the new test `l.a != r.a` keeps two nodes of
     ONE locally abstract type, one with an expansion of its own, out
     of the arm of ctype.ml:2258-2269, which OCaml takes for them (it
     expands the first once and unifies again). The kernel sends the
     pair to unify2. A case that shows the same answer, or the arm.
+    State: still owed, to the next design turn; the tenth turn ended
+    in R3i (decision 118) and did not look at it.
 11. OWED, tests: step tests of the loops no shape of
     `instance_sets_at_ten_thousand` runs wide (the parents of
     `own_ancestor`, the nodes of `inherit_own` and their product, the
@@ -7919,11 +8295,16 @@ designed differs from OCaml, where one is known.
     after a failed pattern unification). And
     `the_newer_of_two_locally_abstract_types_is_expanded_once` reads
     either memo since this turn: once R3s is built it says which.
+    State: still owed, to the next design turn; the tenth turn ended
+    in R3i (decision 118) and did not look at it.
 12. OWED, for the design of R3i: `ExpandMode::Rigid` expands private
     abbreviations (`matches!(mode, Opt | Rigid)` in expand.rs, since
     R3b), but `expand_head_rigid` is `expand_head` with rigid
     variants (ctype.ml:3184-3189): public, and with the chain. No
     caller yet.
+    State: paid in the tenth turn (the commit "the rigid expansion is
+    the public one"; decision 113; test
+    `the_rigid_expansion_is_public_and_adds_the_chain`).
 13. The turn's five questions. (1) The two lowerings are not built
     in R3s; they are item 6. (2) One commit of bodies and one that
     removes the `ignore` and `allow` lines: yes. (3) A scheme
@@ -7933,12 +8314,15 @@ designed differs from OCaml, where one is known.
     a program is looked for first, in today's checker too. (5) The
     explained seeds are NOT left as differences of today's checker:
     items 1 and 5.
+    State: answered here; what it leaves owed is in the items it
+    names.
 14. Accepted: the one test of built code that changed; `#[inline
     (always)]` on `subst_plain` and `unify_distinct_from`, `#[cold]`
     on the new out-of-line bodies; the figures of decision 111 taken
     on the prototype and not on the skeleton (the builder reports
     both columns); the eighth turn's items 5 to 10 untouched, each
     still owed.
+    State: accepted; nothing owed.
 
 **Corrections after the review of R3s** (pull request 382). R3s is
 built as section 8.11 and decisions 97 to 112 say; what its review
@@ -7960,28 +8344,38 @@ found is the design's.
    `lower_args` over `n0 := (int => n0)` (it did not end);
    `non_recursive_abbrev` over a type that holds such a node (its
    frames grew without end).
+   State: made in the review it names (on trunk).
 2. OWED: `instance_clash` puts its pair on the trace without cutting
    the trace to the base of the unification, which `escape_pair`
    does for the refusal of `update_level` (the `Unify` of ctype.ml:
    1226 is the whole trace, as the one of 589 is). They differ when
    the trace holds pairs above the base at the clash. A case, or the
    reason none exists.
+   State: still owed, to the next design turn; the tenth turn ended
+   in R3i (decision 118) and did not look at it.
 3. OWED: on the refused path of `ExpandMode::Unif` the memo of the
    expansion stays (decision 108) and `inherit_own` does not run, so
    a second expansion finds a body whose copies without arguments
    have no row of their own. A case after a caught clash.
+   State: still owed, to the next design turn; the tenth turn ended
+   in R3i (decision 118) and did not look at it.
 4. OWED: `own_ancestor` passes a row that `forget_abbrev` emptied,
    also after a cleanup; OCaml's cleanup makes that reference `Mnil`
    (it was registered by `memorize_abbrev`, btype.ml:629-634), which
    ends the chain. A case, or the reason the order cannot happen.
+   State: still owed, to the next design turn; the tenth turn ended
+   in R3i (decision 118) and did not look at it.
 5. OWED: `subst_traced` reads the level of the node's set before the
    plain expansion; OCaml reads `gadt_instance_level env ty` after
    `subst` (ctype.ml:1217, then 1222). They differ only when binding
    the parameters adds `ty` to a set.
+   State: still owed, to the next design turn; the tenth turn ended
+   in R3i (decision 118) and did not look at it.
 6. OWED, to R5: a `Checker` is not reset between units. The state of
    this slice (the byte `gadt`, the scopes and members, the own
    memos and their count, `instance_marks`) needs its reset with the
    rest, and a test that a second unit starts with none of it.
+   State: still owed, to R5, as it says.
 7. OWED, the same hazard where it was before R3s. Four walks hold a
    generation of `marks` across an expansion (`occur_expanding`,
    `occur_pattern`, `non_recursive_abbrev`, `lower_args_walk`; the
@@ -7997,11 +8391,262 @@ found is the design's.
    and a debug assertion that a generation still held is not written
    over. `begin_cell_session`, reached through `link_memorized`,
    marks cells the expansion just made: followed only in part.
+   State: still owed, to the next design turn; the tenth turn ended
+   in R3i (decision 118) and did not look at it.
 8. Made: the cost sentence of `own_ancestor` (the chain is every
    traced expansion above the copy, ended or not: n rows at the n-th
    of a chain of abbreviations, as `find_repr` over OCaml's `Mlink`
    chain) and the size sentence of `OwnMemo` (the table grows to the
    graph's length).
+   State: made in the review it names (on trunk).
+
+### 8.12 The relations (R3i, R3j)
+
+Written in the tenth skeleton turn. R3i is designed, with a skeleton,
+tests that passed against a prototype, and a prompt in 8.4. R3j is not
+designed; what is known about it is at the end.
+
+**The callers, and the signatures they need.**
+
+| Relation | Called from | What is passed | What is read |
+|---|---|---|---|
+| `moregeneral env inst_nongen pat subj` | includecore.ml:47 (`value_descriptions`) | `true`, the two `val_type` | the boolean; the links in the pattern's weak variables stay |
+| `equal env rename tyl1 tyl2` | includecore.ml 92, 127, 131, 154, 157, 392, 429, 481, 488, 571, 583, 726, 737 (`true`); 584 (`false`); typedecl.ml 911, 1017, 1224 (`false`), 1738 (`true`); ctype.ml:4351 (`false`) | two lists: parameters with a type, parameters with arguments, one type each | the boolean |
+| `matches env ty ty'` | typecore.ml:879 (the result of an arrow against an expected type); typedecl.ml:815 (a constraint on a parameter) | two types | the boolean |
+
+`Checker::moregeneral(inst_nongen, pattern, subject)` takes two nodes
+of the graph and makes the instances itself; `Checker::moregen` is the
+inner call for a caller that made them from templates.
+`Checker::equal(rename, left, right)` takes two slices (a caller copies
+a list out of the graph's pools: the walk writes them).
+`Checker::matches(ty, pattern)`.
+
+**What each relation writes, and what puts it back.**
+
+| | `moregeneral` | `equal` | `matches` |
+|---|---|---|---|
+| Speculation | none (decision 114) | one, restored on either answer | one, opened before `rigidify`, restored on either answer |
+| Writes that stay | links of the pattern's weak variables with `inst_nongen`; the memo of constructors without arguments | none (the memos: decision 115) | none (the memos are cleaned before the unification, ctype.ml:3170) |
+| Expansion | `ExpandMode::Safe` (`expand_head`, 2940-2941) | `ExpandMode::Rigid` (3218-3219; decision 113) | unification's own, then `Safe` for each variable (3160) |
+| Universal variables | `enter_poly` and `unify_univar` on `Checker::scopes`, cut back to the length at the entry, which a debug assertion holds at zero (OCaml empties the list and does not put the old value back: `current_univar_pairs () := []`, 3093, 3363) | the same | unification's |
+| Packages | `unify_package` with the relation's loop popping its pairs; `package_end` (`PackageDecls`); no supplier: a clash | the same | unification's |
+| Pair table | `Checker::related`, cleared at the entry (decision 116) | the same | none: OCaml's `matches` has none |
+| Trace | none; cut back to the entry's length | the same | the same |
+
+**The arms of `moregen` (ctype.ml:2925-2991)** against the bodies:
+
+| OCaml | Lines | Body |
+|---|---|---|
+| `t1 == t2` before and after `repr` | 2926, 2930 | `relate_frames`, the `Pair` frame |
+| `Tvar _, _ when may_instantiate` | 2934-2937 | `moregen_pair` 1: `moregen_occur`, `occur`, link |
+| two constructors without arguments of one path | 2938 | `moregen_pair` 2 |
+| `expand_head` both, one node, `Type_pairs` | 2940-2948 | `moregen_pair` 3 |
+| `Tvar _, _ when may_instantiate` of the expanded head | 2950-2952 | `moregen_pair` 4: `moregen_occur` with the unexpanded `t2`, link, no `occur` |
+| arrows, tuples, constructors of one path | 2953-2968 | `relate_children`: `push_children` |
+| `Tpackage` | 2969-2974 | `relate_children`: `unify_package`; `PackageEnd` |
+| `Tvariant` | 2975-2976; 3031-3089 | `moregen_row`, `filter_fields`, `moregen_row_field` |
+| `Tobject`, `Tfield` | 2977-2981; 2997-3029 | `relate_fields`, `relate_field` |
+| `Tnil` | 2982 | `relate_children` |
+| `Tpoly` without and with variables | 2983-2987 | `relate_children`: the pair of bodies; `enter_poly` |
+| `Tunivar` | 2988-2989 | `relate_children`: `unify_univar` |
+| anything else | 2990 | a clash |
+| `moregen_occur` | 2901-2919 | `moregen_occur`, `row_children` |
+
+**The arms of `eqtype` (ctype.ml:3200-3274)**: the same table with
+`eqtype_pair` for 3201-3235 (`rename_pair` for the two arms of
+variables, `normalize_renaming` for 3191-3198), `relate_children` for
+3236-3273, `relate_fields` for 3280-3323 and `eqtype_row` for 3325-3358.
+
+**`matches` (3167-3179)**: `rigidify` (3130-3154) with `row_children`,
+`Checker::cleanup_abbrev`, `Checker::unify`, `all_distinct_vars`
+(3156-3165).
+
+**Marks.** Every walk of the slice that marks, the structure it marks,
+which state OCaml has (a list of the path, or a mark that stays), who
+can hold a generation of the same structure when it is called, and what
+it calls while it holds its own.
+
+| Walk | Marks | OCaml's state | Callers that hold a generation | Calls while it holds one |
+|---|---|---|---|---|
+| `moregen_occur` | `Checker::marks`, one generation | a mark that stays (levels negated, `unmark_type` after the walk; 2906, 2912) | none: reached from `moregen_pair` and `moregen_row`, which hold none; `moregeneral` is called by a signature inclusion, outside every walk | `Graph::children`, `row_children`: neither takes one. `occur_univar` and `lower` run AFTER the walk |
+| `duplicate_type` | `Checker::marks`, one generation | none (`Subst` marks with `Tsubst`) | none: called by `moregeneral` only | `Graph::children`, `row_children`, `Graph::write`; the copy runs AFTER the walk |
+| `rigidify` | `Checker::marks`, one generation; the array grows with the nodes the walk makes | a mark that stays (3132; `unmark_type` at 3153) | none: `matches` is called by the typer, outside every walk | `Graph::children`, `row_children`, `build_variant`, `Graph::link`, `forget_name_children`: none takes one |
+| `all_distinct_vars` | `Checker::marks`, one generation, taken AFTER every expansion | a list (`List.memq ty !tyl`, 3161): a set of the heads, not a path | none | nothing: the expansions are a pass of their own before it, because an expansion of a type with a constrained parameter unifies |
+| `rename_pair` | `Checker::renaming`, its own table and generation | a list (`subst`) | none: nothing else reads the table | nothing |
+| `relate_frames` | `Checker::related`, a hash set | a hash table (`Type_pairs`) | none: `pairs` and `compatible` are pattern mode's | `expand_head`, `occur`, `lower`, unification inside an expansion: none reads `related` |
+
+The relations hold no generation of `marks` across an expansion or a
+unification, so the hazard of 8.11 (item 7 of the list after R3s) is
+not theirs.
+
+**Cost, and what a unit that calls no relation pays.** Nothing: the six
+fields of `Checker` are empty vectors and an empty set, and no built
+function tests them. `Checker::expand_head` gained one compare of its
+mode (decision 113), which folds at every call with a constant mode.
+Per call, each body's doc comment states its cost; the two step tests
+pin them as relations between 1,000 and 10,000.
+
+**Source programs** for the three relations, each run through the
+OCaml compiler in the second turn of the tenth (`bsc -nostdlib
+-nopervasives -bs-no-builtin-ppx -color never`, built from this tree);
+the Rust compiler was not run on them. The first `matches_bad` of the
+first turn (`type u<'b> = t<'b>`) is ACCEPTED by OCaml, and a use
+outside a recursive group (`type bad = t<string>`) is refused by
+`Typetexp` before `matches` is asked; the program below is the one
+that reaches typedecl.ml:815.
+
+```text
+moregeneral_ok    module M: { let f: int => int } = { let f = x => x }
+    accepted (exit 0; JavaScript printed)
+
+moregeneral_bad   module M: { let f: 'a => 'a } = { let f = (x: int) => x }
+    We've found a bug for you!
+    moregeneral_bad.res:1:33-57
+    1 │ module M: { let f: 'a => 'a } = { let f = (x: int) => x }
+    Signature mismatch:
+    Actual declaration (moregeneral_bad.res:1:39):
+      let f: int => int
+    Expected declaration (moregeneral_bad.res:1:13-27):
+      let f: 'a => 'a
+    (exit 2)
+
+equal_ok          module M: { type t = (int, string) } = { type u = int; type t = (u, string) }
+    accepted (exit 0)
+
+equal_bad         module M: { type t = int } = { type u = private int; type t = u }
+    We've found a bug for you!
+    equal_bad.res:1:30-65
+    1 │ module M: { type t = int } = { type u = private int; type t = u }
+    Signature mismatch:
+    Actual declaration (equal_bad.res:1:54-63):
+      type t = u
+    Expected declaration (equal_bad.res:1:13-24):
+      type t = int
+    (exit 2)
+
+matches_bad       type rec u = U(t<string>)
+                  and t<'a> = 'a constraint 'a = int
+    We've found a bug for you!
+    matches_bad.res:1:16-24
+    1 │ type rec u = U(t<string>)
+    2 │ and t<'a> = 'a constraint 'a = int
+    Constraints are not satisfied in this type.
+    Type t<string> should be an instance of t<int>
+    (exit 2)
+```
+
+(Blank lines of the output are left out.) The outputs agree with the
+tables above: `moregeneral` refuses an interface more general than its
+implementation, `equal` does not expand a private abbreviation, and
+`matches` refuses `t<string>` against `t<int>`.
+
+**What the tenth turn did not do**: decision 118. **R3j** (`subtype`,
+`force_subtype`, `enlarge_type`) keeps its three signatures and
+`todo!("R3j")` bodies; the range ctype.ml:3396-4235 was not read in the
+turn, so nothing is said here about its arms. What the next turn
+inherits for it: `Checker::related` is the pair table `subtype_rec`
+clears (`TypePairs.clear subtypes`, 4217); `relate_frames` and
+`relate_children` are the form its walk should take; `row_children` is
+`iter_row`; the entry of R3j in
+`ignored_tests_name_the_slices_they_reach` names R3i.
+
+**Corrections after the review of the tenth turn** (pull request 393:
+a first-pass review that applied the prototype and read each body
+beside its OCaml function, then the final review).
+
+1. Made: line numbers of ctype.ml in the doc comments of `relate.rs`,
+   in two tests, in the comment of a seed list, in decisions 114 and
+   117 and in the tables of this section. From the arrow arm of
+   `moregen` on, and for `moregen_fields`, `moregen_row`,
+   `eqtype_fields` and `eqtype_row`, they were 3 to 13 lines off. The
+   prototype was posted before the correction: where a line it cites
+   differs from the skeleton's, the skeleton is right.
+2. Made, in the prompt of R3i, the table above and the doc comments of
+   `moregen` and `equal`: OCaml EMPTIES its list of universal-variable
+   scopes at the entry of the two relations (ctype.ml:3093, 3363) and
+   does not put the old value back; the kernel cuts `scopes` back to
+   its length at the entry. The two are one thing only when no scope
+   is open at the entry, which the build asserts in debug builds
+   (`unify_univar` reads every scope, so a relation entered with one
+   open could pair two universal variables OCaml refuses, 1559). No
+   caller exists yet: the walks that will call a relation (R5, R6)
+   inherit the rule that none is called with a scope open.
+3. Made, in the prompt: the loops no step shape runs wide name the
+   walk of `moregen_occur` (every shape calls it at the generic
+   level, which skips it) and the common tags of `moregen_row`; the
+   reading list holds `occur_univar` (1561-1600); what counts a step
+   in `normalize_renaming` is said once; the comment that holds the
+   prototype is named.
+4. OWED BEFORE THE BUILDER OF R3i STARTS, as a task of its own with
+   the prototype as the oracle: `relation_plan_agrees_on_generated_cases`
+   exempts a listed seed wholly. It asserts that the seeds that differ
+   are the listed ones, and nothing about HOW a listed seed differs;
+   the classification of the tenth turn was a script run once and is
+   not in the test, so a fault of the new side that stays inside the
+   77 listed seeds is not seen. A listed seed must differ AND fit the
+   class its list names, else the test fails with the seed: for the
+   two `EQUAL` lists, the two forms differ only in answer lines that
+   read `equal = false` on the old side and `equal = true` on the new;
+   for the two `NIL` lists, every answer line agrees and the lines
+   that differ are explained by a `nil` node the new side copied (the
+   turn's condition, more occurrences of `nil` in the new form, is
+   loose: four of the seven seeds rest on it unread; read them);
+   for `UNIVARS_OLD_FREE_UNIVAR_DIFFERS`, the first line that differs
+   is an answer of `moregeneral`, `true` on the old side and `false`
+   on the new. A listed seed that does not fit against the prototype
+   is read against the OCaml lines before a body is built. Even then
+   the `EQUAL` class would take a new side that answers `true`
+   wrongly: the lists are emptied by item 5, not trusted.
+5. OWED, today's checker, each with a source program first (decision
+   20): `equal` on a row that a unification extended
+   (`equal_rows_without_renaming` expands the field `row_more` where
+   OCaml follows the chain, ctype.ml:3327 and btype.ml:148-151; 68
+   seeds); the copy of `moregeneral` keeps `Tnil` (subst.ml:135-143; 7
+   seeds, sharing only); `moregen_occur` asks `occur_univar` only with
+   a scope open (ctype.ml:2918; 2 seeds; a free universal variable
+   does not come from a program); `equal` takes no snapshot
+   (3361-3369). When one is corrected its list is emptied in the same
+   pull request, and the test says so by failing.
+6. OWED by the eleventh turn, tests: step shapes that run the walk of
+   `moregen_occur` (a variable below the generic level), the common
+   tags of `moregen_row` with `moregen_row_field`, and `equal` with
+   renaming over n rows that each get opened (`normalize_renaming`
+   scans the renaming again after every write of the trail: n squared
+   over two, as OCaml's `normalize_subst`; the cost sentence of its
+   doc comment says less and is corrected with the test); hand-built
+   tests for the arms the turn lists as reached by none (packages,
+   universal variables, the `Reither` arms, `normalize_renaming` past
+   its first compare, `filter_fields` with `erase`); the step shapes
+   not seen to fail with their structure broken.
+7. OWED by the eleventh turn, each decided by a measurement or by the
+   lines: `Checker::related` is cleared at the entry of every relation,
+   and a clear writes every control byte of a table that one large
+   relation grew (clear by count, or shrink); whether `Graph::copy`
+   gives the copy of a constructor an empty memo slot
+   (`ref Mnil`, subst.ml:172) and copies the arguments of a row's name
+   as `Subst.typexp` does, and what `duplicate_type` does for a
+   private row (`has_fixed_row`, subst.ml:153-166); the level of the
+   node `rigidify` links a row variable to (OCaml's is the marked
+   level of the row, ctype.ml:3139-3144); `moregen` called at a level
+   other than the generic one (`build_variant` makes the extension at
+   the current level where OCaml uses `newgenty`, 3052-3054): its one
+   caller is `moregeneral`, so make it private or state the
+   precondition.
+8. Checked in the review beyond the turn's runs: the five source
+   programs of this section and thirteen more (open and closed rows in
+   both directions, open and closed objects, a weak variable against
+   an interface, a polymorphic record field, parameters renamed and
+   swapped, records, a constrained parameter given a variable) through
+   the OCaml compiler and today's Rust checker: the same answer and
+   the same text on all eighteen. CI on the reviewed head ran `tc::`
+   at 343 passed and 9 ignored, the count the turn had inferred.
+9. Accepted: decisions 113 to 118. 114 (no speculation in
+   `moregeneral`) and 115 (the memos are not compared after `equal`
+   and `matches`) were read against ctype.ml:3104-3124 and 3361-3369
+   and `Btype.backtrack`; for 116, a hash set of pairs is OCaml's own
+   structure here and no dense index of pairs exists; `#[inline(never)]`
+   on `expand_head_rigid` and the allowance on `mod relate` until R3j
+   stand. R3j and the owed items of 8.11 go to the eleventh turn.
 
 ## 9. R4 as designed
 
