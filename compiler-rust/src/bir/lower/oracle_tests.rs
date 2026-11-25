@@ -6,6 +6,16 @@ use crate::lambda::arena::{Lam, LamArena};
 use crate::lambda::lam_compile::LambdaCompiler;
 use crate::lambda::lam_constant::{Constant as C, PointerInfo};
 
+/// The tail-call inlining pass on a module that assigns no variable.
+fn inline(program: JsDepsProgram) -> JsDepsProgram {
+    crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass(program, &Default::default())
+}
+
+/// The substitution and dead-mark pass on a module that assigns no variable.
+fn dead(program: JsDepsProgram, jsx_preserve: bool) -> JsDepsProgram {
+    crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_and_mark_dead_pass(program, &Default::default(), jsx_preserve)
+}
+
 pub(super) fn compare(arena: LamArena, root: Lam) {
     compare_with_resolver(arena, root, None);
 }
@@ -665,8 +675,6 @@ fn block_substitution_and_dead_removal_do_not_commute_with_tailcall_inlining() {
     use crate::lambda::{ApInfo, ApplyStatus, LamLoc, TagInfo};
     use crate::lambda::lam_primitive::{Primitive, Mutable};
     use crate::lambda::lam_compat::FieldDbgInfo;
-    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_and_mark_dead_pass as dead;
-    use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass as inline;
     use crate::lambda::js_shake::apply_js_shake_pass as shake;
     let mut a = LamArena::new();
     let p = Ident::new("pair", 10, IdentFlags::NONE);
@@ -875,8 +883,7 @@ fn cross_module_inline_of_a_body_that_holds_a_function() {
 /// 4 record rest, 5 substitution and dead marks, 6 shake), printed. For the T4
 /// ordering findings below.
 fn legacy_text(build: impl Fn(&mut LamArena) -> Lam, order: &[u8]) -> String {
-    use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_and_mark_dead_pass as dead, apply_js_flatten_pass as flatten};
-    use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass as inline;
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass as flatten;
     use crate::lambda::js_shake::apply_js_shake_pass as shake;
     let mut a = LamArena::new();
     let root = build(&mut a);
@@ -1050,9 +1057,8 @@ fn flattening_a_copied_return_branch_changes_the_simplify_if_head_reader() {
     use crate::js_ir::arena::ExprKind;
     use crate::js_ir::build::stmt;
     use crate::lambda::{LamLoc, lam_primitive::Primitive};
-    use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_pass as flatten, apply_js_flatten_and_mark_dead_pass as dead};
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass as flatten;
     use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass as shadow;
-    use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass as inline;
     use crate::lambda::js_pass_record_rest::apply_js_record_rest_pass as rest;
     use crate::lambda::js_shake::apply_js_shake_pass as shake;
     let mut a = LamArena::new();
@@ -1582,7 +1588,7 @@ fn cached_external_templates_keep_fresh_binders_and_import_once() {
 /// names (as `legacy_text`), printed. `order` never holds pass 2 here: the
 /// new side runs no external-shadow pass (THREE_TREES 11.4, "T5 design").
 fn new_text(build: impl Fn(&mut LamArena) -> Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, order: &[u8]) -> (String, usize) {
-    use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_and_mark_dead_pass as dead, apply_js_flatten_pass as flatten};
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass as flatten;
     let mut a = LamArena::new();
     let root = build(&mut a);
     let exported = Ident::new("run", 900, IdentFlags::NONE);
@@ -1606,7 +1612,7 @@ fn new_text(build: impl Fn(&mut LamArena) -> Lam, resolver: Option<&crate::js_ir
     for pass in order {
         program = match pass {
             1 => flatten(program),
-            3 => crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass(program),
+            3 => inline(program),
             4 => crate::lambda::js_pass_record_rest::apply_js_record_rest_pass(program),
             5 => dead(program, false),
             6 => crate::lambda::js_shake::apply_js_shake_pass(program),

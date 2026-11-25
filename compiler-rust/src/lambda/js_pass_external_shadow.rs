@@ -43,6 +43,15 @@ pub(crate) fn is_js_global(id: &Ident) -> bool {
     id.is_js() || (id.is_global() && id.stamp() == 0)
 }
 
+/// Whether reading the variable `id` after other code may give another value
+/// than reading it now: `id` is a JS global, such as a `@val` external, which
+/// JS code may assign, or one of `assignable`, the local variables some
+/// `Lassign` assigns, which the other code or a closure it calls may assign
+/// (js_analyzer.ml, `var_may_change`).
+pub(crate) fn var_may_change(assignable: &HashSet<Ident>, id: &Ident) -> bool {
+    is_js_global(id) || assignable.contains(id)
+}
+
 fn printed_binding_name(ident: &Ident) -> Option<String> {
     (!ident.is_js()).then(|| convert_ident_name(ident.name()))
 }
@@ -68,10 +77,15 @@ impl Scope {
             *self.counts.get_mut(&name).expect("scope count") -= 1;
         }
     }
+    /// A JS `let`, `const` or function declaration is in scope in its whole
+    /// block, including before the declaration. A `Block` statement is
+    /// printed without braces, so its declarations are in the enclosing block.
     fn add_declarations(&mut self, j: &JsArena, block: &[Stmt]) {
         for stmt in block {
-            if let StmtKind::Variable(decl) = j.sk(*stmt) {
-                self.add_binding(&j.var(decl).ident);
+            match j.sk(*stmt) {
+                StmtKind::Variable(decl) => self.add_binding(&j.var(decl).ident),
+                StmtKind::Block(block) => self.add_declarations(j, j.stmts(block)),
+                _ => {}
             }
         }
     }

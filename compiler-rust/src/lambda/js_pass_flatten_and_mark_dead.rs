@@ -22,6 +22,7 @@ use crate::lambda::lam_compat::LetKind;
 use super::js_exp_make::{
     direct_projection_from_pure_literal, int_literal, js_expr_no_side_effects,
 };
+use super::js_pass_external_shadow::var_may_change;
 
 pub(crate) fn apply_js_flatten_pass(mut deps: DepsProgram) -> DepsProgram {
     let program = &mut deps.program;
@@ -30,8 +31,13 @@ pub(crate) fn apply_js_flatten_pass(mut deps: DepsProgram) -> DepsProgram {
     deps
 }
 
+/// `assignable` are the variables some `Lassign` assigns: an element of a
+/// block that is one of them or a JS global is bound before the block instead
+/// of replacing a later read of the block's field
+/// (js_pass_flatten_and_mark_dead.ml, `program ~assignable`).
 pub(crate) fn apply_js_flatten_and_mark_dead_pass(
     mut deps: DepsProgram,
+    assignable: &HashSet<Ident>,
     jsx_preserve: bool,
 ) -> DepsProgram {
     // OCaml's substitution pass allocates materialized block fields with
@@ -42,13 +48,19 @@ pub(crate) fn apply_js_flatten_and_mark_dead_pass(
     let start_stamp = max_ident_stamp_in_program(&deps.program).max(Ident::current_local_stamp());
     let id_gen = IdGenerator::with_start_stamp(start_stamp);
     Ident::set_current_time(start_stamp);
-    flatten_and_mark_dead_program(&mut deps.program, &id_gen, jsx_preserve);
+    flatten_and_mark_dead_program(&mut deps.program, &id_gen, assignable, jsx_preserve);
     deps
 }
 
-fn flatten_and_mark_dead_program(program: &mut Program, id_gen: &IdGenerator, jsx_preserve: bool) {
+fn flatten_and_mark_dead_program(
+    program: &mut Program,
+    id_gen: &IdGenerator,
+    assignable: &HashSet<Ident>,
+    jsx_preserve: bool,
+) {
     let mut subst = Substitute {
         id_gen,
+        assignable,
         substitution: HashMap::new(),
         jsx_preserve,
     };
@@ -60,6 +72,8 @@ fn flatten_and_mark_dead_program(program: &mut Program, id_gen: &IdGenerator, js
 /// `js_pass_flatten_and_mark_dead.ml` `subst_map`.
 struct Substitute<'g> {
     id_gen: &'g IdGenerator,
+    /// The variables some `Lassign` assigns (`Lam_stats.assignable`).
+    assignable: &'g HashSet<Ident>,
     substitution: HashMap<Ident, Expr>,
     jsx_preserve: bool,
 }
@@ -98,7 +112,7 @@ impl Mapper for Substitute<'_> {
                 let mut bindings = Vec::new();
 
                 for (index, item) in items.into_iter().enumerate() {
-                    if is_simple_block_binding_item(j, item) {
+                    if is_simple_block_binding_item(j, self.assignable, item) {
                         rewritten_items.push(item);
                     } else {
                         let rewritten = self.expression(j, item);
@@ -328,15 +342,19 @@ fn is_deep_constant_block_binding_item(j: &JsArena, expr: Expr) -> bool {
     }
 }
 
-fn is_simple_block_binding_item(j: &JsArena, expr: Expr) -> bool {
-    // Mirror OCaml's `js_pass_flatten_and_mark_dead.ml:188-193` "simple"
-    // case: only `Var`, `Number`, `Str`, `Bool`, `Undefined` items stay
-    // inline; everything else, including `Optional_block` and any
-    // `Caml_block`, is hoisted into a fresh local binding.
+fn is_simple_block_binding_item(j: &JsArena, assignable: &HashSet<Ident>, expr: Expr) -> bool {
+    // Mirror OCaml's `js_pass_flatten_and_mark_dead.ml` "simple" case: only
+    // `Var`, `Number`, `Str`, `Bool`, `Undefined` items stay inline;
+    // everything else, including `Optional_block` and any `Caml_block`, is
+    // hoisted into a fresh local binding. So is a variable that an
+    // assignment may change before a later read of the block's field
+    // replaced by the item (`is_changing_var`).
+    if let ExprKind::Var(id) = j.ek(expr) {
+        return !var_may_change(assignable, &j.ident(id));
+    }
     matches!(
         j.ek(expr),
-        ExprKind::Var(_)
-            | ExprKind::Qualified(_)
+        ExprKind::Qualified(_)
             | ExprKind::Number(_)
             | ExprKind::Str(_)
             | ExprKind::TemplateLiteral(_)

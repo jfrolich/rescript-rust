@@ -76,6 +76,15 @@ pub(crate) enum OutputFinished {
     Dummy,
 }
 
+/// Who reads the JS globals that bindings shadow through `globalThis`: the
+/// external-shadow pass after the binding passes (`Pass`), or the backend
+/// lowering, which decided it already (`Decided`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExternalShadow {
+    Pass,
+    Decided,
+}
+
 /// A `Js_output.t` whose value is `None`: what OCaml's statement
 /// continuations (`Declare`, `Assign`, `EffectCall`) produce.
 #[derive(Debug, Clone)]
@@ -923,7 +932,11 @@ impl LambdaCompiler {
                     let reclosed = stats.decisions.decision_reclosed;
                     stats.decisions = crate::bir::shadow::compare_decisions(&decisions, &flattened.program);
                     stats.decisions.decision_reclosed = reclosed;
-                    let new_after = self.finish_flattened_output(flattened, &possible_required_modules);
+                    let new_after = self.finish_flattened_output(
+                        flattened,
+                        &possible_required_modules,
+                        ExternalShadow::Decided,
+                    );
                     crate::bir::shadow::LowerCheck::Supported(Box::new(crate::bir::shadow::LowerPair {
                         stats,
                         before: [before.expect("check capture"), new_before],
@@ -1025,24 +1038,21 @@ impl LambdaCompiler {
             let _phase = info_span!("compiler.js_pass_flatten").entered();
             apply_js_flatten_pass(deps)
         };
-        deps = {
-            let _phase = info_span!("compiler.js_pass_external_shadow").entered();
-            apply_external_shadow_pass(deps)
-        };
-        self.finish_flattened_output(deps, possible_required_modules)
+        self.finish_flattened_output(deps, possible_required_modules, ExternalShadow::Pass)
     }
 
-    /// The passes after the flatten and external-shadow steps, and the
-    /// dependency tail. The new side of the gate enters here: its
+    /// The passes after the flatten step, and the dependency tail. The new
+    /// side of the gate enters here with `ExternalShadow::Decided`: its
     /// references to shadowed globals were decided by the lowering.
     fn finish_flattened_output(
         &mut self,
         mut deps: DepsProgram,
         possible_required_modules: &AHashSet<ModuleId>,
+        external_shadow: ExternalShadow,
     ) -> DepsProgram {
         deps = {
             let _phase = info_span!("compiler.js_pass_tailcall_inline").entered();
-            apply_js_tailcall_inline_pass(deps)
+            apply_js_tailcall_inline_pass(deps, &self.assignable)
         };
         deps = {
             let _phase = info_span!("compiler.js_pass_record_rest").entered();
@@ -1050,8 +1060,15 @@ impl LambdaCompiler {
         };
         deps = {
             let _phase = info_span!("compiler.js_pass_flatten_mark_dead").entered();
-            apply_js_flatten_and_mark_dead_pass(deps, self.jsx_preserve)
+            apply_js_flatten_and_mark_dead_pass(deps, &self.assignable, self.jsx_preserve)
         };
+        // After the passes that add bindings, so that a JS global read in one
+        // of them, as in `let t_0 = t_0`, is not captured by the binding
+        // (lam_compile_main.ml, `compile`).
+        if external_shadow == ExternalShadow::Pass {
+            let _phase = info_span!("compiler.js_pass_external_shadow").entered();
+            deps = apply_external_shadow_pass(deps);
+        }
         deps = {
             let _phase = info_span!("compiler.js_pass_shake").entered();
             apply_js_shake_pass(deps)

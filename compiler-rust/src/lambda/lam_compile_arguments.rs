@@ -5,7 +5,7 @@
 //! `compiler/core/lam_compile.ml`.
 
 use super::js_exp_make::js_expr_no_side_effects;
-use super::js_pass_external_shadow::is_js_global;
+use super::js_pass_external_shadow::{is_js_global, var_may_change};
 use super::lam_compile::LambdaCompiler;
 use crate::ident::Ident;
 use crate::js_ir::BinOp;
@@ -37,10 +37,7 @@ pub(crate) fn delay_safe(j: &JsArena, assignable: &AHashSet<Ident>, e: Expr) -> 
         | ExprKind::JsonLiteral(_)
         | ExprKind::Fun(_)
         | ExprKind::Qualified(_) => true,
-        ExprKind::Var(id) => {
-            let id = j.ident(id);
-            !is_js_global(&id) && !assignable.contains(&id)
-        }
+        ExprKind::Var(id) => !var_may_change(assignable, &j.ident(id)),
         ExprKind::Bin(BinOp::Eq, _, _) => false,
         ExprKind::Bin(_, a, b) => js_expr_no_side_effects(j, e) && safe(a) && safe(b),
         ExprKind::StringAppend(a, b) => safe(a) && safe(b),

@@ -760,51 +760,47 @@ fn js_pass_pipeline_preserves_dict_has_in_operator_through_typeof() {
     let mut j = JsArena::new();
     let dict = Ident::create_local("dict");
     let result = Ident::create_local("result");
-    let deps = apply_js_shake_pass(apply_js_flatten_and_mark_dead_pass(
-        apply_js_tailcall_inline_pass(apply_external_shadow_pass(apply_js_flatten_pass(
-            DepsProgram {
-                program: Program::new_in(
-                    vec![
-                        JS::variable(
-                            VarDecl {
-                                ident: dict,
-                                value: Some(JE::new(
-                                    ExprKind::Object(test_props(vec![], &mut j)),
-                                    &mut j,
-                                )),
-                                property: LetKind::Strict,
-                                ident_info: IdentInfo::default(),
-                            },
+    let deps = apply_js_flatten_pass(DepsProgram {
+        program: Program::new_in(
+            vec![
+                JS::variable(
+                    VarDecl {
+                        ident: dict,
+                        value: Some(JE::new(
+                            ExprKind::Object(test_props(vec![], &mut j)),
                             &mut j,
-                        ),
-                        JS::variable(
-                            VarDecl {
-                                ident: result,
-                                value: Some(JE::new(
-                                    ExprKind::Typeof(JE::new(
-                                        ExprKind::In(
-                                            JE::string("key1", &mut j),
-                                            JE::var(dict, &mut j),
-                                        ),
-                                        &mut j,
-                                    )),
-                                    &mut j,
-                                )),
-                                property: LetKind::Strict,
-                                ident_info: IdentInfo::default(),
-                            },
-                            &mut j,
-                        ),
-                    ],
-                    vec![result],
-                    std::mem::take(&mut j),
+                        )),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    },
+                    &mut j,
                 ),
-                modules: vec![],
-                side_effect: None,
-            },
-        ))),
-        false,
-    ));
+                JS::variable(
+                    VarDecl {
+                        ident: result,
+                        value: Some(JE::new(
+                            ExprKind::Typeof(JE::new(
+                                ExprKind::In(JE::string("key1", &mut j), JE::var(dict, &mut j)),
+                                &mut j,
+                            )),
+                            &mut j,
+                        )),
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    },
+                    &mut j,
+                ),
+            ],
+            vec![result],
+            std::mem::take(&mut j),
+        ),
+        modules: vec![],
+        side_effect: None,
+    });
+    let assignable = Default::default();
+    let deps = apply_js_tailcall_inline_pass(deps, &assignable);
+    let deps = apply_js_flatten_and_mark_dead_pass(deps, &assignable, false);
+    let deps = apply_js_shake_pass(apply_external_shadow_pass(deps));
     let rendered = print_deps_program(&deps, None);
     assert!(
         rendered.contains("typeof (\"key1\" in dict)"),
