@@ -2516,6 +2516,12 @@ fn check_polyvar_name(loc: LocIdx, name: &str) -> TypeCoreResult<()> {
 }
 
 pub(crate) fn int32_literal_fits_ocaml(s: &str) -> bool {
+    int32_of_string_ocaml(s).is_some()
+}
+
+/// OCaml `Int32.of_string_opt`: a decimal literal in the int32 range, or a
+/// hexadecimal, octal or binary one up to `0xFFFF_FFFF`, which wraps.
+pub(crate) fn int32_of_string_ocaml(s: &str) -> Option<i32> {
     let stripped: String = s.chars().filter(|c| *c != '_').collect();
     let digits = stripped.as_str();
     let (negative, digits) = if let Some(rest) = digits.strip_prefix('-') {
@@ -2544,11 +2550,9 @@ pub(crate) fn int32_literal_fits_ocaml(s: &str) -> bool {
         (10, digits)
     };
     if digits.is_empty() {
-        return false;
+        return None;
     }
-    let Ok(value) = u128::from_str_radix(digits, base) else {
-        return false;
-    };
+    let value = u128::from_str_radix(digits, base).ok()?;
     let max = if base == 10 {
         if negative {
             2_147_483_648u128
@@ -2558,7 +2562,13 @@ pub(crate) fn int32_literal_fits_ocaml(s: &str) -> bool {
     } else {
         u32::MAX as u128
     };
-    value <= max
+    if value > max {
+        return None;
+    }
+    // At most 2^32 - 1, so the cast keeps the bits; a negative literal
+    // negates the wrapped value, as OCaml's `parse_sign_and_base` does.
+    let bits = value as u32 as i32;
+    Some(if negative { bits.wrapping_neg() } else { bits })
 }
 
 /// Convert a parsed constant to a typed constant.
@@ -30330,6 +30340,21 @@ fn parmatch_check_unused(
 
 #[cfg(test)]
 mod tests {
+    /// `Int32.of_string_opt`: decimal literals stay in range, other bases
+    /// wrap up to `0xFFFF_FFFF`, underscores are ignored.
+    #[test]
+    fn int32_of_string_matches_ocaml() {
+        assert_eq!(int32_of_string_ocaml("2147483647"), Some(i32::MAX));
+        assert_eq!(int32_of_string_ocaml("-2147483648"), Some(i32::MIN));
+        assert_eq!(int32_of_string_ocaml("2147483648"), None);
+        assert_eq!(int32_of_string_ocaml("10000000000"), None);
+        assert_eq!(int32_of_string_ocaml("0xFFFF_FFFF"), Some(-1));
+        assert_eq!(int32_of_string_ocaml("-0x1"), Some(-1));
+        assert_eq!(int32_of_string_ocaml("0b101"), Some(5));
+        assert_eq!(int32_of_string_ocaml("0x1_0000_0000"), None);
+        assert_eq!(int32_of_string_ocaml("1_000"), Some(1000));
+    }
+
     #[test]
     fn direct_application_view_sizes() {
         assert_eq!(std::mem::size_of::<ApplicationCallee<'_>>(), 16);

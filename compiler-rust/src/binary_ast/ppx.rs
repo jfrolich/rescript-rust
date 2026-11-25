@@ -4743,6 +4743,20 @@ pub fn inline_bigint_primitive(s: &str) -> PrimitiveRepr {
 
 // ========== @inline Handling ==========
 
+/// `Ast_external_mk.inline_int_of_literal`: an inlined int constant is
+/// emitted as a 32-bit JS integer, so a literal outside that range cannot be
+/// inlined; the built-in PPX reports it.
+fn inline_int_of_literal(arena: &mut ParseArena, digits: StrIdx, loc: LocIdx) -> Option<i32> {
+    let value = crate::types::typecore::int32_of_string_ocaml(arena.get_string(digits));
+    if value.is_none() {
+        arena.defer_ppx_error(PpxError::at_loc(
+            loc,
+            "This @inline integer constant is outside the int range (-2147483648 to 2147483647).",
+        ));
+    }
+    value
+}
+
 /// Check if attributes contain @inline
 fn has_inline_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
     attrs.iter().any(|(attr_name, _)| {
@@ -4804,7 +4818,7 @@ fn transform_inline_sig_value(
             // @inline(42) let x: t
             Constant::Integer(_, None | Some('l')) => {
                 let digits = c.integer_digits().expect("machine integer");
-                let i = arena.get_string(digits).parse::<i32>().ok()?;
+                let i = inline_int_of_literal(arena, digits, expr.pexp_loc)?;
                 let prim = inline_int_primitive(i);
                 Some(ValueDescription {
                     pval_jsx_component: None,
@@ -4920,7 +4934,7 @@ fn transform_inline_binding(
             // @inline let x = 42
             Constant::Integer(_, None | Some('l')) => {
                 let digits = c.integer_digits().expect("machine integer");
-                let i = arena.get_string(digits).parse::<i32>().ok()?;
+                let i = inline_int_of_literal(arena, digits, expr.pexp_loc)?;
                 let prim = inline_int_primitive(i);
                 Some(StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
