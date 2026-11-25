@@ -3602,6 +3602,45 @@ fn print_subtype_context<W: std::io::Write>(
                 " is private: its values can only be built in the module that defines it, so another type cannot be coerced to it.",
             );
         }
+        C::ClassNotAnAncestor(classes) => {
+            let crate::types::ctype::UnrelatedClasses {
+                source,
+                source_class,
+                ancestors,
+                target,
+                target_class,
+            } = &**classes;
+            // `Mesh@three` is the class `Mesh` of the module "three".
+            let class = |name: &str| match crate::types::variant_runtime::split_class_name(name) {
+                (path, Some(module)) => format!("{path} of \"{module}\""),
+                (path, None) => path.to_string(),
+            };
+            ppf.space();
+            info(ppf, &source.name());
+            ppf.str(" is the class ");
+            ppf.str(&class(source_class));
+            match ancestors.as_slice() {
+                [] => ppf.str(" and declares no superclass. "),
+                [parents @ .., last] => {
+                    ppf.str(", a subclass of ");
+                    for parent in parents {
+                        ppf.str(&class(parent));
+                        ppf.str(if parents.len() > 1 { ", " } else { " " });
+                    }
+                    if !parents.is_empty() {
+                        ppf.str("and ");
+                    }
+                    ppf.str(&class(last));
+                    ppf.str(". ");
+                }
+            }
+            info(ppf, &target.name());
+            ppf.str(" is the class ");
+            ppf.str(&class(target_class));
+            ppf.str(
+                ". A class type coerces to its own class and to the superclasses it declares.",
+            );
+        }
         C::RecordArrayMismatch {
             array_record_name,
             object_record_name,

@@ -1,0 +1,1 @@
+- A type declared with `@instanceOf` coerces to every declaration of the same class and of the class's declared ancestors, also one in another package: `(el :> WebAPI.element)` for a `ReactDOM.element`. Where an argument, a record field or a constructor payload has such a type and another is expected, the coercion is implicit. Rust compiler only.

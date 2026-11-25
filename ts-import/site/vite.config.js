@@ -7,8 +7,12 @@ export default defineConfig({
   plugins: [react()],
   worker: { format: "es" },
   server: {
-    // The page is rendered from docs/ts-import, two directories up.
+    // The pages are rendered from docs/, two directories up.
     fs: { allow: ["../.."] },
   },
-  build: { target: "esnext" },
+  build: {
+    target: "esnext",
+    // One page per document: docs/ts-import and docs/class-identity.
+    rollupOptions: { input: ["index.html", "classes.html"] },
+  },
 });
