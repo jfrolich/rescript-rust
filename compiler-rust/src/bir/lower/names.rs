@@ -954,10 +954,25 @@ pub(crate) fn replay<B: JsStmt>(
     }
     replay.done.unnamed_references = unnamed;
     let done = replay.done;
+    probe_reads(&log, &done);
     let scope = bir.js_scope.as_mut().expect("lowering scope");
     scope.names = log;
     scope.globals = globals;
     done
+}
+
+/// PROBE (T6r): when `RESCRIPT_T6R_PROBE_READS` names a file, one line per
+/// replayed unit is appended to it, in one write: the calls of
+/// `Js::owner`, `Js::kind_of`, `Js::is_callee` and `Js::id_bound` the
+/// naming log made, then the replay's statements and moves. Nothing is done
+/// without the variable. Cost: one lookup of the variable per unit.
+fn probe_reads(log: &Log, done: &Replayed) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("RESCRIPT_T6R_PROBE_READS") else { return };
+    let ReadsById { owner, kind_of, is_callee, id_bound } = log.by_id;
+    let line = format!("{owner} {kind_of} {is_callee} {id_bound} {} {}\n", done.statements, done.moves);
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).expect("the probe's file opens");
+    file.write_all(line.as_bytes()).expect("the probe's file is written");
 }
 
 /// How the printer writes a declaration (`emit::walk::Declaration`).
