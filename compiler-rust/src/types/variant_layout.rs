@@ -1038,7 +1038,7 @@ pub(crate) fn check_manifest_annotation(
                     name.to_string(),
                     superclass,
                 ))
-            } else if ancestors.contains(&name) {
+            } else if ancestors.contains(name) {
                 error(AstUntaggedVariantError::ClassTwiceInChain(name.to_string()))
             } else {
                 Ok(())
