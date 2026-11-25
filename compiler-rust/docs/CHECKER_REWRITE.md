@@ -3613,8 +3613,8 @@ the corrected prototype and the ninth test came after that run.
 R3i. Every slice above it in the table of 8.1 is merged. Read section
 8.12 and section 8.6, decisions 113 to 118; compiler/ml/ctype.ml
 314-397 (flatten_fields, associate_fields, merge_row_fields,
-filter_row_fields), 496, 1544-1560, 1656-1679, 2901-3124, 3126-3198,
-3200-3380; compiler/ml/btype.ml 112-170, 229-265, 753-804;
+filter_row_fields), 496, 1544-1600 (unify_univar, occur_univar),
+1656-1679, 2901-3124, 3126-3198, 3200-3380; compiler/ml/btype.ml 112-170, 229-265, 753-804;
 compiler/ml/subst.ml 132-215; in src/tc/relate.rs everything; in
 src/tc/unify.rs the doc comments of Frame, FrameKind, PairSet and of
 the fields of Checker, and the doc comments AND bodies of
@@ -3636,8 +3636,11 @@ A prototype of this slice was written in the design turn and the
 nine tests of the slice passed against it. It is not in the
 repository; it is a comment on pull request 393 (one fenced diff
 against the skeleton, each body under a line `// R3I-PROTOTYPE`; take
-the LAST comment that holds one: the earlier two have the fault of
-decision 117 in duplicate_type). You MAY read it. Three things it does are NOT yours to copy:
+the LAST comment that holds one, issue comment 7164565630: the
+earlier two have the fault of decision 117 in duplicate_type; the
+review corrected line numbers of ctype.ml in the skeleton's doc
+comments after it was posted, so where a line it cites differs from
+the skeleton's, the skeleton is right). You MAY read it. Three things it does are NOT yours to copy:
 relate_fields and moregen_row put their clash path in a closure that
 is called at once (write the cut of the frames out); all_distinct_vars
 turns a clash of a safe expansion into the unexpanded node with
@@ -3684,14 +3687,23 @@ relate_frames pops; one a node moregen_occur, duplicate_type (also one
 a node its pass after the copy reads) and rigidify mark; one a field
 row_children reads; one a merge step of relate_fields; one a field
 filter_fields reads and one a field of r1 and r2 eqtype_row reads;
-one an entry of each pass of all_distinct_vars; one an entry
-normalize_renaming scans.
+one an entry of each pass of all_distinct_vars; one an entry of the
+first loop of normalize_renaming (the scan for a link; its rewrite
+counts none).
 
 Relations to hold: every tc:: test that passed before passes
 unchanged; after every call of a relation `frames`, `saved`, `scopes`
 and `trace` have the lengths they had (the tests assert it);
 `equal` and `matches` leave every node that existed before the call
 as it was; a unit that calls no relation reaches none of your bodies.
+
+The first statement of `moregen` and of `equal`:
+  debug_assert!(self.scopes.is_empty(), "a relation entered with a scope of universal variables open");
+OCaml empties its list of scopes there (ctype.ml:3093, 3363) and does
+not put the old value back; cutting `scopes` back to its length at
+the entry is the same only when that length is zero. The prototype
+does not have the assertion. If it fails in a test, stop and report
+the test: do not take it out and do not change the test.
 
 The hand-built tests are the judge, each with the OCaml lines it
 follows. If a test fails where your code does what the cited lines
@@ -3717,7 +3729,10 @@ Before each push, from compiler-rust, both print no warning:
 comment is indented as clippy asks). In your report, name each loop of
 your bodies with the shape of relations_at_ten_thousand or of
 relations_over_ten_thousand_fields_and_tags that runs it 10,000
-times; the loops no shape runs that often are the chain of variant
+times; the loops no shape runs that often are the walk of
+moregen_occur (every shape calls it at the generic level, which skips
+it), the common tags of moregen_row with its static scan and
+moregen_row_field, the chain of variant
 nodes in row_children and duplicate_type, the types of one field in
 moregen_row_field and eqtype_row, the expansions of eqtype_row and
 relate_fields, and the entries of normalize_renaming: name them as
@@ -6141,7 +6156,7 @@ tables).
      (`may_instantiate`, 2921-2923: every level but `generic_level - 1`),
      levels of the subject's copy (`update_level` in `moregen_occur`),
      and resolved references of the pattern's rows (`set_row_field e1`,
-     3077-3087). The one caller is `Includecore.value_descriptions`
+     3069-3086). The one caller is `Includecore.value_descriptions`
      (includecore.ml:47), always with `inst_nongen = true`: a weak
      variable of an implementation is instantiated by its interface and
      stays so. Today's checker has the same form (types/ctype.rs
@@ -6225,7 +6240,7 @@ tables).
      - Today's `equal` answers `false` for two rows of which the right
        one was extended by a unification: it expands the FIELD
        `right.row_more` where OCaml expands `row_more row2`, the
-       function that follows the chain (ctype.ml:3324). 68 seeds
+       function that follows the chain (ctype.ml:3327). 68 seeds
        (`ROWS_OLD_EQUAL_DIFFERS`, `UNIVARS_OLD_EQUAL_DIFFERS`).
      - Today's copy keeps `Tnil` as it keeps a variable, where
        `Subst.typexp` copies it: 7 seeds (`ROWS_OLD_NIL_DIFFERS`,
@@ -6240,7 +6255,7 @@ tables).
        hold. In OCaml the copy keeps them (`let e = if keep then e else
        ref None`, btype.ml:374, with `keep = not dup`, subst.ml:213),
        and `set_row_field e1 (Reither (c2, [], m2, e2))`
-       (ctype.ml:3080) then joins the pattern's field to the SUBJECT's.
+       (ctype.ml:3074) then joins the pattern's field to the SUBJECT's.
        Today's checker was right. The restore now runs between the
        copy and the pass; test
        `the_copy_of_the_subject_shares_the_references_of_its_rows`
@@ -8413,12 +8428,12 @@ a list out of the graph's pools: the walk writes them).
 | Speculation | none (decision 114) | one, restored on either answer | one, opened before `rigidify`, restored on either answer |
 | Writes that stay | links of the pattern's weak variables with `inst_nongen`; the memo of constructors without arguments | none (the memos: decision 115) | none (the memos are cleaned before the unification, ctype.ml:3170) |
 | Expansion | `ExpandMode::Safe` (`expand_head`, 2940-2941) | `ExpandMode::Rigid` (3218-3219; decision 113) | unification's own, then `Safe` for each variable (3160) |
-| Universal variables | `enter_poly` and `unify_univar` on `Checker::scopes`, cut back to the length at the entry (`current_univar_pairs () := []`, 3092, 3362) | the same | unification's |
+| Universal variables | `enter_poly` and `unify_univar` on `Checker::scopes`, cut back to the length at the entry, which a debug assertion holds at zero (OCaml empties the list and does not put the old value back: `current_univar_pairs () := []`, 3093, 3363) | the same | unification's |
 | Packages | `unify_package` with the relation's loop popping its pairs; `package_end` (`PackageDecls`); no supplier: a clash | the same | unification's |
 | Pair table | `Checker::related`, cleared at the entry (decision 116) | the same | none: OCaml's `matches` has none |
 | Trace | none; cut back to the entry's length | the same | the same |
 
-**The arms of `moregen` (ctype.ml:2925-3004)** against the bodies:
+**The arms of `moregen` (ctype.ml:2925-2991)** against the bodies:
 
 | OCaml | Lines | Body |
 |---|---|---|
@@ -8427,20 +8442,20 @@ a list out of the graph's pools: the walk writes them).
 | two constructors without arguments of one path | 2938 | `moregen_pair` 2 |
 | `expand_head` both, one node, `Type_pairs` | 2940-2948 | `moregen_pair` 3 |
 | `Tvar _, _ when may_instantiate` of the expanded head | 2950-2952 | `moregen_pair` 4: `moregen_occur` with the unexpanded `t2`, link, no `occur` |
-| arrows, tuples, constructors of one path | 2953-2965 | `relate_children`: `push_children` |
-| `Tpackage` | 2966-2970 | `relate_children`: `unify_package`; `PackageEnd` |
-| `Tvariant` | 2971-2972; 3043-3088 | `moregen_row`, `filter_fields`, `moregen_row_field` |
-| `Tobject`, `Tfield` | 2973-2977; 3010-3041 | `relate_fields`, `relate_field` |
-| `Tnil` | 2978 | `relate_children` |
-| `Tpoly` without and with variables | 2979-2983 | `relate_children`: the pair of bodies; `enter_poly` |
-| `Tunivar` | 2984-2985 | `relate_children`: `unify_univar` |
-| anything else | 2986 | a clash |
+| arrows, tuples, constructors of one path | 2953-2968 | `relate_children`: `push_children` |
+| `Tpackage` | 2969-2974 | `relate_children`: `unify_package`; `PackageEnd` |
+| `Tvariant` | 2975-2976; 3031-3089 | `moregen_row`, `filter_fields`, `moregen_row_field` |
+| `Tobject`, `Tfield` | 2977-2981; 2997-3029 | `relate_fields`, `relate_field` |
+| `Tnil` | 2982 | `relate_children` |
+| `Tpoly` without and with variables | 2983-2987 | `relate_children`: the pair of bodies; `enter_poly` |
+| `Tunivar` | 2988-2989 | `relate_children`: `unify_univar` |
+| anything else | 2990 | a clash |
 | `moregen_occur` | 2901-2919 | `moregen_occur`, `row_children` |
 
 **The arms of `eqtype` (ctype.ml:3200-3274)**: the same table with
-`eqtype_pair` for 3201-3236 (`rename_pair` for the two arms of
+`eqtype_pair` for 3201-3235 (`rename_pair` for the two arms of
 variables, `normalize_renaming` for 3191-3198), `relate_children` for
-3237-3273, `relate_fields` for 3280-3320 and `eqtype_row` for 3322-3358.
+3236-3273, `relate_fields` for 3280-3323 and `eqtype_row` for 3325-3358.
 
 **`matches` (3167-3179)**: `rigidify` (3130-3154) with `row_children`,
 `Checker::cleanup_abbrev`, `Checker::unify`, `all_distinct_vars`
@@ -8534,6 +8549,104 @@ clears (`TypePairs.clear subtypes`, 4217); `relate_frames` and
 `relate_children` are the form its walk should take; `row_children` is
 `iter_row`; the entry of R3j in
 `ignored_tests_name_the_slices_they_reach` names R3i.
+
+**Corrections after the review of the tenth turn** (pull request 393:
+a first-pass review that applied the prototype and read each body
+beside its OCaml function, then the final review).
+
+1. Made: line numbers of ctype.ml in the doc comments of `relate.rs`,
+   in two tests, in the comment of a seed list, in decisions 114 and
+   117 and in the tables of this section. From the arrow arm of
+   `moregen` on, and for `moregen_fields`, `moregen_row`,
+   `eqtype_fields` and `eqtype_row`, they were 3 to 13 lines off. The
+   prototype was posted before the correction: where a line it cites
+   differs from the skeleton's, the skeleton is right.
+2. Made, in the prompt of R3i, the table above and the doc comments of
+   `moregen` and `equal`: OCaml EMPTIES its list of universal-variable
+   scopes at the entry of the two relations (ctype.ml:3093, 3363) and
+   does not put the old value back; the kernel cuts `scopes` back to
+   its length at the entry. The two are one thing only when no scope
+   is open at the entry, which the build asserts in debug builds
+   (`unify_univar` reads every scope, so a relation entered with one
+   open could pair two universal variables OCaml refuses, 1559). No
+   caller exists yet: the walks that will call a relation (R5, R6)
+   inherit the rule that none is called with a scope open.
+3. Made, in the prompt: the loops no step shape runs wide name the
+   walk of `moregen_occur` (every shape calls it at the generic
+   level, which skips it) and the common tags of `moregen_row`; the
+   reading list holds `occur_univar` (1561-1600); what counts a step
+   in `normalize_renaming` is said once; the comment that holds the
+   prototype is named.
+4. OWED BEFORE THE BUILDER OF R3i STARTS, as a task of its own with
+   the prototype as the oracle: `relation_plan_agrees_on_generated_cases`
+   exempts a listed seed wholly. It asserts that the seeds that differ
+   are the listed ones, and nothing about HOW a listed seed differs;
+   the classification of the tenth turn was a script run once and is
+   not in the test, so a fault of the new side that stays inside the
+   77 listed seeds is not seen. A listed seed must differ AND fit the
+   class its list names, else the test fails with the seed: for the
+   two `EQUAL` lists, the two forms differ only in answer lines that
+   read `equal = false` on the old side and `equal = true` on the new;
+   for the two `NIL` lists, every answer line agrees and the lines
+   that differ are explained by a `nil` node the new side copied (the
+   turn's condition, more occurrences of `nil` in the new form, is
+   loose: four of the seven seeds rest on it unread; read them);
+   for `UNIVARS_OLD_FREE_UNIVAR_DIFFERS`, the first line that differs
+   is an answer of `moregeneral`, `true` on the old side and `false`
+   on the new. A listed seed that does not fit against the prototype
+   is read against the OCaml lines before a body is built. Even then
+   the `EQUAL` class would take a new side that answers `true`
+   wrongly: the lists are emptied by item 5, not trusted.
+5. OWED, today's checker, each with a source program first (decision
+   20): `equal` on a row that a unification extended
+   (`equal_rows_without_renaming` expands the field `row_more` where
+   OCaml follows the chain, ctype.ml:3327 and btype.ml:148-151; 68
+   seeds); the copy of `moregeneral` keeps `Tnil` (subst.ml:135-143; 7
+   seeds, sharing only); `moregen_occur` asks `occur_univar` only with
+   a scope open (ctype.ml:2918; 2 seeds; a free universal variable
+   does not come from a program); `equal` takes no snapshot
+   (3361-3369). When one is corrected its list is emptied in the same
+   pull request, and the test says so by failing.
+6. OWED by the eleventh turn, tests: step shapes that run the walk of
+   `moregen_occur` (a variable below the generic level), the common
+   tags of `moregen_row` with `moregen_row_field`, and `equal` with
+   renaming over n rows that each get opened (`normalize_renaming`
+   scans the renaming again after every write of the trail: n squared
+   over two, as OCaml's `normalize_subst`; the cost sentence of its
+   doc comment says less and is corrected with the test); hand-built
+   tests for the arms the turn lists as reached by none (packages,
+   universal variables, the `Reither` arms, `normalize_renaming` past
+   its first compare, `filter_fields` with `erase`); the step shapes
+   not seen to fail with their structure broken.
+7. OWED by the eleventh turn, each decided by a measurement or by the
+   lines: `Checker::related` is cleared at the entry of every relation,
+   and a clear writes every control byte of a table that one large
+   relation grew (clear by count, or shrink); whether `Graph::copy`
+   gives the copy of a constructor an empty memo slot
+   (`ref Mnil`, subst.ml:172) and copies the arguments of a row's name
+   as `Subst.typexp` does, and what `duplicate_type` does for a
+   private row (`has_fixed_row`, subst.ml:153-166); the level of the
+   node `rigidify` links a row variable to (OCaml's is the marked
+   level of the row, ctype.ml:3139-3144); `moregen` called at a level
+   other than the generic one (`build_variant` makes the extension at
+   the current level where OCaml uses `newgenty`, 3052-3054): its one
+   caller is `moregeneral`, so make it private or state the
+   precondition.
+8. Checked in the review beyond the turn's runs: the five source
+   programs of this section and thirteen more (open and closed rows in
+   both directions, open and closed objects, a weak variable against
+   an interface, a polymorphic record field, parameters renamed and
+   swapped, records, a constrained parameter given a variable) through
+   the OCaml compiler and today's Rust checker: the same answer and
+   the same text on all eighteen. CI on the reviewed head ran `tc::`
+   at 343 passed and 9 ignored, the count the turn had inferred.
+9. Accepted: decisions 113 to 118. 114 (no speculation in
+   `moregeneral`) and 115 (the memos are not compared after `equal`
+   and `matches`) were read against ctype.ml:3104-3124 and 3361-3369
+   and `Btype.backtrack`; for 116, a hash set of pairs is OCaml's own
+   structure here and no dense index of pairs exists; `#[inline(never)]`
+   on `expand_head_rigid` and the allowance on `mod relate` until R3j
+   stand. R3j and the owed items of 8.11 go to the eleventh turn.
 
 ## 9. R4 as designed
 

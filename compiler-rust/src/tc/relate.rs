@@ -35,7 +35,7 @@ pub struct Constraint {
 /// passed down the walk by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Relation {
-    /// `moregen inst_nongen` (compiler/ml/ctype.ml:2925-3004).
+    /// `moregen inst_nongen` (compiler/ml/ctype.ml:2925-2991).
     Moregen { inst_nongen: bool },
     /// `eqtype rename` (compiler/ml/ctype.ml:3200-3274).
     Equal { rename: bool },
@@ -161,16 +161,20 @@ impl Checker {
         todo!("R3i")
     }
 
-    /// The outer `moregen` (compiler/ml/ctype.ml:3090-3093: `Must empty
+    /// The outer `moregen` (compiler/ml/ctype.ml:3091-3094: `Must empty
     /// univar_pairs first`) with the pair table of `moregeneral`
-    /// (`Type_pairs.create 13`, ctype.ml:3118) and its `try ... with Unify
+    /// (`Type_pairs.create 13`, ctype.ml:3119) and its `try ... with Unify
     /// _ -> false`: whether the instance `pattern` can be instantiated to
     /// `subject`, linking the variables [`may_instantiate`] allows. For a
     /// caller that made the two instances itself (from two templates).
     /// [`Checker::related`] is cleared; the pair goes on
     /// [`Checker::frames`] and [`Checker::relate_frames`] runs; on a
     /// failure the frames, `saved`, the scopes of universal variables
-    /// and the trace are cut back to what they were at the entry. What
+    /// and the trace are cut back to what they were at the entry. OCaml
+    /// EMPTIES its list of scopes at this entry (`current_univar_pairs ()
+    /// := []`, ctype.ml:3093) and does not put the old value back, which
+    /// is the same only when no scope is open: the body asserts it in
+    /// debug builds, and no caller may enter with one open. What
     /// was linked stays, on either answer. Cost: O(pairs visited), each
     /// one [`Checker::moregen_pair`]; one hash insertion a pair that is
     /// not decided at its first test. (R3i)
@@ -198,7 +202,10 @@ impl Checker {
     /// Lists of different lengths: `false`, nothing opened
     /// (`if List.length tl1 <> List.length tl2 then raise (Unify [])`,
     /// ctype.ml:3277, inside the snapshot, which then has nothing to
-    /// undo). Otherwise one speculation, [`Checker::related`] cleared,
+    /// undo). No scope of universal variables is open at the entry
+    /// (asserted in debug builds: OCaml empties its list there, 3363, and
+    /// the kernel only cuts `scopes` back to its length at the entry).
+    /// Otherwise one speculation, [`Checker::related`] cleared,
     /// with `rename` a new generation of [`Checker::renaming`], the pairs
     /// pushed last first, [`Checker::relate_frames`], and
     /// [`Checker::restore`] on either answer: nothing `equal` wrote stays
@@ -263,7 +270,7 @@ impl Checker {
     ///   (`univar_pairs := old_univars`, ctype.ml:1675).
     /// - A [`FrameKind::PackageEnd`] frame: [`Checker::package_end`]; a clash is
     ///   the relation's (`with Not_found -> raise (Unify [])`,
-    ///   ctype.ml:2969, 3257).
+    ///   ctype.ml:2974, 3257).
     /// - A [`FrameKind::Field`] frame: [`Checker::relate_field`].
     /// - A [`FrameKind::RowField`] frame: [`Checker::moregen_row_field`]
     ///   (`eqtype` pushes none).
@@ -274,7 +281,7 @@ impl Checker {
         todo!("R3i")
     }
 
-    /// One pair of `moregen` (compiler/ml/ctype.ml:2925-3004), `t1` and
+    /// One pair of `moregen` (compiler/ml/ctype.ml:2925-2991), `t1` and
     /// `t2` two distinct representatives, in OCaml's order of tests:
     ///
     /// 1. `Tvar _, _ when may_instantiate inst_nongen t1` (2934-2937):
@@ -318,7 +325,7 @@ impl Checker {
     }
 
     /// The structure arms the two relations share
-    /// (compiler/ml/ctype.ml:2953-3002 and 3237-3273), for two expanded
+    /// (compiler/ml/ctype.ml:2953-2990 and 3236-3273), for two expanded
     /// heads `t1x`, `t2x` with descriptors `l` and `r`:
     ///
     /// - neither extended: [`Checker::push_children`] (two arrows of one
@@ -552,8 +559,8 @@ impl Checker {
         todo!("R3i")
     }
 
-    /// `moregen_fields` (compiler/ml/ctype.ml:3010-3041) and
-    /// `eqtype_fields` (3280-3320) of two field lists.
+    /// `moregen_fields` (compiler/ml/ctype.ml:2997-3029) and
+    /// `eqtype_fields` (3280-3323) of two field lists.
     ///
     /// Both: [`Checker::flatten_fields`] of the two into `Extras::fields`
     /// (taken and put back), `associate_fields` by one merge from the
@@ -566,13 +573,13 @@ impl Checker {
     /// then raise (Unify [])`); the pair of `rest1` and `build_fields
     /// (repr ty2).level miss2 rest2` ([`Checker::build_field`] from the
     /// last name) is pushed above the field frames, so it is popped
-    /// first (3015-3016).
+    /// first (3002-3003).
     ///
     /// `eqtype`: first `same_row` (3283-3288): `rest1 == rest2`, or the
     /// pair is in [`Checker::related`], or with `rename` the renaming
     /// holds it: nothing. Otherwise `rest2` is expanded in
     /// [`ExpandMode::Rigid`]; an object: the whole call again with its
-    /// field list (3291-3292; a loop, not a recursion). Otherwise a name
+    /// field list (3292-3293; a loop, not a recursion). Otherwise a name
     /// one side lacks is a clash, and the pair of the two rests is
     /// pushed above the field frames.
     ///
@@ -583,7 +590,7 @@ impl Checker {
     }
 
     /// The pop of a [`FrameKind::Field`] frame in a relation
-    /// (compiler/ml/ctype.ml:3019-3022, 3299-3302): `left` and `right`
+    /// (compiler/ml/ctype.ml:3006-3007, 3300-3301): `left` and `right`
     /// are the two field nodes of one name.
     ///
     /// ```text
@@ -599,23 +606,23 @@ impl Checker {
         todo!("R3i")
     }
 
-    /// `moregen_row` (compiler/ml/ctype.ml:3043-3088) for the two variant
+    /// `moregen_row` (compiler/ml/ctype.ml:3031-3089) for the two variant
     /// nodes `t1x`, `t2x`.
     ///
     /// 1. Both nodes are opened ([`Checker::open_row`]) and flattened
     ///    ([`Checker::flatten_row`]) into `Extras::row_scratch`; `rm1 ==
-    ///    rm2`: nothing (3046).
-    /// 2. `may_inst` (3049-3051): `rm1` is a variable that
+    ///    rm2`: nothing (3034).
+    /// 2. `may_inst` (3036-3038): `rm1` is a variable that
     ///    [`may_instantiate`], or `Tnil`.
     /// 3. [`Checker::merge_rows`]. When row 2 is closed,
     ///    `filter_row_fields may_inst r1` and `filter_row_fields false
-    ///    r2` (3054-3057; ctype.ml:388-397), each from its last field: an
+    ///    r2` (3040-3043; ctype.ml:388-397), each from its last field: an
     ///    absent field is dropped, and with `may_inst` a field of `r1`
     ///    that is `Reither` and not matched is made absent
     ///    (`Checker::resolve`, `Checker::settle`) and dropped.
     /// 4. A clash when `r1` is not empty, or row 1 is closed and row 2
-    ///    is not or `r2` is not empty (3058-3059).
-    /// 5. By the two rests (3060-3070): two universal variables,
+    ///    is not or `r2` is not empty (3045-3046).
+    /// 5. By the two rests (3047-3058): two universal variables,
     ///    [`Checker::unify_univar`]; one, a clash; `static_row row1`
     ///    (row 1 closed and none of its fields `Reither` NOW, after step
     ///    3), nothing; `may_inst`: a new generic variant node of `r2`
@@ -665,7 +672,7 @@ impl Checker {
     }
 
     /// The pop of a [`FrameKind::RowField`] frame of `moregen_row`
-    /// (compiler/ml/ctype.ml:3071-3088), one common tag; `f1` and `f2`
+    /// (compiler/ml/ctype.ml:3059-3089), one common tag; `f1` and `f2`
     /// are the two fields read now ([`field_repr`]) and `may_inst` is
     /// the record's `a`:
     ///
@@ -711,7 +718,7 @@ impl Checker {
         todo!("R3i")
     }
 
-    /// `eqtype_row` (compiler/ml/ctype.ml:3322-3358) for the two variant
+    /// `eqtype_row` (compiler/ml/ctype.ml:3325-3358) for the two variant
     /// nodes `t1x`, `t2x`. Nothing is written but the rows that are
     /// opened ([`Checker::open_row`], [`Checker::flatten_row`]), which
     /// the restore of `equal` undoes.
@@ -720,16 +727,16 @@ impl Checker {
     ///    [`ExpandMode::Rigid`], and while the head is a variant node the
     ///    row is that node's (`match expand_head_rigid env (row_more
     ///    row2) with {desc = Tvariant row2} -> eqtype_row ... row1
-    ///    row2`, 3324-3325; a loop).
+    ///    row2`, 3327-3328; a loop).
     /// 2. Row 1 is flattened, the two are merged
     ///    ([`Checker::merge_rows`]).
-    /// 3. A clash (3329-3333) when the two rows differ in `closed`, or
+    /// 3. A clash (3332-3336) when the two rows differ in `closed`, or
     ///    they are open and one has a tag the other lacks, or a tag only
     ///    one has is not absent (`filter_row_fields false (r1 @ r2) <>
     ///    []`).
-    /// 4. Unless row 1 is static, the pair of the two rests (3334-3335),
+    /// 4. Unless row 1 is static, the pair of the two rests (3337-3338),
     ///    popped first.
-    /// 5. Each common tag (3336-3358), in the order of the pairs: two
+    /// 5. Each common tag (3339-3358), in the order of the pairs: two
     ///    present fields with a type, the pair; two `Reither` with one
     ///    `c`: both without types, nothing; both with types, the pair of
     ///    the first two, then with as many types on each side the other

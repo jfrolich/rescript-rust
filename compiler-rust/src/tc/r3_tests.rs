@@ -7621,7 +7621,7 @@ fn moregeneral_instantiates_what_may_be_and_keeps_its_links() {
 /// `myint` equals `int` (the public abbreviation expands); a private
 /// abbreviation does not equal its manifest (`expand_head_rigid` is
 /// public: a type declaration against its manifest, includecore.ml:
-/// 380-392; `equal_ok` and `equal_bad` of 8.12); two lists of
+/// 157, in `type_manifest`; `equal_ok` and `equal_bad` of 8.12); two lists of
 /// different lengths are not equal. After every
 /// call the nodes that existed before it are what they were (the
 /// expansions are undone), and no frame, scope or trace entry is left.
@@ -7845,7 +7845,7 @@ fn relations_at_ten_thousand() {
 ///    `relate_field` frames.
 /// 2. `moregeneral` of an open object of no field against a closed one
 ///    of n: `relate_fields` builds n fields for the pattern's rest
-///    (`build_fields`, ctype.ml:3015-3016).
+///    (`build_fields`, ctype.ml:3002-3003).
 /// 3. `equal` of two closed rows of n present tags in opposite orders:
 ///    `eqtype_row`.
 /// 4. `moregeneral` of the open row `[> ]` (a generic row variable)
@@ -7914,7 +7914,7 @@ fn relations_over_ten_thousand_fields_and_tags() {
 ///             let row = copy_row (typexp_rec s) true row (not dup) more' in
 /// (* compiler/ml/btype.ml:374, copy_row *)
 ///           let e = if keep then e else ref None in
-/// (* compiler/ml/ctype.ml:3077-3080, moregen_row *)
+/// (* compiler/ml/ctype.ml:3071-3074, moregen_row *)
 ///           | Reither (c1, tl1, _, e1), Reither (c2, tl2, m2, e2) ->
 ///             if e1 != e2 then (
 ///               if c1 && not c2 then raise (Unify []);

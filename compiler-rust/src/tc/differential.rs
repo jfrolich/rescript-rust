@@ -5557,7 +5557,7 @@ mod tests {
     /// for two rows of which the right one was extended by a
     /// unification (its `row_more` is a variant node). OCaml's
     /// `eqtype_row` expands `row_more row2`, the FUNCTION, which follows
-    /// the chain to the row variable (compiler/ml/ctype.ml:3324,
+    /// the chain to the row variable (compiler/ml/ctype.ml:3327,
     /// btype.ml `row_more`); types/ctype.rs `equal_rows_without_renaming`
     /// expands the FIELD `right.row_more`, finds the inner row and
     /// compares the left row with that row alone. On each of these seeds

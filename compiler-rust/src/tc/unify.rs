@@ -360,7 +360,7 @@ pub struct Checker {
     /// 3200, 3647): ordered pairs, the left node in the high half of the
     /// key. A hash set because no dense index of pairs exists. Cleared
     /// at the entry of each relation (`Type_pairs.create`,
-    /// ctype.ml:3118, 3375; `TypePairs.clear subtypes`, 4217); not
+    /// ctype.ml:3119, 3374; `TypePairs.clear subtypes`, 4217); not
     /// `pairs` or `compatible`, which pattern mode owns. (R3i, R3j)
     pub related: PairSet,
     /// The renaming of `equal` with `rename` (`subst`, compiler/ml/
