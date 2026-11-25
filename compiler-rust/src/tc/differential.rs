@@ -40,9 +40,9 @@
 //! - [`BUILD`]: operations that make a variable, a tuple of two operands and
 //!   an operand's child, so that a type can hold a node above its own level
 //!   and a unification can meet a type inside itself.
-//! - [`OBJECTS`], [`VARIANTS`], [`UNIVARS`], [`PACKAGES`], [`PATTERN`],
-//!   [`RELATIONS`], [`SUBTYPE`]: the types and operations of slices R3e to
-//!   R3j; [`Plan::slices`] names the slices each reaches.
+//! - [`OBJECTS`], [`VARIANTS`], [`UNIVARS`], [`PATTERN`], [`INSTANCES`],
+//!   [`RELATIONS`]: the types and operations of slices R3e to R3i and
+//!   R3s.
 //!
 //! Nothing here is on a compile path; the harness allocates freely.
 
@@ -203,6 +203,15 @@ pub(crate) const PATTERN: u16 = 1 << 9;
 /// a member only to a set that exists, judges nothing of the slice.
 pub(crate) const INSTANCES: u16 = 1 << 10;
 
+/// The relations (slice R3i; section 8.12, decision 116). The operations
+/// get [`Op::Moregeneral`], [`Op::Equal`] and [`Op::Matches`], and a
+/// sequence that makes two generalized instances of one value, the
+/// second unified with an operand first, so that a scheme is compared
+/// with an instance of itself. A relation makes no operand and cannot
+/// fail: its answer is a line of the form (`3: equal = true`), ahead of
+/// the operands, and what it left in the graph is in the operands' form.
+pub(crate) const RELATIONS: u16 = 1 << 11;
+
 /// A tier and what a case adds to it. 4 bytes, passed by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Plan {
@@ -302,6 +311,21 @@ pub(crate) enum Op {
     /// case: a pattern unification at this level then adds its
     /// equations at the level of a set that exists. [`INSTANCES`].
     Scope,
+    /// `moregeneral env inst_nongen pattern subject`
+    /// (compiler/ml/ctype.ml:3104-3124; `Checker::moregeneral`): the
+    /// first operand as the pattern scheme, the second as the subject,
+    /// the flag `inst_nongen`. What it links stays. [`RELATIONS`].
+    Moregeneral(u16, u16, bool),
+    /// `equal env rename [left] [right]` (compiler/ml/ctype.ml:
+    /// 3372-3376; `Checker::equal`), the flag `rename`. Both sides then
+    /// forget every memorized expansion, as [`Op::Cleanup`] does
+    /// (decision 115: what the memos hold after it is not compared).
+    /// [`RELATIONS`].
+    Equal(u16, u16, bool),
+    /// `matches env ty pattern` (compiler/ml/ctype.ml:3167-3179;
+    /// `Checker::matches`); then the cleanup of [`Op::Equal`].
+    /// [`RELATIONS`].
+    Matches(u16, u16),
 }
 
 /// A deliberately wrong new side, for the tests that prove the harness sees
@@ -340,6 +364,8 @@ pub(crate) enum Fault {
     /// [`Op::Gadt`] unifies in expression mode: no equation, no
     /// reification, a link where pattern mode assumes. [`PATTERN`].
     ExpressionMode,
+    /// A relation answers the opposite. [`RELATIONS`].
+    WrongAnswer,
 }
 
 /// What one side reports for one case.
@@ -765,6 +791,44 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
                 4 => Op::Gadt(operand(rng), operand(rng), rng.below(3) as u8),
                 _ => Op::Child(operand(rng), rng.below(4) as u8),
             }
+        } else if plan.has(RELATIONS) && rng.below(3) == 0 {
+            // [`RELATIONS`]: a relation of two operands; or of an operand
+            // and a copy of it; or, `follow` being last first, two
+            // instances of one value made inside a definition, the
+            // second unified with an operand, both generalized, and the
+            // first asked whether it is more general than the second
+            // (and the other way round).
+            let (a, b) = (operand(rng), operand(rng));
+            let flag = rng.below(2) == 0;
+            let next = operands as u16;
+            match rng.below(10) {
+                0 | 1 if depth < 4 => {
+                    let value = rng.below(values) as u16;
+                    let (general, special) = if rng.below(3) == 0 { (next + 1, next) } else { (next, next + 1) };
+                    follow = vec![
+                        Op::Equal(next, next + 1, true),
+                        Op::Moregeneral(general, special, flag),
+                        Op::Generalize(next + 1),
+                        Op::Generalize(next),
+                        Op::EndDef,
+                        Op::Unify(next + 1, a),
+                        Op::Instance(value),
+                        Op::Instance(value),
+                    ];
+                    Op::BeginDef
+                }
+                2 => {
+                    follow = vec![match rng.below(3) {
+                        0 => Op::Equal(a, next, flag),
+                        1 => Op::Matches(a, next),
+                        _ => Op::Moregeneral(next, a, flag),
+                    }];
+                    Op::Copy(a)
+                }
+                3 | 4 => Op::Moregeneral(a, b, flag),
+                5 | 6 => Op::Equal(a, b, flag),
+                _ => Op::Matches(a, b),
+            }
         } else if plan.has(BUILD) && rng.below(4) == 0 {
             match rng.below(4) {
                 0 => Op::Var,
@@ -802,7 +866,11 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
             Op::BeginDef => depth += 1,
             Op::EndDef => {
                 depth -= 1;
-                if plan.has(BUILD) && rng.below(2) == 0 {
+                if !follow.is_empty() {
+                    // The `EndDef` of a [`RELATIONS`] sequence: what
+                    // follows it is drawn already. No other plan has an
+                    // `EndDef` in `follow`.
+                } else if plan.has(BUILD) && rng.below(2) == 0 {
                     let (tuple, var) = (operands as u16, operands as u16 + 1);
                     let unify = if rng.below(2) == 0 {
                         Op::Unify(var, tuple)
@@ -1121,6 +1189,8 @@ fn run_old_until(program: &Program, plan: Plan, ops: &[Op], cut: &mut Option<usi
         changed: 0,
     };
     let mut operands: Vec<TypeExprRef> = Vec::new();
+    // [`RELATIONS`]: the answers, one line each, ahead of the form.
+    let mut relations = String::new();
     for (index, op) in ops.iter().enumerate() {
         let before = match op {
             Op::Unify(..) | Op::Lower(..) | Op::Gadt(..) if explain => {
@@ -1131,7 +1201,22 @@ fn run_old_until(program: &Program, plan: Plan, ops: &[Op], cut: &mut Option<usi
         let mut failure = None;
         let env = &current;
         let mut refined = None;
+        let mut answer = None;
         match *op {
+            Op::Moregeneral(pattern, subject, inst_nongen) => {
+                let (pattern, subject) = (operands[pattern as usize], operands[subject as usize]);
+                answer = Some(("moregeneral", ctype::moregeneral(ctx, env, inst_nongen, pattern, subject)));
+            }
+            Op::Equal(left, right, rename) => {
+                let (left, right) = (operands[left as usize], operands[right as usize]);
+                answer = Some(("equal", ctype::equal(ctx, env, rename, &[left], &[right])));
+                ctx.clear_abbrev_memos();
+            }
+            Op::Matches(ty, pattern) => {
+                let (ty, pattern) = (operands[ty as usize], operands[pattern as usize]);
+                answer = Some(("matches", ctype::matches(ctx, env, ty, pattern)));
+                ctx.clear_abbrev_memos();
+            }
             Op::Instance(value) => operands.push(ctype::instance(ctx, old.values[value as usize])),
             // `instance env` (ctype.ml:846-851): the copy of a member
             // joins the member's set.
@@ -1241,6 +1326,9 @@ fn run_old_until(program: &Program, plan: Plan, ops: &[Op], cut: &mut Option<usi
                 }
             }
         }
+        if let Some(answer) = answer {
+            let _ = writeln!(relations, "{index}: {} = {}", answer.0, answer.1);
+        }
         if let Some(env) = refined {
             current = env;
         }
@@ -1252,6 +1340,7 @@ fn run_old_until(program: &Program, plan: Plan, ops: &[Op], cut: &mut Option<usi
             record_failure(&mut outcome, index, &before, after);
         }
     }
+    outcome.form.push_str(&relations);
     outcome.form.push_str(&old_forms(&old, plan, &operands, &[]).0);
     if plan.has(PATTERN) {
         outcome.form.push_str(&old_equations(&old, &current));
@@ -1524,6 +1613,10 @@ pub(crate) struct New {
     /// Set while the bodies of equations are printed: a `nil` prints as
     /// `nil`, as on the old side (`OldSeen::bare_nil`).
     bare_nil: bool,
+    /// [`RELATIONS`]: the answers so far, one line each.
+    relations: String,
+    /// The index of the operation being applied.
+    applied: usize,
 }
 
 /// The supplier of a [`PATTERN`] case (`rows::LocalDecls`): a fresh
@@ -1626,6 +1719,8 @@ impl New {
             refs: Vec::new(),
             fresh: Default::default(),
             bare_nil: false,
+            relations: String::new(),
+            applied: 0,
             open,
             segment,
             checker,
@@ -2079,6 +2174,23 @@ impl New {
                 }
                 self.operands.push(ty);
             }
+            Op::Moregeneral(pattern, subject, inst_nongen) => {
+                let (pattern, subject) = (self.operands[pattern as usize], self.operands[subject as usize]);
+                let answer = self.checker.moregeneral(inst_nongen, pattern, subject);
+                self.answer("moregeneral", answer != (fault == Fault::WrongAnswer));
+            }
+            Op::Equal(left, right, rename) => {
+                let (left, right) = (self.operands[left as usize], self.operands[right as usize]);
+                let answer = self.checker.equal(rename, &[left], &[right]);
+                self.checker.cleanup_abbrev();
+                self.answer("equal", answer != (fault == Fault::WrongAnswer));
+            }
+            Op::Matches(ty, pattern) => {
+                let (ty, pattern) = (self.operands[ty as usize], self.operands[pattern as usize]);
+                let answer = self.checker.matches(ty, pattern);
+                self.checker.cleanup_abbrev();
+                self.answer("matches", answer != (fault == Fault::WrongAnswer));
+            }
             Op::Gadt(left, right, flags) => {
                 let (left, right) = (self.operands[left as usize], self.operands[right as usize]);
                 if fault == Fault::ExpressionMode {
@@ -2107,6 +2219,12 @@ impl New {
             }
         }
         Ok(())
+    }
+
+    /// O(1) amortized: one answer line of a relation, numbered by the
+    /// operation's index.
+    fn answer(&mut self, relation: &str, answer: bool) {
+        let _ = writeln!(self.relations, "{}: {relation} = {answer}", self.applied);
     }
 
     /// O(printed nodes): the form of every operand; see the module text.
@@ -2429,6 +2547,7 @@ pub(crate) fn run_new(program: &Program, plan: impl Into<Plan>, ops: &[Op], faul
             Op::Unify(..) | Op::Lower(..) | Op::Gadt(..) if explain => new.form(),
             _ => String::new(),
         };
+        new.applied = index;
         if new.apply(op, fault).is_err() {
             if !explain {
                 return Outcome::ended(index);
@@ -2449,6 +2568,7 @@ pub(crate) fn run_new(program: &Program, plan: impl Into<Plan>, ops: &[Op], faul
             record_failure(&mut outcome, index, &before, after);
         }
     }
+    outcome.form.push_str(&new.relations);
     outcome.form.push_str(&new.form());
     if plan.has(PATTERN) {
         outcome.form.push_str(&new.equations());
@@ -3678,8 +3798,8 @@ mod tests {
             ("R3n", &["R3m", "R3e", "R3f"]),
             ("R3g", &["R3m", "R3e", "R3f", "R3n"]),
             ("R3h", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
-            ("R3i", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
-            ("R3j", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
+            ("R3i", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3p", "R3h", "R3r", "R3q", "R3s"]),
+            ("R3j", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3p", "R3h", "R3r", "R3q", "R3s", "R3i"]),
         ];
         // Method name -> slice, from the bodies that are still `todo!`.
         fn scan(source: &str, methods: &mut Vec<(String, String)>) {
@@ -5337,6 +5457,148 @@ mod tests {
         assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
         run_cases(Plan::new(Tier::Full, UNIVAR_PLAN | BUILD), 1, 100, 100);
     }
+
+    /// The plans of the relations: on plain programs, on objects and
+    /// variants, and with universal variables.
+    const RELATION_PLANS: [u16; 3] = [RELATIONS, RELATIONS | OBJECTS | VARIANTS, RELATIONS | UNIVAR_PLAN];
+
+    /// How often each relation answered `true` and `false` in a form:
+    /// `[moregeneral, equal, matches]`, each `[true, false]`.
+    fn answers(form: &str, counts: &mut [[usize; 2]; 3]) {
+        for line in form.lines() {
+            for (at, name) in ["moregeneral", "equal", "matches"].iter().enumerate() {
+                if let Some(rest) = line.split(": ").nth(1).and_then(|rest| rest.strip_prefix(name)) {
+                    counts[at][usize::from(rest == " = false")] += 1;
+                }
+            }
+        }
+    }
+
+    /// The old side of the relation plans runs today and is not vacuous:
+    /// each relation answers `true` and `false` on each plan (observed;
+    /// the counts are printed, and each is asserted at a quarter of what
+    /// was seen or less). Today's checker has all three relations
+    /// (types/ctype.rs `moregeneral`, `equal`, `matches`).
+    #[test]
+    fn old_side_of_the_relation_plans_is_not_vacuous() {
+        for with in RELATION_PLANS {
+            let plan = Plan::new(Tier::Full, with);
+            let mut counts = [[0usize; 2]; 3];
+            let mut cases = 0;
+            for seed in 1..=12u64 {
+                for sequence in 0..100u64 {
+                    let (program, ops) = case(plan, seed * 1_000_003 + sequence);
+                    let outcome = run_old(&program, plan, &ops);
+                    if outcome.failed.is_none() {
+                        cases += 1;
+                        answers(&outcome.form, &mut counts);
+                    }
+                }
+            }
+            println!("relation plan {with:#x}, old side: {cases} cases, {counts:?}");
+            assert!(cases >= 600, "{cases}");
+            for (at, [yes, no]) in counts.iter().enumerate() {
+                assert!(*yes >= 20 && *no >= 20, "relation {at} of plan {with:#x}: {counts:?}");
+            }
+        }
+    }
+
+    /// A relation that answers the opposite is reported: the harness
+    /// compares the answers.
+    #[test]
+    #[ignore = "R3i build"]
+    fn a_wrong_answer_of_a_relation_is_reported() {
+        // Reaches: R3i.
+        let program = compile(FIXED.to_string());
+        let plan = Plan::new(Tier::Full, RELATIONS);
+        let ops = [Op::Instance(0), Op::Instance(0), Op::Equal(0, 1, true), Op::Matches(0, 1)];
+        let outcome = compare(0, &program, plan, &ops, Fault::None).unwrap();
+        assert!(outcome.form.starts_with("2: equal = true\n3: matches = true\n"), "{}", outcome.form);
+        assert!(compare(0, &program, plan, &ops, Fault::WrongAnswer).is_err());
+    }
+
+    /// The acceptance test of R3i against today's checker: 10,000 cases
+    /// of every operation and the three relations on plain programs,
+    /// 10,000 on programs with objects and variants and 5,000 with
+    /// universal variables. Each case compares the answer of every
+    /// relation and the form of every operand after it: what
+    /// `moregeneral` linked, and that `equal` and `matches` left
+    /// nothing. Today's checker is the judge of the answers; it is NOT
+    /// the judge of what the memos hold after `equal` and `matches`
+    /// (it takes no snapshot in `equal`; decision 115), so both sides
+    /// forget the memos after those two. A case that differs is read
+    /// against the OCaml arm before either side is followed (decision
+    /// 18); a seed where today's checker departs from ctype.ml is pinned
+    /// with its cause by the reviewer, not by the builder.
+    ///
+    /// Reaches: R3m, R3e, R3f, R3n, R3g, R3i.
+    #[test]
+    #[ignore = "R3i build"]
+    fn relation_plan_agrees_on_generated_cases() {
+        for (at, programs) in [(0, 100), (1, 100), (2, 50)] {
+            let with = RELATION_PLANS[at];
+            let (coverage, differing) = run_plan(Plan::new(Tier::Full, with), 1, programs, 100);
+            let seeds: Vec<u64> = differing.iter().map(|(seed, _)| *seed).collect();
+            let mut known: Vec<u64> = match at {
+                0 => Vec::new(),
+                1 => [&ROWS_OLD_EQUAL_DIFFERS[..], &ROWS_OLD_NIL_DIFFERS[..], &ROWS_UNCLASSIFIED[..]].concat(),
+                _ => [&UNIVARS_OLD_EQUAL_DIFFERS[..], &UNIVARS_OLD_NIL_DIFFERS[..], &UNIVARS_UNCLASSIFIED[..]].concat(),
+            };
+            known.sort_unstable();
+            let unknown = differing.iter().find(|(seed, _)| !known.contains(seed));
+            assert!(seeds == known, "plan {with:#x}: {seeds:?}\n{}", unknown.map_or("", |(_, report)| report.as_str()));
+            assert_eq!(coverage.cases + known.len(), programs as usize * 100);
+        }
+    }
+
+    /// Seeds of the relation plan with objects and variants on which
+    /// TODAY'S CHECKER differs from OCaml in `equal`: it answers `false`
+    /// for two rows of which the right one was extended by a
+    /// unification (its `row_more` is a variant node). OCaml's
+    /// `eqtype_row` expands `row_more row2`, the FUNCTION, which follows
+    /// the chain to the row variable (compiler/ml/ctype.ml:3324,
+    /// btype.ml `row_more`); types/ctype.rs `equal_rows_without_renaming`
+    /// expands the FIELD `right.row_more`, finds the inner row and
+    /// compares the left row with that row alone. On each of these seeds
+    /// the two sides agree on everything but `equal = false` (old)
+    /// against `equal = true` (new), seen in the tenth skeleton turn.
+    const ROWS_OLD_EQUAL_DIFFERS: [u64; 52] = [
+        1000013, 3000021, 4000062, 9000070, 11000114, 12000122, 14000076, 17000141, 20000083, 20000109,
+        21000071, 22000117, 23000165, 30000145, 30000180, 32000124, 32000163, 33000101, 35000150, 40000189,
+        40000190, 40000200, 41000213, 42000196, 46000232, 49000208, 49000234, 55000260, 58000191, 58000235,
+        58000270, 65000224, 65000236, 68000208, 68000273, 69000302, 72000300, 75000246, 75000308, 76000293,
+        78000236, 78000242, 78000305, 81000299, 82000304, 84000339, 86000341, 90000348, 91000338, 92000279,
+        95000330, 100000301,
+    ];
+    /// Seeds on which TODAY'S CHECKER differs from OCaml in the copy of
+    /// `moregeneral`: its `subst_identity_copy` keeps a `Tnil` node as
+    /// it keeps a variable (types/ctype.rs, the arm `Tvar | Tunivar |
+    /// Tnil`), where `Subst.typexp` copies it (compiler/ml/subst.ml:
+    /// 135-143 keeps `Tvar` and `Tunivar` only), and a `Tnil` of the
+    /// pattern is then one node with a `Tnil` of the subject. The
+    /// answers agree; the old form has fewer `nil` nodes of their own.
+    const ROWS_OLD_NIL_DIFFERS: [u64; 4] = [32000157, 54000224, 69000217, 84000296];
+    /// Seeds that differ and were NOT classified in the tenth skeleton
+    /// turn (8.6, decision 117): the reviewer reads them against the
+    /// OCaml arms before R3i is accepted. 81000256: after a
+    /// `moregeneral` with `inst_nongen` that joined two `Reither`
+    /// fields and a later unification, the old side prints one type
+    /// more in a field of the pattern.
+    const ROWS_UNCLASSIFIED: [u64; 1] = [81000256];
+    /// As [`ROWS_OLD_EQUAL_DIFFERS`], on the plan with universal
+    /// variables.
+    const UNIVARS_OLD_EQUAL_DIFFERS: [u64; 16] = [
+        2000018, 6000024, 8000033, 9000110, 11000112, 12000074, 14000060, 22000109, 23000147, 23000165,
+        28000123, 33000167, 37000116, 37000194, 48000215, 49000216,
+    ];
+    /// As [`ROWS_OLD_NIL_DIFFERS`], on the plan with universal variables.
+    const UNIVARS_OLD_NIL_DIFFERS: [u64; 3] = [5000060, 12000099, 14000052];
+    /// Not classified (decision 117). 5000086 and 13000118 were read:
+    /// `moregeneral` with `inst_nongen` of a weak variable against a
+    /// FREE universal variable, which `moregen_occur` refuses (`occur_univar
+    /// env ty`, compiler/ml/ctype.ml:2917-2918) and today's checker
+    /// accepts and links; 16000113 and 20000085 were not read.
+    const UNIVARS_UNCLASSIFIED: [u64; 4] = [5000086, 13000118, 16000113, 20000085];
 
     /// The plan of the cases of GADT instances.
     const INSTANCE_PLAN: u16 = PATTERN_PLAN | INSTANCES;

@@ -355,6 +355,28 @@ pub struct Checker {
     pub instance_scope: u32,
     /// The pool of members; a scope's list starts at its head node. (R3s)
     pub instance_members: Vec<InstanceMember>,
+    /// The pairs a relation of `relate.rs` has visited (`type_pairs` of
+    /// `moregen`, `eqtype` and `subtype_rec`, compiler/ml/ctype.ml:2925,
+    /// 3200, 3647): ordered pairs, the left node in the high half of the
+    /// key. A hash set because no dense index of pairs exists. Cleared
+    /// at the entry of each relation (`Type_pairs.create`,
+    /// ctype.ml:3118, 3375; `TypePairs.clear subtypes`, 4217); not
+    /// `pairs` or `compatible`, which pattern mode owns. (R3i, R3j)
+    pub related: PairSet,
+    /// The renaming of `equal` with `rename` (`subst`, compiler/ml/
+    /// ctype.ml:3200-3215): one row a node, live by
+    /// `renaming_generation`. Empty until a unit calls `equal` with
+    /// `rename`; then it grows to the graph's length. (R3i)
+    pub renaming: Vec<super::relate::Renamed>,
+    pub renaming_generation: u32,
+    /// The pairs of the renaming in the order they were added, for
+    /// `normalize_subst` (ctype.ml:3191-3198), and the length of the
+    /// trail when they were last normalized. (R3i)
+    pub renamed: Vec<[Ty; 2]>,
+    pub renaming_trail: usize,
+    /// Scratch of `matches`: the variables `rigidify` collected
+    /// (`vars`, ctype.ml:3150-3154). Empty between calls. (R3i)
+    pub rigid_vars: Vec<Ty>,
 }
 
 /// `Frame::extra` of the frame [`Checker::occur_pattern`] pushes for a
@@ -395,6 +417,12 @@ impl Checker {
             instance_scopes: Vec::new(),
             instance_scope: NONE,
             instance_members: Vec::new(),
+            related: PairSet::default(),
+            renaming: Vec::new(),
+            renaming_generation: 0,
+            renamed: Vec::new(),
+            renaming_trail: 0,
+            rigid_vars: Vec::new(),
         }
     }
 
@@ -2663,7 +2691,7 @@ impl Checker {
 
     /// O(1): push one pair.
     #[inline]
-    fn push_pair(&mut self, left: Ty, right: Ty) {
+    pub(super) fn push_pair(&mut self, left: Ty, right: Ty) {
         self.frames.push(Frame {
             left,
             right,
@@ -2673,7 +2701,7 @@ impl Checker {
     }
 
     /// O(len): push the pairs of two list ranges, last first.
-    fn push_lists(&mut self, left: u32, right: u32, len: u32) {
+    pub(super) fn push_lists(&mut self, left: u32, right: u32, len: u32) {
         for i in (0..len).rev() {
             let l = self.g.lists[(left + i) as usize];
             let r = self.g.lists[(right + i) as usize];
