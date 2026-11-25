@@ -5567,7 +5567,8 @@ mod tests {
                 ],
             };
             // `compare` runs both sides on these operations: no relation
-            // plan has `PATTERN`, which alone cuts them (`old_judges`).
+            // plan has the bit of pattern unification, the only one under
+            // which it cuts them (`old_judges`).
             let plan = Plan::new(Tier::Full, with);
             let mut refused = Vec::new();
             for &(list, seeds, class) in lists {
