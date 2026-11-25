@@ -1,0 +1,1 @@
+- Type checker rewrite, slice R3i designed: the relations `moregeneral`, `equal` and `matches` of the new checker have a skeleton, harness operations judged by today's checker, and acceptance tests that passed against a prototype; the rigid head expansion of the new checker is the public one, as in OCaml. Subtyping (R3j) is not designed yet.

@@ -102,7 +102,7 @@ impl Checker {
         todo!("R3i")
     }
 
-    /// `duplicate_type ty` (compiler/ml/ctype.ml:1041-1042, `Subst.type_expr
+    /// `duplicate_type ty` (compiler/ml/ctype.ml:496, `Subst.type_expr
     /// Subst.identity`): a copy of every node of `ty` that is not a
     /// variable, at the generic level, around the variables themselves.
     ///
@@ -141,7 +141,7 @@ impl Checker {
     /// references of rows ([`Checker::copy_refs`]) but WITHOUT its
     /// lookup of the memo: `Subst` makes a constructor node with an
     /// empty memo and asks no memo (`Tconstr (type_path s p, List.map
-    /// (typexp s) tl, ref Mnil)`, subst.ml:160-161), so a copy of a
+    /// (typexp s) tl, ref Mnil)`, subst.ml:172), so a copy of a
     /// constructor without arguments is a new node and never a link to
     /// a memorized one; `Graph::restore`, which puts the levels of `ty`
     /// back. The

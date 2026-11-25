@@ -7545,8 +7545,9 @@ fn the_rigid_expansion_is_public_and_adds_the_chain() {
 ///
 /// Witnesses, schemes built generic by hand: (1) `'a => 'a` is more
 /// general than `int => int` and not the other way round (a value
-/// description against its interface, includecore.ml:47: checked with
-/// both compilers, `moregeneral_ok` and `moregeneral_bad` of 8.12). (2)
+/// description against its interface, includecore.ml:47; the source
+/// programs of 8.12 were NOT run through the two compilers in the tenth
+/// skeleton turn: no OCaml build was at hand). (2)
 /// `'a => 'b` is more general than `'c => 'c`, and `'c => 'c` is not
 /// more general than `'a => 'b`: the second `'c` is a link by then. (3)
 /// A weak variable `w` (level 2) in the pattern `w => w`: without
@@ -7620,8 +7621,8 @@ fn moregeneral_instantiates_what_may_be_and_keeps_its_links() {
 /// `myint` equals `int` (the public abbreviation expands); a private
 /// abbreviation does not equal its manifest (`expand_head_rigid` is
 /// public: a type declaration against its manifest, includecore.ml:
-/// 380-392, checked with both compilers: `equal_ok` and `equal_bad` of
-/// 8.12); two lists of different lengths are not equal. After every
+/// 380-392; not run through the two compilers, as above); two lists of
+/// different lengths are not equal. After every
 /// call the nodes that existed before it are what they were (the
 /// expansions are undone), and no frame, scope or trace entry is left.
 ///
@@ -7689,8 +7690,8 @@ fn equal_renames_bijectively_and_restores() {
 /// become one) or `(int, 'd)` (one is instantiated); `(int, int)`
 /// matches `('c, 'd)`: the variables of the SECOND argument may be
 /// instantiated. The constraint of a type parameter that would
-/// instantiate it is refused this way (typedecl.ml:815: checked with
-/// both compilers, `matches_bad` of 8.12). After every call every node
+/// instantiate it is refused this way (typedecl.ml:815; not run
+/// through the two compilers, as above). After every call every node
 /// is what it was, in both modes, and `unexplained_failure` is not set.
 ///
 /// Bodies: `matches`, `rigidify` (variables), `all_distinct_vars` (both
