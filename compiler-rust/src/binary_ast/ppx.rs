@@ -1881,14 +1881,29 @@ fn build_arg_type_specs(typ: &CoreType, arena: &ParseArena) -> (Vec<Param>, usiz
     (param_specs, arity)
 }
 
-fn params_is_single_extern_unit(params: &[Param]) -> bool {
-    matches!(
-        params,
-        [Param {
-            arg_type: Attr::ExternUnit,
-            ..
-        }]
-    )
+/// A `unit` argument is left out of the JS code, so property and index
+/// accesses would be missing their object, index or value
+/// (ast_external_process.ml, `reject_unit_arg`). The check is about the
+/// declared arguments, not the `unit` parameter `build_arg_type_specs`
+/// appends when every argument is a constant.
+fn reject_unit_arg(params: &[Param], attr: &str, loc: LocIdx) -> PpxResult<()> {
+    let declared = match params.split_last() {
+        Some((
+            Param {
+                arg_type: Attr::ExternUnit,
+                ..
+            },
+            rest,
+        )) if !rest.is_empty() && rest.iter().all(|p| matches!(p.arg_type, Attr::ArgCst(_))) => rest,
+        _ => params,
+    };
+    if declared.iter().any(|p| matches!(p.arg_type, Attr::ExternUnit)) {
+        return Err(PpxError::at_loc(
+            loc,
+            format!("Ill defined attribute @{attr} (unit argument is not allowed)"),
+        ));
+    }
+    Ok(())
 }
 
 fn params_first_arg_is_const(params: &[Param]) -> bool {
@@ -2450,18 +2465,24 @@ fn validate_external_attribute_errors(
         ));
     }
 
-    if external_desc_is_plain_set_index(&desc) && arity != 3 {
-        return Err(PpxError::at_loc(
-            vd.pval_loc,
-            "Ill defined attribute @set_index (arity of 3)",
-        ));
+    if external_desc_is_plain_set_index(&desc) {
+        if arity != 3 {
+            return Err(PpxError::at_loc(
+                vd.pval_loc,
+                "Ill defined attribute @set_index (arity of 3)",
+            ));
+        }
+        reject_unit_arg(&params, "set_index", vd.pval_loc)?;
     }
 
-    if external_desc_is_plain_get_index(&desc) && arity != 2 {
-        return Err(PpxError::at_loc(
-            vd.pval_loc,
-            format!("Ill defined attribute @get_index (arity expected 2 : while {arity})"),
-        ));
+    if external_desc_is_plain_get_index(&desc) {
+        if arity != 2 {
+            return Err(PpxError::at_loc(
+                vd.pval_loc,
+                format!("Ill defined attribute @get_index (arity expected 2 : while {arity})"),
+            ));
+        }
+        reject_unit_arg(&params, "get_index", vd.pval_loc)?;
     }
 
     if !desc.mk_obj {
@@ -2528,6 +2549,7 @@ fn validate_external_attribute_errors(
                     "Ill defined attribute @set (two args required)",
                 ));
             }
+            reject_unit_arg(&params, "set", vd.pval_loc)?;
         } else if desc.set_name.is_some() {
             return Err(PpxError::at_loc(
                 vd.pval_loc,
@@ -2543,14 +2565,7 @@ fn validate_external_attribute_errors(
                 ));
             }
 
-            // OCaml Ast_external_process.external_desc_of_non_obj rejects `@get`
-            // externals with a single unit argument before emitting FFI metadata.
-            if params_is_single_extern_unit(&params) {
-                return Err(PpxError::at_loc(
-                    vd.pval_loc,
-                    "Ill defined attribute @get (unit argument is not allowed)",
-                ));
-            }
+            reject_unit_arg(&params, "get", vd.pval_loc)?;
         } else if desc.get_name.is_some() {
             return Err(PpxError::at_loc(
                 vd.pval_loc,
