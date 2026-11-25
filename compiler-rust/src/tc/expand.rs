@@ -22,8 +22,8 @@ use super::unify::{Checker, Clash, Frame, FrameKind};
 
 /// [`TypeInfo::flags`]: the type has a manifest that expands publicly.
 pub const ABBREV: u8 = 1;
-/// The manifest is private: only [`ExpandMode::Opt`] and [`ExpandMode::Rigid`]
-/// expand it (`expand_abbrev_opt`, compiler/ml/ctype.ml:1311).
+/// The manifest is private: only [`ExpandMode::Opt`] expands it
+/// (`expand_abbrev_opt`, compiler/ml/ctype.ml:1311).
 pub const PRIVATE: u8 = 2;
 /// The path is another spelling of the type `manifest` names (a type reached
 /// through a module alias); it expands to a constructor node of that type
@@ -674,8 +674,12 @@ pub enum ExpandMode {
     Safe,
     /// `expand_head_opt` (compiler/ml/ctype.ml:1323): private ones too.
     Opt,
-    /// `expand_head_rigid` (compiler/ml/ctype.ml:3184): as `Opt`, with
-    /// polymorphic variant rows kept rigid. Read by R3i.
+    /// `expand_head_rigid` (compiler/ml/ctype.ml:3184-3189): `expand_head`
+    /// with `rigid_variants` set for the call, so public abbreviations
+    /// only, a clash of a step stops the expansion there, and the chain
+    /// of GADT instances is added as in `Safe`. Read by `eqtype` (R3i).
+    /// (Corrected in the tenth skeleton turn: it expanded private
+    /// abbreviations since R3b; CHECKER_REWRITE 8.6, decision 113.)
     Rigid,
 }
 
@@ -1042,7 +1046,7 @@ impl Checker {
         if node.tag() != CONSTR {
             return Ok(Ty(NONE));
         }
-        let private = matches!(mode, ExpandMode::Opt | ExpandMode::Rigid);
+        let private = mode == ExpandMode::Opt;
         let mut memorized = self.find_expansion(ty, private);
         let mut info = ABSTRACT;
         if memorized.0 == NONE {
@@ -1235,7 +1239,7 @@ impl Checker {
             // `memorize_abbrev` before the copy of the body (ctype.ml:1124):
             // a node of the type itself in the body links to `ty`.
             let body = Ty(self.g.nodes.len() as u32);
-            self.memorize(ty, body, matches!(mode, ExpandMode::Opt | ExpandMode::Rigid));
+            self.memorize(ty, body, mode == ExpandMode::Opt);
             let level = std::mem::replace(&mut self.g.level, node.level);
             let copy = self.copy(manifest.body);
             self.g.level = level;
@@ -1251,7 +1255,7 @@ impl Checker {
             }
         };
         let body = relocate(manifest.body);
-        let private = matches!(mode, ExpandMode::Opt | ExpandMode::Rigid);
+        let private = mode == ExpandMode::Opt;
         self.memorize(ty, body, private);
         // `abbreviations () := abbrev` (ctype.ml:1126): the copies below
         // read the list this node's reference now starts.
@@ -1317,6 +1321,9 @@ impl Checker {
     /// type's parameters are constrained. [`ExpandMode::Unif`] is
     /// [`Checker::expand_head_unif`]. (R3b)
     pub fn expand_head(&mut self, ty: Ty, mode: ExpandMode) -> Result<Ty, Clash> {
+        if mode == ExpandMode::Rigid {
+            return self.expand_head_rigid(ty);
+        }
         let original = self.g.repr(ty);
         if mode == ExpandMode::Unif {
             let head = self.expand_head_unif(original)?;
@@ -1335,7 +1342,8 @@ impl Checker {
                 // (compiler/ml/ctype.ml:1251-1256).
                 Err(Clash) if mode == ExpandMode::Safe => break,
                 // `expand_head_opt` backtracks and returns the type it was
-                // given (compiler/ml/ctype.ml:1330-1335): `Opt`, `Rigid`.
+                // given (compiler/ml/ctype.ml:1330-1335): `Opt`. (`Rigid`
+                // went to `expand_head_rigid` above.)
                 Err(Clash) => return Ok(original),
             };
             if next.0 == NONE {
@@ -1356,6 +1364,33 @@ impl Checker {
             self.expanded_instance(original, head);
         }
         Ok(head)
+    }
+
+    /// `expand_head_rigid` (compiler/ml/ctype.ml:3184-3189):
+    ///
+    /// ```text
+    /// let expand_head_rigid env ty =
+    ///   let old = !(rigid_variants ()) in
+    ///   rigid_variants () := true;
+    ///   let ty' = expand_head env ty in
+    ///   rigid_variants () := old;
+    ///   ty'
+    /// ```
+    ///
+    /// [`Checker::expand_head`] in [`ExpandMode::Safe`] with
+    /// `Extras::rigid_variants` set for the call and put back after it:
+    /// the flag is read by `Checker::unify_row_field` only, which an
+    /// expansion reaches when it unifies a constrained parameter with
+    /// its argument. Two byte writes and the cost of the `Safe` call.
+    /// Out of line: `expand_head` is called with a constant mode
+    /// everywhere else, and its one test of this mode folds away. (R3i,
+    /// built in the tenth skeleton turn)
+    #[inline(never)]
+    fn expand_head_rigid(&mut self, ty: Ty) -> Result<Ty, Clash> {
+        let old = std::mem::replace(&mut self.extras.rigid_variants, true);
+        let head = self.expand_head(ty, ExpandMode::Safe);
+        self.extras.rigid_variants = old;
+        head
     }
 
     /// `try_expand_head`'s second half (compiler/ml/ctype.ml:1271-1276):

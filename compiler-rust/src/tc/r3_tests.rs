@@ -7466,3 +7466,62 @@ fn a_type_on_the_way_stays_on_the_way_when_its_expansion_joins_a_set() {
     assert!(small >= 1_000, "{small}");
     assert!(large <= 11 * small, "{small} {large}");
 }
+
+// ---------------------------------------------------------------------
+// R3i: `moregeneral`, `equal`, `matches` (CHECKER_REWRITE 8.12).
+// ---------------------------------------------------------------------
+
+use super::expand::PRIVATE;
+
+/// `expand_head_rigid` is the PUBLIC expansion, with rigid variants and
+/// with the chain of GADT instances:
+///
+/// ```text
+/// (* compiler/ml/ctype.ml:3184-3189 *)
+/// let expand_head_rigid env ty =
+///   let old = !(rigid_variants ()) in
+///   rigid_variants () := true;
+///   let ty' = expand_head env ty in
+///   rigid_variants () := old;
+///   ty'
+/// (* compiler/ml/ctype.ml:1283-1289, expand_head: try_expand_safe, the
+///    public expansion *)
+/// (* compiler/ml/ctype.ml:1271-1276, try_expand_head *)
+///   (match Env.gadt_instance_level env ty' with
+///   | None -> ()
+///   | Some lv -> Env.add_gadt_instance_chain env lv ty);
+/// ```
+///
+/// Since R3b [`ExpandMode::Rigid`] expanded private abbreviations
+/// (`matches!(mode, Opt | Rigid)`); corrected in the tenth skeleton turn
+/// (8.6, decision 113). (a) `type myint = private int`: `Rigid` leaves the
+/// node, `Opt` expands it, and the flag `rigid_variants` is what it was
+/// after the call. (b) Under the equation `n0 := int` a node whose
+/// expansion is a member of the case's set joins that set when it is
+/// expanded in `Rigid`, as in `Safe`
+/// (`expanding_a_head_into_a_set_adds_the_chain_whatever_the_flag`).
+/// Fails without the correction: (a) reads `INT` for the rigid head.
+#[test]
+fn the_rigid_expansion_is_public_and_adds_the_chain() {
+    let mut c = checker(Mode::Success);
+    c.types.rows[MYINT as usize].flags = PRIVATE;
+    let node = constr(&mut c, MYINT, &[]);
+    assert_eq!(c.expand_head(node, ExpandMode::Rigid).unwrap(), node);
+    assert!(!c.extras.rigid_variants);
+    let public = constr(&mut c, A, &[]);
+    let head = c.expand_head(public, ExpandMode::Rigid).unwrap();
+    assert_eq!(path(&mut c, head), INT);
+    let head = c.expand_head(node, ExpandMode::Opt).unwrap();
+    assert_eq!(path(&mut c, head), INT);
+
+    let mut c = case_checker(Mode::Success);
+    used_at_int(&mut c);
+    let z = constr(&mut c, N0, &[]);
+    let first = c.traced(|c| c.expand_head(z, ExpandMode::Unif)).unwrap();
+    let fresh = constr(&mut c, MYINT, &[]);
+    c.memorize(fresh, first, false);
+    assert_eq!(c.instance_level(fresh), 0);
+    assert_eq!(c.expand_head(fresh, ExpandMode::Rigid).unwrap(), first);
+    assert_eq!(c.instance_level(fresh), CASE);
+    assert!(!c.extras.rigid_variants);
+}
