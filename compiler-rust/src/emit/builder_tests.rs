@@ -1515,6 +1515,30 @@ mod statements {
         assert_eq!(behind(10_000) - behind(1_000), 9_000);
     }
 
+    /// A substitution that is asked for fewer references than the
+    /// statement holds stops at the last it was asked for: asked for 100,
+    /// it reads the same with 1,000 and with 10,000 references, and each
+    /// further reference asked for costs one step (what `make` builds is
+    /// counted by its constructor and taken off). The references left are
+    /// still there.
+    #[test]
+    fn a_substitution_that_stops_with_references_left_reads_no_further() {
+        let steps = |uses: usize, asked: u32| {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let mut statement = wide_call(&mut b, 3, uses);
+            let before = (b.steps, b.nodes());
+            assert_eq!(b.substitute(&mut statement, 0, asked, |b| b.reference(1, 0)), asked);
+            let steps = b.steps - before.0 - (b.nodes() - before.1) as u64;
+            // A second call finds exactly the references the first left.
+            assert_eq!(b.substitute(&mut statement, 0, u32::MAX, |b| b.reference(1, 0)) as usize, uses - asked as usize);
+            steps
+        };
+        assert_eq!(steps(10_000, 100), steps(1_000, 100));
+        assert_eq!(steps(10_000, 1_000) - steps(10_000, 100), 900);
+        assert_eq!(steps(10_000, 10_000) - steps(10_000, 1_000), 9_000);
+    }
+
     /// Decision 7: the alias of a declaration is read through its id, and
     /// follows a substitution of its initialiser.
     #[test]

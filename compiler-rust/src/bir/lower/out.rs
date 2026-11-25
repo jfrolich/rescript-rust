@@ -121,14 +121,17 @@ impl<B: JsStmt> StatementStack<B> {
     /// `statement_refs` with the place of each statement: its slot, or its
     /// index among the held statements with [`StatementStack::HELD`] set.
     /// A place names its statement for `at_place` and `at_place_mut` until
-    /// the run is taken or killed: nothing moves a statement of a run that
-    /// is complete, and no function takes a statement out by its place, so
-    /// the invariant of `Slot::DeadEnd` and the holds are as they were.
+    /// the run is taken or killed, or the statement is taken out by its
+    /// place (`take_placed`): nothing moves a statement of a run that is
+    /// complete, and `take_placed` leaves the other places as they were
+    /// (a slot becomes one dead slot, a hold keeps its length), so the
+    /// invariant of `Slot::DeadEnd` and the holds are as they were.
     /// Cost: that of `statement_refs`, O(slots of the run + held
     /// statements): one step per slot, a dead range crossed in one, and
     /// one per held statement. (THREE_TREES 11.4, "T6x-e and T6x-f: the
-    /// fold reads where its rows are", decision 5: `export.rs::build_rows`
-    /// keeps the place of each row of the top level.)
+    /// fold reads where its rows are", decisions 5 and 13:
+    /// `export.rs::build_rows` keeps the place of each row of the top
+    /// level.)
     pub(super) fn placed_refs(&self, span: Span) -> impl Iterator<Item = (u32, &B::S)> + '_ {
         let (mut at, end) = (span.start as usize, span.end());
         let (mut inner, mut inner_end) = (0usize, 0usize);
@@ -147,6 +150,7 @@ impl<B: JsStmt> StatementStack<B> {
                 Some(Slot::Dead(len)) => *len as usize,
                 _ => 1,
             };
+            debug_assert!(current < Self::HELD as usize, "a slot beyond the places of a stack");
             match slot {
                 Some(Slot::Statement(s)) => return Some((current as u32, s)),
                 Some(Slot::Held(span)) => (inner, inner_end) = (span.start as usize, span.end()),
@@ -183,6 +187,33 @@ impl<B: JsStmt> StatementStack<B> {
             return self.held[(place & !Self::HELD) as usize].as_mut().expect("held statement");
         }
         match &mut self.slots[place as usize] {
+            Some(Slot::Statement(s)) => s,
+            _ => panic!("place {place} holds no statement"),
+        }
+    }
+    /// The statement at `place` moved out, to the caller, who owns it from
+    /// here. A slot is left `Dead(1)`, as `take` leaves it, and the run
+    /// gives nothing for it afterwards. A held statement cannot leave its
+    /// hold (the hold's span counts it, and every function that reads or
+    /// takes a hold expects each of its entries): it is exchanged for what
+    /// `stand_in` makes, which the run gives in its stead when it is taken
+    /// and which the caller of `take_run` releases. `stand_in` is called
+    /// for a held statement only. The other places of the run stay valid.
+    /// A place is taken once: a slot taken twice panics, a held place
+    /// taken twice gives the stand-in and is not told from a first take
+    /// (the caller marks what it took; the fold sets `Row::REMOVED`).
+    /// O(1): one write; counts no step and allocates nothing. Panics when
+    /// the place holds no statement. (THREE_TREES 11.4, "T6x-e and T6x-f:
+    /// the fold reads where its rows are", decision 13:
+    /// `export.rs::release_row`, a removed row of the top level. Slice
+    /// T6x-e3 removes the attribute with that caller.)
+    #[cfg(test)]
+    pub(super) fn take_placed(&mut self, place: u32, stand_in: impl FnOnce() -> B::S) -> B::S {
+        if place & Self::HELD != 0 {
+            let held = self.held[(place & !Self::HELD) as usize].as_mut().expect("held statement");
+            return std::mem::replace(held, stand_in());
+        }
+        match self.slots[place as usize].replace(Slot::Dead(1)) {
             Some(Slot::Statement(s)) => s,
             _ => panic!("place {place} holds no statement"),
         }
@@ -1117,6 +1148,115 @@ mod tests {
             stack.kill(run);
             assert_eq!(stack.mark(), Span::default());
         }
+    }
+    /// THREE_TREES 11.4, "T6x-e and T6x-f: the fold reads where its rows
+    /// are", decision 13. A statement taken out by its place: a slot is
+    /// left dead and the run gives nothing for it; a held statement is
+    /// exchanged for a stand-in, which the run gives where the statement
+    /// stood. The other places keep naming their statements, every reader
+    /// of the run and of its slots accepts what is left, and nothing is
+    /// scanned or allocated, with 1,000 and with 10,000 statements held.
+    #[test]
+    fn a_statement_taken_by_its_place_leaves_the_run_readable() {
+        for n in [1_000u32, 10_000] {
+            let mut bir = Bir::default();
+            bir.begin_bulk();
+            let mut js = Rows::default();
+            let mut stack = StatementStack::<Rows>::default();
+            let mut ids = Vec::new();
+            let make = |js: &mut Rows, bir: &mut Bir, ids: &mut Vec<u32>| {
+                let statement = js.debugger(bir);
+                ids.push(js.stmt_id(bir, &statement));
+                statement
+            };
+            let hole = stack.reserve();
+            let held: Vec<_> = (0..n).map(|_| make(&mut js, &mut bir, &mut ids)).collect();
+            stack.fill_held(hole, held);
+            for _ in 0..3 {
+                stack.push(make(&mut js, &mut bir, &mut ids));
+            }
+            let run = stack.since(Span::default());
+            let places: Vec<u32> = stack.placed_refs(run).map(|(place, _)| place).collect();
+            // A slot in the middle of three, and a statement in the middle
+            // of the hold.
+            let (slot, inner) = (n as usize + 1, n as usize / 2);
+            assert_eq!(places[slot], 2);
+            assert_eq!(places[inner], StatementStack::<Rows>::HELD | inner as u32);
+            let stand_in = js.debugger(&mut bir);
+            let stand_in_id = js.stmt_id(&bir, &stand_in);
+            let (scanned, steps) = (stack.scanned, js.steps());
+            let mut stand_in = Some(stand_in);
+            let taken = allocation_counter::measure(|| {
+                let from_slot = stack.take_placed(places[slot], || unreachable!("a slot needs no stand-in"));
+                assert_eq!(js.stmt_id(&bir, &from_slot), ids[slot]);
+                let from_hold = stack.take_placed(places[inner], || stand_in.take().expect("asked once"));
+                assert_eq!(js.stmt_id(&bir, &from_hold), ids[inner]);
+            });
+            assert_eq!(taken.count_total, 0, "{n}: {taken:?}");
+            assert!(stand_in.is_none());
+            assert_eq!((stack.scanned, js.steps()), (scanned, steps));
+            // What is left: every other place still names its statement.
+            let mut left = ids.clone();
+            left[inner] = stand_in_id;
+            left.remove(slot);
+            for (&place, &id) in places.iter().zip(&ids) {
+                if place != places[slot] && place != places[inner] {
+                    assert_eq!(js.stmt_id(&bir, stack.at_place(place)), id);
+                }
+            }
+            assert_eq!(js.stmt_id(&bir, stack.at_place(places[inner])), stand_in_id);
+            // The readers of a run and of its ends accept the dead slot and
+            // the hold, which still has every entry.
+            let read: Vec<u32> = stack.statement_refs(run).map(|s| js.stmt_id(&bir, s)).collect();
+            assert_eq!(read, left);
+            assert_eq!(js.stmt_id(&bir, stack.first(run).unwrap()), left[0]);
+            assert_eq!(js.stmt_id(&bir, stack.last(run).unwrap()), *left.last().unwrap());
+            assert!(stack.only(run).is_none());
+            assert!(stack.has_statements(run));
+            let given: Vec<u32> = stack.take_run(run).map(|s| js.stmt_id(&bir, &s)).collect();
+            assert_eq!(given, left);
+            stack.kill(run);
+            assert_eq!(stack.mark(), Span::default());
+        }
+    }
+    /// The same from the end of the run: `take_run_rev` crosses the dead
+    /// slot and gives the stand-in where the held statement stood.
+    #[test]
+    fn a_run_with_a_statement_taken_by_its_place_is_taken_from_its_end() {
+        let mut bir = Bir::default();
+        bir.begin_bulk();
+        let mut js = Rows::default();
+        let mut stack = StatementStack::<Rows>::default();
+        let hole = stack.reserve();
+        let held: Vec<_> = (0..3).map(|_| js.debugger(&mut bir)).collect();
+        let mut ids: Vec<u32> = held.iter().map(|s| js.stmt_id(&bir, s)).collect();
+        stack.fill_held(hole, held);
+        for _ in 0..2 {
+            let statement = js.debugger(&mut bir);
+            ids.push(js.stmt_id(&bir, &statement));
+            stack.push(statement);
+        }
+        let run = stack.since(Span::default());
+        let places: Vec<u32> = stack.placed_refs(run).map(|(place, _)| place).collect();
+        let stand_in = js.debugger(&mut bir);
+        ids[1] = js.stmt_id(&bir, &stand_in);
+        stack.take_placed(places[1], || stand_in);
+        stack.take_placed(places[3], || unreachable!("a slot needs no stand-in"));
+        ids.remove(3);
+        ids.reverse();
+        let given: Vec<u32> = stack.take_run_rev(run).map(|s| js.stmt_id(&bir, &s)).collect();
+        assert_eq!(given, ids);
+    }
+    /// A place whose statement was taken is not taken again.
+    #[test]
+    #[should_panic(expected = "place 0 holds no statement")]
+    fn a_place_is_taken_once() {
+        let mut bir = Bir::default();
+        let mut js = Rows::default();
+        let mut stack = StatementStack::<Rows>::default();
+        stack.push(js.debugger(&mut bir));
+        stack.take_placed(0, || unreachable!("a slot needs no stand-in"));
+        stack.take_placed(0, || unreachable!("a slot needs no stand-in"));
     }
     /// A place that holds no statement is not read.
     #[test]
