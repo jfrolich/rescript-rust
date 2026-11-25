@@ -1,0 +1,1 @@
+- The export fold of the backend lowering reads each row's statement where it is (its place on the statement stack, in its block or in the fold's own tables) instead of through its id, and releases a removed row at once through its holder.

@@ -320,6 +320,7 @@ impl JsStmt for Rows {
             _ => None,
         }
     }
+    #[cfg(test)]
     fn block_ids(&self, a: &Pools, s: &S, mut sink: impl FnMut(u32)) {
         let View::SBlock { statements } = a.view(s.0) else { panic!("not a block statement") };
         for statement in statements {

@@ -1,0 +1,1 @@
+- Three trees T6x-e4: the export fold of the backend lowering names an expression by its position (a row's initialiser or the export value in hand), replaces the uses of a moved variable by one `JsStmt::substitute` per later row that holds one, and asks `JsStmt::alias_at` for the alias of a variable no row declares; no function of the fold finds a node from its id.
