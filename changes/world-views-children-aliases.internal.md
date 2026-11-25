@@ -1,0 +1,1 @@
+- Build the component views of child modules and of aliases of a unit once per build, not once per worker thread.

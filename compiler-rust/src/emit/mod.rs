@@ -2,6 +2,8 @@
 mod build;
 mod literal;
 mod naming;
+#[cfg(test)]
+pub(crate) use naming::{ProgramNames, ReplayTables, replay};
 mod program;
 mod raw;
 pub use raw::RawSegment;

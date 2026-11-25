@@ -1,0 +1,176 @@
+diff --git a/compiler-rust/src/driver.rs b/compiler-rust/src/driver.rs
+index 6cc0a9e6b..2be2ce386 100644
+--- a/compiler-rust/src/driver.rs
++++ b/compiler-rust/src/driver.rs
+@@ -10435,10 +10435,15 @@ fn compile_until_js(
+     );
+     let env_setup_span = info_span!("compiler.env_setup").entered();
+     let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
+-    let type_ctx = fresh_type_context();
+-    type_ctx.set_location_namespace(&options.location_identity(filename));
+-    let (mut tctx, env) = in_process_type_check_context(
+-        &type_ctx,
++    // Prototype (CHECKER_REWRITE 4.2): the unit is checked on the success
++    // path first. If a unification failed there without its snapshot, or the
++    // unit has an error, that attempt is discarded and the unit is checked
++    // again in the explaining mode, which is the checker as it was.
++    let success_ctx = fresh_type_context();
++    success_ctx.set_location_namespace(&options.location_identity(filename));
++    success_ctx.set_explain_mode(false);
++    let (mut success_tctx, success_env) = in_process_type_check_context(
++        &success_ctx,
+         arena,
+         options,
+         registry,
+@@ -10446,10 +10451,10 @@ fn compile_until_js(
+         &file_config,
+         &frontend_warning_specs,
+     );
+-    tctx.derived_plans = derived_plans;
++    success_tctx.derived_plans = derived_plans;
+     // The reference compile of a check is not part of the census.
+     if derived_plans {
+-        tctx.derived_census = arena.derived_census.clone();
++        success_tctx.derived_census = arena.derived_census.clone();
+     }
+     drop(env_setup_span);
+     if let Some(start) = env_setup_start {
+@@ -10461,10 +10466,43 @@ fn compile_until_js(
+     let source_cell = std::cell::OnceCell::new();
+     let source = || -> &str { source_cell.get_or_init(|| read_in_process_source(filename)) };
+ 
+-    let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
++    let success_typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
+         let _phase = info_span!("compiler.type_structure").entered();
+-        type_structure(&mut tctx, &env, arena, structure)
++        type_structure(&mut success_tctx, &success_env, arena, structure)
+     });
++    success_ctx.set_explain_mode(true);
++    let explain_ctx;
++    let (type_ctx, mut tctx, env, typed) =
++        if success_typed.is_err() || success_ctx.unexplained_unify_failure() {
++            if std::env::var_os("RESCRIPT_EXPLAIN_RERUNS").is_some() {
++                eprintln!(
++                    "[explain-rerun] {module_name} error={}",
++                    success_typed.is_err()
++                );
++            }
++            drop(success_typed);
++            drop(success_tctx);
++            drop(success_env);
++            explain_ctx = fresh_type_context();
++            explain_ctx.set_location_namespace(&options.location_identity(filename));
++            let (mut tctx, env) = in_process_type_check_context(
++                &explain_ctx,
++                arena,
++                options,
++                registry,
++                module_name,
++                &file_config,
++                &frontend_warning_specs,
++            );
++            tctx.derived_plans = derived_plans;
++            if derived_plans {
++                tctx.derived_census = arena.derived_census.clone();
++            }
++            let typed = type_structure(&mut tctx, &env, arena, structure);
++            (&explain_ctx, tctx, env, typed)
++        } else {
++            (&success_ctx, success_tctx, success_env, success_typed)
++        };
+     let (typed_structure, final_env) = match typed {
+         Ok(result) => result,
+         Err(e) => {
+diff --git a/compiler-rust/src/types/context.rs b/compiler-rust/src/types/context.rs
+index 3b2be833e..41faeca68 100644
+--- a/compiler-rust/src/types/context.rs
++++ b/compiler-rust/src/types/context.rs
+@@ -841,6 +841,12 @@ pub struct TypeContext {
+     /// OCaml-shaped mutation trail. Logging is dormant unless a snapshot lives.
+     mutation_journal: RefCell<TypeMutationJournal>,
+     mutation_logging: TrailLogging,
++    /// Prototype (CHECKER_REWRITE 4.2): `false` while a unit is checked on
++    /// the success path, where a top-level unification takes no snapshot.
++    explain_mode: Cell<bool>,
++    /// A unification failed on the success path without its snapshot: the
++    /// unit must be checked again in the explaining mode.
++    unexplained_unify_failure: Cell<bool>,
+ 
+     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
+     compiler_counters_enabled: bool,
+@@ -1372,6 +1378,8 @@ impl TypeContext {
+             local_stored_components: RefCell::new(crate::fast_hash::AHashMap::new()),
+             mutation_journal: RefCell::new(TypeMutationJournal::default()),
+             mutation_logging: TrailLogging::default(),
++            explain_mode: Cell::new(true),
++            unexplained_unify_failure: Cell::new(false),
+             compiler_counters_enabled: crate::perf_counters::enabled(),
+             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
+             // simple_abbrevs memo ref.
+@@ -1562,6 +1570,30 @@ impl TypeContext {
+         self.typed_envs.borrow().get(env_ref.index()).cloned()
+     }
+ 
++    /// Whether a top-level unification needs its undo-compress snapshot:
++    /// always in the explaining mode, and under any live snapshot (a
++    /// speculation), never on the success path. Cost: two `Cell` reads.
++    #[inline]
++    pub(crate) fn unify_takes_snapshot(&self) -> bool {
++        self.explain_mode.get() || self.mutation_logging.compress()
++    }
++
++    /// Cost: one `Cell` write.
++    pub(crate) fn set_explain_mode(&self, on: bool) {
++        self.explain_mode.set(on);
++    }
++
++    /// Cost: one `Cell` write; called on a failure path only.
++    #[cold]
++    pub(crate) fn note_unexplained_unify_failure(&self) {
++        self.unexplained_unify_failure.set(true);
++    }
++
++    /// Cost: one `Cell` read.
++    pub(crate) fn unexplained_unify_failure(&self) -> bool {
++        self.unexplained_unify_failure.get()
++    }
++
+     #[inline]
+     pub(crate) fn compiler_counters_enabled(&self) -> bool {
+         self.compiler_counters_enabled
+diff --git a/compiler-rust/src/types/ctype.rs b/compiler-rust/src/types/ctype.rs
+index 4038b48a8..192c7d04f 100644
+--- a/compiler-rust/src/types/ctype.rs
++++ b/compiler-rust/src/types/ctype.rs
+@@ -7565,12 +7565,15 @@ pub fn unify(
+     }
+     // OCaml's outer `unify` (ctype.ml:2589-2594) takes a snapshot so a
+     // failure can `undo_compress` before expanding the trace.
+-    let top_snapshot = (state.recursion_depth == 1).then(|| {
+-        if ctx.compiler_counters_enabled() {
+-            crate::perf_counters::census_unify(ctx, t1, t2);
+-        }
+-        ctx.snapshot_type_state_for_undo_compress()
+-    });
++    if state.recursion_depth == 1 && ctx.compiler_counters_enabled() {
++        crate::perf_counters::census_unify(ctx, t1, t2);
++    }
++    // Prototype (CHECKER_REWRITE 4.2): on the success path a top-level
++    // unification takes no snapshot; its failure is recorded and the unit is
++    // checked again in the explaining mode, which takes it.
++    let top_snapshot = (state.recursion_depth == 1 && ctx.unify_takes_snapshot())
++        .then(|| ctx.snapshot_type_state_for_undo_compress());
++    let unexplained = state.recursion_depth == 1 && top_snapshot.is_none();
+ 
+     // Fast path: same reference
+     let t1 = ctx.repr(t1);
+@@ -7620,6 +7623,9 @@ pub fn unify(
+         }
+     }
+     drop(top_snapshot);
++    if unexplained && result.is_err() {
++        ctx.note_unexplained_unify_failure();
++    }
+     result
+ }
+ 

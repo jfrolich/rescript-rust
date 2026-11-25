@@ -1,0 +1,1 @@
+- Run the derived-code census summary tests and the sequential instruction comparison tests in CI.

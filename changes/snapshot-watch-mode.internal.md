@@ -1,0 +1,1 @@
+- Revalidate watched runtime and Belt snapshot sources, rebuild changed packages and dependents from source, and expose config-less runtime sources to editor tooling.

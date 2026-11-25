@@ -133,6 +133,23 @@ impl<A> Plan<A> {
         &self.tests[id.0 as usize]
     }
 
+    /// Whether the plan reads a field of the value: object cases told apart
+    /// by their fields, or cases of a tagged variant that share a tag.
+    pub(crate) fn tests_fields(&self) -> bool {
+        self.tests.iter().any(|test| {
+            matches!(
+                test,
+                Test::FieldIn(_)
+                    | Test::FieldEquals(..)
+                    | Test::FieldTypeof(..)
+                    | Test::FieldIsArray(_)
+            )
+        }) || self
+            .trees
+            .iter()
+            .any(|tree| matches!(tree, Tree::SwitchField(..)))
+    }
+
     pub(crate) fn value_clauses(&self, clauses: Clauses) -> &[(LiteralTag, Clause<A>)] {
         &self.value_clauses[clauses.range()]
     }

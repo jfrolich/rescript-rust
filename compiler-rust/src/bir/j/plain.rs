@@ -11,6 +11,10 @@ pub fn node(b: &mut Bir, view: View<'_>, aux: u16) -> NodeId {
         flags.0 |= NodeFlags::STRICT | NodeFlags::J_SUBEXPR;
         b.nodes[id.index()].set_flags(flags);
     }
+    let mut flags = b.node(id).flags();
+    if super::facts::delay_safe(b, id) { flags.0 |= NodeFlags::DELAY_SAFE; }
+    else { flags.0 &= !NodeFlags::DELAY_SAFE; }
+    b.nodes[id.index()].set_flags(flags);
     id
 }
 /// Integer literal, with no source decoration.

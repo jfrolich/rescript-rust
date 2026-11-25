@@ -164,15 +164,26 @@ if (buildTest) {
     if (!fs.existsSync(path.join(testDir, "input.js"))) {
       console.warn(`input.js does not exist in ${testDir}`);
     } else {
-      // note existsSync test already ensure that it is a directory
-      const out = await node("input.js", [], { cwd: testDir });
-      process.stdout.write(out.stdout);
+      const modes =
+        file === "super_errors_derived"
+          ? [undefined, "general", "check"]
+          : [undefined];
+      for (const mode of modes) {
+        const env = { ...process.env };
+        if (file === "super_errors_derived") {
+          delete env.RESCRIPT_DERIVED_PATH;
+          if (mode !== undefined) env.RESCRIPT_DERIVED_PATH = mode;
+        }
+        const out = await node("input.js", [], { cwd: testDir, env });
+        process.stdout.write(out.stdout);
+        const label = mode === undefined ? file : `${file} (${mode})`;
 
-      if (out.status === 0) {
-        console.log(`✅ success in ${file}`);
-      } else {
-        console.log(`❌ error in ${file} with stderr:\n${out.stderr}`);
-        hasError = true;
+        if (out.status === 0) {
+          console.log(`✅ success in ${label}`);
+        } else {
+          console.log(`❌ error in ${label} with stderr:\n${out.stderr}`);
+          hasError = true;
+        }
       }
     }
   }

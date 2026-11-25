@@ -1,0 +1,1 @@
+- Stop with "The module or file M can't be found" at "command line" when an `-open M` flag (in `compiler-flags`, `rescript bsc` or a file's `@@config`) names a missing module, as the OCaml compiler does, instead of ignoring the open. Dotted opens such as `-open Stdlib.Math` now open the module instead of being skipped.

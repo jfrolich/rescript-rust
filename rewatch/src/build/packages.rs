@@ -180,11 +180,16 @@ fn read_folders_and_dirs(
     is_type_dev: bool,
     record_entries: bool,
 ) -> Result<SourceWalk> {
+    // Normalize once per source directory, before forming any unit path:
+    // O(directory components), one buffer, no filesystem canonicalization.
+    let path_buf: PathBuf = path.components()
+        .filter(|component| *component != std::path::Component::CurDir)
+        .collect();
+    let path = path_buf.as_path();
     let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
     let mut dirs = vec![path.to_path_buf()];
     let mut outputs = AHashMap::new();
     let mut entries = AHashSet::new();
-    let path_buf = PathBuf::from(path);
     fs::metadata(package_dir.join(path))?;
     // Each subfolder, and whether it is reached through a symlink.
     let mut subdirs: Vec<(PathBuf, bool)> = Vec::new();
@@ -476,7 +481,7 @@ fn read_dependencies(
                 }
             };
 
-            let is_local_dep = is_local_dependency(project_context, package_name, &canonical_path);
+            let is_local_dep = is_local_dependency(project_context, &canonical_path);
 
             let dependencies = read_dependencies(
                 &mut registered_dependencies_set.to_owned(),
@@ -500,15 +505,29 @@ fn read_dependencies(
         .map(|dependencies| dependencies.into_iter().flatten().collect())
 }
 
-fn is_local_dependency(project_context: &ProjectContext, package_name: &str, canonical_path: &Path) -> bool {
+/// Whether the build owns the dependency at `canonical_path`: compiles its dev
+/// sources, reports its warnings, cleans and watches it.
+fn is_local_dependency(project_context: &ProjectContext, canonical_path: &Path) -> bool {
     match &project_context.monorepo_context {
-        None => project_context.current_config.name.as_str() == package_name,
-        Some(MonoRepoContext::MonorepoRoot { .. }) => {
-            helpers::is_local_package(project_context.get_root_path(), canonical_path)
+        // A build started in a project with no parent workspace owns every
+        // package below the project outside node_modules, such as packages
+        // nested in it and linked from a node_modules above it
+        // (rewatch-ocaml/project_context.ml, `dependency_is_local_canonical`).
+        // Dependency paths are canonical, so the root is compared canonical.
+        None | Some(MonoRepoContext::MonorepoRoot { .. }) => {
+            let root = project_context.get_root_path();
+            let root = root
+                .canonicalize()
+                .map(StrippedVerbatimPath::to_stripped_verbatim_path)
+                .unwrap_or_else(|_| root.to_path_buf());
+            helpers::is_local_package(&root, canonical_path)
         }
-        Some(MonoRepoContext::MonorepoPackage { parent_config }) => {
-            helpers::is_local_package(&parent_config.path, canonical_path)
-        }
+        // A build started in a workspace member owns only that member: the
+        // other workspace packages resolve through the workspace, but owning
+        // them would include their dev sources, clean their outputs and
+        // watch them (rewatch-ocaml/project_context.ml,
+        // `dependency_is_local_canonical`).
+        Some(MonoRepoContext::MonorepoPackage { .. }) => false,
     }
 }
 
@@ -1686,7 +1705,8 @@ mod test {
     #[test]
     fn monorepo_root_marks_transitive_workspace_dependencies_as_local() {
         let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
+        // Dependency paths are canonical (on macOS the temp dir is a symlink).
+        let root = &temp_dir.path().canonicalize().unwrap();
 
         let mut local_dependencies = AHashSet::new();
         local_dependencies.insert("direct".to_string());
@@ -1709,18 +1729,48 @@ mod test {
 
         assert!(super::is_local_dependency(
             &project_context,
-            "direct",
             &root.join("packages/direct")
         ));
         assert!(super::is_local_dependency(
             &project_context,
-            "transitive",
             &root.join("packages/transitive")
         ));
         assert!(!super::is_local_dependency(
             &project_context,
-            "external",
             &root.join("node_modules/external")
+        ));
+    }
+
+    /// A project with no parent workspace owns the packages nested in it, also
+    /// when they are linked from a node_modules above it.
+    #[test]
+    fn single_project_marks_nested_packages_as_local() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().canonicalize().unwrap();
+        let project = root.join("webapp");
+        fs::create_dir_all(&project).unwrap();
+        let project_context = ProjectContext::with_empty_caches(
+            config::tests::create_config(config::tests::CreateConfigArgs {
+                name: "webapp".to_string(),
+                bs_deps: vec![],
+                build_dev_deps: vec![],
+                allowed_dependents: None,
+                path: project.join("rescript.json"),
+            }),
+            None,
+        );
+
+        assert!(super::is_local_dependency(
+            &project_context,
+            &project.join("packages/nested")
+        ));
+        assert!(!super::is_local_dependency(
+            &project_context,
+            &project.join("node_modules/external")
+        ));
+        assert!(!super::is_local_dependency(
+            &project_context,
+            &root.join("sibling")
         ));
     }
 
@@ -1999,6 +2049,20 @@ mod test {
             dep_active.is_empty(),
             "an explicit empty features list should activate no feature-tagged dirs, got {dep_active:?}"
         );
+    }
+
+    #[test]
+    fn runtime_unit_paths_match_source_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Example.res"), "let x = 1\n").unwrap();
+        let runtime = super::super::compile::runtime_source_paths(root.path()).unwrap();
+        for directory in [".", "./.", ""] {
+            let sources = super::read_folders(&None, root.path(), std::path::Path::new(directory), false, false).unwrap();
+            assert_eq!(sources.len(), 1);
+            let project_path = root.path().join(sources.keys().next().unwrap());
+            assert_eq!(project_path.to_str(), runtime[0].1.to_str());
+            assert!(!project_path.to_str().unwrap().contains("/./"));
+        }
     }
 
     #[cfg(unix)]

@@ -25,6 +25,11 @@ impl SignatureCheck {
     /// comparison differs or no report directory is configured.
     #[cold]
     pub fn report(&self, unit: &str, comparison: &Comparison) -> anyhow::Result<()> {
+        self.prepare(unit, comparison)?.publish()
+    }
+
+    /// O(report bytes), only in signature-check mode; no filesystem writes.
+    pub(crate) fn prepare(&self, unit: &str, comparison: &Comparison) -> anyhow::Result<PreparedReport> {
         let outcomes = &comparison.outcomes;
         let directory = self.directory.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -45,29 +50,54 @@ impl SignatureCheck {
         // overwrite a mismatch, including when workers compile the same unit.
         let mut key = std::collections::hash_map::DefaultHasher::new();
         data.hash(&mut key);
-        std::fs::create_dir_all(directory)?;
         let path = directory.join(format!("{:016x}.json", key.finish()));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-        {
-            Ok(mut file) => file.write_all(&data)?,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
+        let mut failure = None;
         for (kind, outcome) in ["fingerprint", "item hashes", "bytes"]
             .into_iter()
             .zip(outcomes)
         {
             if let Outcome::Different { detail } = outcome {
-                anyhow::bail!(
+                failure = Some(format!(
                     "{unit}: signature equality: {kind}: {detail} (shared graph {})",
                     comparison.shared_graph
-                );
+                ));
+                break;
             }
         }
-        Ok(())
+        Ok(PreparedReport { path, data, failure })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(directory: PathBuf) -> Self {
+        Self { directory: Some(directory) }
+    }
+}
+
+/// Private report bytes; dropping these writes nothing.
+pub(crate) struct PreparedReport {
+    path: PathBuf,
+    data: Vec<u8>,
+    failure: Option<String>,
+}
+
+impl PreparedReport {
+    /// O(error text), only on mismatch; no filesystem effects.
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        match &self.failure {
+            Some(error) => anyhow::bail!("{error}"),
+            None => Ok(()),
+        }
+    }
+
+    /// O(report bytes), once the owning attempt commits.
+    pub(crate) fn publish(self) -> anyhow::Result<()> {
+        std::fs::create_dir_all(self.path.parent().expect("report directory"))?;
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&self.path) {
+            Ok(mut file) => file.write_all(&self.data)?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.validate()
     }
 }
 

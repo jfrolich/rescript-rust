@@ -23,6 +23,7 @@ use crate::parser::ast::{
 };
 use crate::parser::longident::Longident;
 
+pub(super) mod plan;
 mod serde;
 
 const ANNOTATION_NAME: &str = "spice";
@@ -1291,238 +1292,115 @@ fn tuple_generate_decoder(
     expr_fun(ArgLabel::Nolabel, fun_pat, match_expr, Some(1), arena)
 }
 
-fn codecs_generate_constr_codecs(
+/// Which of the two codecs of a type is meant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    Encode,
+    Decode,
+}
+
+/// The library function that is the codec of a built-in type constructor,
+/// or `None` for `JSON.t` and for a type with its own derived codecs.
+/// Cost: O(path depth) borrowed comparisons per candidate name; no allocation.
+fn library_codec(
     context: EncodeContext,
-    settings: GeneratorSettings,
+    side: Side,
+    lid_idx: LidentIdx,
+    arena: &ParseArena,
+) -> Option<&'static str> {
+    let is = |parts: &[&str]| longident_matches(arena, lid_idx, parts);
+    let pick = |encode: &'static str, decode: &'static str| match side {
+        Side::Encode => encode,
+        Side::Decode => decode,
+    };
+    Some(if is(&["string"]) {
+        pick("stringToJson", "stringFromJson")
+    } else if is(&["int"]) {
+        pick("intToJson", "intFromJson")
+    } else if is(&["bigint"]) {
+        pick("bigintToJson", "bigintFromJson")
+    } else if is(&["float"]) {
+        pick("floatToJson", "floatFromJson")
+    } else if is(&["bool"]) {
+        pick("boolToJson", "boolFromJson")
+    } else if is(&["unit"]) {
+        pick("unitToJson", "unitFromJson")
+    } else if is(&["array"]) {
+        pick("arrayToJson", "arrayFromJson")
+    } else if is(&["list"]) {
+        pick("listToJson", "listFromJson")
+    } else if is(&["option"]) {
+        let encode = match context {
+            EncodeContext::Optional => "optionToJson",
+            EncodeContext::Value => "optionToNullableJson",
+        };
+        pick(encode, "optionFromJson")
+    } else if is(&["Js", "null"]) || is(&["Js", "Null", "t"]) || is(&["Null", "t"]) {
+        pick("nullToJson", "nullFromJson")
+    } else if is(&["result"]) || is(&["Result", "t"]) || is(&["Belt", "Result", "t"]) {
+        pick("resultToJson", "resultFromJson")
+    } else if is_dict_identifier(lid_idx, arena) {
+        pick("dictToJson", "dictFromJson")
+    } else {
+        return None;
+    })
+}
+
+/// Whether the constructor is the JSON type itself, whose codec is the
+/// identity. Cost: O(path depth) borrowed comparisons; no allocation.
+pub(super) fn is_json_identifier(lid_idx: LidentIdx, arena: &ParseArena) -> bool {
+    longident_matches(arena, lid_idx, &["Js", "Json", "t"])
+        || longident_matches(arena, lid_idx, &["JSON", "t"])
+}
+
+/// The name of the derived codec of a user type: `t` gives `t_encode`,
+/// `t_encodeJson` or `t_decode`, `M.t` the same in `M`. A functor
+/// application has none.
+/// Cost: one string of the name's length and one longident.
+fn user_codec_lid(
+    context: EncodeContext,
+    side: Side,
+    lid_idx: LidentIdx,
+    arena: &mut ParseArena,
+) -> Option<LidentIdx> {
+    let suffix = match (side, context) {
+        (Side::Encode, EncodeContext::Optional) => ENCODER_FUNC_SUFFIX,
+        (Side::Encode, EncodeContext::Value) => VALUE_ENCODER_FUNC_SUFFIX,
+        (Side::Decode, _) => DECODER_FUNC_SUFFIX,
+    };
+    match arena.get_longident(lid_idx).clone() {
+        Longident::Lident(name) => {
+            let new_name = format!("{}{}", arena.get_string(name), suffix);
+            let idx = arena.push_string(new_name);
+            Some(arena.push_lident_from_idx(idx))
+        }
+        Longident::Ldot(prefix, right) => {
+            let new_name = format!("{}{}", arena.get_string(right), suffix);
+            let new_idx = arena.push_string(new_name);
+            Some(arena.push_longident(Longident::Ldot(prefix, new_idx)))
+        }
+        Longident::Lapply(_, _) => None,
+    }
+}
+
+/// codecs.ml `generate_constr_codecs`, one side.
+fn codecs_generate_constr_codec(
+    context: EncodeContext,
+    side: Side,
     lid: &Located<LidentIdx>,
     arena: &mut ParseArena,
-) -> (Option<Expression>, Option<Expression>) {
-    let do_encode = settings.do_encode;
-    let do_decode = settings.do_decode;
+) -> Option<Expression> {
     let lid_loc = lid.loc;
-
-    let lid_idx = lid.txt;
-    let encode = if do_encode {
-        if longident_matches(arena, lid_idx, &["string"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "stringToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["int"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "intToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["bigint"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "bigintToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["float"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "floatToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["bool"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "boolToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["unit"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "unitToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["array"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "arrayToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["list"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "listToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["option"]) {
-            let codec = match context {
-                EncodeContext::Optional => "optionToJson",
-                EncodeContext::Value => "optionToNullableJson",
-            };
-            Some(expr_ident_spice_codecs_with_loc(arena, codec, lid_loc))
-        } else if longident_matches(arena, lid_idx, &["Js", "null"])
-            || longident_matches(arena, lid_idx, &["Js", "Null", "t"])
-            || longident_matches(arena, lid_idx, &["Null", "t"])
-        {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "nullToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["result"])
-            || longident_matches(arena, lid_idx, &["Result", "t"])
-            || longident_matches(arena, lid_idx, &["Belt", "Result", "t"])
-        {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "resultToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["dict"])
-            || longident_matches(arena, lid_idx, &["Js", "Dict", "t"])
-            || longident_matches(arena, lid_idx, &["Dict", "t"])
-        {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "dictToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["Js", "Json", "t"])
-            || longident_matches(arena, lid_idx, &["JSON", "t"])
-        {
-            let v_loc = lid_loc;
-            let v_pat = pat_var_with_loc(arena, "v", v_loc);
-            let v_expr = expr_ident_path_with_lid_loc(arena, &["v"], v_loc);
-            Some(expr_fun_with_loc(
-                ArgLabel::Nolabel,
-                v_pat,
-                v_expr,
-                Some(1),
-                v_loc,
-                arena,
-            ))
-        } else {
-            let lid = arena.get_longident(lid_idx).clone();
-            match lid {
-                Longident::Lident(s) => {
-                    let name = arena.get_string(s);
-                    let suffix = match context {
-                        EncodeContext::Optional => ENCODER_FUNC_SUFFIX,
-                        EncodeContext::Value => VALUE_ENCODER_FUNC_SUFFIX,
-                    };
-                    let new_name = format!("{}{}", name, suffix);
-                    let idx = arena.push_string(new_name);
-                    Some(expr_ident_from_str_idx(arena, idx, arena.none_loc()))
-                }
-                Longident::Ldot(prefix, right) => {
-                    let right_name = arena.get_string(right);
-                    let suffix = match context {
-                        EncodeContext::Optional => ENCODER_FUNC_SUFFIX,
-                        EncodeContext::Value => VALUE_ENCODER_FUNC_SUFFIX,
-                    };
-                    let new_name = format!("{}{}", right_name, suffix);
-                    let new_idx = arena.push_string(new_name);
-                    let new_lid = Longident::Ldot(prefix.clone(), new_idx);
-                    let lid_idx = arena.push_longident(new_lid);
-                    Some(expr_ident_with_loc(
-                        lid_idx,
-                        arena.none_loc(),
-                        arena.dummy_loc(),
-                    ))
-                }
-                Longident::Lapply(_, _) => None,
-            }
-        }
-    } else {
-        None
-    };
-
-    let decode = if do_decode {
-        if longident_matches(arena, lid_idx, &["string"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "stringFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["int"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "intFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["bigint"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "bigintFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["float"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "floatFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["bool"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "boolFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["unit"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "unitFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["array"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "arrayFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["list"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "listFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["option"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "optionFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["Js", "null"])
-            || longident_matches(arena, lid_idx, &["Js", "Null", "t"])
-            || longident_matches(arena, lid_idx, &["Null", "t"])
-        {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "nullFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["result"])
-            || longident_matches(arena, lid_idx, &["Result", "t"])
-            || longident_matches(arena, lid_idx, &["Belt", "Result", "t"])
-        {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "resultFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["dict"])
-            || longident_matches(arena, lid_idx, &["Js", "Dict", "t"])
-            || longident_matches(arena, lid_idx, &["Dict", "t"])
-        {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "dictFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["Js", "Json", "t"])
-            || longident_matches(arena, lid_idx, &["JSON", "t"])
-        {
-            let v_loc = lid_loc;
-            let v_pat = pat_var_with_loc(arena, "v", v_loc);
-            let v_expr = expr_ident_path_with_lid_loc(arena, &["v"], v_loc);
-            let ok_expr = expr_construct_with_locs(
+    if let Some(name) = library_codec(context, side, lid.txt, arena) {
+        return Some(expr_ident_spice_codecs_with_loc(arena, name, lid_loc));
+    }
+    if is_json_identifier(lid.txt, arena) {
+        let v_loc = lid_loc;
+        let v_pat = pat_var_with_loc(arena, "v", v_loc);
+        let v_expr = expr_ident_path_with_lid_loc(arena, &["v"], v_loc);
+        let body = match side {
+            Side::Encode => v_expr,
+            Side::Decode => expr_construct_with_locs(
                 {
                     let lident_name = arena.intern_string("Ok");
                     arena.push_lident_from_idx(lident_name)
@@ -1531,43 +1409,41 @@ fn codecs_generate_constr_codecs(
                 v_loc,
                 v_loc,
                 arena,
-            );
-            Some(expr_fun_with_loc(
-                ArgLabel::Nolabel,
-                v_pat,
-                ok_expr,
-                Some(1),
-                v_loc,
-                arena,
-            ))
-        } else {
-            let lid = arena.get_longident(lid_idx).clone();
-            match lid {
-                Longident::Lident(s) => {
-                    let name = arena.get_string(s);
-                    let new_name = format!("{}{}", name, DECODER_FUNC_SUFFIX);
-                    let idx = arena.push_string(new_name);
-                    Some(expr_ident_from_str_idx(arena, idx, arena.none_loc()))
-                }
-                Longident::Ldot(prefix, right) => {
-                    let right_name = arena.get_string(right);
-                    let new_name = format!("{}{}", right_name, DECODER_FUNC_SUFFIX);
-                    let new_idx = arena.push_string(new_name);
-                    let new_lid = Longident::Ldot(prefix.clone(), new_idx);
-                    let lid_idx = arena.push_longident(new_lid);
-                    Some(expr_ident_with_loc(
-                        lid_idx,
-                        arena.none_loc(),
-                        arena.dummy_loc(),
-                    ))
-                }
-                Longident::Lapply(_, _) => None,
-            }
-        }
+            ),
+        };
+        return Some(expr_fun_with_loc(
+            ArgLabel::Nolabel,
+            v_pat,
+            body,
+            Some(1),
+            v_loc,
+            arena,
+        ));
+    }
+    let lid_idx = user_codec_lid(context, side, lid.txt, arena)?;
+    Some(expr_ident_with_loc(
+        lid_idx,
+        arena.none_loc(),
+        arena.dummy_loc(),
+    ))
+}
+
+fn codecs_generate_constr_codecs(
+    context: EncodeContext,
+    settings: GeneratorSettings,
+    lid: &Located<LidentIdx>,
+    arena: &mut ParseArena,
+) -> (Option<Expression>, Option<Expression>) {
+    let encode = if settings.do_encode {
+        codecs_generate_constr_codec(context, Side::Encode, lid, arena)
     } else {
         None
     };
-
+    let decode = if settings.do_decode {
+        codecs_generate_constr_codec(context, Side::Decode, lid, arena)
+    } else {
+        None
+    };
     (encode, decode)
 }
 
@@ -4310,6 +4186,7 @@ fn with_fallback(
 
 fn map_type_decl_structure(
     decl: &TypeDeclaration,
+    generator_settings: Option<GeneratorSettings>,
     arena: &mut ParseArena,
 ) -> SpiceResult<Vec<ValueBinding>> {
     let type_name = arena.get_string(decl.ptype_name.txt).to_string();
@@ -4318,8 +4195,6 @@ fn map_type_decl_structure(
         get_attribute_by_name(&decl.ptype_attributes, "unboxed", arena),
         Ok(Some(_))
     );
-
-    let generator_settings = get_generator_settings_from_attributes(&decl.ptype_attributes, arena)?;
 
     let settings = match generator_settings {
         None => return Ok(vec![]),
@@ -4511,6 +4386,12 @@ fn signature_item_contains_spice_type_decl(item: &SignatureItem, arena: &ParseAr
 }
 
 fn structure_item_contains_spice_type_decl(item: &StructureItem, arena: &ParseArena) -> bool {
+    #[cfg(test)]
+    {
+        let mut steps = arena.derived_scope_steps.get();
+        steps.presence_items += 1;
+        arena.derived_scope_steps.set(steps);
+    }
     match &item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
             let (_, decls) = &**inner;
@@ -4535,6 +4416,7 @@ fn structure_item_contains_spice_type_decl(item: &StructureItem, arena: &ParseAr
         }
         StructureItemDesc::Pstr_eval(_)
         | StructureItemDesc::Pstr_value(_)
+        | StructureItemDesc::Pstr_derived(_)
         | StructureItemDesc::Pstr_primitive(_)
         | StructureItemDesc::Pstr_typext(_)
         | StructureItemDesc::Pstr_exception(_)
@@ -4545,14 +4427,15 @@ fn structure_item_contains_spice_type_decl(item: &StructureItem, arena: &ParseAr
     }
 }
 
-struct LocCloner<'a> {
+struct LocCloner<'a, 'scope> {
     arena: &'a mut ParseArena,
     error: Option<String>,
+    scope: super::derive::Scope<'scope>,
 }
 
-impl<'a> LocCloner<'a> {
-    fn new(arena: &'a mut ParseArena) -> Self {
-        Self { arena, error: None }
+impl<'a, 'scope> LocCloner<'a, 'scope> {
+    fn new(arena: &'a mut ParseArena, scope: super::derive::Scope<'scope>) -> Self {
+        Self { arena, error: None, scope }
     }
 
     fn finish(self) -> SpiceResult<()> {
@@ -5274,7 +5157,10 @@ impl<'a> LocCloner<'a> {
             ExpressionDesc::Pexp_open(inner) => {
                 let (_, ref mut lid, ref mut expr) = **inner;
                 self.located(lid);
+                let enclosing = self.scope;
+                self.scope = enclosing.after_open();
                 self.expression_idx(expr);
+                self.scope = enclosing;
             }
             ExpressionDesc::Pexp_extension(ext) => self.extension(ext),
             ExpressionDesc::Pexp_raw(raw) => {
@@ -5304,7 +5190,7 @@ impl<'a> LocCloner<'a> {
             ModuleExprDesc::Pmod_ident(lid) => self.located(lid),
             ModuleExprDesc::Pmod_structure(items) => {
                 let original = std::mem::take(items);
-                match map_structure_items_with_mapper(&original, self.arena, true) {
+                match map_structure_items_with_mapper(&original, self.arena, true, self.scope) {
                     Ok(mapped) => **items = mapped,
                     Err(error) => {
                         *items = original;
@@ -5527,10 +5413,16 @@ impl<'a> LocCloner<'a> {
 
     fn structure_item(&mut self, item: &mut StructureItem) {
         let derived = super::derive::is_derived_item(item, self.arena);
+        let reason = self.arena.derived_census.as_ref().and_then(|c| c.general_group(item));
         self.loc(&mut item.pstr_loc);
         self.structure_item_desc(&mut item.pstr_desc);
         if derived {
             super::derive::mark_generated_item(item, self.arena);
+        }
+        if let (Some(census), Some(reason), StructureItemDesc::Pstr_value((_, group))) =
+            (&mut self.arena.derived_census, reason, &item.pstr_desc)
+        {
+            census.set_general_group(group.start(), reason);
         }
     }
 
@@ -5549,6 +5441,8 @@ impl<'a> LocCloner<'a> {
                 }
                 *bindings = self.arena.push_vb_list(&new_bindings);
             }
+            // A plan holds no syntax to clone.
+            StructureItemDesc::Pstr_derived(_) => {}
             StructureItemDesc::Pstr_primitive(vd) => self.value_description(vd),
             StructureItemDesc::Pstr_type(inner) => {
                 let (_, ref mut decls) = **inner;
@@ -5619,9 +5513,10 @@ impl<'a> LocCloner<'a> {
 fn clone_mapped_structure_item(
     item: &StructureItem,
     arena: &mut ParseArena,
+    scope: super::derive::Scope<'_>,
 ) -> SpiceResult<StructureItem> {
     let mut mapped_item = item.clone();
-    let mut cloner = LocCloner::new(arena);
+    let mut cloner = LocCloner::new(arena, scope);
     cloner.structure_item(&mut mapped_item);
     cloner.finish()?;
     Ok(mapped_item)
@@ -5632,40 +5527,138 @@ fn clone_mapped_signature_item(
     arena: &mut ParseArena,
 ) -> SpiceResult<SignatureItem> {
     let mut mapped_item = item.clone();
-    let mut cloner = LocCloner::new(arena);
+    let mut cloner = LocCloner::new(arena, super::derive::Scope::default());
     cloner.signature_item(&mut mapped_item);
     cloner.finish()?;
     Ok(mapped_item)
+}
+
+/// The derive settings of each declaration of a group, read once from its
+/// attributes; an attribute that cannot be read is the error generating the
+/// declaration reports.
+type GroupSettings = smallvec::SmallVec<[SpiceResult<Option<GeneratorSettings>>; 4]>;
+
+/// The number of bindings the derive makes for a declaration: two for an
+/// encoder, one for a decoder. Cost: O(1).
+fn binding_count(settings: Option<GeneratorSettings>) -> usize {
+    settings.map_or(0, |settings| {
+        2 * usize::from(settings.do_encode) + usize::from(settings.do_decode)
+    })
+}
+
+/// The path of a group of type declarations: a plan when every declaration
+/// that derives classifies `Plan`, otherwise the first reason met. With the
+/// census on, every binding is charged to the group's effective reason:
+/// the checker types this indivisible value group in one interval.
+/// Cost: O(type nodes and attributes of the group); no allocation unless two
+/// declarations of the group derive.
+fn classify_group(
+    arena: &mut ParseArena,
+    rec_flag: RecFlag,
+    decls: &[TypeDeclaration],
+    settings: &[Option<GeneratorSettings>],
+    scope: super::derive::Scope<'_>,
+) -> super::derive::Classification {
+    use super::derive::Classification;
+    let deriving = settings.iter().filter(|settings| settings.is_some()).count();
+    let shares_names = deriving > 1 && plan::group_shares_names(decls, arena);
+    let mut group = Classification::Plan;
+    let mut bindings = 0;
+    for (decl, settings) in decls.iter().zip(settings) {
+        let count = binding_count(*settings) as u64;
+        if count == 0 {
+            continue;
+        }
+        bindings += count;
+        match plan::classify_in_scope(arena, decl, rec_flag, shares_names, scope) {
+            Classification::Plan => {},
+            general @ Classification::General(_) => {
+                if group == Classification::Plan {
+                    group = general;
+                }
+            }
+        }
+    }
+    if group == Classification::Plan && scope.result_shadowed
+        && settings.iter().flatten().any(|settings| settings.do_decode)
+    {
+        group = Classification::General(super::derive::GeneralReason::ShadowedResultConstructor);
+    }
+    if let Some(census) = arena.derived_census.as_mut() {
+        census.paths.add(group, bindings);
+    }
+    group
 }
 
 fn map_structure_item_spice(
     item: &StructureItem,
     arena: &mut ParseArena,
     mapper_active: bool,
+    scope: super::derive::Scope<'_>,
 ) -> SpiceResult<Vec<StructureItem>> {
     match &item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
             let (ref rec_flag, ref decls) = **inner;
+            // The settings are read once, for the classification and for
+            // whichever of the plan and the syntax is then made.
+            let settings: GroupSettings = decls
+                .iter()
+                .map(|decl| get_generator_settings_from_attributes(&decl.ptype_attributes, arena))
+                .collect();
+            // A group that takes a plan generates no syntax: it is classified
+            // from its declarations alone, before anything is generated.
+            let classification = if let Ok(settings) = settings
+                .iter()
+                .cloned()
+                .collect::<SpiceResult<smallvec::SmallVec<[Option<GeneratorSettings>; 4]>>>()
+                && settings.iter().any(|settings| settings.is_some())
+            {
+                Some((classify_group(arena, *rec_flag, decls, &settings, scope), settings))
+            } else {
+                None
+            };
+            if let Some((super::derive::Classification::Plan, ref settings)) = classification {
+                let mapped_item = clone_mapped_structure_item(item, arena, scope)?;
+                let value_item = StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_derived(plan::build(arena, decls, settings, scope)),
+                    pstr_loc: arena.dummy_loc(),
+                };
+                return Ok(vec![mapped_item, value_item]);
+            }
+            let reason = classification.as_ref().and_then(|(classification, _)| match classification {
+                super::derive::Classification::General(reason) => Some(*reason),
+                super::derive::Classification::Plan => None,
+            });
             let mut vbs = Vec::new();
-            for decl in decls {
-                let generated = map_type_decl_structure(decl, arena)?;
+            for (decl, settings) in decls.iter().zip(settings) {
+                let generated = map_type_decl_structure(decl, settings?, arena)?;
                 if arena.derived_census.is_some() {
+                    let before = arena.derived_census.as_ref().unwrap().shape_nodes.len();
                     super::derive::record_shapes(decl, decls, *rec_flag == RecFlag::Recursive, &generated, arena);
+                    if let Some(reason) = reason {
+                        let census = arena.derived_census.as_mut().unwrap();
+                        census.general_syntax_nodes[reason.census_index()] +=
+                            census.shape_nodes[before..].iter().sum::<u64>();
+                    }
                 }
                 vbs.extend(generated);
             }
 
             if vbs.is_empty() {
                 if mapper_active {
-                    Ok(vec![clone_mapped_structure_item(item, arena)?])
+                    Ok(vec![clone_mapped_structure_item(item, arena, scope)?])
                 } else {
                     Ok(vec![item.clone()])
                 }
             } else {
-                let mapped_item = clone_mapped_structure_item(item, arena)?;
+                let mapped_item = clone_mapped_structure_item(item, arena, scope)?;
 
+                let general = arena.push_vb_list(&vbs);
+                if let (Some(census), Some(reason)) = (&mut arena.derived_census, reason) {
+                    census.set_general_group(general.start(), reason);
+                }
                 let value_item = StructureItem {
-                    pstr_desc: StructureItemDesc::Pstr_value((*rec_flag, arena.push_vb_list(&vbs))),
+                    pstr_desc: StructureItemDesc::Pstr_value((*rec_flag, general)),
                     pstr_loc: arena.dummy_loc(),
                 };
                 super::derive::mark_generated_item(&value_item, arena);
@@ -5674,7 +5667,7 @@ fn map_structure_item_spice(
         }
         _ => {
             if mapper_active || structure_item_contains_spice_type_decl(item, arena) {
-                Ok(vec![clone_mapped_structure_item(item, arena)?])
+                Ok(vec![clone_mapped_structure_item(item, arena, scope)?])
             } else {
                 Ok(vec![item.clone()])
             }
@@ -5879,6 +5872,12 @@ fn signature_contains_spice_type_decl(signature: &[SignatureItem], arena: &Parse
         .any(|item| signature_item_contains_spice_type_decl(item, arena))
 }
 
+/// First item containing a derive, including nested module declarations.
+/// Cost: O(visited items and attributes), stopping on the first match.
+pub(crate) fn first_spice_item(structure: &[StructureItem], arena: &ParseArena) -> Option<usize> {
+    structure.iter().position(|item| structure_item_contains_spice_type_decl(item, arena))
+}
+
 /// Returns true when the Spice mapper should be applied over the whole structure.
 pub fn structure_uses_spice_mapper(structure: &[StructureItem], arena: &ParseArena) -> bool {
     structure_contains_spice_type_decl(structure, arena)
@@ -5892,25 +5891,50 @@ pub fn signature_uses_spice_mapper(signature: &[SignatureItem], arena: &ParseAre
 /// Expand the Spice codecs of one structure item. `mapper_active` tells
 /// whether the Spice mapper runs over the whole structure; see
 /// [`structure_uses_spice_mapper`].
-pub fn expand_structure_item_with_mapper(
+/// Cost: O(visited item syntax + generated codec syntax), plus O(constructors)
+/// for the standalone scope check when the mapper is active. The scoped main
+/// frontend entry avoids this standalone scan by passing its prefix facts.
+pub fn expand_structure_item_with_mapper(item: &StructureItem, arena: &mut ParseArena, mapper_active: bool) -> SpiceResult<Vec<StructureItem>> {
+    expand_structure_item_in_scope(item, arena, mapper_active, super::derive::Scope { result_shadowed: mapper_active && super::derive::shadows_result(item, arena), ..super::derive::Scope::default() })
+}
+
+/// Expand with the local constructor scope supplied by the enclosing mapper.
+/// Cost: O(type nodes plus generated syntax), without a second inference attempt.
+pub fn expand_structure_item_in_scope(
     item: &StructureItem,
     arena: &mut ParseArena,
     mapper_active: bool,
+    scope: super::derive::Scope<'_>,
 ) -> SpiceResult<Vec<StructureItem>> {
     if !arena.builtin_spice_enabled() {
         return Ok(vec![item.clone()]);
     }
-    map_structure_item_spice(item, arena, mapper_active)
+    map_structure_item_spice(item, arena, mapper_active, scope)
 }
 
 fn map_structure_items_with_mapper(
     structure: &[StructureItem],
     arena: &mut ParseArena,
     mapper_active: bool,
+    scope: super::derive::Scope<'_>,
 ) -> SpiceResult<Vec<StructureItem>> {
     let mut expanded = Vec::new();
+    let mut prefix = super::derive::PrefixScope::new(scope);
     for item in structure {
-        expanded.extend(map_structure_item_spice(item, arena, mapper_active)?);
+        #[cfg(test)]
+        {
+            let mut steps = arena.derived_scope_steps.get();
+            steps.nested_items += 1;
+            arena.derived_scope_steps.set(steps);
+        }
+        prefix.push(item, arena);
+        // Only the items of a module expression are mapped here.
+        expanded.extend(map_structure_item_spice(
+            item,
+            arena,
+            mapper_active,
+            prefix.at(prefix.len() - 1),
+        )?);
     }
     Ok(expanded)
 }
@@ -5954,4 +5978,25 @@ fn longident_comparison_steps_are_linear_without_collecting_segments() {
     while let Longident::Ldot(prefix, _) = path { path = *prefix; }
     let apply = Longident::Lapply(Box::new(Longident::Lident(name)), Box::new(Longident::Lident(name)));
     assert_eq!(longident_matches_borrowed(&arena, &apply, &[]), (true, 1));
+}
+
+
+#[cfg(test)]
+#[test]
+fn ten_thousand_nested_items_take_one_scope_visit_each() {
+    let items = (0..10_000).map(|i| format!("type t{i} = C{i}\n")).collect::<String>();
+    let source = format!("module Nested = {{{items}}}");
+    let mut parser = crate::parser::Parser::new("scope.res", &source);
+    let structure = crate::parser::module::parse_structure(&mut parser);
+    assert!(!parser.has_errors());
+    let mut arena = parser.into_arena();
+    let StructureItemDesc::Pstr_module(module) = &structure[0].pstr_desc else { panic!("module") };
+    let ModuleExprDesc::Pmod_structure(items) = &arena.get_mod_expr(module.pmb_expr).pmod_desc else { panic!("structure") };
+    let items = items.clone();
+    let mapped = map_structure_items_with_mapper(&items, &mut arena, true, super::derive::Scope::default()).unwrap();
+    assert_eq!(mapped.len(), 10_000);
+    let steps = arena.derived_scope_steps.get();
+    assert_eq!(steps.nested_items, 10_000);
+    assert_eq!(steps.prefix_items, 10_000);
+    assert_eq!(steps.shadow_items, 10_000);
 }

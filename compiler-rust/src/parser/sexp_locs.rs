@@ -1594,6 +1594,9 @@ pub fn structure(items: &[StructureItem], arena: &ParseArena) -> Sexp {
 
 fn structure_item(si: &StructureItem, arena: &ParseArena) -> Sexp {
     let desc = match &si.pstr_desc {
+        StructureItemDesc::Pstr_derived(_) => {
+            unreachable!("{}", crate::binary_ast::derive::NO_SYNTAX)
+        }
         StructureItemDesc::Pstr_eval(inner) => {
             let (ref e, ref attrs) = **inner;
             Sexp::list(vec![

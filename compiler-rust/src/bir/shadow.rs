@@ -53,6 +53,8 @@ struct UnitReport<'a> {
     facts: Option<std::collections::BTreeMap<&'static str, u64>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     shared_catch_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lower: Option<super::lower::SwitchStats>,
 }
 
 #[derive(serde::Serialize)]
@@ -71,7 +73,7 @@ fn report(
     unsupported: Option<&'static str>,
     norm: Option<NormReport>,
 ) -> anyhow::Result<()> {
-    write_report(unit, stage, unsupported, norm, None, false)
+    write_report(unit, stage, unsupported, norm, None, false, None)
 }
 
 fn report_with_facts(
@@ -81,14 +83,14 @@ fn report_with_facts(
     norm: Option<NormReport>,
     facts: Option<std::collections::BTreeMap<&'static str, u64>>,
 ) -> anyhow::Result<()> {
-    write_report(unit, stage, unsupported, norm, facts, false)
+    write_report(unit, stage, unsupported, norm, facts, false, None)
 }
 
 fn report_with_sharing(
     unit: &str, stage: &'static str, unsupported: Option<&'static str>,
     norm: Option<NormReport>, shared_catch_only: bool,
 ) -> anyhow::Result<()> {
-    write_report(unit, stage, unsupported, norm, None, shared_catch_only)
+    write_report(unit, stage, unsupported, norm, None, shared_catch_only, None)
 }
 
 fn write_report(
@@ -98,6 +100,7 @@ fn write_report(
     norm: Option<NormReport>,
     facts: Option<std::collections::BTreeMap<&'static str, u64>>,
     shared_catch_only: bool,
+    lower: Option<super::lower::SwitchStats>,
 ) -> anyhow::Result<()> {
     let Some(directory) = std::env::var_os("RESCRIPT_BACKEND_STATS") else {
         return Ok(());
@@ -135,6 +138,7 @@ fn write_report(
         norm,
         facts,
         shared_catch_only,
+        lower,
     })?;
     file.write_all(&data)?;
     Ok(())
@@ -342,12 +346,13 @@ pub fn check_exits(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<()
     let mut legacy = arena.clone();
     let expected =
         crate::lambda::lam_pass_deep_flatten::deep_flatten(&mut legacy, root, &generator);
-    let legacy_counts: std::collections::BTreeMap<_, _> =
-        crate::lambda::lam_pass_exits::count_helper(&legacy, expected)
-            .into_iter()
-            .map(|(label, count)| (label as u32, count))
-            .collect();
-    if counts != legacy_counts {
+    let legacy_counts = crate::lambda::lam_pass_exits::count_helper(&legacy, expected);
+    if counts.iter().filter(|&&count| count != 0).count() != legacy_counts.len()
+        || legacy_counts.iter().any(|(&label, &count)| {
+            imported.arena.pools.catch_labels.get(&(label as u32))
+                .and_then(|header| counts.get(header.index())) != Some(&count)
+        })
+    {
         anyhow::bail!("{unit}: lambda-exits ordered count mismatch");
     }
     let expected = crate::lambda::lam_pass_exits::simplify_exits(&mut legacy, expected, &generator);
@@ -910,9 +915,73 @@ pub(crate) enum LowerCheck {
 }
 
 pub(crate) struct LowerPair {
+    pub stats: super::lower::SwitchStats,
     pub before: [crate::js_ir::arena::JsDepsProgram; 2],
     pub after: [crate::js_ir::arena::JsDepsProgram; 2],
     pub locations: Option<std::sync::Arc<crate::lambda::LamLocTable>>,
+}
+
+/// What the new lowering hands to the shared tail of the gate.
+pub(crate) struct LowerCandidate {
+    pub arena: crate::js_ir::arena::JsArena,
+    /// The top-level statements, effects of the last value included.
+    pub block: Vec<crate::js_ir::arena::Stmt>,
+    /// The exported identifiers after the lowering's coercion, and the
+    /// original identifiers whose names they reserve.
+    pub exports: Vec<crate::ident::Ident>,
+    pub reservations: Vec<crate::ident::Ident>,
+    pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
+    pub stats: super::lower::SwitchStats,
+    /// Step A's decision per declaration, with the identifier it prints as.
+    pub decisions: Vec<(crate::ident::Ident, super::lower::scope::Decision)>,
+    /// The references of `arena` the lowering decided to print as
+    /// `globalThis.name` (`lower::globals`, `bridge_j::qualify`).
+    pub qualified: Vec<crate::js_ir::arena::Expr>,
+}
+
+/// Step A's decisions (`lower::close`) against the legacy tail-call pass's
+/// on `program`, the program that pass receives on the new side (the
+/// lowering's references to shadowed globals qualified, then the flatten
+/// pass): the same identifiers on both sides, so the
+/// comparison is by declared identifier. A difference is a finding, counted
+/// in the report, not a failure of the gate: the legacy pass still decides.
+/// Check mode only. One hash lookup per row and per legacy identifier; the
+/// identifiers are those of the legacy JS IR, which has no dense index.
+pub(crate) fn compare_decisions(
+    decisions: &[(crate::ident::Ident, super::lower::scope::Decision)],
+    program: &crate::js_ir::arena::JsProgram,
+) -> super::lower::DecisionStats {
+    use ahash::AHashMap;
+    let legacy = crate::lambda::js_pass_tailcall_inline::decisions(program);
+    let mut stats = super::lower::DecisionStats { decision_rows: decisions.len(), decision_legacy: legacy.len(), ..Default::default() };
+    // Per identifier: its rows and the sum of their counts.
+    let mut rows: AHashMap<crate::ident::Ident, (u32, u64)> = AHashMap::with_capacity(decisions.len());
+    for (ident, decision) in decisions {
+        let row = rows.entry(*ident).or_default();
+        row.0 += 1;
+        row.1 += u64::from(decision.built());
+        stats.decision_inline += usize::from(decision.inline());
+        let Some(&(status, _, inline)) = legacy.get(ident) else {
+            stats.decision_extra += 1;
+            continue;
+        };
+        if decision.status() != status as u32 {
+            stats.decision_status_differences += 1;
+        } else if decision.inline() != inline {
+            stats.decision_site_differences += 1;
+        }
+    }
+    for (ident, &(_, count, inline)) in &legacy {
+        stats.decision_legacy_inline += usize::from(inline);
+        match rows.get(ident) {
+            None => stats.decision_missing += 1,
+            Some(&(copies, built)) => {
+                stats.decision_copied += usize::from(copies > 1);
+                stats.decision_count_differences += usize::from(built != count as u64);
+            }
+        }
+    }
+    stats
 }
 
 /// Import exactly the simplified root about to enter legacy compile_expr.
@@ -923,14 +992,7 @@ pub(crate) fn prepare_lower(
     resolver: Option<&crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
     check_div_by_zero: bool,
-) -> Result<
-    (
-        crate::js_ir::arena::JsArena,
-        crate::lambda::lam_compile::Compiled,
-        Vec<crate::js_ir::ModuleId>,
-    ),
-    LowerFailure,
-> {
+) -> Result<LowerCandidate, LowerFailure> {
     let (input, catch_only) = super::bridge::import_for_lowering(arena, root);
     let input = input.map_err(|reason| match reason.0 {
         "shared Lambda subtree with binder" | "shared Lambda expansion" => LowerFailure::Unsupported(reason, catch_only),
@@ -943,8 +1005,8 @@ pub(crate) fn prepare_lower(
         .validate(Some(lowered.program.root))
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower validation: {error}")))?;
     // bridge_j's exporter uses expr_with/stmt_with and alloc_* only: no
-    // smart constructor and no normalize. The last SExp transports Out::value.
-    let mut exported = super::bridge_j::export_js(&lowered.program)
+    // smart constructor and no normalize.
+    let super::bridge_j::Exported { program: exported, qualified } = super::bridge_j::export_lowered(&lowered.program)
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower export: {error}")))?;
     super::j::write_stats(lowered.program.arena.j_stats)
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("J normalisation stats: {error}")))?;
@@ -960,30 +1022,35 @@ pub(crate) fn prepare_lower(
         compare_lower_text("P1", "probe vs direct", &print(&direct), &print(&exported))
             .map_err(LowerFailure::Error)?;
     }
-    let value =
-        exported.program.block.pop().ok_or_else(|| {
-            LowerFailure::Error(anyhow::anyhow!("lower export lacks output value"))
-        })?;
-    let crate::js_ir::arena::StmtKind::Exp(expr) = exported.program.arena.sk(value) else {
-        return Err(LowerFailure::Error(anyhow::anyhow!(
-            "lower export value is not SExp"
-        )));
-    };
-    use crate::lambda::lam_compile::OutputFinished;
-    let finished = match lowered.finished {
-        super::lower::Finished::True => OutputFinished::True,
-        super::lower::Finished::False => OutputFinished::False,
-        super::lower::Finished::Dummy => OutputFinished::Dummy,
-    };
-    Ok((
-        exported.program.arena,
-        crate::lambda::lam_compile::Compiled {
-            prelude: exported.program.block,
-            expr,
-            finished,
-        },
-        lowered.dynamic_imports,
-    ))
+    let scope = lowered.program.arena.js_scope.as_ref().expect("lowering scope");
+    // A statement the lowering moves out of a copied list is copied, and
+    // decided, again: the last decision of a variable is the one that stands.
+    let mut last = vec![u32::MAX; lowered.program.arena.vars.len()];
+    for (index, decision) in scope.decisions.iter().enumerate() {
+        last[decision.var.index()] = index as u32;
+    }
+    let decisions: Vec<_> = scope
+        .decisions
+        .iter()
+        .enumerate()
+        .filter(|(index, decision)| last[decision.var.index()] == *index as u32)
+        .map(|(_, decision)| {
+            let origin = lowered.program.arena.vars.j_origin[decision.var.index()];
+            (lowered.program.idents[origin.index()], *decision)
+        })
+        .collect();
+    let mut stats = lowered.switch_stats;
+    stats.decisions.decision_reclosed = scope.decisions.len() - decisions.len();
+    Ok(LowerCandidate {
+        decisions,
+        qualified,
+        arena: exported.program.arena,
+        block: exported.program.block,
+        exports: lowered.coerced.exports,
+        reservations: lowered.coerced.reservations,
+        dynamic_imports: lowered.dynamic_imports,
+        stats,
+    })
 }
 
 /// Two independent texts through the legacy ES module printer; when requested,
@@ -997,7 +1064,7 @@ pub(crate) fn check_lower(check: LowerCheck, unit: &str, jsx_preserve: bool) -> 
             Err(anyhow::anyhow!("{unit}: lower: {error:#}"))
         }
         LowerCheck::Supported(pair) => {
-            let LowerPair { before, after, locations } = *pair;
+            let LowerPair { before, after, locations, stats } = *pair;
             for (text, pair) in [("lower", before), ("lower+passes", after)] {
                 let print = |p| {
                     crate::js_ir::print_deps_program_with_directives_and_options(
@@ -1022,7 +1089,7 @@ pub(crate) fn check_lower(check: LowerCheck, unit: &str, jsx_preserve: bool) -> 
                     compare_lower_text(unit, &format!("{text} mappings"), &left_map.unwrap_or_default(), &right_map.unwrap_or_default())?;
                 }
             }
-            report(unit, "lower", None, None)
+            write_report(unit, "lower", None, None, None, false, Some(stats))
         }
     }
 }
@@ -1071,9 +1138,9 @@ mod lower_tests {
             let same = [empty.clone(), empty.clone()];
             let different = [empty.clone(), changed.clone()];
             let check = if after_changed {
-                LowerCheck::Supported(Box::new(LowerPair { before: same, after: different, locations: None }))
+                LowerCheck::Supported(Box::new(LowerPair { before: same, after: different, locations: None, stats: Default::default() }))
             } else {
-                LowerCheck::Supported(Box::new(LowerPair { before: different, after: same, locations: None }))
+                LowerCheck::Supported(Box::new(LowerPair { before: different, after: same, locations: None, stats: Default::default() }))
             };
             let text = if after_changed { "lower+passes" } else { "lower" };
             let error = check_lower(check, "Gate.res", false).unwrap_err().to_string();

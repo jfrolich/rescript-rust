@@ -1,0 +1,1 @@
+- Lower external calls, argument conversions, object fields and eligible cross-module inline bodies through the opt-in BIR backend.

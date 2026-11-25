@@ -288,6 +288,9 @@ pub struct TypedArena {
     signature_items: ListPool<TypedSignatureItem>,
     exp_colds: Vec<ExpCold>,
     pat_colds: Vec<PatCold>,
+    /// What the checker recorded for `Tstr_derived` items, indexed by the
+    /// plan's handles.
+    pub derived: crate::types::derived::DerivedTable,
 }
 
 /// Accessors for the cold data of expressions and patterns. Records are

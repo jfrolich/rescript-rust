@@ -1,16 +1,34 @@
 //! Continuations for the level-L to level-J lowering (BACKEND_LOWERING §1).
 //! Context references are indices, never references into growing state pools.
 mod args;
+mod assign;
+mod loops;
+mod label;
+mod try_;
+mod ffi_args;
+mod external;
 mod call;
+mod close;
 mod cond;
+mod exit;
+mod export;
+mod globals;
+#[cfg(test)]
+pub(crate) mod names;
 mod expr;
 mod konst;
 mod prim;
 mod record;
+mod rec;
+mod tail;
 mod import;
 mod jsx;
 mod prim_cmp;
 mod prim_block;
+mod switch;
+mod variant;
+mod untagged;
+mod location;
 #[cfg(test)]
 mod oracle_tests;
 pub mod out;
@@ -169,6 +187,10 @@ pub enum ProbePlan<R> {
 pub trait ProbeRules {
     /// Decoded operands required after visiting children.
     type Resume;
+    /// O(1): observe source entry for symbolic label scheduling.
+    fn source_enter(&mut self, _cx: Cx, _node: NodeId) {}
+    /// O(arity): compose symbolic events after one completed lowering.
+    fn source_leave(&mut self, _output: &Probed) {}
     /// K1: C:1529 compile_expr; inspect and lower a source node exactly once.
     fn enter(
         &mut self,
@@ -177,6 +199,9 @@ pub trait ProbeRules {
     ) -> Result<ProbePlan<Self::Resume>, super::bridge::Unsupported>;
     /// K1/K2: C:1529 compile_expr / C:4603 compile_effect_output; child order.
     fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);
+    /// Resolve a child continuation after preceding siblings have completed.
+    /// O(1); string-switch V allocates its result after lowering the scrutinee.
+    fn child_context(&self, cx: Cx, _resume: &Self::Resume, _index: usize) -> Cx { cx }
     /// K4/K2: C:2411 compile_let_binding_output / C:4603 compile_effect_output.
     /// Consume a child's result before entering its next sibling when required.
     fn child(&mut self, _cx: Cx, _resume: &Self::Resume, _index: usize, output: Probed) -> Probed {
@@ -209,6 +234,7 @@ impl SourceProbe {
     ) -> Result<Probed, super::bridge::Unsupported> {
         enum Work<R> {
             Enter(Cx, NodeId),
+            EnterChild(Cx, NodeId, usize, usize),
             Finish(Cx, R, usize),
             Child(Cx, usize, usize),
         }
@@ -216,18 +242,27 @@ impl SourceProbe {
         let mut values = Vec::new();
         let mut children = Vec::new();
         while let Some(task) = work.pop() {
+            let task = match task {
+                Work::EnterChild(cx, node, parent, index) => {
+                    let Work::Finish(_, resume, _) = &work[parent] else { unreachable!("parent resume") };
+                    Work::Enter(rules.child_context(cx, resume, index), node)
+                }
+                task => task,
+            };
             match task {
+                Work::EnterChild(..) => unreachable!("resolved child context"),
                 Work::Enter(cx, node) => {
                     self.steps += 1;
+                    rules.source_enter(cx, node);
                     match rules.enter(cx, node)? {
-                        ProbePlan::Ready(value) => values.push(value),
+                        ProbePlan::Ready(value) => { rules.source_leave(&value); values.push(value); },
                         ProbePlan::Children(resume) => {
                             rules.children(cx, &resume, &mut children);
                             let parent = work.len();
                             work.push(Work::Finish(cx, resume, children.len()));
                             for (index, (cx, node)) in children.drain(..).enumerate().rev() {
                                 work.push(Work::Child(cx, parent, index));
-                                work.push(Work::Enter(cx, node));
+                                work.push(Work::EnterChild(cx, node, parent, index));
                             }
                         }
                     }
@@ -237,6 +272,7 @@ impl SourceProbe {
                         unreachable!("parent resume frame")
                     };
                     let child = values.pop().expect("completed source child");
+                    let cx = rules.child_context(cx, resume, index);
                     values.push(rules.child(cx, resume, index, child));
                 }
                 Work::Finish(cx, resume, count) => {
@@ -245,6 +281,7 @@ impl SourceProbe {
                         .checked_sub(count)
                         .expect("source probe children");
                     let value = rules.finish(cx, resume, values.drain(start..))?;
+                    rules.source_leave(&value);
                     values.push(value);
                 }
             }
@@ -254,18 +291,77 @@ impl SourceProbe {
     }
 }
 
-/// N1: C:663 compile_deps_program_in_arena. The final statement is a plain
-/// SExp carrying Out::value for the migration exporter, not an emitted effect.
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub(crate) struct SwitchStats {
+    pub source_visits: usize,
+    pub fingerprint_visits: usize,
+    pub comparisons: usize,
+    pub compared_pairs: usize,
+    pub location_visits: usize,
+    /// Steps of `close::decide` over every copied run.
+    pub close_steps: usize,
+    /// Statements copied into lists (`StatementStack::copied`): a moved
+    /// statement is copied, and decided, once per move.
+    pub statements_copied: usize,
+    /// References to JavaScript globals the lowering marked to print as
+    /// `globalThis.name`, and the steps of that decision
+    /// (`globals::decide`).
+    pub globals_qualified: usize,
+    pub global_steps: usize,
+    /// Step A against the legacy tail-call pass (`shadow::compare_decisions`),
+    /// zero until check mode compares.
+    #[serde(flatten)]
+    pub decisions: DecisionStats,
+}
+
+/// The decisions of step A (`close::decide`) compared with those of the
+/// legacy tail-call pass on the same program after the flatten and
+/// external-shadow passes, by declared identifier (THREE_TREES 11.4, "T4c
+/// design" (a) and (b)).
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub(crate) struct DecisionStats {
+    /// Declarations the lowering decided, each counted once.
+    pub decision_rows: usize,
+    /// Decisions replaced by a later one of the same variable: its
+    /// statement was moved out of a copied list and copied again.
+    pub decision_reclosed: usize,
+    /// Identifiers the legacy pass gives a status.
+    pub decision_legacy: usize,
+    /// Rows whose identifier the legacy pass does not see declared.
+    pub decision_extra: usize,
+    /// Identifiers of the legacy pass without a row.
+    pub decision_missing: usize,
+    /// Identifiers with more than one row: copies that print alike.
+    pub decision_copied: usize,
+    /// Identifiers whose `built`, summed over their rows, is not the count
+    /// the legacy pass reads.
+    pub decision_count_differences: usize,
+    /// Rows whose status is not the legacy status of their identifier.
+    pub decision_status_differences: usize,
+    /// Rows with the legacy status whose inline candidacy (a recorded site)
+    /// is not the legacy pass's.
+    pub decision_site_differences: usize,
+    /// Rows the lowering would inline, and identifiers the legacy pass
+    /// keeps for inlining.
+    pub decision_inline: usize,
+    pub decision_legacy_inline: usize,
+}
+
 pub(crate) struct Lowered {
     pub program: super::bridge_j::Imported,
+    /// Read by the rule tests against the legacy output's flag.
+    #[cfg(test)]
     pub finished: Finished,
+    /// The exports after coercion and the names they reserve (`export.rs`).
+    pub coerced: export::Coerced,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
+    pub switch_stats: SwitchStats,
 }
 
 /// N1: C:663 compile_deps_program_in_arena; one fresh J arena for this migration cut.
 #[cfg(test)]
 pub(crate) fn lower(
-    input: super::bridge::Imported,
+    input: super::bridge::ForLowering,
     locations: Option<&crate::lambda::LamLocTable>,
     direct: bool,
 ) -> Result<Lowered, Unsupported> {
@@ -274,7 +370,7 @@ pub(crate) fn lower(
 
 /// H2: C:1266 compile_external_field_apply; summaries are read-only inputs.
 pub(crate) fn lower_with_resolver(
-    input: super::bridge::Imported,
+    input: super::bridge::ForLowering,
     locations: Option<&crate::lambda::LamLocTable>,
     direct: bool,
     resolver: Option<&crate::js_ir::ModulePathResolver>,
@@ -292,6 +388,28 @@ enum ModuleConstants {
 }
 
 struct State {
+    tail_arguments: usize,
+    tail_parameters: usize,
+    tail_sort_comparisons: usize,
+    tail_body_statements: usize,
+    tail_frames: Vec<tail::Frame>,
+    tail_functions: Vec<Option<LoopRef>>,
+    tail_copies: Vec<Option<VarId>>,
+    tail_assignments: Vec<NodeId>,
+    tail_order: Vec<VarId>,
+    rec_members: Vec<rec::Member>,
+    rec_steps: usize,
+    switches: Vec<Option<switch::Plan>>,
+    variants: Vec<Option<variant::Plan>>,
+    untagged: Vec<Option<untagged::Plan>>,
+    switch_facts: Vec<switch::Facts>,
+    switch_work: Vec<(NodeId, bool)>,
+    switch_pairs: Vec<(NodeId, NodeId)>,
+    switch_primitive_hashes: Vec<u64>,
+    switch_constant_hashes: Vec<u64>,
+    switch_comparisons: usize,
+    switch_compared: usize,
+    switch_visits: usize,
     source: Bir,
     arena: Bir,
     idents: Vec<Ident>,
@@ -301,6 +419,11 @@ struct State {
     invalid_module_paths: Vec<bool>,
     awaited_units: Vec<bool>,
     dynamic_imports: Vec<crate::js_ir::ModuleId>,
+    external_references: Vec<Option<crate::bir::ImportId>>,
+    external_globals: Vec<Option<VarId>>,
+    inline_globals: Vec<Ident>,
+    inline_scratch: crate::bir::l::beta::Scratch,
+    external_bindings: Vec<[Option<VarId>; 2]>,
     module_constants: Vec<ModuleConstants>,
     direct: bool,
     located_functions: Vec<bool>,
@@ -309,12 +432,35 @@ struct State {
     cross_module_inline: bool,
     check_div_by_zero: bool,
     locations: Option<crate::lambda::LamLocTable>,
+    switch_locations: Vec<location::Fact>,
+    location_work: Vec<(NodeId,bool)>,
+    location_steps: usize,
     sequence_steps: usize,
     primitive_steps: usize,
     /// Let/Seq nodes read by row R5 step 0 of section 3.6.
     spine_steps: usize,
     /// Reused by the J rules that push onto a vector.
     scratch: Vec<NodeId>,
+    /// 4.1: the jump table, indexed by catch header; grown where a catch is
+    /// entered and the unit has more headers than entries.
+    jumps: Vec<exit::Jump>,
+    /// The handlers of the catches being lowered, a stack of flattened tables.
+    catch_table: Vec<(NodeId, crate::bir::CatchId)>,
+    catches: Vec<Option<exit::Plan>>,
+    tries: Vec<try_::Plan>,
+    loops: Vec<loops::Plan>,
+    next_loop_label: u32,
+    labels: label::Schedule,
+    try_form_reads: usize,
+    catch_work: Vec<NodeId>,
+    /// `HAS_EXIT` reads that decided a flattening or a form.
+    catch_flag_reads: usize,
+    /// Handler nodes read to find the label of an exit (4.1 step 1).
+    catch_walk_steps: usize,
+    /// The variables of the export blocks, as the importer recorded them.
+    export_vars: Vec<u32>,
+    /// The tables of the export fold (`export.rs`).
+    coercion: export::Tables,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -323,7 +469,9 @@ impl State {
         let mut arena = Bir::default();
         arena.begin_bulk();
         arena.pools = std::mem::take(&mut input.arena.pools);
-        arena.func_owners.resize(arena.pools.funcs.len(), None);
+        arena.vars.funcs = std::mem::take(&mut input.arena.vars.funcs);
+        arena.vars.function_params = std::mem::take(&mut input.arena.vars.function_params);
+        arena.func_owners.resize(arena.vars.funcs.len(), None);
         for i in 0..input.arena.vars.len() {
             let var = VarId(i as u32);
             let made = arena.new_var_id(input.arena.vars.name(var), input.arena.vars.order(var));
@@ -344,9 +492,22 @@ impl State {
             .map(|i| input.arena.vars.order(VarId(i as u32)))
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
+            tail_arguments: 0, tail_parameters: 0, tail_sort_comparisons: 0, tail_body_statements: 0,
+            tail_frames: Vec::new(), tail_functions: Vec::new(), tail_copies: Vec::new(),
+            tail_assignments: Vec::new(), tail_order: Vec::new(),
+            rec_members: Vec::new(), rec_steps: 0,
+            switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],
+            switches: Vec::new(), variants: Vec::new(), untagged: Vec::new(), switch_work: Vec::new(), switch_pairs: Vec::new(),
+            switch_primitive_hashes: Vec::new(), switch_constant_hashes: Vec::new(),
+            switch_comparisons: 0, switch_compared: 0, switch_visits: 0,
             invalid_module_paths: vec![false; input.arena.nodes.len()],
             awaited_units: vec![false; input.arena.vars.len()],
             dynamic_imports: Vec::new(),
+            external_references: Vec::new(),
+            external_globals: Vec::new(),
+            inline_globals: Vec::new(),
+            inline_scratch: Default::default(),
+            external_bindings: Vec::new(),
             module_constants: (0..arena.pools.j_modules.len()).map(|_| ModuleConstants::Unread).collect(),
             source: input.arena,
             arena,
@@ -361,10 +522,24 @@ impl State {
             cross_module_inline: false,
             check_div_by_zero: true,
             locations: None,
+            switch_locations: Vec::new(), location_work: Vec::new(), location_steps: 0,
             sequence_steps: 0,
             primitive_steps: 0,
             spine_steps: 0,
             scratch: Vec::new(),
+            jumps: Vec::new(),
+            catch_table: Vec::new(),
+            catches: Vec::new(),
+            tries: Vec::new(),
+            loops: Vec::new(),
+            next_loop_label: 0,
+            labels: label::Schedule::default(),
+            try_form_reads: 0,
+            catch_work: Vec::new(),
+            catch_flag_reads: 0,
+            catch_walk_steps: 0,
+            export_vars: input.export_vars,
+            coercion: Default::default(),
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -387,6 +562,7 @@ impl State {
         let mut traversal = SourceProbe::default();
         let output = traversal.probe(self, cx, node);
         self.source_steps += traversal.steps;
+        if output.is_ok() { self.finish_labels(); }
         output
     }
     /// K2/K6: C:4715 append_effect_output / C:5144 compile_if_return_output.
@@ -407,8 +583,34 @@ impl State {
         self.statements.append(first, second, value)
     }
 
-    /// N1: C:663 compile_deps_program_in_arena. Export transports the last value
-    /// in a plain sentinel SExp removed before export extraction and coercion.
+    /// N1: C:663 compile_deps_program_in_arena, the unit: the last value is
+    /// read for the exports (`export.rs`). Cost: that of `extract_exports`
+    /// and of `finish`.
+    fn complete_unit(mut self, probed: Probed) -> Lowered {
+        let out = self.realize(Cx::value(), probed);
+        let exports = self.extract_exports(out.value, out.finished);
+        let run = self.statements.since(Span {
+            start: out.stmts.start,
+            len: 0,
+        });
+        let (list, coerced) = match exports {
+            Some(exports) if !exports.is_empty() => {
+                let coerced = self.coerce_exports(run, exports, out.finished);
+                let list = self.coerced_list(run);
+                self.statements.close(&mut self.arena, list);
+                (list, coerced)
+            }
+            _ => (
+                self.statements.take_list(&mut self.arena, run),
+                export::Coerced::default(),
+            ),
+        };
+        self.finish(list, out.finished, coerced)
+    }
+
+    /// The output of one construct in `cx`, for the rule tests: the value is
+    /// carried by a plain sentinel SExp after the statements.
+    #[cfg(test)]
     fn complete(mut self, cx: Cx, probed: Probed) -> Lowered {
         let out = self.realize(cx, probed);
         let value = out
@@ -421,17 +623,56 @@ impl State {
             len: 0,
         });
         let list = self.statements.take_list(&mut self.arena, run);
+        self.finish(list, out.finished, export::Coerced::default())
+    }
+
+    /// The root block over the top-level list. One step per statement of
+    /// the list and one write per catch of the unit.
+    fn finish(mut self, list: crate::bir::ListId, _finished: Finished, coerced: export::Coerced) -> Lowered {
+        #[cfg(test)]
+        let coerced = export::Coerced {
+            steps: self.coercion.steps,
+            site_visits: self.coercion.site_visits,
+            ..coerced
+        };
         let root = self.arena.block_from_list(list);
+        // The headers keep their labels and parameters; the exits they count
+        // stay in the source, which reads the counts while a function of
+        // another module is inlined. One write per catch of the unit.
+        for header in &mut self.arena.pools.catches {
+            header.uses = 0;
+        }
         self.arena.finish_bulk(root);
+        // THREE_TREES 11.4, "T5 design": every list is the one the flatten
+        // pass receives, so the bindings around a reference are final.
+        globals::decide(&mut self.arena, &self.idents);
+        let (close_steps, globals_qualified, global_steps) = self.arena.js_scope.as_ref()
+            .map_or((0, 0, 0), |scope| (scope.close_steps, scope.globals.qualified, scope.globals.steps));
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
-            finished: out.finished,
+            #[cfg(test)]
+            finished: _finished,
+            coerced,
             dynamic_imports: self.dynamic_imports,
+            switch_stats: SwitchStats {
+                source_visits: self.source_steps,
+                fingerprint_visits: self.switch_visits,
+                comparisons: self.switch_comparisons,
+                compared_pairs: self.switch_compared,
+                location_visits: self.location_steps,
+                close_steps,
+                statements_copied: self.statements.copied,
+                globals_qualified,
+                global_steps,
+                decisions: DecisionStats::default(),
+            },
         }
     }
 }
 
 impl ProbeRules for State {
+    fn source_enter(&mut self, cx: Cx, node: NodeId) { self.label_enter(cx, node); }
+    fn source_leave(&mut self, output: &Probed) { self.label_leave(output); }
     type Resume = expr::Resume;
     /// K1/H12: C:1529 compile_expr and K:60 compile_constant.
     fn enter(&mut self, cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume>, Unsupported> {
@@ -446,18 +687,14 @@ impl ProbeRules for State {
             ),
             View::Const { value } => self.constant(value),
             View::Apply { callee, args, info } => {
-                // K7: C:4558 try_compile_self_tailcall_block. S3.6 owns the
-                // loop record and matching callee; no such record exists yet.
-                if matches!(cx.cont, Cont::Value(Tail::Return(Ret::Named { loop_: Some(_), .. }))
-                    | Cont::Effect(Tail::Return(Ret::Named { loop_: Some(_), .. }))) {
-                    return Err(Unsupported("let rec"));
-                }
                 let args = args.to_vec();
-                let call = self.application(callee, &args, info)?;
+                let tail = self.self_call(cx, callee);
+                let mut call = self.application(cx, callee, &args, info)?;
+                call.tail = tail;
                 return Ok(ProbePlan::Children(expr::Resume::Call(call)));
             }
             View::Fun { body, header } => {
-                return Ok(ProbePlan::Children(expr::Resume::Fun { body, header }));
+                return Ok(ProbePlan::Children(expr::Resume::Fun { body, header, loop_: self.tail_functions.get(node.index()).copied().flatten() }));
             }
             View::Let { var, value, body } => {
                 if let Some(value) = value { self.record_awaited_unit(var, value); }
@@ -483,7 +720,7 @@ impl ProbeRules for State {
             View::Seq { first, second } => {
                 return Ok(ProbePlan::Children(expr::Resume::Seq { first, second }));
             }
-            View::LetRec { .. } => return Err(Unsupported("let rec")),
+            View::LetRec { .. } => return Ok(ProbePlan::Children(expr::Resume::Rec(self.recursive_group(node)?))),
             View::Prim { primitive, args }
                 if matches!(
                     self.arena.primitive(primitive).primitive,
@@ -510,37 +747,44 @@ impl ProbeRules for State {
                         return Ok(ProbePlan::Ready(self.probe_leaf(cx, value)));
                     }
                 }
-                let reason = match &self.arena.primitive(primitive).primitive {
-                    Primitive::Psequand | Primitive::Psequor => {
-                        unreachable!("short circuits are lowered above")
-                    }
-                    Primitive::PjsCall(_)
-                    | Primitive::PjsApply
-                    | Primitive::PjsObjectCreate(_)
-                    | Primitive::PjsObjectGet(_)
-                    | Primitive::PjsObjectSet(_)
-                    | Primitive::PjsFnMethod => "external",
-                    _ => return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
-                        primitive, operands: self.source.node(node).primitive_arguments(),
-                    }))),
-                };
-                return Err(Unsupported(reason));
+                return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
+                    primitive, operands: self.source.node(node).primitive_arguments(),
+                })));
             }
             View::If { condition, then_, else_ } => {
                 let conditional = self.conditional(cx, cond::Kind::If, condition, then_, else_)?;
                 return Ok(ProbePlan::Children(expr::Resume::If(conditional)));
             }
-            View::Switch { .. } => return Err(Unsupported("switch")),
-            View::StrSwitch { .. } => return Err(Unsupported("string switch")),
-            View::Catch { .. } | View::Exit { .. } => return Err(Unsupported("static catch")),
-            View::Try { .. } | View::TryFinally { .. } => return Err(Unsupported("try")),
-            View::While { .. }
-            | View::For { .. }
-            | View::ForOf { .. }
-            | View::ForAwaitOf { .. }
-            | View::Break
-            | View::Continue => return Err(Unsupported("loop")),
-            View::Assign { .. } => return Err(Unsupported("assign")),
+            View::Switch { scrutinee, header, .. } => {
+                let operands = self.source.node(node).switch_actions();
+                if matches!(self.arena.switch(header).dispatch, crate::lambda::SwitchDispatch::Variant(_)) {
+                    if variant::shares_a_tag(self.arena.switch(header)) {
+                        return Err(Unsupported("variant cases that share a tag"));
+                    }
+                    if variant::is_untagged(self.arena.switch(header)) {
+                        return Ok(ProbePlan::Children(expr::Resume::Untagged(self.untagged_switch(cx, scrutinee, operands, header)?)));
+                    }
+                    return Ok(ProbePlan::Children(expr::Resume::Variant(self.named_variant(cx, scrutinee, operands, header)?)));
+                }
+                return Ok(ProbePlan::Children(expr::Resume::Switch(self.integer_switch(cx, scrutinee, operands, header)?)));
+            }
+            View::StrSwitch { scrutinee, header, .. } => {
+                let operands = self.source.node(node).switch_actions();
+                return Ok(ProbePlan::Children(expr::Resume::Switch(self.string_switch(cx, scrutinee, operands, header)?)));
+            }
+            View::Catch { .. } => {
+                return Ok(ProbePlan::Children(expr::Resume::Catch(self.catch(cx, node))));
+            }
+            View::Exit { label, .. } => {
+                let args = self.source.node(node).exit_arguments();
+                return Ok(ProbePlan::Children(expr::Resume::Exit(self.exit(label, args))));
+            }
+            View::Try { body, exception, handler } => return Ok(ProbePlan::Children(expr::Resume::Try(self.try_statement(cx, body, Some(exception), Some(handler), None)))),
+            View::TryFinally { body, finaliser } => return Ok(ProbePlan::Children(expr::Resume::Try(self.compile_try_finally(cx, body, finaliser)))),
+            View::While { .. } | View::For { .. } | View::ForOf { .. } | View::ForAwaitOf { .. } => return Ok(ProbePlan::Children(expr::Resume::Loop(self.loop_statement(cx, node)))),
+            View::Break => return Ok(ProbePlan::Ready(self.loop_jump(cx, false)?)),
+            View::Continue => return Ok(ProbePlan::Ready(self.loop_jump(cx, true)?)),
+            View::Assign { var, value } => return Ok(ProbePlan::Children(expr::Resume::Assign { var, value })),
             View::JBin { .. }
             | View::JNot { .. }
             | View::JBnot { .. }
@@ -598,6 +842,13 @@ impl ProbeRules for State {
     /// K4/K2/K10: C:2411 compile_let_binding_output / C:4603 compile_effect_output / C:1997 with_function_scope.
     fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>) {
         self.expression_children(cx, resume, into);
+    }
+    /// V: compile_string_switch_inner. O(1), after the scrutinee allocates
+    /// its temporaries and the switch result obtains its identity.
+    fn child_context(&self, cx: Cx, resume: &Self::Resume, index: usize) -> Cx {
+        if let expr::Resume::Switch(frame) = resume {
+            self.switch_child_context(cx, *frame, index)
+        } else { cx }
     }
     /// K4/K2: C:2411 compile_let_binding_output / C:4603 compile_effect_output.
     fn child(&mut self, cx: Cx, resume: &Self::Resume, index: usize, output: Probed) -> Probed {

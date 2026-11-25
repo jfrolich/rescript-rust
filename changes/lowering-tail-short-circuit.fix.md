@@ -1,0 +1,1 @@
+- Preserve conditional short-circuit returns inside tail-recursive functions, matching the reference compiler.

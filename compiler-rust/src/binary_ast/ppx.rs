@@ -1222,8 +1222,8 @@ fn check_constant(
     warnings: &mut Vec<PpxWarning>,
     arena: &ParseArena,
 ) {
-    if let Constant::Integer(s, None) = constant {
-        if !crate::types::typecore::int32_literal_fits_ocaml(arena.get_string(*s)) {
+    if let Some(digits) = constant.integer_digits() {
+        if !crate::types::typecore::int32_literal_fits_ocaml(arena.get_string(digits)) {
             warnings.push(PpxWarning {
                 loc,
                 warning: Warning::BsIntegerLiteralOverflow,
@@ -1395,6 +1395,30 @@ macro_rules! validation_methods {
                             arena,
                         );
                         self.attributes(arena, expr.pexp_attributes.as_slice());
+                    }
+                }
+                ExpressionDesc::Pexp_await(operand) => self.expr(arena, *operand),
+                ExpressionDesc::Pexp_let((flag, bindings, body)) => {
+                    if let Some(binding) = crate::parser::parsetree_viewer::single_record_binding(arena, *flag, *bindings) {
+                        self.attributes(arena, expr.pexp_attributes.as_slice());
+                        self.attributes(arena, binding.pvb_attributes.as_slice());
+                        self.expr(arena, binding.pvb_expr);
+                        self.pat(arena, binding.pvb_pat);
+                        self.expr(arena, *body);
+                    } else {
+                        super::ast_iter::walk_expr(self, arena, idx);
+                    }
+                }
+                ExpressionDesc::Pexp_match((scrutinee, cases)) => {
+                    if let Some((yes, no)) = crate::parser::parsetree_viewer::boolean_match_arms(arena, *cases) {
+                        // The old conditional expansion discarded the patterns and
+                        // visited branches in boolean order (bs_builtin_ppx.ml:138-167).
+                        self.attributes(arena, expr.pexp_attributes.as_slice());
+                        self.expr(arena, *scrutinee);
+                        self.expr(arena, yes);
+                        self.expr(arena, no);
+                    } else {
+                        super::ast_iter::walk_expr(self, arena, idx);
                     }
                 }
                 _ => super::ast_iter::walk_expr(self, arena, idx),
@@ -4763,8 +4787,9 @@ fn transform_inline_sig_value(
         ExpressionDesc::Pexp_constant(c) => match c {
             Constant::String(_) => None,
             // @inline(42) let x: t
-            Constant::Integer(s, None) => {
-                let i = arena.get_string(*s).parse::<i32>().ok()?;
+            Constant::Integer(_, None | Some('l')) => {
+                let digits = c.integer_digits().expect("machine integer");
+                let i = arena.get_string(digits).parse::<i32>().ok()?;
                 let prim = inline_int_primitive(i);
                 Some(ValueDescription {
                     pval_jsx_component: None,
@@ -4878,8 +4903,9 @@ fn transform_inline_binding(
         ExpressionDesc::Pexp_constant(c) => match c {
             Constant::String(_) => None,
             // @inline let x = 42
-            Constant::Integer(s, None) => {
-                let i = arena.get_string(*s).parse::<i32>().ok()?;
+            Constant::Integer(_, None | Some('l')) => {
+                let digits = c.integer_digits().expect("machine integer");
+                let i = arena.get_string(digits).parse::<i32>().ok()?;
                 let prim = inline_int_primitive(i);
                 Some(StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
@@ -5634,6 +5660,7 @@ fn private_extension_item_allowed(item: &StructureItem, arena: &ParseArena) -> b
     match &item.pstr_desc {
         StructureItemDesc::Pstr_eval(_)
         | StructureItemDesc::Pstr_value(_)
+        | StructureItemDesc::Pstr_derived(_)
         | StructureItemDesc::Pstr_primitive(_)
         | StructureItemDesc::Pstr_typext(_)
         | StructureItemDesc::Pstr_exception(_) => true,
@@ -5775,43 +5802,6 @@ fn transform_await(inner: ExprIdx, loc: LocIdx, arena: &mut ParseArena) -> Expre
             transformed_jsx: false,
         }),
         pexp_loc: ghost_loc,
-        pexp_attributes: Attributes::new(),
-    }
-}
-
-/// Wrap expression with `Primitive_promise.unsafe_async(expr)`
-/// OCaml: ast_async.ml add_promise_type
-///
-/// OCaml uses the loc directly (not ghosted): `Ast_helper.Exp.ident ~loc` and
-/// `Ast_helper.Exp.apply ~loc`. All three uses of loc (pexp_ident.loc, ident.pexp_loc,
-/// apply.pexp_loc) share the same ppat_loc object for pointer-identity-based sharing.
-fn wrap_with_unsafe_async(inner: ExprIdx, loc: LocIdx, arena: &mut ParseArena) -> Expression {
-    // Create Primitive_promise.unsafe_async identifier
-    let promise_str = arena.intern_string("Primitive_promise");
-    let promise_lident = arena.push_lident_from_idx(promise_str);
-    let unsafe_async_lid = arena.push_ldot_static(promise_lident, "unsafe_async");
-
-    // OCaml uses the same loc object for all three positions
-    let func_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
-            txt: unsafe_async_lid,
-            loc,
-        }),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
-            funct: arena.push_expr(func_ident),
-            args: {
-                let items = [(ArgLabel::Nolabel, inner)];
-                arena.push_apply_args(&items)
-            },
-            partial: false,
-            transformed_jsx: false,
-        }),
-        pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
 }
@@ -6884,14 +6874,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     let attrs = rewrite_attributes(&pat.ppat_attributes, arena);
 
     let desc = match &pat.ppat_desc {
-        PatternDesc::Ppat_constant(c) => match c {
-            // Strip 'l' suffix from integer literals
-            Constant::Integer(s, Some('l')) => {
-                PatternDesc::Ppat_constant(Constant::Integer(*s, None))
-            }
-            // Other constants: no transformation needed
-            _ => PatternDesc::Ppat_constant(*c),
-        },
+        PatternDesc::Ppat_constant(c) => PatternDesc::Ppat_constant(*c),
 
         // Alias pattern: recurse into the aliased pattern
         PatternDesc::Ppat_alias(inner_idx, name) => {
@@ -7057,16 +7040,6 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     }
 }
 
-/// OCaml async rewriting uses the mapped lhs pattern location, and for
-/// `Ppat_var` that location is pointer-identical to `name.loc`. Keep the same
-/// identity when arena indices differ but location contents are equal.
-fn async_lhs_loc(lhs: &Pattern, _arena: &ParseArena) -> LocIdx {
-    if let PatternDesc::Ppat_var(name) = &lhs.ppat_desc {
-        return name.loc;
-    }
-    lhs.ppat_loc
-}
-
 fn split_this_attrs(attrs: &[Attribute], arena: &ParseArena) -> (bool, Vec<Attribute>) {
     let mut has_this = false;
     let mut remaining = Vec::new();
@@ -7129,15 +7102,7 @@ fn rewrite_method_callback_expression(
         arena.set_nary_fun_newtypes(first.p_pat, newtypes);
     }
 
-    // Ast_async.make_function_async, with the location of the mapped first
-    // pattern.
-    let rhs = if is_async {
-        let async_loc = async_lhs_loc(arena.get_pat(first.p_pat), arena);
-        let wrapped = wrap_with_unsafe_async(body, async_loc, arena);
-        arena.push_expr(wrapped)
-    } else {
-        body
-    };
+    let rhs = body;
     let method_body = Expression {
         pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
             arg_label: first.p_lbl,
@@ -7306,7 +7271,7 @@ fn pattern_needs_no_rewrite(arena: &ParseArena, idx: PatIdx) -> bool {
             .all(|p| pattern_needs_no_rewrite(arena, *p))
     };
     match &pat.ppat_desc {
-        PatternDesc::Ppat_constant(c) => !matches!(c, Constant::Integer(_, Some('l'))),
+        PatternDesc::Ppat_constant(_) => true,
         PatternDesc::Ppat_alias(inner, _) | PatternDesc::Ppat_exception(inner) => {
             pattern_needs_no_rewrite(arena, *inner)
         }
@@ -7397,27 +7362,14 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
     MAPPER_STEPS.with(|steps| steps.set(steps.get() + 1));
     let expr = arena.get_expr(idx);
     let loc = expr.pexp_loc;
-    match &expr.pexp_desc {
-        // bs_builtin_ppx.ml: `{e with pexp_desc = Pexp_constant
-        // (Pconst_integer (s, None))}`, the attributes as they are.
-        ExpressionDesc::Pexp_constant(Constant::Integer(digits, Some('l'))) => {
-            let expanded = Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(*digits, None)),
-                pexp_loc: loc,
-                pexp_attributes: expr.pexp_attributes.clone(),
-            };
-            return expand(arena, idx, expanded);
-        }
-        ExpressionDesc::Pexp_apply(apply) => {
-            if let Some((a, f)) = pipe_operands(arena, apply) {
-                let attrs = expr.pexp_attributes.clone();
-                rewrite_expr(a, arena);
-                rewrite_expr(f, arena);
-                let expanded = desugar_pipe(loc, &attrs, a, f, arena);
-                return expand(arena, idx, expanded);
-            }
-        }
-        _ => {}
+    if let ExpressionDesc::Pexp_apply(apply) = &expr.pexp_desc
+        && let Some((a, f)) = pipe_operands(arena, apply)
+    {
+        let attrs = expr.pexp_attributes.clone();
+        rewrite_expr(a, arena);
+        rewrite_expr(f, arena);
+        let expanded = desugar_pipe(loc, &attrs, a, f, arena);
+        return expand(arena, idx, expanded);
     }
     arena.mark_rewritten_expr_loc(loc);
 
@@ -7526,7 +7478,7 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
             let (rec_flag, bindings, body) = *inner;
             if rec_flag == RecFlag::Nonrecursive
                 && bindings.len() == 1
-                && rewrite_single_binding_let(idx, bindings, body, arena)
+                && rewrite_unwrap_binding_let(idx, bindings, body, arena)
             {
                 return;
             }
@@ -7552,26 +7504,6 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
 
         ExpressionDesc::Pexp_match(inner) => {
             let (scrutinee, cases) = *inner;
-            // bs_builtin_ppx.ml (lines 138-167):
-            //   switch b { | true => t | false => f }
-            // becomes
-            //   if b { t } else { f }
-            if let Some((t_exp, f_exp)) = boolean_match_arms(arena, cases) {
-                let attrs = arena.get_expr(idx).pexp_attributes.clone();
-                rewrite_expr(scrutinee, arena);
-                rewrite_expr(t_exp, arena);
-                rewrite_expr(f_exp, arena);
-                let expanded = Expression {
-                    pexp_desc: ExpressionDesc::Pexp_ifthenelse(Box::new((
-                        scrutinee,
-                        t_exp,
-                        Some(f_exp),
-                    ))),
-                    pexp_loc: loc,
-                    pexp_attributes: rewrite_attributes(&attrs, arena).into(),
-                };
-                return expand(arena, idx, expanded);
-            }
             rewrite_expr(scrutinee, arena);
             rewrite_cases(cases, arena).map(|cases| ExpressionDesc::Pexp_match((scrutinee, cases)))
         }
@@ -7758,16 +7690,10 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
             None
         }
 
-        // `await e` is `Primitive_promise.unsafe_await(e)`. OCaml's
-        // `create_await_expression` takes the ghost location from the
-        // operand as written, and makes a new expression without the
-        // attributes of the `Pexp_await` node.
         ExpressionDesc::Pexp_await(e) => {
-            let e = *e;
-            let e_loc = arena.get_expr(e).pexp_loc;
-            rewrite_expr(e, arena);
-            let expanded = transform_await(e, e_loc, arena);
-            return expand(arena, idx, expanded);
+            rewrite_expr(*e, arena);
+            // The old expansion discarded this node's attributes entirely.
+            return;
         }
 
         // The default mapper maps the packed module with `sub.module_expr`
@@ -7938,40 +7864,14 @@ fn rewrite_expr_list(list: ExprList, arena: &mut ParseArena) {
 /// in either order and without guards.
 ///
 /// Cost: constant.
-fn boolean_match_arms(arena: &ParseArena, cases: CaseList) -> Option<(ExprIdx, ExprIdx)> {
-    let [first, second] = arena.case_list(cases) else {
-        return None;
-    };
-    if first.pc_guard.is_some() || second.pc_guard.is_some() {
-        return None;
-    }
-    let is = |pat: PatIdx, name: &str| {
-        if let PatternDesc::Ppat_construct(lid, args) = &arena.get_pat(pat).ppat_desc
-            && args.txt.is_empty()
-        {
-            matches!(arena.get_longident(lid.txt), Longident::Lident(s) if arena.get_string(*s) == name)
-        } else {
-            false
-        }
-    };
-    if is(first.pc_lhs, "true") && is(second.pc_lhs, "false") {
-        Some((first.pc_rhs, second.pc_rhs))
-    } else if is(first.pc_lhs, "false") && is(second.pc_lhs, "true") {
-        Some((second.pc_rhs, first.pc_rhs))
-    } else {
-        None
-    }
-}
-
 /// The rewrites of `let pattern = e; body` with one non-recursive binding
 /// (bs_builtin_ppx.ml lines 295-319): a supported `let?` is a match with an
-/// early-return case and a continuation case, and a record or dictionary
-/// pattern is a one-case match. Returns false, having done nothing, for any
-/// other binding.
+/// early-return case and a continuation case. Returns false, having done
+/// nothing, for any other binding.
 ///
 /// Cost: constant beside the visits of the binding's pattern, expression
 /// and body.
-fn rewrite_single_binding_let(
+fn rewrite_unwrap_binding_let(
     idx: ExprIdx,
     bindings: VbList,
     body: ExprIdx,
@@ -8070,39 +7970,7 @@ fn rewrite_single_binding_let(
         arena.set_expansion(idx, unwrapped);
         return true;
     }
-    let is_record_pat = match &arena.get_pat(vb_pat).ppat_desc {
-        PatternDesc::Ppat_record(..) | PatternDesc::Ppat_dict(_) => true,
-        PatternDesc::Ppat_alias(inner, _) => {
-            matches!(
-                &arena.get_pat(*inner).ppat_desc,
-                PatternDesc::Ppat_record(..) | PatternDesc::Ppat_dict(_)
-            )
-        }
-        _ => false,
-    };
-    if !is_record_pat {
-        return false;
-    }
-    // The attributes of the expression, then those of the binding.
-    let mut attrs = arena.get_expr(idx).pexp_attributes.clone();
-    attrs.extend(arena.vb_list(bindings)[0].pvb_attributes.iter().cloned());
-    rewrite_expr(vb_expr, arena);
-    let pat = rewrite_pat_idx(vb_pat, arena);
-    rewrite_expr(body, arena);
-    let attrs = rewrite_attributes(&attrs, arena);
-    let case = Case {
-        pc_bar: None,
-        pc_lhs: pat,
-        pc_guard: None,
-        pc_rhs: body,
-    };
-    let expanded = Expression {
-        pexp_desc: ExpressionDesc::Pexp_match((vb_expr, arena.push_case_list(&[case]))),
-        pexp_loc: loc,
-        pexp_attributes: attrs.into(),
-    };
-    expand(arena, idx, expanded);
-    true
+    false
 }
 
 /// The built-in rewrites of a function: `@this` makes a method callback, an
@@ -8143,12 +8011,6 @@ fn rewrite_fun(idx: ExprIdx, arena: &mut ParseArena) {
             changed.push((i, new_pat));
         }
     }
-    let first_pat = match changed.first() {
-        Some((0, pat)) => *pat,
-        _ => params[0].1,
-    };
-    // OCaml takes the location from the mapped lhs pattern.
-    let pattern_loc = async_lhs_loc(arena.get_pat(first_pat), arena);
     rewrite_expr(body, arena);
     let newtypes_have_attributes = arena
         .nary_fun_newtypes(&fun)
@@ -8180,14 +8042,7 @@ fn rewrite_fun(idx: ExprIdx, arena: &mut ParseArena) {
     }
     let attrs = arena.get_expr(idx).pexp_attributes.clone();
     let new_attrs = rewritten_attributes(&attrs, arena);
-    // Ast_async.make_function_async: the body of an `async` function is
-    // `Primitive_promise.unsafe_async(body)`.
-    let rhs = if fun.is_async {
-        let wrapped = wrap_with_unsafe_async(body, pattern_loc, arena);
-        arena.push_expr(wrapped)
-    } else {
-        body
-    };
+    let rhs = body;
     if rhs != fun.rhs || shape.2 != fun.lhs || new_attrs.is_some() {
         let expanded = Expression {
             pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
@@ -9833,12 +9688,74 @@ fn rewrite_structure_impl(
     structure: &[StructureItem],
     arena: &mut ParseArena,
     apply_spice: bool,
-    mut warnings: Option<&mut Vec<PpxWarning>>,
+    warnings: Option<&mut Vec<PpxWarning>>,
 ) -> PpxResult<Vec<StructureItem>> {
-    // Context for tracking already-created module type names (per-structure scope)
+    // This detection already belongs to the mapper. One new O(1) dispatch
+    // erases all result-scope work for a structure with no derived items.
+    let first = apply_spice.then(|| derive::first_spice_item(structure, arena)).flatten();
+    if let Some(first) = first {
+        rewrite_structure_scoped::<true>(structure, arena, apply_spice, warnings, first)
+    } else {
+        rewrite_structure_scoped::<false>(structure, arena, apply_spice, warnings, 0)
+    }
+}
+
+/// Lazily collect source-order scope at the first mapped item that derives.
+/// Cost: zero steps when disabled; otherwise one O(items + constructors)
+/// prefix scan, irrespective of the frontend's reverse mapping order.
+/// Presence through `first` was already learned by the whole-structure scan:
+/// earlier items are false and `first` is true. Only later items need inspection;
+/// their attributes were not visited by that scan.
+fn result_shadow_for<'scope, const ENABLED: bool>(
+    structure: &[StructureItem],
+    index: usize,
+    first: usize,
+    arena: &mut ParseArena,
+    prefix: &'scope mut Option<derive::PrefixScope<'static>>,
+    step: impl FnMut(),
+) -> derive::Scope<'scope> {
+    if !ENABLED || index < first
+        || (index > first && !derive::structure_uses_spice_mapper(&structure[index..=index], arena))
+    {
+        return derive::Scope::default();
+    }
+    extend_result_prefix(structure, index, arena, prefix, step)
+}
+
+/// Extend source-order facts for ordinary items and private payloads.
+/// Cost: O(new prefix items + their constructors/declarations + name bytes),
+/// plus alias-version/scope depth when resolving an alias manifest. Each slot
+/// is visited at most once across calls; dense buffers grow amortized linearly.
+/// Already collected positions cost O(1), including reverse-order queries.
+fn extend_result_prefix<'scope>(
+    structure: &[StructureItem],
+    index: usize,
+    arena: &mut ParseArena,
+    prefix: &'scope mut Option<derive::PrefixScope<'static>>,
+    mut step: impl FnMut(),
+) -> derive::Scope<'scope> {
+    let prefix = prefix.get_or_insert_with(derive::PrefixScope::default);
+    while prefix.len() <= index {
+        step();
+        prefix.push(&structure[prefix.len()], arena);
+    }
+    prefix.at(index)
+}
+
+/// Map the scheduled structure items using the mapper-presence fact.
+/// Cost: O(items + visited attributes + mapped syntax and generated codecs),
+/// plus the lazy prefix work documented on `extend_result_prefix` when enabled.
+/// The disabled specialization allocates no prefix or alias buffers and does
+/// no scope traversal; the existing schedule/output buffers remain O(items).
+fn rewrite_structure_scoped<const RESULT_SCOPE: bool>(
+    structure: &[StructureItem],
+    arena: &mut ParseArena,
+    apply_spice: bool,
+    mut warnings: Option<&mut Vec<PpxWarning>>,
+    first_spice_item: usize,
+) -> PpxResult<Vec<StructureItem>> {
     let mut await_context = std::collections::HashSet::new();
-    let spice_mapper_active =
-        apply_spice && derive::structure_uses_spice_mapper(structure, arena);
+    let spice_mapper_active = RESULT_SCOPE;
 
     // OCaml `Bs_builtin_ppx.structure_mapper` (bs_builtin_ppx.ml:676-802)
     // recurses as `head :: structure_mapper rest`. Constructor arguments are
@@ -9892,6 +9809,7 @@ fn rewrite_structure_impl(
         }
     }
 
+    let mut result_prefix = None;
     let mut slots: Vec<Vec<StructureItem>> = (0..units.len()).map(|_| Vec::new()).collect();
     for event in order {
         match event {
@@ -9905,11 +9823,15 @@ fn rewrite_structure_impl(
                     warnings.append(&mut checker.warnings);
                 }
                 result?;
+                let result_shadowed = result_shadow_for::<RESULT_SCOPE>(
+                    structure, index, first_spice_item, arena, &mut result_prefix, || {},
+                );
                 slots[unit_index] = rewrite_structure_unit(
                     &structure[index],
                     arena,
                     apply_spice,
                     spice_mapper_active,
+                    result_shadowed,
                     &mut await_context,
                 )?;
             }
@@ -9926,6 +9848,10 @@ fn rewrite_structure_impl(
                     result?;
                 }
                 let mut mapped = Vec::new();
+                let mut private_shadow = if RESULT_SCOPE {
+                    // A private payload inherits only the preceding outer scope.
+                    extend_result_prefix(structure, start, arena, &mut result_prefix, || {})
+                } else { derive::Scope::default() };
                 for item in &structure[start..end] {
                     let StructureItemDesc::Pstr_extension(inner) = &item.pstr_desc else {
                         unreachable!("%%private run holds extensions")
@@ -9936,13 +9862,18 @@ fn rewrite_structure_impl(
                     // here they stay extensions (and `Typemod_hide.check`
                     // rejects them).
                     for work in private_extension_structure_items(payload, ext_name.loc)? {
+                        if RESULT_SCOPE {
+                            private_shadow.result_shadowed |= derive::shadows_result(work, arena);
+                        }
                         if is_structure_mapper_extension(work, arena) {
                             mapped.push(work.clone());
                         } else if apply_spice {
+                            // The run becomes the body of a local module.
                             mapped.extend(try_rewrite_structure_item(
                                 work,
                                 arena,
                                 spice_mapper_active,
+                                private_shadow,
                             )?);
                         } else {
                             mapped.extend(rewrite_structure_item_no_spice(work, arena));
@@ -9975,6 +9906,7 @@ fn rewrite_structure_unit(
     arena: &mut ParseArena,
     apply_spice: bool,
     spice_mapper_active: bool,
+    result_shadowed: derive::Scope<'_>,
     await_context: &mut std::collections::HashSet<String>,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
@@ -9989,6 +9921,7 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
+                    result_shadowed,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -10014,6 +9947,7 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
+                    result_shadowed,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -10026,6 +9960,7 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
+                    result_shadowed,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -10501,9 +10436,11 @@ fn try_rewrite_structure_item(
     item: &StructureItem,
     arena: &mut ParseArena,
     spice_mapper_active: bool,
+    result_shadowed: derive::Scope<'_>,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
-    for expanded in derive::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
+    for expanded in
+        derive::expand_structure_item_in_scope(item, arena, spice_mapper_active, result_shadowed)
         .map_err(PpxError::message)?
     {
         if let StructureItemDesc::Pstr_primitive(vd) = &expanded.pstr_desc {
@@ -10519,7 +10456,8 @@ fn try_rewrite_structure_item(
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
     let spice_mapper_active =
         derive::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
-    try_rewrite_structure_item(item, arena, spice_mapper_active).unwrap_or_else(|error| {
+    try_rewrite_structure_item(item, arena, spice_mapper_active, derive::Scope::default())
+        .unwrap_or_else(|error| {
         arena.defer_ppx_error(error);
         rewrite_structure_item_no_spice(item, arena)
     })
@@ -10533,10 +10471,16 @@ fn rewrite_structure_item_no_spice(
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
     let derived = derive::is_derived_item(item, arena);
+    let reason = arena.derived_census.as_ref().and_then(|c| c.general_group(item));
     let rewritten = rewrite_structure_item_body(item, arena);
     if derived {
         for item in &rewritten {
             derive::mark_generated_item(item, arena);
+            if let (Some(census), Some(reason), StructureItemDesc::Pstr_value((_, group))) =
+                (&mut arena.derived_census, reason, &item.pstr_desc)
+            {
+                census.set_general_group(group.start(), reason);
+            }
         }
     }
     rewritten
@@ -10657,6 +10601,8 @@ fn rewrite_structure_item_body(
                 }]
             }
         }
+        // A plan holds no syntax to rewrite.
+        StructureItemDesc::Pstr_derived(_) => vec![item.clone()],
         // Handle value bindings - need to rewrite expressions and patterns
         // Also handle @inline transformation
         StructureItemDesc::Pstr_value(inner) => {
@@ -11688,6 +11634,136 @@ let e = () =>
     }
 
     #[test]
+    fn ten_thousand_items_without_derives_do_no_result_scope_work() {
+        let source = (0..10_000).map(|i| format!("type t{i} = C{i}\n")).collect::<String>();
+        let (mut arena, items) = parse_structure(&source);
+        let mapped = rewrite_structure_impl(&items, &mut arena, true, None).unwrap();
+        assert_eq!(mapped.len(), 10_000);
+        assert_eq!(arena.derived_scope_steps.get(), derive::ScopeSteps {
+            presence_items: items.len(), ..derive::ScopeSteps::default()
+        });
+    }
+
+    #[test]
+    fn ten_thousand_derived_items_visit_each_prefix_slot_once() {
+        let source = (0..10_000).map(|i| format!("@spice type t{i} = int\n")).collect::<String>();
+        let (mut arena, items) = parse_structure(&source);
+        let mut prefix = None;
+        let mut steps = 0;
+        for index in (0..items.len()).rev() {
+            result_shadow_for::<true>(&items, index, 0, &mut arena, &mut prefix, || steps += 1);
+        }
+        assert_eq!(steps, items.len());
+        assert_eq!(arena.derived_scope_steps.get().prefix_items, items.len());
+    }
+
+    #[test]
+    fn ten_thousand_variant_constructors_take_ten_thousand_scope_steps() {
+        let constructors = (0..10_000).map(|i| format!("C{i}")).collect::<Vec<_>>().join(" | ");
+        let (arena, items) = parse_structure(&format!("type t = {constructors}"));
+        assert!(!derive::shadows_result(&items[0], &arena));
+        assert_eq!(arena.derived_scope_steps.get().constructors, 10_000);
+    }
+
+    #[test]
+    fn scope_presence_does_not_rescan_the_known_prefix() {
+        let source = (0..10_000).map(|i| {
+            let attr = if i == 5_000 { "@spice " } else { "" };
+            format!("{attr}type t{i} = int\n")
+        }).collect::<String>();
+        let (mut arena, items) = parse_structure(&source);
+        let first = derive::first_spice_item(&items, &arena).unwrap();
+        assert_eq!(first, 5_000);
+        assert_eq!(arena.derived_scope_steps.get().presence_items, 5_001);
+        let mut prefix = None;
+        for index in (0..items.len()).rev() {
+            result_shadow_for::<true>(&items, index, first, &mut arena, &mut prefix, || {});
+        }
+        assert_eq!(arena.derived_scope_steps.get().presence_items, items.len());
+    }
+
+    #[test]
+    fn result_scope_is_lazy_and_scans_the_prefix_once() {
+        let (mut arena, items) = parse_structure("type mine = Error\n@spice type t = {x: int}");
+        let mut prefix = None;
+        let mut steps = 0;
+        assert!(!result_shadow_for::<true>(&items, 0, 1, &mut arena, &mut prefix, || steps += 1).result_shadowed);
+        assert_eq!(steps, 0);
+        for _ in 0..10_000 {
+            assert!(result_shadow_for::<true>(&items, 1, 1, &mut arena, &mut prefix, || steps += 1).result_shadowed);
+        }
+        assert_eq!(steps, items.len());
+    }
+
+    #[test]
+    fn import_epochs_invalidate_aliases_and_builtins_in_source_order() {
+        for import in ["open Owner", "include Owner"] {
+            let (mut arena, items) = parse_structure(&format!(
+                "type j = int\n{import}\ntype j = {{value: int}}\n{import}\nlet marker = 0"
+            ));
+            let j = arena.push_lident("j");
+            let int = arena.push_lident("int");
+            let mut prefix = derive::PrefixScope::default();
+            for item in &items { prefix.push(item, &mut arena); }
+            // Query backwards after both imports have been collected.
+            for (position, expected) in [(3, None), (2, Some(false)), (1, None), (0, Some(false))] {
+                assert_eq!(prefix.at(position).identity_fact(j, &arena), expected);
+                let mut nested = derive::PrefixScope::new(prefix.at(position));
+                nested.push(&items[4], &mut arena);
+                assert_eq!(nested.at(0).identity_fact(j, &arena), expected);
+            }
+            assert_eq!(prefix.at(0).identity_fact(int, &arena), Some(false));
+            assert_eq!(prefix.at(1).identity_fact(int, &arena), None);
+            let mut nested = derive::PrefixScope::new(prefix.at(1));
+            nested.push(&items[2], &mut arena);
+            assert_eq!(nested.at(0).identity_fact(j, &arena), Some(false));
+        }
+    }
+
+    #[test]
+    fn json_alias_scope_survives_reverse_mapping_and_nested_modules() {
+        let (mut arena, source) = parse_structure(
+            "@spice type j = JSON.t\n@spice type a = array<j>\n@spice type b = option<j>\nmodule M = {@spice type c = array<j>}"
+        );
+        arena.set_derived_plans(None);
+        arena.derived_census = Some(Box::new(derive::census::Census::new(std::path::Path::new("unused"), "alias.res")));
+        rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
+        let counts = &arena.derived_census.as_ref().unwrap().paths;
+        assert_eq!(counts.json_identity_argument, 6);
+        assert_eq!(counts.plan, 6);
+    }
+
+    #[test]
+    fn exception_and_type_extension_shadow_result_constructors() {
+        for declaration in ["exception Error(string)", "exception Ok", "type t += Ok | Error(string)"] {
+            let (arena, items) = parse_structure(declaration);
+            assert!(derive::shadows_result(&items[0], &arena), "{declaration}");
+        }
+    }
+
+    #[test]
+    fn result_shadow_scope_follows_source_order_not_mapping_order() {
+        let (mut arena, source) = parse_structure(
+            "@spice type before = {x: int}\ntype mine = Error\n@spice type after = {y: int}\n@spice.encode type encoder = {z: int}",
+        );
+        arena.set_derived_plans(None);
+        let rewritten = rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
+        assert_eq!(rewritten.iter().filter(|item| matches!(item.pstr_desc, StructureItemDesc::Pstr_derived(_))).count(), 2);
+    }
+
+    #[test]
+    fn result_shadow_is_inherited_by_nested_modules() {
+        let (mut arena, source) = parse_structure(
+            "type mine = Error\nmodule M = { @spice type t = {x: int} }",
+        );
+        arena.set_derived_plans(None);
+        let rewritten = rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
+        let StructureItemDesc::Pstr_module(module) = &rewritten[1].pstr_desc else { panic!("module") };
+        let ModuleExprDesc::Pmod_structure(items) = &arena.get_mod_expr(module.pmb_expr).pmod_desc else { panic!("structure") };
+        assert!(!items.iter().any(|item| matches!(item.pstr_desc, StructureItemDesc::Pstr_derived(_))));
+    }
+
+    #[test]
     fn derived_value_groups_survive_frontend_rewriting() {
         let (mut arena, source) = parse_structure(
             "let before = 1\n@spice type a = {x: int}\n@spice type b = string\nlet after = 2\n",
@@ -11757,7 +11833,11 @@ let e = () =>
         assert_eq!(arena.get_expr(root), &root_before);
         for (idx, before) in items.iter().zip(&before) {
             assert_eq!(arena.get_expr(*idx), before, "the node as parsed is kept");
-            assert_ne!(arena.expanded(*idx), *idx, "the rewrite is recorded");
+            if items[4..].contains(idx) {
+                assert_eq!(arena.expanded(*idx), *idx, "direct construct stays as written");
+            } else {
+                assert_ne!(arena.expanded(*idx), *idx, "the rewrite is recorded");
+            }
         }
         let expanded = |i: usize| &arena.get_expr(arena.expanded(items[i])).pexp_desc;
         assert!(matches!(expanded(0), ExpressionDesc::Pexp_constraint(_)));
@@ -11775,10 +11855,10 @@ let e = () =>
         assert_eq!(arena.apply_args(call.args).len(), 2);
         assert!(matches!(
             expanded(4),
-            ExpressionDesc::Pexp_constant(Constant::Integer(_, None))
+            ExpressionDesc::Pexp_constant(Constant::Integer(_, Some('l')))
         ));
-        assert!(matches!(expanded(5), ExpressionDesc::Pexp_apply(_)));
-        assert!(matches!(expanded(6), ExpressionDesc::Pexp_ifthenelse(_)));
+        assert!(matches!(expanded(5), ExpressionDesc::Pexp_await(_)));
+        assert!(matches!(expanded(6), ExpressionDesc::Pexp_match(_)));
         assert!(matches!(expanded(7), ExpressionDesc::Pexp_fun(_)));
     }
 
@@ -11803,24 +11883,56 @@ let e = () =>
     }
 
     #[test]
-    fn a_changed_pattern_expands_only_the_expression_that_holds_it() {
+    fn integer_patterns_keep_their_handles_and_create_no_expansion() {
         let (mut arena, root, items) =
             bound_tuple("let x = (a, switch b { | 1l => (c, d) | _ => (d, c) })\n");
+        let before = arena.get_expr(items[1]).clone();
         let appended = appended_exprs(&mut arena, |arena| rewrite_expr(root, arena));
-        assert_eq!(appended, 1, "the match with its mapped pattern");
+        assert_eq!(appended, 0);
         assert_eq!(arena.expanded(root), root);
-        let expanded = arena.expanded(items[1]);
-        assert_ne!(expanded, items[1]);
-        let (ExpressionDesc::Pexp_match((scrutinee, cases)), ExpressionDesc::Pexp_match((_, old))) =
-            (&arena.get_expr(expanded).pexp_desc, &arena.get_expr(items[1]).pexp_desc)
-        else {
-            panic!("expected matches");
-        };
-        assert!(matches!(arena.get_expr(*scrutinee).pexp_desc, ExpressionDesc::Pexp_ident(_)));
-        let (new, old) = (arena.case_list(*cases), arena.case_list(*old));
-        assert_ne!(new[0].pc_lhs, old[0].pc_lhs);
-        assert_eq!(new[0].pc_rhs, old[0].pc_rhs);
-        assert_eq!(new[1], old[1]);
+        assert_eq!(arena.expanded(items[1]), items[1]);
+        assert_eq!(arena.get_expr(items[1]), &before);
+    }
+
+    #[test]
+    fn ten_thousand_async_await_functions_append_nothing() {
+        let mut source = String::from("let x = [");
+        source.push_str(&"async p => await p, ".repeat(10_000));
+        source.push_str("]\n");
+        // Array, then each function, parameter pattern and await.
+        assert_eq!(mapper_cost(&source), (30_001, 0));
+    }
+
+    #[test]
+    fn ten_thousand_record_lets_append_nothing() {
+        let mut source = String::from("let x = [");
+        source.push_str(&"{let {a} = b; a}, ".repeat(10_000));
+        source.push_str("]\n");
+        // Array, and per element: braces, let, record pattern and variable.
+        assert_eq!(mapper_cost(&source), (40_001, 0));
+    }
+
+    #[test]
+    fn ten_thousand_boolean_matches_append_nothing() {
+        let mut source = String::from("let x = [");
+        source.push_str(&"switch b { | false => 0 | true => 1 }, ".repeat(10_000));
+        source.push_str("]\n");
+        // One array, then each match and its two constant patterns.
+        assert_eq!(mapper_cost(&source), (30_001, 0));
+    }
+
+    #[test]
+    fn ten_thousand_integer_suffixes_append_nothing() {
+        let mut source = String::from("let x = [");
+        source.push_str(&"1l, ".repeat(10_000));
+        source.push_str("]\n");
+        assert_eq!(mapper_cost(&source), (0, 0));
+        let mut source = String::from("let x = switch a {\n");
+        for i in 0..10_000 {
+            source.push_str(&format!("| {i}l => b\n"));
+        }
+        source.push_str("}\n");
+        assert_eq!(mapper_cost(&source), (10_001, 0));
     }
 
     /// `rewrite_expr` on the single binding of `source`: the nodes entered

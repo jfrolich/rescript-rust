@@ -41,6 +41,27 @@ pub struct SourcePaths {
     pub interface: Option<PathBuf>,
 }
 
+/// A package whose modules `reanalyze` reads.
+#[derive(Debug, Clone)]
+pub struct LocalPackage {
+    /// The package's build directory, where the OCaml compiler writes its
+    /// `.cmt` files.
+    pub build_root: String,
+    /// The package's modules.
+    pub modules: Vec<LocalModule>,
+}
+
+/// A module of a [`LocalPackage`].
+#[derive(Debug, Clone)]
+pub struct LocalModule {
+    /// The module's name.
+    pub name: String,
+    /// The base name of the artifacts the OCaml compiler writes for the
+    /// module: its source file's, with the package's namespace
+    /// (`foo-Namespace`), not capitalized.
+    pub artifact: String,
+}
+
 /// The project a command runs in: its modules, including those of
 /// dependencies and the runtime, and on-demand type-checking.
 pub trait Project {
@@ -62,6 +83,21 @@ pub trait Project {
     /// Type-check a module's interface or implementation from its current
     /// source.
     fn typecheck(&self, module_name: &str, interface: bool) -> Option<TypedSource>;
+    /// The packages `reanalyze` reads: the project's own and the local
+    /// packages it depends on, in the order of their build directories.
+    fn local_packages(&self) -> Vec<LocalPackage> {
+        Vec::new()
+    }
+    /// Run `job` on each of `0..count`: on several threads at once where
+    /// the project has them, each with the stack type-checking needs. A
+    /// command that reads every module (`reanalyze`) type-checks them this
+    /// way. Each index must run exactly once, and all jobs must complete
+    /// before this method returns.
+    fn run_jobs(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
+        for index in 0..count {
+            job(index);
+        }
+    }
 }
 
 /// A loaded module: OCaml's `full` (a `File.t` and its `extra`).
@@ -74,6 +110,8 @@ pub struct Loaded {
     pub extra: Extra,
     /// An attribute reader's error raised by a command reading this module.
     pub raised: super::process_attributes::Raised,
+    /// The file names of the module's locations.
+    files: process_cmt::FileNames,
 }
 
 impl Loaded {
@@ -90,6 +128,7 @@ impl Loaded {
             types: &self.source.typed.type_ctx,
             raised: &self.raised,
             ta: &self.source.typed.typed_arena,
+            files: &self.files,
         }
     }
 }
@@ -250,11 +289,13 @@ fn invalid_escape_message(
 fn load_source(source: TypedSource, module_name: &str, id: ModuleId) -> Result<Loaded, String> {
     let uri = source.path.to_string_lossy().into_owned();
     let raised = super::process_attributes::Raised::default();
+    let files = process_cmt::FileNames::default();
     let ctx = Ctx {
         arena: source.parsed.arena(),
         types: &source.typed.type_ctx,
         raised: &raised,
         ta: &source.typed.typed_arena,
+        files: &files,
     };
     let annots = match &source.typed.typed {
         ToolingTyped::Implementation(structure) => Some(Annots::Implementation(
@@ -281,6 +322,7 @@ fn load_source(source: TypedSource, module_name: &str, id: ModuleId) -> Result<L
         file,
         extra,
         raised,
+        files,
     })
 }
 
@@ -290,6 +332,8 @@ fn namespace_file(module_name: &str, id: ModuleId, aliases: &[(String, String)])
     let mut file = File::create(module_name, String::new(), id);
     let mut structure = (*file.structure).clone();
     let mut exported = (*structure.exported).clone();
+    // `Location.none`'s file name.
+    let none_file: Arc<str> = Arc::from(process_cmt::NONE_FILE);
     for (stamp, (alias, target)) in (1..).zip(aliases) {
         let item = Module::Ident(crate::types::Path::pident(
             crate::ident::Ident::create_persistent(target.as_str()),
@@ -302,6 +346,7 @@ fn namespace_file(module_name: &str, id: ModuleId, aliases: &[(String, String)])
                     loc: Loc::none(),
                 },
                 extent_loc: Loc::none(),
+                extent_file: none_file.clone(),
                 stamp,
                 module_path: ModulePath::File {
                     uri: file.uri.clone(),
@@ -321,6 +366,7 @@ fn namespace_file(module_name: &str, id: ModuleId, aliases: &[(String, String)])
             },
             name: alias.clone(),
             loc: Loc::none(),
+            file: none_file.clone(),
             docstring: Vec::new(),
             deprecated: None,
         });

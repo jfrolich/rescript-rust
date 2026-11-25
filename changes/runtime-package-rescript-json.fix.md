@@ -1,0 +1,1 @@
+- Include `rescript.json` in the `@rescript/runtime` package. The build system reads it, and an installed runtime without it failed with "failed to read runtime config".

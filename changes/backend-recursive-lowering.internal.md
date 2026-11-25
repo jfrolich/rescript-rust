@@ -1,0 +1,1 @@
+- Lower recursive function groups and self tail calls to the backend IR, preserving iteration-local closure captures and loop-return conditionals.

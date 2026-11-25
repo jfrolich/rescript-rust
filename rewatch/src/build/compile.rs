@@ -697,26 +697,27 @@ pub fn compile(
     crate::build::phase_mark("compile-start");
     prepare_registry_for_runtime_precompile(build_state);
 
-    // Pre-compile all @rescript/runtime modules into the registry.
-    // In in-process mode, the registry is the sole source of truth —
-    // no CMI fallback. Every dependency must be in the registry before
-    // project modules start compiling, even when @rescript/runtime is
-    // also present in the package graph (otherwise implicit Stdlib opens
-    // can require modules that the main build graph hasn't reached yet).
-    let parent_span = compile_parent_span.clone();
-    let pre_compile_result: Result<()> = std::thread::scope(|scope| {
-        spawn_runtime_precompile(scope, || {
-            let _parent = parent_span.enter();
-            pre_compile_runtime_modules_with_mode(
-                &build_state.module_registry,
-                &build_state.build_state.compiler_info.runtime_path,
-                RuntimeStore::of_build(build_state).as_ref(),
-                build_state.check_only,
-            )
-        })
-        .and_then(join_runtime_precompile)
-    });
-    pre_compile_result?;
+    // A runtime project supplies its own modules through the normal dependency
+    // scheduler (-make-runtime disables implicit Stdlib dependencies). Other
+    // projects need runtime interfaces before their modules can compile.
+    if build_state.build_state.project_context.current_config.name != "@rescript/runtime" {
+        let parent_span = compile_parent_span.clone();
+        let pre_compile_result: Result<()> = std::thread::scope(|scope| {
+            spawn_runtime_precompile(scope, || {
+                let _parent = parent_span.enter();
+                pre_compile_runtime_modules_with_mode(
+                    &build_state.module_registry,
+                    &build_state.build_state.compiler_info.runtime_path,
+                    RuntimeStore::of_build(build_state).as_ref(),
+                    build_state.check_only,
+                    build_state.dump.is_some(),
+                    build_state.revoked_snapshots[0],
+                )
+            })
+            .and_then(join_runtime_precompile)
+        });
+        pre_compile_result?;
+    }
     crate::build::phase_mark("runtime-precompile-end");
 
     // Clear source-fallback paths after pre-compilation.
@@ -2295,6 +2296,7 @@ fn build_package_compiler_options(
         nopervasives: parsed_flags.nopervasives,
         no_version_header: parsed_flags.no_version_header,
         package_name: Some(package.config.name.clone()),
+        package_root: Some(package.path.clone()),
         make_runtime: parsed_flags.make_runtime,
         gentype_config,
         gentype_resolver,
@@ -2958,13 +2960,13 @@ pub fn runtime_registry(runtime_root: &Path) -> Result<ModuleRegistry> {
 pub(crate) struct RuntimeStore {
     pub db: PathBuf,
     pub compiler_hash: String,
+    /// Whether the build may add to the store. A check-only build writes no
+    /// files: it reads what a build stored and stores nothing itself.
+    pub writable: bool,
 }
 
 impl RuntimeStore {
     pub(crate) fn of_build(build_state: &BuildCommandState) -> Option<Self> {
-        if build_state.check_only {
-            return None;
-        }
         let root = build_state
             .packages
             .values()
@@ -2972,6 +2974,7 @@ impl RuntimeStore {
         Some(Self {
             db: super::state_db::path(root),
             compiler_hash: build_state.compiler_info.bsc_hash.to_hex().to_string(),
+            writable: !build_state.check_only,
         })
     }
 
@@ -3037,7 +3040,9 @@ fn store_runtime_interfaces(
     key: &str,
     runtime_modules: &[RuntimeModuleSource],
 ) {
-    if let Some(interfaces) = encode_runtime_interfaces(registry, runtime_modules) {
+    if store.writable
+        && let Some(interfaces) = encode_runtime_interfaces(registry, runtime_modules)
+    {
         super::state_db::write_runtime_interfaces(&store.db, key, &interfaces);
     }
 }
@@ -3064,7 +3069,7 @@ pub(crate) fn pre_compile_runtime_modules(
     runtime_root: &Path,
     store: Option<&RuntimeStore>,
 ) -> Result<()> {
-    pre_compile_runtime_modules_with_mode(registry, runtime_root, store, false)
+    pre_compile_runtime_modules_with_mode(registry, runtime_root, store, false, false, false)
 }
 
 pub(crate) fn pre_compile_runtime_modules_with_mode(
@@ -3072,13 +3077,15 @@ pub(crate) fn pre_compile_runtime_modules_with_mode(
     runtime_root: &Path,
     store: Option<&RuntimeStore>,
     check_only: bool,
+    dump: bool,
+    snapshot_revoked: bool,
 ) -> Result<()> {
     let _span = info_span!("build.runtime_precompile").entered();
     let runtime_timing_enabled =
         std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some() || module_timings_enabled();
     let runtime_timing_start = runtime_timing_enabled.then(Instant::now);
     let runtime_timing_before = runtime_timing_enabled.then(rescript_compiler::timing::snapshot);
-    let runtime_config = packages::read_config(runtime_root)
+    let runtime_config = super::snapshot::runtime_config(runtime_root)
         .with_context(|| format!("failed to read runtime config from {}", runtime_root.display()))?;
     // The runtime package ships its sources at its root; its compiled
     // modules would be in its artifact directory, the runtime's `-I`.
@@ -3092,7 +3099,7 @@ pub(crate) fn pre_compile_runtime_modules_with_mode(
 
     let already_registered = {
         let registry = registry.lock().unwrap();
-        runtime_paths.iter().all(|(module_name, _)| {
+        registry.has_runtime_snapshot() || runtime_paths.iter().all(|(module_name, _)| {
             registry.is_pending_stored(module_name)
                 || (registry.module_info_is_runtime(module_name) && registry.has_cached_module(module_name))
         })
@@ -3104,7 +3111,7 @@ pub(crate) fn pre_compile_runtime_modules_with_mode(
     // The interfaces the last build compiled stand in for compiling the
     // runtime again while its sources and the compiler are the same.
     // The runtime compiled into this executable, when these are its sources.
-    if super::snapshot::register(registry, runtime_root, &runtime_paths) {
+    if !snapshot_revoked && super::snapshot::register(registry, runtime_root, &runtime_paths, store, dump)? {
         debug!("Registered {} embedded runtime interfaces", runtime_paths.len());
         return Ok(());
     }
@@ -3832,6 +3839,7 @@ pub(crate) fn runtime_compiler_options(
         nopervasives: parsed_flags.nopervasives,
         module_name: Some(module_name.to_string()),
         package_name: Some(runtime_config.name.clone()),
+        package_root: Some(runtime_root.to_path_buf()),
         make_runtime: parsed_flags.make_runtime,
         keep_locs: parsed_flags.keep_locs,
         skip_js_render: true,
@@ -3864,21 +3872,45 @@ fn compile_with_location_retry<T>(
     ast: &StoredAst,
     build: &BuildCommandState,
     options: &rescript_compiler::driver::CompilerOptions,
-    mut compile: impl FnMut(&StoredAst, &rescript_compiler::driver::CompilerOptions) -> Result<T>,
+    mut compile: impl FnMut(&StoredAst, &rescript_compiler::driver::CompilerOptions,
+        Option<rescript_compiler::driver::DerivedFallback<'_>>) -> Result<T>,
 ) -> Result<T> {
-    use rescript_compiler::driver::LocationRetry;
-    let result = match ast.retry_source() {
-        // A location-free compile places its warnings in a located parse of
-        // the same source; it returns `LocationRetry::Warning` when it cannot.
-        Some(source) if !ast.arena().stores_locations() => {
-            let source = source.clone();
-            let mut options = options.clone();
-            options.warning_locations = Some(Arc::new(move || {
-                super::parse::reparse_arena_with_locations(&source)
-            }));
-            compile(ast, &options)
+    use rescript_compiler::driver::{DerivedPath, LocationRetry};
+    // Set up for each tree compiled, `tree` being the parse and `source`
+    // what it was parsed from. A check compiles the general form of a unit
+    // that has plans as well. A unit with plans gets its general syntax,
+    // which the compiler's attempt loop continues on when the checker cannot
+    // use a plan; nothing of the abandoned attempt is published.
+    let per_tree = |tree: &StoredAst,
+                    source: &Arc<super::build_types::ParseSource>,
+                    options: &mut rescript_compiler::driver::CompilerOptions| {
+        if tree.arena().plans().item_count() == 0 {
+            return;
         }
-        _ => compile(ast, options),
+        if options.derived_path == DerivedPath::Check {
+            let (source, locations) = (source.clone(), tree.arena().stores_locations());
+            options.derived_reference =
+                Some(Arc::new(move || super::parse::general_form(&source, locations)));
+            options.derived_differences = Some(build.derived_differences.clone());
+        }
+    };
+    let fallback = || derived_fallback(ast, ast.arena().stores_locations());
+    let fallback = matches!(ast, StoredAst::Structure(_)).then_some(
+        &fallback as rescript_compiler::driver::DerivedFallback<'_>);
+    let result = match ast.retry_source() {
+        Some(source) if !ast.arena().stores_locations()
+            || (options.derived_path == DerivedPath::Check && ast.arena().plans().item_count() > 0) => {
+            let mut options = options.clone();
+            // A location-free compile places its warnings in a located
+            // parse of the same source; it returns
+            // `LocationRetry::Warning` when it cannot.
+            if !ast.arena().stores_locations() {
+                options.warning_locations = Some(warning_locations(source));
+            }
+            per_tree(ast, source, &mut options);
+            compile(ast, &options, fallback)
+        }
+        _ => compile(ast, options, fallback),
     };
     let local_retry = !ast.arena().stores_locations()
         && matches!(
@@ -3897,7 +3929,17 @@ fn compile_with_location_retry<T>(
                 .map(|source| source.file_path.display().to_string())
                 .unwrap_or_default()
         );
-        return super::parse::reparse_with_locations(ast).and_then(|located| compile(&located, options));
+        // The located parse keeps no source of its own: its reference is
+        // made from the source it was parsed from.
+        let located = super::parse::reparse_with_locations(ast)?;
+        let mut options = options.clone();
+        if let Some(source) = ast.retry_source() {
+            per_tree(&located, source, &mut options);
+        }
+        let fallback = || derived_fallback(ast, true);
+        let fallback = matches!(located, StoredAst::Structure(_)).then_some(
+            &fallback as rescript_compiler::driver::DerivedFallback<'_>);
+        return compile(&located, &options, fallback);
     }
     if !build.parses_with_locations() && result.is_err() {
         // Type errors can quote declarations from dependency interfaces.
@@ -3909,6 +3951,42 @@ fn compile_with_location_retry<T>(
     }
     result
 }
+
+/// The located parse of `source`, in which a location-free compile of it
+/// places its warnings (`CompilerOptions::warning_locations`).
+/// Cost now: one Arc reference-count increment and one closure allocation.
+/// Cost when called: a source parse/frontend run with location tables. The
+/// owned `WarningLocations` API requires the closure to retain `ParseSource`;
+/// it cannot borrow the temporary options assembly's reference to that Arc.
+fn warning_locations(
+    source: &Arc<super::build_types::ParseSource>,
+) -> rescript_compiler::driver::WarningLocations {
+    let source = source.clone();
+    Arc::new(move || super::parse::reparse_arena_with_locations(&source))
+}
+
+/// The general syntax of the implementation `ast`
+/// (`DerivedFallback`): its source parsed again with
+/// derived code as syntax, with locations when `locations` (the tree being
+/// compiled has them). Cost: one frontend run, only after fallback is requested.
+fn derived_fallback(ast: &StoredAst, locations: bool) -> Result<rescript_compiler::driver::GeneralSyntax<rescript_compiler::parser::ast::Structure>> {
+    let StoredAst::Structure(general) = super::parse::reparse_without_plans(ast, locations)? else {
+        anyhow::bail!("a parse without plans changed the kind of the unit")
+    };
+    let warning_locations = match &general.retry_source {
+        Some(source) if !general.arena.stores_locations() => Some(warning_locations(source)),
+        _ => None,
+    };
+    let general =
+        Arc::try_unwrap(general).map_err(|_| anyhow::anyhow!("a new parse without plans is shared"))?;
+    Ok(rescript_compiler::driver::GeneralSyntax {
+        arena: general.arena,
+        tree: general.structure,
+        warning_locations,
+    })
+}
+
+
 
 fn compile_module_in_process_to_js_boundary(
     package: &packages::Package,
@@ -3999,7 +4077,7 @@ fn compile_module_in_process_to_js_boundary(
         let intf_key = format!("{module_name}:intf");
         let intf_result = match stored_asts.get(&intf_key) {
             Some(ast @ StoredAst::Signature(_)) => {
-                compile_with_location_retry(ast, build_command_state, &options, |ast, options| {
+                compile_with_location_retry(ast, build_command_state, &options, |ast, options, _fallback| {
                     let StoredAst::Signature(stored) = ast else {
                         unreachable!("interface retry changed AST kind")
                     };
@@ -4159,7 +4237,7 @@ fn compile_module_in_process_to_js_boundary(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match stored_asts.get(&impl_key) {
                 Some(ast @ StoredAst::Structure(_)) => {
-                    compile_with_location_retry(ast, build_command_state, &options, |ast, options| {
+                    compile_with_location_retry(ast, build_command_state, &options, |ast, options, fallback| {
                         let StoredAst::Structure(stored) = ast else {
                             unreachable!("implementation retry changed AST kind")
                         };
@@ -4181,6 +4259,7 @@ fn compile_module_in_process_to_js_boundary(
                             gentype_interface.clone(),
                             signature_hook,
                             publication,
+                            fallback,
                         )
                     })
                 }
@@ -4375,23 +4454,44 @@ fn finish_in_process_js_inner(
     let compiler_warnings = std::mem::take(&mut pre_js.warnings);
     let warning = visible_compiler_warnings(&compiler_warnings, package.is_local_dep);
     if build_command_state.check_only {
-        let registry_updates = js_metadata_registry_updates_for_package(
-            &module_name,
+        // No code is generated: the module keeps the JS metadata of the last
+        // build that generated its code (see `recorded_js_metadata`).
+        let recorded = super::incremental::recorded_js_metadata(build_command_state, &module_name);
+        let (is_pure, constants, arities, lambdas) = match recorded {
+            Some(info) => (
+                info.is_pure,
+                Arc::unwrap_or_clone(info.cmj_export_constants),
+                Arc::unwrap_or_clone(info.cmj_export_arities),
+                Arc::unwrap_or_clone(info.cmj_export_lambdas),
+            ),
+            None => (false, AHashMap::new(), AHashMap::new(), Default::default()),
+        };
+        let module_info = in_memory_module_info_for_package(
             package,
             build_command_state.get_root_config(),
             source_abs,
-            false,
-            AHashMap::new(),
-            AHashMap::new(),
-            Default::default(),
+            is_pure,
+            constants,
+            arities,
+            lambdas,
             is_runtime,
-            has_interface,
-            interface_registry_update,
-            pre_js.pers_struct,
         );
+        // The signature is registered already when it was published before
+        // this phase; the metadata alone replaces the provisional one.
+        let update = match interface_registry_update.filter(|_| has_interface) {
+            Some(mut update) => {
+                update.module_info = module_info;
+                update
+            }
+            None => PendingRegistryUpdate {
+                module_name: module_name.clone(),
+                pers_struct: pre_js.pers_struct.filter(|_| !has_interface),
+                module_info,
+            },
+        };
         return Ok(InProcessModuleResult {
             warning,
-            registry_updates: send_js_metadata_ready(metadata_tx, module_name, registry_updates),
+            registry_updates: send_js_metadata_ready(metadata_tx, module_name, vec![update]),
         });
     }
 
@@ -4693,6 +4793,7 @@ mod tests {
         let store = |hash: &str| RuntimeStore {
             db: db.clone(),
             compiler_hash: hash.to_string(),
+            writable: true,
         };
         let runtime_root = temp_dir.path().join("runtime");
         fs::create_dir_all(&runtime_root).expect("runtime directory should be created");

@@ -224,6 +224,27 @@ fn remove_gentype_file(package: &Package, source: &Path) {
 /// sources it compiled that no longer exist: the JS output and any typed
 /// artifacts in `lib/rescript`. Returns the number of removed sources.
 pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) -> usize {
+    read_previous_in_process_build(build_state, PreviousOutputs::Remove, &AHashSet::new())
+}
+
+/// What reading the previous build's record does about the outputs of
+/// sources that are gone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PreviousOutputs {
+    /// Remove them, as a build does.
+    Remove,
+    /// Leave them: a build that writes nothing removes nothing either.
+    Keep,
+}
+
+/// Read the record of the previous in-process build of every package but
+/// those of `skip`, for [`build::incremental`]. Returns the number of
+/// recorded sources that are gone.
+pub fn read_previous_in_process_build(
+    build_state: &mut BuildCommandState,
+    outputs: PreviousOutputs,
+    skip: &AHashSet<String>,
+) -> usize {
     let root_config = build_state.get_root_config();
     let suffix = root_config.get_suffix(root_config.get_package_specs().first().unwrap());
     let current = in_process_source_paths(build_state);
@@ -233,6 +254,7 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
     let states: Vec<(&String, build::state_db::PackageState)> = build_state
         .packages
         .par_iter()
+        .filter(|(name, _)| !skip.contains(*name))
         .filter_map(|(name, package)| build::state_db::read(package).map(|state| (name, state)))
         .collect();
     for (package_name, state) in states {
@@ -246,6 +268,12 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
                 continue;
             }
             removed += 1;
+            if !build_state.modules.contains_key(module_name) {
+                deleted_modules.insert(module_name.to_string());
+            }
+            if outputs == PreviousOutputs::Keep {
+                continue;
+            }
             let basename = helpers::file_path_to_compiler_asset_basename(path, &package.namespace);
             // Another build (such as rescript-ocaml's) may have left the
             // removed module's typed artifacts, which dependents would
@@ -261,9 +289,6 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
             {
                 remove_mjs_file(&package.path.join(path), &suffix);
                 remove_gentype_file(package, path);
-            }
-            if !build_state.modules.contains_key(module_name) {
-                deleted_modules.insert(module_name.to_string());
             }
         }
         previous.packages.insert(

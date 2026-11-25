@@ -1,0 +1,1 @@
+- A build started in a project with no parent workspace owns the packages nested in it, as the OCaml build system does: it reports their warnings, applies their warning settings and compiles their dev sources.

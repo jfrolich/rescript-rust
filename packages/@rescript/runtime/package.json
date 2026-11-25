@@ -33,7 +33,9 @@
     "provenance": true
   },
   "files": [
+    "rescript.json",
     "lib",
+    "rescript.json",
     "*.res",
     "*.resi"
   ],

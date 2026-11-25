@@ -256,6 +256,10 @@ impl Module {
 #[derive(Debug)]
 pub struct BuildState {
     pub check_only: bool,
+    /// Whether a build prints the warnings of a successful compilation (a
+    /// failed one prints them with its errors). `rescript doc` builds only
+    /// to type-check, so it prints none.
+    pub print_warnings: bool,
     pub project_context: ProjectContext,
     pub modules: AHashMap<String, Module>,
     pub packages: AHashMap<String, Package>,
@@ -336,6 +340,8 @@ impl BuildRun {
 /// - `build`/`watch` commands need both core data AND CLI overrides
 /// - This prevents the "code smell" of optional fields that are None for some commands
 pub struct BuildCommandState {
+    /// Runtime/Belt snapshots revoked by source edits for this watch session.
+    pub revoked_snapshots: [bool; 2],
     pub root_folder: PathBuf,
     pub build_state: BuildState,
     // Command-line --warn-error flag override (takes precedence over rescript.json config)
@@ -348,6 +354,9 @@ pub struct BuildCommandState {
     /// cross-module errors can quote the dependency's declaration site.
     pub diagnostic_locations: bool,
     pub diagnostic_retry: std::sync::atomic::AtomicBool,
+    /// What `RESCRIPT_DERIVED_PATH=check` found in this build: reported
+    /// together when the compile phase ends, and then the build fails.
+    pub derived_differences: rescript_compiler::driver::DerivedDifferences,
     // In-memory published interfaces, keyed by module name. Only used in --in-process mode.
     // Maps module_name -> InMemoryModuleState.
     pub in_memory_interfaces: Mutex<AHashMap<String, InMemoryModuleState>>,
@@ -411,6 +420,9 @@ pub struct BuildCommandState {
     // What the previous in-process build recorded (see `incremental`). Read
     // during initialization, in-process builds only.
     pub previous_in_process: Option<super::incremental::PreviousInProcessBuild>,
+    /// Readers of the packages' stored interfaces, for a check-only build
+    /// (see `incremental::recorded_js_metadata`).
+    pub recorded_cores: Mutex<AHashMap<String, Arc<super::state_db::InterfaceCores>>>,
     // Compile into the module registry only, writing nothing to disk (no
     // JavaScript, source copies or compiler log): `rescript bsc` builds an
     // `-I` package this way without touching its files.
@@ -479,6 +491,7 @@ impl BuildState {
         Self {
             project_context,
             check_only: false,
+            print_warnings: true,
             module_names: AHashSet::new(),
             modules: AHashMap::new(),
             packages,
@@ -523,9 +536,11 @@ impl BuildCommandState {
             build_state: BuildState::new(project_context, packages, compiler, source_map_command),
             warn_error_override,
             dump: None,
+            revoked_snapshots: [false; 2],
             stored_asts: Mutex::new(AHashMap::new()),
             diagnostic_locations: false,
             diagnostic_retry: std::sync::atomic::AtomicBool::new(false),
+            derived_differences: Default::default(),
             in_memory_interfaces: Mutex::new(AHashMap::new()),
             published_item_digests: Mutex::new(AHashMap::new()),
             prepared_interfaces: Mutex::new(AHashMap::new()),
@@ -544,6 +559,7 @@ impl BuildCommandState {
             package_compiler_options: Mutex::new(AHashMap::new()),
             features,
             previous_in_process: None,
+            recorded_cores: Mutex::new(AHashMap::new()),
             in_memory_only: false,
             incremental_plan: None,
             build_run: BuildRun::NotStarted,

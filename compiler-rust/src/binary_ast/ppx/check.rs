@@ -126,6 +126,8 @@ impl<'a> Checker<'a> {
             return Err(PpxError::at_loc(loc, message));
         }
         match &item.pstr_desc {
+            // A plan holds no syntax to check.
+            StructureItemDesc::Pstr_derived(_) => Ok(()),
             StructureItemDesc::Pstr_type(inner) => {
                 let (_rec_flag, tdcls) = &**inner;
                 self.type_declarations_with_deriving(tdcls, true)
@@ -180,6 +182,7 @@ impl<'a> Checker<'a> {
     /// `Ast_mapper.M.map_structure_item` (ast_mapper.ml:236-255).
     fn default_structure_item(&mut self, item: &StructureItem) -> PpxResult<()> {
         match &item.pstr_desc {
+            StructureItemDesc::Pstr_derived(_) => Ok(()),
             StructureItemDesc::Pstr_eval(inner) => {
                 let (expr, attrs) = &**inner;
                 self.expr(*expr)?;

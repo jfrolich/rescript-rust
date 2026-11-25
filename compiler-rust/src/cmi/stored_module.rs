@@ -110,9 +110,14 @@ pub fn decode_core(bytes: &[u8]) -> Option<StoredCore> {
     crate::binser::from_slice(bytes).ok()
 }
 
-/// Rewrite one filename prefix in O(path bytes), allocating only for a changed
-/// filename-table entry, never per type or Lambda node.
+/// Rewrite one normalized package-root prefix in O(path bytes), allocating only
+/// for a changed filename-table entry, never per type or Lambda node. These
+/// tables also contain longident names: reject those by bytes before asking the
+/// path component walker to check the boundary of a matching root.
 pub fn rebase_filename(name: &mut String, from: &std::path::Path, to: &std::path::Path) {
+    if from.to_str().is_some_and(|prefix| !name.starts_with(prefix)) {
+        return;
+    }
     if let Ok(relative) = std::path::Path::new(name).strip_prefix(from) {
         *name = to.join(relative).to_string_lossy().into_owned();
     }

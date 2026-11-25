@@ -1915,6 +1915,17 @@ fn sexp_structure_item_desc(
             Sexp::atom("Tstr_attribute"),
             sexp_attribute(arena, cx, attr),
         ]),
+        // The plan handle, then each binding with its type.
+        StructureItemDesc::Tstr_derived(idx) => {
+            let mut items = vec![Sexp::atom("Tstr_derived"), Sexp::atom(&idx.0.to_string())];
+            for bound in cx.ta.derived.bound(*idx) {
+                items.push(Sexp::list(vec![
+                    Sexp::atom(bound.ident.name()),
+                    sexp_type_expr(arena, ctx, bound.ty),
+                ]));
+            }
+            Sexp::list(items)
+        }
     }
 }
 

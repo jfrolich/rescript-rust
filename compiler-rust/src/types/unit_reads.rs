@@ -55,11 +55,17 @@ struct Collector<'a> {
     /// depend only on those, and many type nodes share a path.
     paths: ahash::AHashSet<(usize, Kind)>,
     out: Vec<UnitRead>,
+    /// Every path read, whatever its root, for the tests that compare two
+    /// typed trees of one program.
+    #[cfg(test)]
+    trace: Vec<(String, Kind)>,
 }
 
 impl Collector<'_> {
     fn path(&mut self, path: &Path, kind: Kind) {
         if self.paths.insert((path.node_addr(), kind)) {
+            #[cfg(test)]
+            self.trace.push((path.name(), kind));
             read_of_path(path, kind, None, &mut self.out);
         }
     }
@@ -125,6 +131,33 @@ impl Collector<'_> {
     fn label(&mut self, ld: &LabelDescription) {
         self.ty(ld.lbl_res);
         self.ty(ld.lbl_arg);
+    }
+}
+
+impl Collector<'_> {
+    /// The reads of a discharged derived item: the path each obligation
+    /// resolved to, and the types of its value instances and bindings. Its
+    /// general form reads the same: every identifier of it is an obligation,
+    /// and the type of each of its expressions and patterns is a part of an
+    /// obligation's instance.
+    /// Cost: O(obligations + bindings of the item) paths, and each type node
+    /// they reach once per unit.
+    fn derived(&mut self, idx: crate::binary_ast::derive::plan::DerivedIdx) {
+        use crate::types::derived::Resolved;
+        let table = &self.ta.derived;
+        for resolved in table.resolved_of(idx) {
+            match resolved {
+                Resolved::Value { path, instance } => {
+                    self.path(&path, Kind::Value);
+                    self.ty(instance);
+                }
+                Resolved::Type(path) => self.path(&path, Kind::Type),
+                Resolved::Equation | Resolved::Label(_) | Resolved::Constructor { .. } | Resolved::Literal(_) => {}
+            }
+        }
+        for bound in table.bound(idx) {
+            self.ty(bound.ty);
+        }
     }
 }
 
@@ -217,6 +250,7 @@ impl<'a> TastIterator<'a> for Collector<'a> {
         match &item.str_desc {
             StructureItemDesc::Tstr_open(od) => self.path(&od.open_path, Kind::Module),
             StructureItemDesc::Tstr_typext(te) => self.path(&te.tyext_path, Kind::Type),
+            StructureItemDesc::Tstr_derived(idx) => self.derived(*idx),
             _ => {}
         }
         ti::walk_structure_item(self, item);
@@ -262,6 +296,8 @@ pub fn structure_reads(
         stack: Vec::new(),
         paths: ahash::AHashSet::new(),
         out: opened(opens).collect(),
+        #[cfg(test)]
+        trace: Vec::new(),
     };
     collector.structure(structure);
     collector.out
@@ -281,7 +317,66 @@ pub fn signature_reads(
         stack: Vec::new(),
         paths: ahash::AHashSet::new(),
         out: opened(opens).collect(),
+        #[cfg(test)]
+        trace: Vec::new(),
     };
     collector.signature(signature);
     collector.out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::binary_ast::derive::fixtures::{DECLARATIONS, derive_source};
+    use crate::types::derived::tests::type_context;
+    use crate::types::typecore::TypeCheckContext;
+    use crate::types::{initial_env, typemod};
+    use std::collections::BTreeSet;
+
+    /// The paths a program's typed tree reads, with their kinds, and whether
+    /// a derived item of it was discharged from a plan.
+    fn paths_read(source: &str, plans: bool) -> (BTreeSet<(String, String)>, bool) {
+        let (parser, structure) = derive_source(source, plans);
+        let arena = parser.arena();
+        let type_ctx = type_context();
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        let env = initial_env(&type_ctx);
+        let (typed, _) = typemod::type_structure(&mut tctx, &env, arena, &structure).unwrap();
+        let planned = tctx.typed.derived.discharged() > 0;
+        let mut collector = Collector {
+            ctx: &type_ctx,
+            ta: &tctx.typed,
+            seen: SeenTypes::default(),
+            stack: Vec::new(),
+            paths: ahash::AHashSet::new(),
+            out: Vec::new(),
+            trace: Vec::new(),
+        };
+        collector.structure(&typed);
+        let paths = collector
+            .trace
+            .into_iter()
+            .map(|(path, kind)| (path, format!("{kind:?}")))
+            .collect();
+        (paths, planned)
+    }
+
+    /// A discharged item reads the paths its general form reads.
+    #[test]
+    fn a_discharged_item_reads_what_its_general_form_reads() {
+        let nested = crate::binary_ast::derive::fixtures::NESTED.map(|(source, _)| source);
+        for source in DECLARATIONS.into_iter().chain(nested) {
+            let (planned, discharged) = paths_read(source, true);
+            let (mut general, none) = paths_read(source, false);
+            assert!(discharged && !none);
+            // The general form names its own parameter, a local: no read of
+            // a unit, and a plan has no identifier for it.
+            assert!(general.remove(&("v".to_string(), "Value".to_string())));
+            assert!(
+                planned.iter().any(|(_, kind)| kind == "Value"),
+                "{planned:?}"
+            );
+            assert_eq!(planned, general, "{source}");
+        }
+    }
 }

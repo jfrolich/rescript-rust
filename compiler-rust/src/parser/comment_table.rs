@@ -980,6 +980,9 @@ fn walk_structure_item(
     }
 
     match &si.pstr_desc {
+        StructureItemDesc::Pstr_derived(_) => {
+            unreachable!("{}", crate::binary_ast::derive::NO_SYNTAX)
+        }
         StructureItemDesc::Pstr_primitive(vd) => walk_value_description(vd, t, comments, arena),
         StructureItemDesc::Pstr_open(od) => walk_open_description(od, t, comments, arena),
         StructureItemDesc::Pstr_value(inner) => {

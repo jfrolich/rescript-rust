@@ -1,0 +1,8 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36mcommand line[0m
+
+  [1;33mThe module or file MissingConfigModule can't be found.[0m
+  - If it's a third-party dependency:
+    - Did you add it to the "dependencies" or "dev-dependencies" in rescript.json?
+  - Did you include the file's directory to the "sources" in rescript.json?

@@ -18,10 +18,12 @@ test-reanalyze:
 
 test: test-analysis-binary test-reanalyze
 
-# The Rust editor analysis against the OCaml snapshots (see README.md).
+# The Rust editor analysis and reanalyze against the OCaml snapshots (see
+# README.md).
 test-rust:
 	./no-watcher.sh
 	./test-rust.sh
+	./tests-reanalyze/test-rust.sh
 
 clean:
 	make -C tests clean

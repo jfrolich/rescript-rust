@@ -437,6 +437,9 @@ pub fn print_signature_ml(signature: &[SignatureItem], arena: &ParseArena, out: 
 
 fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item: &StructureItem) {
     match &item.pstr_desc {
+        StructureItemDesc::Pstr_derived(_) => {
+            unreachable!("{}", crate::binary_ast::derive::NO_SYNTAX)
+        }
         StructureItemDesc::Pstr_eval(inner) => {
             let (ref expr_idx, ref attrs) = **inner;
             // OCaml: pp f "@[<hov2>;;%a@]%a"

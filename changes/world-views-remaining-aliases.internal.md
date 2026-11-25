@@ -1,0 +1,1 @@
+- Build the component views of the remaining alias paths and of children declared with a module type name once per build; no component table is built once per worker thread any more.

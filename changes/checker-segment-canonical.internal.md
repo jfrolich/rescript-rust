@@ -1,0 +1,1 @@
+- Independently print immutable checker segments and compare their canonical signatures in dual-checker mode.

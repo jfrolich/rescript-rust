@@ -70,7 +70,30 @@ pub fn verify_compiler_info_with(
     source_map_args: &[String],
     metas: &AHashMap<String, std::collections::BTreeMap<String, String>>,
 ) -> CompilerCheckResult {
-    let mismatched_packages = packages
+    let mismatched_packages = mismatched_packages(packages, compiler, source_map_args, metas);
+
+    let cleaned_count = mismatched_packages.len();
+    mismatched_packages.par_iter().for_each(|package| {
+        // suppress progress printing during init to avoid breaking step output
+        clean::clean_package(false, true, package);
+    });
+    if cleaned_count == 0 {
+        CompilerCheckResult::SameCompilerAsLastRun
+    } else {
+        CompilerCheckResult::CleanedPackagesDueToCompiler
+    }
+}
+
+/// The packages whose previous build this compiler and configuration cannot
+/// continue: a build cleans them, and a build that writes nothing reads no
+/// record of theirs.
+pub fn mismatched_packages<'a>(
+    packages: &'a AHashMap<String, packages::Package>,
+    compiler: &CompilerInfo,
+    source_map_args: &[String],
+    metas: &AHashMap<String, std::collections::BTreeMap<String, String>>,
+) -> Vec<&'a packages::Package> {
+    packages
         .values()
         .par_bridge()
         .filter(|package| {
@@ -109,18 +132,7 @@ pub fn verify_compiler_info_with(
                 }
             })
         })
-        .collect::<Vec<_>>();
-
-    let cleaned_count = mismatched_packages.len();
-    mismatched_packages.par_iter().for_each(|package| {
-        // suppress progress printing during init to avoid breaking step output
-        clean::clean_package(false, true, package);
-    });
-    if cleaned_count == 0 {
-        CompilerCheckResult::SameCompilerAsLastRun
-    } else {
-        CompilerCheckResult::CleanedPackagesDueToCompiler
-    }
+        .collect()
 }
 
 /// Record the compiler identity of this build for every package.

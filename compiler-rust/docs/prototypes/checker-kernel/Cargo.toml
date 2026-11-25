@@ -1,0 +1,12 @@
+[package]
+name = "checker-kernel"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+debug = "line-tables-only"
+
+[workspace]

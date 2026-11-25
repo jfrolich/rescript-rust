@@ -1,0 +1,1 @@
+- Emit the reference compiler's JavaScript for a pattern match whose shared branch returns a function containing another such match, and for a guarded match inside another match's shared-branch fallthrough.

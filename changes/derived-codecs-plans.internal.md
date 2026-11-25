@@ -1,0 +1,1 @@
+- Compile derived codecs of type constructor applications from a plan instead of generated syntax, with `RESCRIPT_DERIVED_PATH` (`general`, `check`) to compare both paths.

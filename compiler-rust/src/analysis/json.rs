@@ -78,6 +78,20 @@ pub fn escape_string(s: &str) -> String {
     out
 }
 
+/// Print `s` with the width OCaml's `Format` gives it (format.ml
+/// `utf_8_scalar_width`): the number of UTF-8 scalar values of its bytes,
+/// an ill-formed sequence counting as one. The layout breaks lines by it.
+fn string(f: &mut Formatter<&mut Vec<u8>>, s: &str) {
+    let width = if s.is_ascii() {
+        s.len()
+    } else {
+        String::from_utf8_lossy(&super::text_bytes(s))
+            .chars()
+            .count()
+    };
+    f.string_as(width, s);
+}
+
 fn is_atom(x: &Json) -> bool {
     match x {
         Json::Null | Json::Bool(_) | Json::Int(_) | Json::String(_) => true,
@@ -107,7 +121,7 @@ fn format(f: &mut Formatter<&mut Vec<u8>>, x: &Json, inside_box: bool) {
         Json::Null => f.string("null"),
         Json::Bool(b) => f.string(if *b { "true" } else { "false" }),
         Json::Int(i) => f.string(&i.to_string()),
-        Json::String(s) => f.string(&escape_string(s)),
+        Json::String(s) => string(f, &escape_string(s)),
         Json::List(l) if l.is_empty() => f.string("[]"),
         Json::List(l) => {
             if !inside_box {
@@ -141,7 +155,7 @@ fn format(f: &mut Formatter<&mut Vec<u8>>, x: &Json, inside_box: bool) {
             pp_list(f, l, |f, (name, x)| {
                 // `format_field`: `@[<hv2>%s: %a@]`.
                 f.open_box(BoxKind::HV, 2);
-                f.string(&escape_string(name));
+                string(f, &escape_string(name));
                 f.string(": ");
                 format(f, x, true);
                 f.close_box();
@@ -192,5 +206,25 @@ mod tests {
 ]"#
         );
         assert_eq!(escape_string("a\"\n\u{1}"), r#""a\"\n\u0001""#);
+    }
+
+    /// The layout counts a multi-byte character once, as OCaml's `Format`
+    /// does: text fits on a line by its characters, not its bytes.
+    #[test]
+    fn measures_strings_in_characters() {
+        let fits = |text: String| {
+            let json = Json::assoc([("docs", Json::List(vec![Json::String(text)]))]);
+            !json.pretty().contains('\n')
+        };
+        let widest = (1..200)
+            .take_while(|n| fits("x".repeat(*n)))
+            .last()
+            .unwrap();
+        let text = format!("{}é—🎉", "x".repeat(widest - 3));
+        assert_eq!(text.chars().count(), widest);
+        // As the analysis holds source text: one character per byte.
+        let latin1: String = text.bytes().map(char::from).collect();
+        assert!(fits(latin1.clone()));
+        assert!(!fits(format!("{latin1}x")));
     }
 }

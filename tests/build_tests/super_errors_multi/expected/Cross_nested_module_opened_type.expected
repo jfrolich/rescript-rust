@@ -1,0 +1,9 @@
+We've found a bug for you!
+  /.../fixtures/Cross_nested_module_opened_type/User.res:2:17-45
+
+  1 │ open Outer
+  2 │ let _: string = Inner.Deep.pair(Inner.make())
+  3 │ 
+
+  This has type: Outer.Inner.Deep.pair (defined as (Outer.Inner.t, int))
+  But it's expected to have type: string

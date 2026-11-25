@@ -1,0 +1,1 @@
+- Run the diagnostics fixtures for derived code in CI, in all three modes.

@@ -1,0 +1,1 @@
+- Compile ordinary derived variant codecs through typed obligations and pooled body plans, sharing record-codec construction for inline records.

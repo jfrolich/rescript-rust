@@ -158,7 +158,9 @@ pub fn main(args: Vec<String>, registry: Option<RegistryProvider>) {
     let handler = builder
         .spawn(|| {
             enable_cli_cleanup_skip();
-            match run(args, registry) {
+            let result = run(args, registry);
+            crate::perf_counters::print_report();
+            match result {
                 Ok(()) => {
                     let _ = std::io::stdout().flush();
                     let _ = std::io::stderr().flush();
@@ -495,7 +497,11 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
 
     let compiler_opts = CompilerOptions {
         ts_files: None,
+        checker: crate::driver::CheckerChoice::from_env(),
         derived_census: CompilerOptions::derived_census_from_env(),
+        derived_path: crate::driver::DerivedPath::from_env(),
+        derived_reference: None,
+        derived_differences: None,
         backend: crate::bir::shadow::BackendMode::from_env(),
         signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
         js_printer: crate::emit::PrinterMode::from_env(),
@@ -537,6 +543,8 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
         package_name: opts.package_name.clone(),
+        package_root: (!opts.gentype_flags.project_root.is_empty())
+            .then(|| PathBuf::from(&opts.gentype_flags.project_root)),
         make_runtime: opts.make_runtime,
         assume_compiled_interface: opts.read_cmi,
         gentype_config: opts.gentype.then(|| {
@@ -614,6 +622,8 @@ fn compile_in_process(
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
         package_name: opts.package_name.clone(),
+        package_root: (!opts.gentype_flags.project_root.is_empty())
+            .then(|| PathBuf::from(&opts.gentype_flags.project_root)),
         gentype_config: opts.gentype.then(|| {
             std::sync::Arc::new(crate::gentype::config::build_config_from_flags(
                 opts.namespace.clone(),
@@ -642,6 +652,7 @@ fn compile_in_process(
         }
     };
 
+    crate::perf_counters::begin_cli_unit();
     if is_interface {
         let result = crate::driver::typecheck_interface_source_in_process(
             &source,
@@ -719,6 +730,7 @@ fn compile_in_process(
     }
     options.js_output_targets = targets.clone();
 
+    crate::perf_counters::begin_cli_unit();
     let result = crate::driver::compile_source_in_process(
         &source,
         &filename,
@@ -814,6 +826,11 @@ fn generate_ast(
         fs::create_dir_all(parent)?;
     }
 
+    // Stored ASTs must contain syntax, not process-local derived plans.
+    let options = &CompilerOptions {
+        derived_path: crate::driver::DerivedPath::General,
+        ..options.clone()
+    };
     let mut parser = Parser::new(&filename, &source);
     let mut frontend_output = String::new();
     let warnings_are_fatal;

@@ -1,0 +1,9 @@
+We've found a bug for you!
+  /.../fixtures/Cross_alias_of_nested_module_type/User.res:1:14-25
+
+  1 │ let _: int = Dep.X.make()
+  2 │ let _: Dep.X.t = 1
+  3 │ 
+
+  This has type: Dep.X.t
+  But it's expected to have type: int

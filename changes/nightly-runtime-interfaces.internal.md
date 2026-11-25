@@ -1,0 +1,1 @@
+- Ship the compiled runtime interfaces in the nightly `@tellahq/rescript-runtime`, so that `rescript-ocaml` finds `Pervasives`.

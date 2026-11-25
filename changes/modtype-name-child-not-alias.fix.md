@@ -1,0 +1,1 @@
+- Do not print `(defined as M.S.t)` after a type of a dependency's module that is declared with a module type name (`module N: S`).

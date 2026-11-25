@@ -8,6 +8,7 @@
 //
 //   node input.js            check with the default (in-process) build
 //   node input.js --ocaml    check with the OCaml reference compiler
+//   node input.js --fixture checker_identity_08  check one fixture
 //   node input.js update     regenerate snapshots with the OCaml reference
 //
 // The OCaml reference build is the hidden `rescript build-reference`, which
@@ -26,9 +27,19 @@ const fixturesDir = path.join(import.meta.dirname, "fixtures");
 const expectedDir = path.join(import.meta.dirname, "expected");
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 
+const fixtureArg = process.argv.indexOf("--fixture");
+const selectedFixture = fixtureArg === -1 ? undefined : process.argv[fixtureArg + 1];
+if (fixtureArg !== -1 && !selectedFixture) {
+  throw new Error("--fixture requires a fixture name");
+}
 const fixtures = readdirSync(fixturesDir)
   .filter(name => statSync(path.join(fixturesDir, name)).isDirectory())
+  .filter(name => selectedFixture === undefined || name === selectedFixture)
   .sort();
+if (fixtures.length === 0) {
+  throw new Error(`Unknown fixture: ${selectedFixture}`);
+}
+const executable = process.env.RESCRIPT_EXECUTABLE ?? rescript_exe;
 
 const updateTests = process.argv.includes("update");
 const useOcaml = updateTests || process.argv.includes("--ocaml");
@@ -112,17 +123,26 @@ async function runFixture(fixtureName) {
         );
       }
     }
+    // A fixture may add fields to the project's configuration (a
+    // namespace, say) in a `config.json` of its own.
+    const configPath = path.join(fixtureDir, "config.json");
+    const config = existsSync(configPath)
+      ? {
+          ...projectConfig,
+          ...JSON.parse(await fs.readFile(configPath, "utf-8")),
+        }
+      : projectConfig;
     await fs.writeFile(
       path.join(projectDir, "rescript.json"),
-      `${JSON.stringify(projectConfig, null, 2)}\n`,
+      `${JSON.stringify(config, null, 2)}\n`,
     );
 
-    const { execBuild, execBin } = setup(projectDir);
+    const { execBin } = setup(projectDir);
     const { stdout, stderr } = ocamlBsc
-      ? await execBin(rescript_exe, ["build-reference", "--bsc", ocamlBsc, projectDir], {
+      ? await execBin(executable, ["build-reference", "--bsc", ocamlBsc, projectDir], {
           env: buildEnv,
         })
-      : await execBuild([], { env: buildEnv });
+      : await execBin(executable, ["build"], { env: buildEnv });
     let log;
     try {
       log = await fs.readFile(

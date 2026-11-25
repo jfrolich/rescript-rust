@@ -43,7 +43,7 @@ impl Bir {
         for (i, value) in self.pools.prims.iter().enumerate() {
             writeln!(out, "prim{i} {value:?}").unwrap();
         }
-        for (i, value) in self.pools.funcs.iter().enumerate() {
+        for (i, value) in self.vars.funcs.iter().enumerate() {
             writeln!(
                 out,
                 "func{i} {value:?} {:?}",

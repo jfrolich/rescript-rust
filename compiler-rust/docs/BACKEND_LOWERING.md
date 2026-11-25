@@ -1,6 +1,6 @@
 # Backend lowering: level L to level J (S3.3 to S3.9)
 
-Status: specification, not implemented. It is the table
+Status: specification. S3.3 to S3.9 are implemented, in check mode only ([STATUS.md](STATUS.md)). It is the table
 [BACKEND_REDESIGN.md](BACKEND_REDESIGN.md) H.1 asks for before stage S3.3
 ("a table mapping each context function of `lam_compile.rs` (A.5) to a
 continuation case"), and the slicing of S3.3 to S3.9. Sections A to I of that
@@ -77,11 +77,13 @@ Three structural differences between the legacy code and OCaml matter here.
 1. **Exits.** OCaml has one jump table, `jmp_table: label -> {exit_id,
    bindings, order_id}`, and one test for the cheap form (`lam_compile.ml:1173`).
    The legacy code has three stacks (`static_handlers`,
-   `static_jump_handlers`, `fallthrough_return_handlers`, C:413-415) and
-   chooses between them with about twenty predicates that walk the body and
-   the handler (`uses_fallthrough_staticcatch_return` (C:3646),
-   `return_staticcatch_requires_explicit_jump` (C:6135) and the functions of row
-   K14). The predicates approximate what OCaml's `in_staticcatch` bit says.
+   `static_jump_handlers`, `fallthrough_return_handlers`, C:413-415). Until
+   S3.5 it chose between them with about twenty predicates that walked the
+   body and the handler and approximated what OCaml's `in_staticcatch` bit
+   says. S3.5 found two shapes on which they chose the other form than OCaml
+   (4.6) and replaced them with OCaml's test, `staticcatch_takes_pseudo_jump`:
+   no enclosing `try` body, the three stacks empty, and no exit in the
+   handler.
 2. **Speculation.** OCaml compiles a branch of a conditional in `NeedValue`
    first and compiles it again in the real continuation when the first result
    needs statements (`lam_compile.ml:1577-1712`). The legacy code does the
@@ -121,7 +123,7 @@ pub enum Ret {
 pub struct Cx {
     cont: Cont,
     jumps: JumpTop,     // top of the jump stack visible here (4.1)
-    switch_depth: u32,  // L switches between here and the closest loop
+    switch_depth: u32,  // inherited switch scopes; a source loop preserves depth
     loops: LoopTop,     // top of the loop-frame stack visible here
     return_unit: bool,  // the enclosing function's `return_unit` attribute
     probing: bool,      // a conditional reads whether this output is free (1.5)
@@ -328,7 +330,7 @@ against it.
 | K11 | Switch depth, loops, labels | `with_switch_depth` (C:1988), `push_loop` (C:2044), `pop_loop` (C:2050), `ensure_current_loop_label` (C:2059), `with_fresh_loop_label_counter` (C:2034), `continues_toplevel_spine` (C:1513) | `loop_N` labels and labelled `break`/`continue` | `Cx::switch_depth`, `Cx::loops`, the label schedule (4.5) |
 | K12 | Exits, explicit form | `flatten_nested_caches` (C:190), `compile_staticcatch_effect_output` (C:3378) and its three siblings, the four `compile_multi_staticcatch_effect_output` (C:3267) siblings, `emit_multi_staticcatch_prelude` (C:6441), `compile_exit_dispatch` (C:6528), `compile_static_raise_jump_output` (C:3173), `next_static_jump_exit_code` (C:6334) | `let exit = 0`, the handler parameters, the body, a dispatch on `exit` | a jump-stack entry with `order > 0`; one function for all continuations (4.1) |
 | K13 | Exits, cheap form (the handler follows the body) | `compile_fallthrough_staticcatch_return_output` (C:3463), `compile_fallthrough_static_raise_return_output` (C:3485), `with_fallthrough_return_handler` (C:3516) | the handler parameters, the body, the handler | a jump-stack entry with `order = -1` (`add_pseudo_jmp`) |
-| K14 | Exits, choice of the form | `compile_staticcatch_in_return` (C:3091), `uses_fallthrough_staticcatch_return` (C:3646), `uses_pseudo_fallthrough_staticcatch_return` (C:3805), `return_staticcatch_requires_explicit_jump` (C:6135) and the predicates in the index | a boolean | one test: the continuation is `Effect(Return(Named { in_catch: false, .. }))`, the flattened table has one handler, and the handler has no `HAS_EXIT` flag (4.1). No walk |
+| K14 | Exits, choice of the form | `compile_staticcatch_in_return` (C:3091), `staticcatch_takes_pseudo_jump` and the predicates in the index (before S3.5: `uses_fallthrough_staticcatch_return`, `uses_pseudo_fallthrough_staticcatch_return`, `return_staticcatch_requires_explicit_jump` and eighteen more, deleted there, 4.6) | a boolean | one test: the continuation is `Effect(Return(Named { in_catch: false, .. }))`, the flattened table has one handler, and the handler has no `HAS_EXIT` flag (4.1). No walk |
 | K15 | Exits, handler substituted at the raise | `with_static_handler` (C:6075), `resolve_static_raise` (C:6113), `compile_hoisted_static_raise_chain_return_tail` (C:3932) | the handler's code at the raise site | none. Open (Q1): the form is reachable only for a catch whose body has no exit to its label |
 | H1 | Calls | `compile_apply_call_inner` (C:1144), `apply_with_arity` (C:1341), `call_info_of_apply_status` (C:320) | `JCall` | 3.3 |
 | H2 | Fields and calls of another module | `compile_external_field_apply` (C:1266), `resolve_cmj_module_field_arity` (C:1222), `resolve_cmj_module_field_lambda` (C:1211), `resolve_cmj_module_field_constant` (K:163) | `JQualified`, a constant, or an inlined body | 3.3 |
@@ -396,7 +398,7 @@ Every function name of the files below, by row.
 | H6 | `compile_recursive_bindings_output` 2215, `compile_recursive_binding` 2244, `compile_recursive_self_binding_makeblock` 2293, `recursive_dummy_object_expr` 2345, `recursive_self_binding_field_info` 2371, `letrec_bindings` 6625, `recursive_function_binding_value` 6692, `binding_is_ocaml_scc_function` 6696, `recursive_binding_group_is_function_only` 6700, `sort_recursive_binding_group` 6710 |
 | K4 | `compile_let_binding` 2400, `compile_let_binding_output` 2411, `compile_if_binding_block` 2699, `compile_switch_binding_block` 2750, `compile_string_switch_binding_block` 2775, `compile_short_circuit_binding_block` 2859, `compile_declared_if_block` 4926, `prepend_declaration_or_fold_final_assignment` 5070, `declare_compiled` 6648 |
 | K6 | `compile_return_block` 2917, `compile_return_output_inner` 2924, `compile_return_output` 3067, `compile_short_circuit_return_output` 3075, `reorder_fallthrough_return_clauses` 3835, `grouped_return_string_clauses` 3847, `lambda_contains_statement_value_form` 5016, `try_fold_effect_only_return_tail` 5118, `compile_if_return_output` 5144, `compile_test_return_block` 5216, `compile_test_return_block_with_fallback` 5231, `compile_switch_return_block` 5652, `compile_switch_return_block_inner` 5666, `compile_string_switch_return_block` 5749, `compile_string_switch_return_block_inner` 5758, `return_case_needs_break` 6643, `return_compiled` 6658 |
-| K14 | `compile_staticcatch_in_return` 3091, `handler_returns_unit_undefined` 3615, `staticcatch_handler_is_identity_binding` 3634, `uses_fallthrough_staticcatch_return` 3646, `uses_pseudo_fallthrough_staticcatch_return` 3805, `return_staticcatch_requires_explicit_jump` 6135, `handler_is_pure_outward_static_raise_forwarder` 6176, `active_static_raise_target_exists` 6199, `return_handler_requires_explicit_staticcatch_jump` 6216, `handler_is_inlineable_pure_return_static_raise_dispatch` 6248, `pure_return_static_raise_dispatch_has_terminal_value` 6259, `lambda_requires_explicit_staticcatch_jump` 6317, `any_child` 6614, `lambda_contains_static_raise` 7501, `handler_has_static_raise_like_ocaml` 7509, `no_static_raise_in_handler_like_ocaml` 7520, `lambda_has_exit` 7524, `lambda_contains_staticcatch` 7534, `lambda_contains_static_raise_to_label` 7542, `switch_cases_contain_static_raise_to_label` 7555, `string_switch_cases_contain_static_raise_to_label` 7568, `lambda_is_direct_static_raise_to_label` 7579, `switch_cases_contain_nontrivial_static_raise_to_label` 7589, `string_switch_cases_contain_nontrivial_static_raise_to_label` 7605, `lambda_has_multiple_static_raises_to_label` 7617, `lambda_static_raise_count_to_label` 7628, `lambda_contains_static_raise_to_other_label` 7645 |
+| K14 | `compile_staticcatch_in_return` 3091, `staticcatch_takes_pseudo_jump`, `any_child` 6614, `handler_has_static_raise_like_ocaml` 7509, `no_static_raise_in_handler_like_ocaml` 7520, `lambda_has_exit` 7524, `lambda_contains_static_raise_to_label` 7542. Deleted by S3.5 (4.6): `handler_returns_unit_undefined`, `staticcatch_handler_is_identity_binding`, `uses_fallthrough_staticcatch_return`, `uses_pseudo_fallthrough_staticcatch_return`, `return_staticcatch_requires_explicit_jump`, `handler_is_pure_outward_static_raise_forwarder`, `active_static_raise_target_exists`, `return_handler_requires_explicit_staticcatch_jump`, `handler_is_inlineable_pure_return_static_raise_dispatch`, `pure_return_static_raise_dispatch_has_terminal_value`, `lambda_requires_explicit_staticcatch_jump`, `lambda_contains_static_raise`, `lambda_contains_staticcatch`, `switch_cases_contain_static_raise_to_label`, `string_switch_cases_contain_static_raise_to_label`, `lambda_is_direct_static_raise_to_label`, `switch_cases_contain_nontrivial_static_raise_to_label`, `string_switch_cases_contain_nontrivial_static_raise_to_label`, `lambda_has_multiple_static_raises_to_label`, `lambda_static_raise_count_to_label`, `lambda_contains_static_raise_to_other_label` |
 | K13 | `compile_fallthrough_staticcatch_tail_loop_return_output` 3439, `compile_fallthrough_staticcatch_return_output` 3463, `compile_fallthrough_static_raise_return_output` 3485, `with_fallthrough_return_handler` 3516, `active_fallthrough_return_handler` 3831 |
 | K9 | `with_return_unit_context` 3532, `lambda_is_trivial_unit_undefined` 3550, `compile_if_unit_return_tail_block` 3579 |
 | K8 | `with_try_body_context` 3543 |
@@ -414,8 +416,8 @@ Every function name of the files below, by row.
 | Row | Functions (line) |
 | --- | --- |
 | H5 | `block_last_is_return_throw_or_continue` 41, `empty_switch_case_clause` 48, `named_payload_switch` 57, `untagged_switch` 75, `is_named` 115, `decode` 128, `stable_group_switch_cases` 180 |
-| H18 | `named_variant_keys_need_bound_scrutinee` 143, `is_int_tag` 244, `switch_literal_tags` 600, `uses_named_variant_view` 610, `uses_named_variant_switch` 860, `literal_tag_value` 868, `switch_tag_value` 882, `named_const_cases` 886, `named_block_cases` 899, `const_switch_default` 912, `const_switch_complete` 920, `block_switch_default` 924, `block_switch_complete` 932, `variant_tag_name` 936, `bind_switch_scrutinee_once` 944, `named_variant_switch_needs_bound_scrutinee` 966, `decoded_switch_needs_bound_scrutinee` 976, `dispatch_named_variant_branches` 987, `variant_tag_expr` 1010, `switch_case_expr` 1021, `switch_case_test` 1042 |
-| H17 | `class_constructor` 220, `is_instance_of` 230, `untagged_typeof_expr` 277, `untagged_test_expr` 290, `untagged_if` 319, `emit_untagged_tree` 336, `emit_untagged_clause` 400, `untagged_fallback_block` 500, `untagged_output_block` 524, `compile_untagged_plan` 547, `compile_untagged_switch` 571, `uses_untagged_variant_view` 618 |
+| H18 | `named_variant_keys_need_bound_scrutinee` 143, `is_int_tag` 244, `switch_literal_tags` 600, `uses_named_variant_switch` 860, `literal_tag_value` 868, `switch_tag_value` 882, `named_const_cases` 886, `named_block_cases` 899, `const_switch_default` 912, `const_switch_complete` 920, `block_switch_default` 924, `block_switch_complete` 932, `variant_tag_name` 936, `bind_switch_scrutinee_once` 944, `named_variant_switch_needs_bound_scrutinee` 966, `decoded_switch_needs_bound_scrutinee` 976, `dispatch_named_variant_branches` 987, `variant_tag_expr` 1010, `switch_case_expr` 1021, `switch_case_test` 1042 |
+| H17 | `class_constructor` 220, `is_instance_of` 230, `untagged_typeof_expr` 277, `untagged_test_expr` 290, `untagged_if` 319, `emit_untagged_tree` 336, `emit_untagged_clause` 400, `untagged_fallback_block` 500, `untagged_output_block` 524, `compile_untagged_plan` 547, `compile_untagged_switch` 571 |
 | K1 | `compile_switch` 468, `compile_switch_inner` 631, `compile_string_switch` 728, `compile_string_switch_inner` 739 |
 | K5 | `compile_small_string_switch_assignment` 1046, `compile_named_string_switch_assignment_general` 1204, `compile_named_string_switch_assignment` 1248, `compile_named_variant_switch_assignment_statements` 1660 |
 | K6 | `compile_small_string_switch_return` 1088, `compile_named_string_switch_return_with_strategy` 1274, `compile_named_string_switch_return` 1432, `compile_named_variant_switch_return_statements` 1738 |
@@ -739,6 +741,177 @@ Incidental: `fold_prim` at level L (C.5 N1, N2) and the J folds of section 6
 overlap (integer arithmetic on two literals is folded by both). The lowering
 does not depend on which one fires; both stay.
 
+### 3.5.1 Externals
+
+This table specifies S3.8 against X (`lam_compile_external.rs`), P
+(`lam_compile_primitive.rs`) and C (`lam_compile.rs`). Line numbers here are
+those at revision `73a1901ea0`; C's earlier index predates intervening ports.
+These are lowering policies, not additional J normalisation rules.
+
+**Continuations and order.** Let `b; e` be the prelude and expression in the
+following table. Every row produces **V** `b; e`, **D** `b; let id = e`,
+**A** `b; id = e`, **E** `b` with `e` retained for the effect consumer, and
+**R** `b; return e` (finished), through the conversions of 1.4. The normal
+unit-return and pure-effect rules still apply. Primitive arguments are lowered
+left to right in **V**, then held as specified below, then sequenced by 3.3.
+Only object creation and the special object-get path add their own statements.
+
+| Row | Primitive | Expression and prelude | Legacy |
+| --- | --- | --- | --- |
+| X1 | `PjsCall` | The declaration-kind table below, with removed argument effects sequenced before the expression | `compile_js_call` (X:1202), `add_external_effect` (X:755) |
+| X2 | `PjsApply` | Plain default-info call of the first value with the rest; no values gives non-unit undefined. No FFI argument conversion or variadic assembly | P:229; unlike `compile_js_call` (X:1202) |
+| X3 | `PjsObjectCreate` | Object literal, possibly a variable object followed by conditional optional-field assignments; result is the object variable | `compile_js_object_create` (X:972) |
+| X4 | `PjsObjectGet(name)` | Static member read. With exactly one receiver, lower it first; if its prelude is nonempty and it cannot be duplicated (with record fields allowed), append a strict `tmp` binding and read its member. Otherwise read directly | P:84; `static_index` (X:1441) |
+| X5 | `PjsObjectSet(name)` | Exactly receiver and value: plain sequence `(receiver.name = value, unit undefined)`. Other arities give non-unit undefined | P:827; member construction `static_index` (X:1441) |
+| X6 | `PjsFnMethod` | First value, marking an actual function `is_method = true` without changing its location; non-function unchanged, missing value non-unit undefined | P:813; ordinary function aliases are separate (`compile_eta_wrapped_runtime_alias`, X:443) |
+
+**Holding precedes sequencing.** A hold goes after that argument's own
+statements, before the generic right-to-left sequencing pass. Thus an argument
+needing a statement also forces earlier unsafe argument values to be evaluated
+before it. Do not first flatten all argument preludes and then add FFI holds.
+
+| Row | Decision | Result | Legacy |
+| --- | --- | --- | --- |
+| X7 | Call argument/spec pairing | Constants consume no runtime argument; hold other arguments in source order, retaining unmatched remaining arguments | `hold_external_args` (X:254) |
+| X8 | Event variant can be read in place | A literal polyvariant block, or a duplicable value, needs no hold. Duplicable means undefined, bool, number, string, template, qualified read, non-global variable, positioned field of a duplicable value, index of two duplicable values, or conditional of three duplicable values | `literal_polyvar_block` (X:30), `polyvar_event_in_place` (X:59), nested `duplicable` (X:60) |
+| X9 | String/int dispatch can run in place | Strictly side-effect-free value needs no hold; otherwise bind `tmp` before the dispatch function, including awaited values | `polyvar_dispatch_in_place` (X:50), `hold_external_arg` (X:213) |
+| X10 | Optional known `Some` needs a variant hold | Hold only its payload, reconstruct the optional wrapper preserving identity and cold metadata; other argument kinds never request a variant hold | `hold_external_arg` (X:213) |
+| X11 | Object argument holding | Skip constants on labelled/empty fields; empty fields do not variant-hold. Labelled and optional fields use X8–X10. An unknown optional value additionally holds if not delay-safe and a later literal-evaluated argument is neither delay-safe nor mutually strictly pure with it | `presence_unknown` (X:173), `hold_external_obj_args` (X:278) |
+
+X11's legacy suffix search is quadratic. Preserve its predicate with a reverse
+summary of later literal-evaluated values: whether any is not delay-safe, and
+whether any such value is not strictly pure. Test the first bit for an impure
+current value and the second for a pure current value. Compute argument facts
+on construction, not by repeated subtree walks. This is a specified algorithm
+change, not a change in which values are held.
+
+**Argument values and effects.** Optional conversion precedes the attribute
+case, except constant specs never consume a runtime argument. The result of
+one argument is zero, one or two values plus an optional effect; use an inline
+bounded result, not a heap vector per argument.
+
+| Row | Kind | Values and effects | Legacy |
+| --- | --- | --- | --- |
+| X12 | Optional label | Undefined becomes non-unit undefined; known optional block becomes payload. Duplicable unknown becomes `isNotNone(arg) ? valFromOption(arg) : undefined`; otherwise one runtime `valFromOption(arg)` call | `external_optional_to_undefined_expr` (X:181), `is_not_none_expr` (X:730), `val_from_option_expr` (X:723) |
+| X13 | `Nothing` | One converted value, no extra effect | `lower_external_arg_values_and_effect` (X:782) |
+| X14 | `ExternUnit` | Preserve effect if not pure; no value for an empty label, unit undefined for a labelled/optional argument | `lower_external_arg_values_and_effect` (X:782), `external_arg_effect` (X:741) |
+| X15 | `Ignore` | No values; preserve effect if not pure | `lower_external_arg_values_and_effect` (X:782), `external_arg_effect` (X:741) |
+| X16 | `ArgCst` | No runtime argument; int literal cast to i32, string literal, or raw JSON literal | `assemble_external_args_no_splice` (X:834); `compile_external_arg_const` (C:6120) |
+| X17 | `PolyVarString` | Undefined stays undefined; literal string dispatches to its mapped string; otherwise a string-switch IIFE | `external_polyvar_string_expr` (X:344) |
+| X18 | `PolyVar` (event) | Two values: tag and payload. A literal two-field polyvariant block supplies both directly; otherwise project NAME and VAL. Map the tag through string dispatch when supplied | `external_polyvar_event_exprs` (X:374), `literal_polyvar_block` (X:370) |
+| X19 | `Int` | Undefined stays undefined; literal tag dispatches to mapped i32; otherwise a string-switch IIFE returning i32 values | `external_polyvar_int_expr` (X:400) |
+| X20 | `Unwrap`, nonoptional | Two-field block with numeric first field yields its second field; otherwise project VAL | `external_polyvar_unwrap_expr` (X:421) |
+| X21 | `Unwrap`, optional | Uses the original raw argument, not the optional-converted value: undefined, unwrap known payload, or runtime `unwrapPolyVar` | `external_option_unwrap_expr` (X:197), `lower_external_arg_values_and_effect` (X:782) |
+| X22 | No splice | Walk specs once; constants insert values; missing runtime arguments become non-unit undefined; concatenate converted values, collect effects in argument order. Remove the trailing optional-undefined suffix, then prefix fused effects | `assemble_external_args_no_splice` (X:834), `keep_non_undefined_external_args` (X:872), `fuse_external_effects` (X:749), `add_external_effect` (X:755) |
+| X23 | Splice/variadic | Last **runtime** argument that is an array expands its elements without attribute conversion. Otherwise convert it and mark that spread is needed. After all specs, wrap the final assembled value in spread. Constants can follow the last runtime argument. No trailing-undefined trimming | `assemble_external_args_with_splice` (X:894), `assemble_external_args` (X:959) |
+
+X22's suffix trimming zips reversed specs with reversed **assembled values**;
+keep this exact rule even where an attribute expands or removes an argument.
+`external_arg_effect` uses ordinary purity, not strict purity. Effects are
+folded with J-M1 and prefixed with J-M1, not inserted at their original argument
+positions; the holding/sequencing phase preserves the necessary evaluations.
+
+**Calls and access.** All calls use default call information. Scoped access
+uses ordinary static members, not record-field positions.
+
+| Row | Declaration/access | J form | Legacy |
+| --- | --- | --- | --- |
+| X24 | Named module value/function | With no scopes, qualify the named member; with scopes, qualify the first scope, then member-access the remaining scopes and name. First scope `default` (or unscoped name `default`) selects default import | `translate_scoped_module_value` (X:621) |
+| X25 | Global value/function | Global variable is first scope, or name when unscoped; append remaining scopes and name | `translate_scoped_global_value` (X:1417) |
+| X26 | Module itself | Bundle is primitive name with no hint/attributes. Zero-arity value returns binding; positive-arity value calls binding with assembled args. Constructor uses **no-splice** assembly, even for variadic declaration | `external_module_binding` (X:609), `compile_js_call` (X:1202) |
+| X27 | Named/global `DeclVal` | Zero effective arity returns target if args empty, otherwise calls target with raw sequenced args. Positive arity uses X22/X23 | `compile_js_call` (X:1202) |
+| X28 | Named/global `DeclNew` | `new target(assembled args)` with X22/X23 | `compile_js_call` (X:1202) |
+| X29 | `DeclSend` | Consume receiver first; assemble remaining args against specs after the first. Apply scopes to receiver, then call its named member (retain receiver binding) | `compile_js_call` (X:1202), `apply_scoped_access` (X:1434) |
+| X30 | `DeclGet`, `DeclSet` | No-splice assembly, exactly one/two values. Scoped receiver's member read or assignment. `DeclSet` does **not** append unit undefined, unlike X5 | `compile_js_call` (X:1202), `static_index` (X:1441) |
+| X31 | `DeclGetIndex`, `DeclSetIndex` | No-splice assembly, exactly two/three values. Scoped receiver indexed by second value, optionally assigned third | `compile_js_call` (X:1202), `apply_scoped_access` (X:1434) |
+| X32 | Tagged templates | Not handled by X: the separate `PtaggedTemplate` primitive retains the existing template lowering | `compile_js_call` (X:1202) is exhaustive over declaration kinds; P's template arm |
+
+**Object fields.** In X3, empty fields consume a runtime argument unless
+constant and preserve its effect only. Labelled constants insert their value;
+other labelled fields require exactly one converted value (X:762). Optional
+undefined fields are omitted; known `Some` payloads are converted as labelled
+values directly into the literal. Unknown optional fields are queued in source
+order. Fuse discarded effects before the literal. If the queue is nonempty,
+bind the object with kind `Variable`; for each queued field, bind a strict
+`tmp` if its value cannot be duplicated, test `value !== undefined`, and assign
+the converted value. Skip `valFromOption` when `for_sure_no_nested_option` is
+set. Convert that field with an empty label; prefix any field effect to its
+assignment value. Result is the object variable (`compile_js_object_create`,
+X:972; `lower_object_external_arg_value_and_effect`, X:762).
+
+**External identifiers.** Identity is `(bundle, default)`, not hint, import
+attributes or dynamic/static use. First encounter creates the binding and its
+name; later encounters reuse it (`external_module_id`, X:581). Each reference
+still carries its own import attributes and dynamic-import bit (X:79, X:581).
+Reuse `import.rs`'s per-unit module inventory and naming implementation rather
+than inventing a second identity scheme. Its current string scan per lookup
+must be replaced by indexed bindings before repeated-call cost is claimed.
+No source handle currently identifies the bundle/default pair: intern it once
+and retain an indexed lookup for subsequent source-primitive uses.
+
+An explicit hint capitalizes its first ASCII character. Without a hint, take
+the final slash-separated component; an ASCII-letter start followed by ASCII
+letters/digits/underscores is capitalized directly. Otherwise collect letters,
+digits and underscores, starting at a letter and capitalizing the next letter
+after dot/hyphen. If collection is empty, use the original bundle (capitalized
+when a slash existed). Sources: `external_module_ident_name` (X:86),
+`capitalize_ascii_first` (X:93), `good_hint_name` (X:106), `collect_start`
+(X:115), `collect_next` (X:133), `js_id_name_of_hint_name` (X:149).
+
+**Cross-module inline attempt (3.3).** Before lowering call arguments, recognize
+a module field of a global. With cross-module inlining enabled, obtain the
+exported Lambda function; require equal parameter/argument counts and
+`attr_can_be_inlined`. Import its body, compute the closed parameter map,
+beta-reduce with `propagate_beta_reduce_with_map`, extend assignable facts for
+the reduced tree, and lower that result. Legacy
+`compile_external_field_apply` (C:1377) returns a value output which callers
+convert to their continuation: do not silently substitute a different
+return-specific lowering. Restore temporary assignable state afterwards.
+No eligible export means the existing arity-aware call, not an unsupported
+result. An eligible body containing an unsupported construct returns that
+construct's reason. This function is in C, not X; X's similarly named
+`external_module_id` (X:581) handles JavaScript imports, not `.cmj` inlining.
+
+**Cost obligations.** One source visit per argument, one linear spec assembly,
+one reverse summary for X11 and one generic sequencing pass. Count holds and
+argument steps at 10,000 call arguments and 10,000 labelled object fields.
+String dispatch construction additionally costs its case count and spelling
+bytes; scoped access costs its segments and spelling bytes. Unknown optional
+fields use one pending list per object, not one allocation per field. This
+specification is not a claim that these costs have already been measured.
+
+**S3.8 implementation evidence.** The event duplicability predicate is a dense
+boolean node table maintained by arena construction/repair; the holder reads
+it in O(1). Object suffix facts are two booleans per argument. Module binding
+identity uses a dense table indexed by the interned bundle and default bit;
+repeated call primitives reuse a `PrimId`-indexed reference. Import attributes
+remain on the reference, not the binding. Persistent global names also reuse
+one variable identity: distinct identities for repeated `console.log` calls
+prevented the conditional normalizer from recognizing equal branches.
+
+The cross-module attempt uses the existing BIR `closed_with_stats` and `reduce`
+implementations of the closure-statistics/beta rules rather than exporting back
+to the legacy Lambda compiler. Imported binders and their assignment facts are
+fresh; they cannot modify enclosing assignment facts. Its reduced body is
+scheduled in V, followed by conversion to the original continuation.
+
+The corpus gate exposed `PisPolyVarBlock("a")` bypassing J-M9/J-E4, producing
+`typeof "a" === "object"` instead of `false`. P:642 calls E:832/E:653, which
+normalizes `typeof` first; the BIR primitive now calls those existing J rules.
+No new J rule was needed. These global-identity and primitive corrections do
+not change the X tables above.
+
+Measured 10,000-element lowering tests (constant operands):
+
+| Shape | Source visits | Primitive steps | Sequencing steps | Holds |
+| --- | ---: | ---: | ---: | ---: |
+| External call | 10,001 | 30,001 | 10,000 | 0 |
+| Labelled object | 10,001 | 40,001 | 10,000 | 0 |
+
+Separate 10,000-element holder tests exercise 10,000 event holds in 10,000
+argument steps and 5,000 optional-object holds in 20,000 argument steps.
+These counts describe the opt-in backend, not a default-path speedup.
+
 ### 3.6 `If`
 
 `If(c, t, e)`. Always first: `V(c)`. Its statements come first in the output
@@ -811,8 +984,20 @@ test in row R6 approximates. The new lowering therefore implements:
 Rows R5 step 0, R5 step 3's wrapper and R6's guard merge are legacy forms
 that OCaml reaches through `S.if_` and block wrappers. They are ported as
 written and are the first place to look when `Check` reports a difference in
-a conditional. Open (Q3): whether rows R5 and R6 ever give different J for the
-same conditional; if they do, one of them differs from OCaml.
+a conditional. Resolved Q3: the rows differ on `(if c unit unit)` when the
+function returns unit. R5 step 0 emits nothing for a pure `c`; R6 emits
+`return;`. Inside `while (true)` the return is essential: falling through
+would repeat the loop. The context difference is meaningful, not evidence
+that one row must disagree with OCaml. Keep both rows (see section 10).
+
+S3.6 also found a separate legacy discrepancy: R6's value probe changed a
+short circuit under a conditional to `&&`/`||`, unlike OCaml's
+`NeedValue should_return`. The legacy path now folds return blocks for
+expression-only branches, preserving conditional returns, and reuses the
+blocks when folding fails. `tests/tests/src/lowering_tail_short_circuit.res`
+is the reference-compiler fixture. R6 retains the block produced by `S.if_`
+when it follows statements of the test; the explicit conjunction/continue
+guard remains unwrapped.
 
 `realize(Free::Cond { test, then_, else_ }, k)`:
 
@@ -861,10 +1046,11 @@ How the rows are carried out (`bir/lower/cond.rs`):
   flags along the `Let`/`Seq` spine of each branch, and then only the test is
   lowered. Nothing is lowered and discarded;
 - row R5 step 1 reads the statements the branches produced in **R**. Its
-  legacy gate, `lambda_contains_statement_value_form` (C:5139), is true of no
-  unit the lowering accepts today, because every such form is `Unsupported`.
-  The slice that adds the first of them (S3.4) must record the fact on the L
-  node; it must not walk the branch;
+  legacy gate, `lambda_contains_statement_value_form` (C:5139), is the L flag
+  `HAS_STATEMENT` of the two branches (7.1), read when the conditional is
+  entered. S3.5 added it: the gate decides for a branch that is a string
+  switch of one complete case, or a static catch in the cheap form, whose
+  statements are effects followed by one return;
 - in **E** a branch that needs statements has the effect of its value pushed
   when the branch is complete (`compiled_to_effect_block` (C:4875)); the
   output of the row is then read by `compiled_from_effect_block` (C:7612): a
@@ -940,14 +1126,22 @@ variable's `order` (B.4) is a creation sequence number and gaps are harmless.
 (`prepend_declaration_or_fold_final_assignment` (C:5070)). **A**, **E**, **R**:
 the switch in that continuation. A switch never probes.
 
-**Order.** The scrutinee is lowered in **V** first. Then the cases, in the
-order of the grouped list, each group's body once; then the default
-(C:5693-5740; OCaml lowers the default before the cases,
-`lam_compile.ml:793-798`, which changes only identifier numbers). Bodies are
-lowered with `switch_depth + 1`.
+**Order.** Integer, string and named dispatch lower the scrutinee in **V**,
+then each grouped body once, then the default. Integer/named/untagged **V**
+allocate the result temporary before the scrutinee; string **V** allocates it
+afterward. Untagged emission follows the existing planner: actual switches
+lower the default before their clauses, while a single-typeof conditional
+lowers its clause before the default. A reused action is lowered once per
+in-switch state and its J output is copied for additional emitted occurrences.
 
-**Forms.** Which form a switch takes is decided by its `SwitchHeader`
-(B.3) and the number of cases, never by the continuation:
+Direct integer and string wrappers enter switch context for the scrutinee and
+bodies, including small string forms. Named dispatch enters it only for the
+bodies of a general side switch; untagged dispatch only for actual switches
+in its plan. The explicit traversal carries these contexts without recursion.
+
+**Forms.** The header selects the representation. Small string/named forms
+also depend on completeness: direct string **E** treats cases as incomplete,
+even without a default, unlike its other continuations:
 
 | Form | When | Function |
 | --- | --- | --- |
@@ -965,15 +1159,19 @@ The general case of the last two (`compile_general_cases`,
    the first group whose head has an equal body, else starts a group; groups
    keep the order of their last member (`stable_group_switch_cases` (V:180)). All
    members of a group but the last get an empty clause that falls through;
-3. zero cases: the default's block. One case and complete: the case's block.
-   One case with or without default, or two cases and complete:
-   `if_(scrutinee === key, case, other)`. Otherwise a `switch` statement;
+3. direct integer dispatch always retains `switch` syntax, including zero,
+   one and two cases. String/named dispatch selects small forms **before**
+   filtering/grouping: zero cases is the default's block; one complete case
+   without a default is its body; one incomplete case or two complete cases
+   use `if_(scrutinee === key, case, other)`. Other forms use a switch;
 4. `break`: in **E** and **A** a clause breaks unless its output is finished
    (`to_break_block`, `js_output.ml:88-100`; `compile_switch_value_block` (C:5306)).
    In **R** a clause breaks only if its body contains an exit **and** its
    output is not finished (`return_case_needs_break` (C:6643));
-5. in **E**, a switch whose clauses and default are all empty is the
-   scrutinee alone (C:5866-5875).
+5. in **E**, a direct integer/string switch whose clauses and default are
+   all empty is the scrutinee alone (C:5866-5875). Named general switches retain
+   their switch even when empty. The legacy-output oracle wins these form
+   distinctions over the earlier generalization of this section.
 
 "Equal" in steps 1 and 2 is `eq_approx` (`lambda/arena.rs`), structural
 equality on ten node kinds that is false for the others. Section 7 bounds its
@@ -989,10 +1187,11 @@ string switches (`compile_named_string_switch_assignment` (V:1248),
 `compile_named_string_switch_effect_with_strategy` (V:1584)). In the new lowering
 each is one function taking `Cx`.
 
-Incidental, stays in the lowering: a labelled `break` or `continue` is
-emitted whenever `switch_depth > 0`, that is inside any L switch, also one
-that is printed as `if` statements. Tested (section 4.4, `break loop_0` under
-an `if` chain).
+Incidental, stays in the lowering: labels use `switch_depth > 0`. Direct
+integer/string wrappers include small forms, but named and untagged dispatch
+only enter the scopes described above. Loop/exit lowering remains the later
+slices' responsibility; this slice tests the dispatcher and nested unsupported
+reasons rather than claiming support for those bodies.
 
 Incidental, legacy only: `compile_hoisted_named_string_return_tail` (C:3918) and
 `should_hoist_grouped_named_string_return_tail` (C:3905) act only when a
@@ -1016,12 +1215,17 @@ arms).
 | `Break`, `Continue` | | `SBreak`, `SContinue`, labelled with the innermost frame's label when `switch_depth > 0`; **finished** | arms of `compile_expr` (C:1529); 4.5 for the label |
 | `Assign(v, x)` | `V(x)` | `SExp(v = x)` | arm of `compile_expr` (C:1529) |
 
-A loop frame is pushed for the body only. A function body starts with no
-frames and `switch_depth = 0` (row K10).
+A loop frame is pushed for the body only, preserving the enclosing switch
+depth (`compiler/core/lam_compile_context.ml:88`). Thus a loop inside a
+switch may label even a direct body jump; resetting depth at loop entry would
+change reference output. A function body starts with no frames and
+`switch_depth = 0` (row K10). The dense one-byte loop fact records both a
+body switch-crossing jump and a direct body jump. Entry reads that byte once
+with the inherited context; no body scan decides whether a label is needed.
 
 ### 3.12 `Try`, `TryFinally`, `LetRec`; source locations
 
-`Try` and `TryFinally` are 5.3; `LetRec` is 5.2.
+`Try` and `TryFinally` are 5.5; `LetRec` is 5.3.
 
 Source locations (only with source maps on; `source_map_enabled`):
 
@@ -1041,14 +1245,23 @@ legacy ones do (for example J-E8 keeps the comment and drops the location of
 a negated literal); the J rules of section 6 are ported with their location
 handling, and the gate with source maps on (8.1) is the judge.
 
+S3.7b validation and measurements: [LOWERING_LOOPS_RECURSIVE_RESULTS.md](LOWERING_LOOPS_RECURSIVE_RESULTS.md).
+
 ## 4. Exits: `Catch` and `Exit`, and loop labels
 
 ### 4.1 Design
 
-The jump stack holds entries `{label, exit: VarId, bindings: run of VarId,
-order: i32}`. `Cx::jumps` is the height visible to a node; an `Exit` searches
-from there down for its label. A function body starts with an empty stack
-(row K10). This is OCaml's `jmp_table` (`lam_compile_context.ml:67`).
+The jump table holds one entry `{exit: VarId, order: i32}` per catch header,
+indexed by the header (`CatchId`); the bindings are the header's parameters.
+A label is bound by one catch (4.2 invariant 1), so an entry is written when
+its catch is entered and read only by the exits of that catch's body: no
+stack is pushed or popped. `Cx::jumps` is the number of entries visible to a
+node, which is all the table needs for `first` below. An `Exit` names its
+handler by label, and labels are sparse (they are `i32` in Lambda, and one
+unit of `tests/tests` has the label -1), so it finds the header through the
+arena's label index, one hash lookup per exit. A function body starts with
+no visible entry (row K10). This is OCaml's `jmp_table`
+(`lam_compile_context.ml:67`).
 
 `lower_catch(cx, node)` (`compile_staticcatch`, `lam_compile.ml:1169-1255`):
 
@@ -1057,7 +1270,8 @@ from there down for its label. A function body starts with an empty stack
    contains no `Exit` to a label already collected (issue 1698). The table is
    ordered **innermost first**. "Contains no exit" is the node flag `HAS_EXIT`
    (section 7): when it is clear the answer is immediate; when it is set the
-   handler is walked for the labels, pruned by the flag.
+   handler is walked for the labels, pruned by the flag. A collected catch is
+   marked in its table entry, so the test of a label is one read.
 2. **Cheap form.** If `cx.cont` is `Effect(Return(Named { in_catch: false,
    .. }))`, the table has one handler, and the handler has no `HAS_EXIT`:
    - push `{label, bindings, order: -1}`;
@@ -1067,8 +1281,8 @@ from there down for its label. A function body starts with an empty stack
    - pop; lower the handler **in `cx`**, after the body;
    - the output is `append(declarations, append(body, handler))`.
 3. **Explicit form**, otherwise:
-   - create `exit` (a fresh identifier named `exit`), before anything is
-     lowered;
+   - in **V** create the result `tmp` first (C:6408), then create `exit` (a
+     fresh identifier named `exit`), before anything is lowered;
    - `first = height of the visible jump stack + 1`
      (`next_static_jump_exit_code` (C:6334); `add_jmps`,
      `lam_compile_context.ml:114-123`). The i-th handler of the table gets
@@ -1084,25 +1298,44 @@ from there down for its label. A function body starts with an empty stack
      the entries still visible; pop;
    - the dispatch (`compile_exit_dispatch` (C:6528)): handlers with equal bodies
      are grouped as switch cases are (3.9 step 2,
-     `compile_grouped_staticcatch_handlers` (C:6493)), and only the last of a
-     group is lowered. One handler: `if (exit === order) { handler }`, and
-     nothing if the handler's block is empty. Several:
-     `switch (exit) { case order: ... }` with no default; a clause breaks
-     when it is the last of its group, its output is not finished and either
-     the continuation is not a return or the handler contains an exit
-     (C:6552);
-   - the output is `append(declarations, append(body, dispatch))`; in **V**
-     its value is `tmp`.
+     `compile_grouped_staticcatch_handlers` (C:6493)), with the fingerprints
+     of the switch lowering, and only the last of a group is lowered. One
+     handler: `S.if_(exit === order, handler, [])`, and nothing if the
+     handler's block is empty. Several: `switch (exit) { case order: ... }`
+     with no default; a clause breaks when it is the last of its group, its
+     output is not finished and either the continuation is not a return or
+     the handler contains an exit (C:6552). The break is clause metadata in
+     every continuation, also in **A**, where a switch on a value emits a
+     `break` statement instead (3.9 step 4);
+   - the output is `append(declarations, append(body, dispatch))`: a finished
+     body drops the dispatch, and the output is finished only then. In **V**
+     its value is `tmp` and it is never finished (C:6408); in **E** its value
+     is `undefined`.
 
 `lower_exit(cx, label, args)` (`compile_staticraise`,
-`lam_compile.ml:1122-1139`). The continuation is ignored. Find the entry. The
-arguments are lowered **last first**, each in `A(binding)`; an argument that
-is a variable is the plain assignment `b = v`; with `order = -1` an argument
-that is the binding itself is skipped (C:3506). The output is the argument
-outputs in source order followed by `exit = order` when `order >= 0`, joined
-with `append`, so a finished argument (one that throws) drops what follows
-it. The output is **not** finished: control falls through to the end of the
+`lam_compile.ml:1122-1139`). Find the entry. The arguments are lowered
+**last first**, each in `A(binding)`; an argument that is a variable is the
+plain assignment `b = v`; with `order = -1` an argument that is the binding
+itself is skipped (C:3506). The output is the argument outputs in source
+order followed by `exit = order` when `order >= 0`, joined with `append`, so
+a finished argument (one that throws) drops what follows it. With more than
+one argument each argument's run is moved to a slot reserved for it, so that
+lowering last first still writes source order. The output is **not**
+finished unless an argument is: control falls through to the end of the
 enclosing statements and reaches the dispatch or the handler.
+
+The continuation is ignored by OCaml. The legacy families read a value where
+they need one, and the lowering gives the same: `undefined` in **V** and
+**E**, and `let id = undefined` in **D** (the default arms of `compile_expr`
+and `compile_let_binding_output`); nothing in **A** and **R**. In an effect
+or return continuation an output that is one block (one argument, a
+conditional that needs statements) is unnested, as `compile_return_output`
+and `compile_effect_block_output` do for every construct.
+
+A catch whose body holds no exit to its label is lowered by the same rule;
+the legacy code substitutes its handler at the (absent) raise instead (row
+K15). The two differ when the body's output is not finished, and the shape
+does not reach the lowering (Q1).
 
 That is the whole mechanism. The legacy code reaches the same outputs with
 four copies of the explicit form (one per continuation family:
@@ -1112,9 +1345,9 @@ four copies of the explicit form (one per continuation family:
 `compile_staticcatch_tail_loop_return_output` (C:3317)), four of the flattened
 form, two of the cheap form, and the choice in
 `compile_staticcatch_in_return` (C:3091) (also inline in
-`compile_tail_loop_return_output_inner` (C:4174), C:4240-4312). The choice there
-is made by walking the body and the handler with the predicates of row K14;
-step 2 above replaces them with the `in_catch` bit and one flag.
+`compile_tail_loop_return_output_inner` (C:4174), C:4240-4312). Since S3.5
+the choice there is OCaml's test as well (`staticcatch_takes_pseudo_jump`,
+4.6); step 2 above is the same test on the `in_catch` bit and one flag.
 
 ### 4.2 Invariants
 
@@ -1461,44 +1694,72 @@ a non-return conditional, nested loops, and string dispatch. The minimal
 before-change outputs are recorded in
 [LOWERING_REFERENCE_EXPERIMENTS.md](LOWERING_REFERENCE_EXPERIMENTS.md).
 
-The rule lives in the lowering. With `probe` there are no discarded
-lowerings, so the numbers are computed:
+The rule lives in `bir/lower/label.rs`. Only retained lowering builds J:
 
-- a label is symbolic while a group is lowered (`LabelRef`, an index into a
-  table of the group); `SWhile`, `SForRange`, `SForOf`, `SBreak` and
-  `SContinue` refer to it; numbers are written when the group is done;
-- the **schedule** is normative: the passes the legacy code makes over the
-  branches of a conditional, in order, and which pass's output is kept. They
-  are rows R1 to R6 of 3.6, the short circuits in **R** (3.7), and the second
-  lowering of a recursive function whose loop was not triggered
-  (`compile_recursive_function_expr` (C:3989), C:4027). Every other construct
-  lowers each child once;
-- a frame that is created inside a pass is new in every pass, so each pass
-  that asks for its label takes a new number; the number in the output is the
-  one taken in the kept pass. A frame created outside the conditional keeps
-  the number of the first request, which can be made in a discarded pass;
-- every `Out` carries the number of labels one pass over its subtree takes,
-  per kind of pass (**V**, **A** which also serves **D**, **E**, **R**, **R**
-  in a loop): five small integers, absent when all are zero, composed from
-  the children's by the pass table. It does not depend on the state outside
-  the subtree, because requests for outer frames are counted where the frame
-  is, not where the request is;
-- when a conditional is done, the labels allocated inside each branch are a
-  contiguous range of the table; the numbers the earlier passes take are added
-  to the range (a difference array over the table, one prefix sum when the
-  group is done). A request for a frame outside the conditional is resolved
-  along the first pass at each enclosing conditional, from the per-kind
-  running counts kept on a stack of the conditionals being lowered.
+- Each requested loop gets a unique, non-interned symbolic `StrId`. Loop
+  statements and jumps, including copied untagged arms, share that handle.
+  Group finalization aliases its string-pool entry to the numbered spelling;
+  no J traversal or per-user patch list is needed.
+- During the same source traversal, a pooled event program summarizes six
+  continuation classes: **V**, **D**, **A**, **E**, **R**, and named tail-loop
+  **R**. **D** cannot alias **A** (it probes conditional branches), nor **V**
+  (only **V** resets counters along a top-level binding spine).
+- Each summary is a pair: internal allocations and the offset of the first
+  enclosing-frame request. Composition counts that external request once
+  across discarded passes. Loop boundaries consume the body's request;
+  conditions and bounds keep the outer frame.
+- A single explicit-stack replay follows retained events. A discarded pass
+  consumes its cached summary in O(1), assigning an external frame on its
+  first request. Top-level groups reset and restore counters explicitly.
+  No source body is re-lowered, and nested conditionals do not cause repeated
+  subtree walks or range remapping.
+- Event edges and source frames are 12 bytes; scheduling tasks are 16 bytes.
+  All lists are pooled. Six fixed-size summaries per event and one replay
+  make scheduling O(source edges + retained events), independent of the
+  exponential work the discarded legacy probes would perform.
 
-The algorithm is specified by a reference implementation that S3.7 writes
-first and keeps under `cfg(test)`: lowering with real discarded passes, as
-the legacy code does (exponential, small inputs only). The property test is
-"computed numbers equal the reference's" on random trees of conditionals,
-loops, switches and breaks in every continuation.
+Q2 is checked by 512 deterministic generated loop/switch/conditional shapes,
+using the actual legacy lowering as the discarded-pass reference and comparing
+printed text in every tested continuation and both parenthesis modes. Separate
+oracles cover top-level counter restoration and recursive self-tail calls.
+The latter exposed a legacy discrepancy: a self-call prevented the initial
+probe's labels from being consumed. The isolated fix is covered against OCaml
+by `tests/js_output_parity/fixtures/self_tail_loop_labels.res` in eight modes.
+A second reference fixture, `inherited_loop_labels.res`, found case-first
+label allocation in legacy general string switches. Both lowerers now visit
+the default first, as `compiler/core/lam_compile.ml:794-799` does, while
+emitting grouped cases before the default. The temporary conditional-label
+Unsupported arm has been removed.
 
-Until that is built, a group in which a label is requested and a conditional
-has a branch that needs statements returns
-`Unsupported("loop label under a re-lowered conditional")`.
+### 4.6 What S3.5 found in the legacy choice
+
+The rule tests of S3.5 lower one catch in return position in 952 shapes
+(body, handler, parameters, what encloses the catch, `return_unit`) with the
+legacy code and with 4.1. They disagreed on 51, in two families, and the
+OCaml compiler was run on source for each:
+
+1. **The handler holds a catch under a function, and no exit of its own.**
+   `lambda_contains_staticcatch` looked into function bodies, so the legacy
+   code took the explicit form. OCaml's `no_static_raise_in_handler` stops at
+   a function (`lam_exit_code.ml:28`) and takes the cheap form.
+2. **A catch without parameters whose body is a catch that exits to it,
+   lowered under an enclosing catch.** An arm of
+   `compile_staticcatch_in_return` took the cheap form without asking
+   whether a catch enclosed it. OCaml has `in_staticcatch = true` there and
+   takes the explicit form. With an exit to the enclosing catch in the body
+   the legacy output also ran the wrong handler.
+
+Both are fixed in the legacy code by the same change: the choice is
+`staticcatch_takes_pseudo_jump`, and the 23 functions that made it before
+are deleted. `tests/tests/src/lowering_static_catch.res` holds one function
+per family with the JavaScript the OCaml compiler prints. After the change
+the 952 shapes agree.
+
+Three more places where the code needed what this document did not say:
+
+- row R5 step 1 needs the fact `HAS_STATEMENT` (3.6, 7.1);
+- a variable the lowering assigns is not `ASSIGNED` for sequencing (7.1);
+- the jump table is indexed by catch header, not by label (4.1).
 
 ## 5. Tail calls as loops, `let rec`, `try`
 
@@ -1543,7 +1804,15 @@ Design (`compile_recursive_let`, `lam_compile.ml:507-575`; `compile_apply`,
   parameter's `VarId`. This is a second place where the relative order of
   identifiers reaches the output (section 9).
 
-No pre-pass is needed and the body is never lowered twice. The legacy code
+The L arena records whether a recursive function has a self tail call during
+construction/import, not lowering. Tail candidates are concatenated in the
+same `control_facts` immediate-child fold as `HAS_EXIT`, `HAS_STATEMENT` and
+`TRIVIAL_UNIT`. Tail-position children concatenate bounded
+segments of pooled callee candidates; a `LetRec` matches the candidates of
+each function against its binding. Candidate cells survive node relocation,
+and the independent validator rebuilds the answer. The lowering reads this
+fact to select the function's continuation. No pre-pass is needed and the
+body is never lowered twice. The legacy code
 asks `function_has_self_tailcall` (C:6772) before, threads `TailLoopState` through
 its own family (row K7), and lowers the function again without the loop when
 nothing was triggered.
@@ -1587,7 +1856,7 @@ Legacy differences from this design, all "read" unless marked:
 
 | Difference | Where | Consequence |
 | --- | --- | --- |
-| A conditional in a function compiled as a loop is lowered by row R6, otherwise by row R5 | 3.6 | Q3 |
+| A conditional in a function compiled as a loop is lowered by row R6, otherwise by row R5 | 3.6 | Q3 resolved: unit returns must exit the loop |
 | The function is lowered twice when the pre-check says yes and nothing triggers | C:4027 | cost only, and the label counter (4.5) |
 
 The J1 rule (C.3) inlines a function at a final `return f(...)` after
@@ -1759,8 +2028,9 @@ into recursive clusters (`raw_lambda/lambda_scc.rs`, A.2).
    | a `Pmakeblock` of a record, an inline record with one non-constant constructor, or a constructor with one non-constant constructor, whose arguments are each a constant or a variable that is the member itself or not another member of the group (`compile_recursive_self_binding_makeblock` (C:2293)) | `let id = <dummy>` (kind `Variable`), then one field assignment per argument, in order (`compile_set_field` (K:246)) | none |
    | any other `Pmakeblock` | the statements of `V(value)`, then `Primitive_object.updateDummy(id, value)` | `let id = <dummy>` (kind `Variable`) |
 
-   The dummy is `[]` for an array record, a tuple and a module block, `{}`
-   otherwise (`recursive_dummy_object_expr` (C:2345)).
+   The dummy is `[]` for an array record, a tuple and a `ModuleExport` block;
+   it is `{}` for `Module` and the other object-shaped tags
+   (`recursive_dummy_object_expr` (C:2345)).
 4. The placeholders of all members are put in front of the group's
    statements, in group order.
 5. Then the body, in the continuation of the `LetRec` (3.4 for the legacy
@@ -1853,6 +2123,19 @@ function g(x) {
 ```
 
 ### 5.5 `Try`, `TryFinally`, `Praise`
+
+S3.7a implementation: exception-region selection reads no subtree flags and
+walks no body. `TryFinally` inspects only the immediate body tag to fuse a
+catch. Saved operands and completed blocks live in a dense frame pool; the
+source traversal carries a four-byte frame index. The 10,000-deep test visits
+20,001 source occurrences and copies at most 20,000 statements in every
+continuation. A 40,001-node body still takes one form-selection operation.
+
+Integration correction: when cross-module inlining borrows the cold pools
+from J, the source function-owner table must first be extended to cover J-only
+headers (for example a lowered one-unit-argument closure). Otherwise the next
+imported function header indexes beyond that table. This does not change the
+lowering rules or the default backend path.
 
 Design (`compile_try`, `lam_compile.ml:1514-1565`).
 
@@ -2136,23 +2419,25 @@ read, one J node built, one statement pushed or copied, or one flag read.
 
 Each row is a question the legacy code answers by walking a subtree, and the
 maintained fact that answers it in `Bir`. The flags are computed when a node
-is built, from the children's flags, as `PURE` is (B.4). `NodeFlags` has two
-free bits (`bir/node.rs` defines six); J expression nodes do not use `TAIL`,
-`VALUE_UNUSED`, `DEAD` or `NO_ALLOC`, so the J flags below reuse those
-positions.
+is built, from the children's flags, as `PURE` is (B.4). `NodeFlags` has no
+free bit: J expression nodes do not use `VALUE_UNUSED`, `DEAD` or `NO_ALLOC`,
+so the J flags below reuse those positions, and L nodes do not use
+`JS_CHAR_PRESENT` or `JS_LOC_PRESENT`, which `HAS_EXIT` and `HAS_STATEMENT`
+reuse. `Var` is an operation of both levels and carries neither L flag.
 
 | Legacy walk | Asked by | Fact |
 | --- | --- | --- |
 | `lam_analysis::no_side_effects` | `lambda_is_trivial_unit_undefined` (C:3550), the predicates of K14 | `PURE` (B.4) |
 | `has_exit_code(handler, in table)`, `has_exit_code(handler, any)`, `lambda_has_exit` (C:7524) | flattening (4.1 step 1), the cheap form's test, `break` in a return continuation (3.9 step 4, 4.1) | L flag `HAS_EXIT`: the subtree contains an `Exit` that is not under a `Fun`. Clear answers at once. Set: for "any" it is the answer; for "in table" the handler is walked, pruned by the flag |
 | `function_has_self_tailcall` (C:6772) | 5.1 | none needed: `triggered` |
-| `lambda_contains_statement_value_form` (C:5016) and every `lambda_contains_*`, `*_requires_explicit_*`, `uses_*fallthrough*` of row K14 | 3.6, 4.1 | none needed: `probe` and `in_catch` |
+| `lambda_contains_statement_value_form` (C:5016) | 3.6 row R5 step 1 | L flag `HAS_STATEMENT`: the subtree contains, not under a `Fun`, a switch, catch, exit, try, loop, assignment, `Break` or `Continue`. `probe` does not answer it: a branch that is not free can still lower to effects followed by one return |
+| every `lambda_contains_*`, `*_requires_explicit_*`, `uses_*fallthrough*` of row K14 (deleted by S3.5) | 4.1 | none needed: `in_catch` and `HAS_EXIT` |
 | `free_variables(body)` | `compile_for_of` (C:2154) | `uses[v] == 0` |
 | `arena_assigned_variables` (whole unit, and per inlined body in `extend_assignable` (A:280)) | `delay_safe` (A:28) | `ASSIGNED` |
 | `expression_has_no_side_effects` (B:102) | J-E2, J-E4, J-E5, J-E6, J-E7, J-S3 | J flag `PURE` |
 | `js_expr_no_side_effects` (E:15) | the lowering, the M rows | J flag `STRICT` (pure, and no `**`, `/`, `%` that may throw) |
 | `is_pure_subexpression` (E:146) | J-M0 | J flag `J_SUBEXPR`, reusing L `DEAD`; distinct from both purity predicates |
-| `delay_safe` (A:28) | sequencing | J flag `DELAY_SAFE`. It depends on `ASSIGNED` of the variables in the expression, which is final before lowering starts |
+| `delay_safe` (A:28) | sequencing | J flag `DELAY_SAFE`. It depends on `ASSIGNED` of the variables in the expression, which is final before lowering starts: an assignment the lowering builds (a result temporary, a handler parameter) does not set it in the lowering's arena, as the legacy `assignable` set holds the targets of L assignments only |
 | `runs_no_code` (A:90) | sequencing | Iterative inspection of the owned record-field spine; unknown property reads stop it. Variables read the final `JS_GLOBAL` fact. This predicate differs from `J_SUBEXPR` and does not share its bit |
 | `lam_subst::subst` of a handler per raise (`resolve_static_raise` (C:6113)) | K15 | removed (Q1) |
 | the second and third lowering of a branch | 3.6 | `probe` |
@@ -2181,15 +2466,15 @@ positions.
 | grouping switch cases and exit handlers (3.9 step 2) | each case is compared with the heads of the groups before it by `eq_approx`, which stops at the first difference | `cases x groups` comparisons. Quadratic for a switch with many distinct bodies. The step count of the compared node pairs is reported per corpus (as `Stats::compared` is for N11, C.5). Open (Q7): whether a cached structural hash is needed |
 | J-E7, J-S3 rules that compare branches (`ocaml_eq_expression`, `ocaml_eq_block`) | stops at the first difference | counted the same way |
 | J-E9 | O(4^11) bounded logical attempts, plus equality/negation inspections and duplicated output | counted (section 6) |
-| flattening catches | one flag read per handler; a walk of a handler that has `HAS_EXIT` | each handler is walked at most once per catch chain it is flattened in |
+| flattening catches | one flag read per handler; a walk of a handler that has `HAS_EXIT`, over its nodes that have the flag, with one label lookup per exit met | a handler is tested once, by the chain that reaches its catch; a node is read once per handler it lies in whose catch is tested that way, so the bound is the nesting depth of handlers that hold exits. Measured at 10,000 nested catches: 9,999 flag reads and no node read when the handlers hold no exit; 9,999 flag reads and 9,999 node reads when each handler is one exit to the catch around it; one flag read for a handler of 60,001 nodes without an exit |
 | sequencing arguments | one right-to-left scan; a held argument's literal is entered once | linear in the arguments |
 | `source_loc_of_lam` (source maps only) | a descent along first children | the depth of the case body, once per clause |
 | label numbers (4.5) | five integers per output that has labels; one prefix sum per group | linear in the labels and conditionals of a group that has labels |
 | `realize` | each node of a `Free` once | a `Free` is realized once |
 | a conditional (3.6) | constant, plus the statements of a branch that becomes a list (copied once) or is discarded; a branch kept as the statements after a guard is not read | each statement is written once and copied to a list once. Measured at 10,000 nested conditionals whose innermost branch needs a statement: 20,001 copies in **V** and **A**, 10,000 in **R** |
-| row R5 step 0 | the `Let`/`Seq` spine of both branches, in a function that returns unit | a spine node belongs to one conditional |
+| row R5 step 0 | one `TRIVIAL_UNIT` flag read per branch | maintained with `HAS_EXIT` and `HAS_STATEMENT` by `Bir::control_facts` during construction/import and repair; independently checked by `Bir::validate` |
 | row R5 step 1 | the expression statements that lead each branch, stopping at the first other statement | a statement leads the branch of one conditional: an enclosing branch starts with a guard or with other statements, unless a test in between is a boolean literal (rule 0 keeps its branch without a guard) |
-| `S.if_` rules that need a rewrite (7 to 10, and 0 to 6 outside **R**) | `norm::js3_simplify_if` on two vectors: the statements of both branches, and two allocations | linear; taken only when `plain_if` says a rule applies. Open: porting J-S3 to list handles removes the vectors |
+| `S.if_` | `norm::js3_simplify_if` takes two list-pool handles; shared rules 0 to 6 also accept statement-stack run handles so retained tails stay in place | consumed statements and shells, plus structural comparisons and J expression rules; no per-branch vectors |
 
 S3.9 primitive costs: the resume is two `u32` handles (8 bytes), retaining
 an existing source-list handle rather than allocating an operand vector. Up to
@@ -2208,6 +2493,64 @@ steps). These are opt-in lowering costs: this slice claims no improvement to
 the default emitted backend. Arena-owned variable-width cold payloads (block
 metadata, property lists, templates) continue to use the existing J pool API;
 this slice does not replace those representations.
+
+S3.4 switch costs (`switch.rs`, `variant.rs`, `untagged.rs`, `location.rs`):
+
+- Source bodies have dense 16-byte fingerprint/exit records. A fingerprint
+  indexes case positions, and candidate matches are confirmed with iterative
+  `eq_approx`; case heads/links and plan handles are dense arrays. A primitive's
+  payload is borrowed, not cloned just to dispatch on it.
+- Direct/named grouping takes expected O(cases + newly fingerprinted nodes +
+  confirmed pairs), preserving last-member group order. The unchanged untagged
+  planner retains its own grouping/simplification costs; the new emitter is an
+  explicit linear program over its emitted tree. This does not claim that the
+  existing planner's pairwise grouping became linear.
+- Continuation handles are 4 bytes. Emission operations are 8 bytes, pending
+  untagged walks 12, and action/output records 16. Cold integer/string, named,
+  and untagged plans are respectively 200, 88, and 336 bytes, pinned by tests.
+- Source maps alone allocate an 8-byte-per-source-node location cache. Each
+  search node is visited once; a located NONE stops the search before filtering,
+  and fallthrough labels retain their own location rather than the group's.
+- Repeated untagged outputs use the arena's existing subtree copier, with
+  binder remapping and bulk use-count finalization. Single-use runs are moved,
+  not copied. The existing copier has its existing map/allocation costs; no
+  claim of an allocation-free copier is made here.
+
+| 10,000-element shape | Source visits | Fingerprint visits | Equality confirmations |
+| --- | ---: | ---: | ---: |
+| distinct integer bodies | 10,002 | 10,000 | 0 |
+| equal pairs | 5,002 | 10,000 | 5,000 |
+| one shared body | 3 | 10,000 | 9,999 |
+| nested integer switches (all five continuations) | 20,001 | 10,000 | 0 |
+| distinct named bodies | 10,002 | 10,000 | 0 |
+| nested small named sides | 20,001 | 0 | 0 |
+| nested untagged payload dispatches | 20,001 | 10,000 | 0 |
+
+A separate 10,000-switch source-location chain takes 10,001 location visits;
+repeating the search takes none. Mapped oracle tests cover all four dispatch
+families and all five continuations. Normalized J expressions also cache delay
+safety from immediate children: corpus checking exposed an unnecessary held
+arithmetic argument when a later argument was an untagged switch.
+
+S3.5 exit costs (`exit.rs`):
+
+- The jump-table entry is 8 bytes, the traversal frame of a catch a 4-byte
+  handle, of an exit 16 bytes; the cold plan of a catch is 168 bytes. The
+  handlers of the catches being lowered are one stack of 8-byte entries, and
+  the walk of a handler that has an exit reuses one work vector: nothing is
+  allocated per catch with one handler or per exit. A table of several
+  handlers allocates the group vectors of the switch lowering once.
+- The form of a catch costs at most two flag reads: one per flattened
+  handler, one for the cheap form.
+- An exit costs one label lookup and one step per argument. Arguments are
+  lowered last first; with more than one, each run is moved once to its
+  reserved slot.
+
+| 10,000-element shape (every continuation) | Source visits | Flag reads | Handler nodes read | Fingerprint visits |
+| --- | ---: | ---: | ---: | ---: |
+| nested catches, one table | 20,003 | 9,999 | 0 | 10,000 |
+| nested catches, each handler exits to the catch around it | 20,003 | 9,999 (10,000 in **R**) | 9,999 | 0 |
+| one catch, handler of 60,001 nodes without an exit, in **R** | | 1 | 0 | 0 |
 
 ### 7.4 Step-count tests each stage adds
 
@@ -2458,7 +2801,8 @@ there, in the section named.
    with the legacy rule: they do not follow the right operand of `&&`/`||` or a `Try`
    handler (the legacy code and OCaml do; tested, 5.2), and they treat a
    function bound by `Let` as able to call itself. The flags should be
-   removed or left unused; they must not be read by S3.6.
+   removed or left unused; they must not be read by S3.6. (Removed since,
+   with `mark_tail_positions` and `tail_child`: #198.)
 10. "A J statement list is a `ListId`": lowering needs block statements as
     real nodes until a unit is done (1.3), and builds lists through a stack.
 11. The J opcode list omits kinds the legacy IR has. `bir/node.rs` already
@@ -2493,9 +2837,11 @@ there, in the section named.
     spread, `await`, dynamic import": `let rec` of functions belongs with
     tail loops (every function member goes through 5.1), and `Assign` with
     loops. The table of 8.3 replaces the row.
-18. S3.2 "fed by importing the JS IR before the JS passes": `import_js` is
+18. S3.2 "fed by importing the JS IR before the JS passes": `import_js` was
     not built (`bir/bridge.rs` returns `Unsupported("JS arena import not
-    implemented")`); S3.3 adds the opposite direction, `export_js`.
+    implemented")`); S3.3 adds the opposite direction, `export_js`. Both
+    directions now exist in `bir/bridge_j.rs` (#167); the stub in
+    `bir/bridge.rs` is still there.
 
 ## 10. Open questions
 
@@ -2503,9 +2849,9 @@ Each with the experiment that settles it; resolved rows retain their measured re
 
 | # | Question | Experiment |
 | --- | --- | --- |
-| Q1 | Is the handler substitution of row K15 (`resolve_static_raise` (C:6113), `compile_hoisted_static_raise_chain_return_tail` (C:3932)) ever executed? By reading it needs a catch whose body has no exit to its label, which `simplify_exits` removes | count its successful returns in a `Check` build over the three in-repository corpora and the application; zero closes the row |
-| Q2 | **Resolved:** the original variant dispatch needs no loop label; a return-position conditional retaining a real JS switch prints `loop_1`, including the discarded value probe (4.5) | OCaml/Rust parity: `tests/tests/src/lowering_conditional_loop.res` and its `.mjs`; corrected switch-context entry and value-probe order. Reference: `compiler/core/lam_compile.ml:793,1636-1644,2086-2118` |
-| Q3 | Do rows R5 and R6 of 3.6 ever produce different J for one conditional, so that making a function a loop changes how its conditionals print? | a `Check` assertion in S3.6: lower each loop function's conditionals by both rows and compare |
+| Q1 | **Measured by S3.5: never.** A counter at the two entries of `with_static_handler` stayed at zero over the runtime library, Belt, `tests/tests` (736 modules) and a 3,735-module application. The legacy path remains until the legacy lowering is deleted; the new lowering has no counterpart (4.1). Original question: is the handler substitution of row K15 (`resolve_static_raise` (C:6113), `compile_hoisted_static_raise_chain_return_tail` (C:3932)) ever executed? By reading it needs a catch whose body has no exit to its label, which `simplify_exits` removes | count its successful returns in a `Check` build over the three in-repository corpora and the application; zero closes the row |
+| Q2 | **Resolved and implemented:** symbolic scheduling matches 512 generated shapes; real-switch conditional probes consume discarded labels, including self-tail-call branches (4.5) | OCaml/Rust parity: `tests/tests/src/lowering_conditional_loop.res` and its `.mjs`; corrected switch-context entry and value-probe order. Reference: `compiler/core/lam_compile.ml:793,1636-1644,2086-2118` |
+| Q3 (resolved) | Yes: `(if c unit unit)` in a unit-returning function. R5 drops the pure test and emits no statements; R6 emits `return;`, which exits the enclosing loop. Both rules are required. | `tail_conditional_oracle_tests::q3_unit_conditional_distinguishes_return_rows` compares the same raw Lambda under both legacy rows; `lower::tail::tests::q3_unit_branch_must_return_from_the_loop` compares the enclosing recursive function with the new lowering. 192 generated loop-conditional shapes compare new and legacy J in five continuations and both probe modes. |
 | Q4 | Is a `LetRec` reachable in the continuations where the legacy code lowers its body as a value (K2, K4, K5, K7; 3.4)? | count in a `Check` build; if reachable, compile one such unit with OCaml |
 | Q5 | **Resolved:** the self call after nested `let rec` is a loop jump; the enclosing `Tail_with_name` return label survives the nested bindings (5.1) | OCaml/Rust parity: `tests/tests/src/lowering_nested_rec.res` and its `.mjs`, with and without capture; corrected the precheck and tail-loop body lowering. Reference: `compiler/core/lam_compile.ml:525-568,1745-1752,2046-2057` |
 | Q6 | Does the cross-module inline attempt in the lowering (3.3) fire after the three inlining rounds? | count with cross-module inlining on, over a corpus built that way |
@@ -2514,3 +2860,27 @@ Each with the experiment that settles it; resolved rows retain their measured re
 | Q9 | The exact order and holding rules of external arguments (S3.8) | the table S3.8 writes first, from X |
 | Q10 | Termination measures for J-E7 and J-S3 (section 6) | S3.2 |
 | Q11 | Whether invariant P1 (1.5) holds for every construct: `probe` then `realize` equals a direct lowering | the debug assertion, on from S3.3 |
+
+### S3.6 measured lowering work
+
+The S3.6 cost tests count source entries and tail-loop work independently:
+
+| Shape | Source entries | Sequenced tail operands | Parameters | Body statements moved |
+| --- | ---: | ---: | ---: | ---: |
+| 10,000 distinct switch cases, each a self tail call | 30,005 | 20,000 | 1 | 1 |
+| Same switch, each recursive call an argument of another call | 50,005 | 0 | 0 | 0 |
+| 10,000 recursive function members without tail calls | 20,002 | 0 | 0 | 0 |
+| One self call exchanging 10,000 parameters | 10,005 | 10,001 | 10,000 | 10,001 |
+
+Both switch functions are lowered once; the second creates no loop record.
+The 10,000-parameter case takes 9,999 sort comparisons and emits each alias
+and assignment once.
+Construction of 10,001 tail candidates takes 780,060 arena visits, including
+all ordinary node construction facts. The two endpoint and candidate-cell
+representations are each 8 bytes; the recursive group and loop frame are each
+16 bytes. Loop headers use a pooled parameter-reference run because a mix of
+unchanged parameters and lazily created copies is not a contiguous VarId run.
+
+The default compiler still uses the legacy backend; this slice itself saves
+nothing on that path. The separate short-circuit correction changes default
+JavaScript only where the old loop probe differed from the OCaml reference.

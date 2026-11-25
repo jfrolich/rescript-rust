@@ -168,6 +168,7 @@ RUNTIME_SOURCES := $(shell find $(RUNTIME_DIR) -path '$(RUNTIME_DIR)/lib' -prune
 BELT_SOURCES := $(shell find $(BELT_DIR) -path '$(BELT_DIR)/lib' -prune -o -type f \( -name '*.res' -o -name '*.resi' -o -name 'rescript.json' \) -print)
 
 lib: $(RUNTIME_BUILD_STAMP) $(BELT_BUILD_STAMP)
+	RESCRIPT_RUNTIME="$(CURDIR)/$(RUNTIME_DIR)" $(RESCRIPT_EXE) snapshot --check
 
 $(RUNTIME_BUILD_STAMP): $(RUNTIME_SOURCES) $(COMPILER_EXES) $(RESCRIPT_EXE) | $(YARN_INSTALL_STAMP)
 	yarn workspace @rescript/runtime build

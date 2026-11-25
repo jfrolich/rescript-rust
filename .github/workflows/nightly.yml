@@ -1,0 +1,168 @@
+name: Nightly
+
+# Publishes each commit on the trunk to npm as @tellahq/rescript, with the
+# dist-tag `nightly` (scripts/nightlyPackages.js explains the package names and
+# how to install them). It publishes with npm trusted publishing: npm trusts
+# this workflow file for each package, which `node scripts/nightlyPackages.js
+# --scope @tellahq --bootstrap --repository <owner/name>` sets up once. No npm
+# token is stored in the repository.
+#
+# A manual run from another branch publishes under the dist-tag `dev`. A pull
+# request that changes this pipeline builds the packages and runs `npm publish
+# --dry-run`.
+
+on:
+  push:
+    branches: [ocaml-to-rust-rewrite]
+  pull_request:
+    paths:
+      - .github/workflows/nightly.yml
+      - scripts/nightlyPackages.js
+  workflow_dispatch:
+
+concurrency:
+  # Every trunk commit is published; a pull request only needs its latest run.
+  group: nightly-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # The platform packages, as ci.yml builds them for a release: the build
+  # system with the Rust compiler from rewatch/, the OCaml tools from dune.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04 # x64
+            ocaml_compiler: ocaml-variants.5.5.2+options,ocaml-option-static
+            node-target: linux-x64
+            rust-target: x86_64-unknown-linux-musl
+            dune-profile: static
+          - os: ubuntu-26.04-arm
+            ocaml_compiler: ocaml-variants.5.5.2+options,ocaml-option-static
+            node-target: linux-arm64
+            rust-target: aarch64-unknown-linux-musl
+            dune-profile: static
+          - os: macos-26 # ARM
+            ocaml_compiler: 5.5.2
+            node-target: darwin-arm64
+            rust-target: aarch64-apple-darwin
+            dune-profile: release
+          - os: windows-2025
+            ocaml_compiler: 5.5.2
+            node-target: win32-x64
+            rust-target: x86_64-pc-windows-gnu
+            exe-suffix: ".exe"
+            dune-profile: release
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+
+    env:
+      DUNE_PROFILE: ${{ matrix.dune-profile }}
+
+    steps:
+      - name: "Windows: Set git config"
+        if: runner.os == 'Windows'
+        run: |
+          git config --system core.autocrlf false
+          git config --system core.eol lf
+          git config --system core.longpaths true
+          git config --system core.symlinks true
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node and dependencies
+        uses: ./.github/actions/setup-node
+
+      - name: Setup Linux dependencies
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/setup-linux-dependencies
+
+      - name: Build rewatch
+        uses: ./.github/actions/build-rewatch
+        with:
+          cache-target: ${{ matrix.rust-target }}
+          rust-target: ${{ matrix.rust-target }}
+          exe-suffix: ${{ matrix.exe-suffix }}
+
+      - name: Setup OCaml ${{ matrix.ocaml_compiler }}
+        uses: ./.github/actions/setup-ocaml
+        with:
+          compiler: ${{ matrix.ocaml_compiler }}
+          os: ${{ matrix.os }}
+          cache-prefix: opam-env-v9
+
+      - name: Build compiler
+        run: opam exec -- dune build --display quiet
+
+      - name: Verify promoted compiler exes
+        run: node scripts/checkCompilerExes.js
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: binaries-${{ matrix.node-target }}
+          path: packages/@rescript/${{ matrix.node-target }}/bin
+          retention-days: 3
+
+  # Runs when some platforms failed to build as well: the others are
+  # published, and the compiler package leaves the missing ones out.
+  publish:
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 30
+    # One publish at a time, so that the dist-tag moves in commit order.
+    concurrency:
+      group: nightly-publish-${{ github.event_name == 'pull_request' && github.ref || 'npm' }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node and dependencies
+        uses: ./.github/actions/setup-node
+
+      - name: Download binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: binaries-*
+
+      - name: Move binaries into the platform packages
+        run: |
+          for dir in binaries-*; do
+            target="${dir#binaries-}"
+            chmod +x "$dir"/*.exe
+            mv -f "$dir"/* "packages/@rescript/$target/bin"
+            if [[ "$target" == linux-* ]]; then
+              for file in "packages/@rescript/$target/bin"/*.exe; do
+                if ! file "$file" | grep -Eq "statically linked|static-pie linked"; then
+                  echo "$file is not statically linked." >&2
+                  exit 1
+                fi
+              done
+            fi
+          done
+        shell: bash
+
+      # npm exchanges the job's OIDC token (id-token: write) for a short-lived
+      # publish token and attests provenance.
+      - name: Publish to npm
+        env:
+          DIST_TAG: ${{ github.ref == 'refs/heads/ocaml-to-rust-rewrite' && 'nightly' || 'dev' }}
+          DRY_RUN: ${{ github.event_name == 'pull_request' }}
+        run: |
+          args=(--scope @tellahq --tag "$DIST_TAG")
+          if [[ "$DRY_RUN" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          node scripts/nightlyPackages.js "${args[@]}"
+        shell: bash

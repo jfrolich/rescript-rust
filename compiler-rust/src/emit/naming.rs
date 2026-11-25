@@ -644,6 +644,251 @@ impl Names {
     }
 }
 
+/// What the program scope names besides its statements, in the pass's
+/// order (`Names::collect`): the imported modules first, then the
+/// reservations of export coercion, then the statements, then the exports.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ProgramNames<'a> {
+    pub(crate) imports: &'a [Ident],
+    pub(crate) reservations: &'a [Ident],
+    pub(crate) exports: &'a [Ident],
+}
+
+/// The pass's group and suffix tables, kept between replays so that a
+/// replay with warm tables allocates nothing; with them the reservation of
+/// one function and the stamp-zero bases the program scope reserved (its
+/// stamped names are in its `assigned`), which `Names::reset` empties.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ReplayTables {
+    names: Names,
+    reservation: Vec<Ident>,
+    zero: Vec<Name>,
+}
+
+#[cfg(test)]
+impl Names {
+    /// Empty the tables for another unit without releasing their storage:
+    /// the program scope's groups stay, emptied in place (a group the
+    /// tables own alone is edited without a copy), so a replay that names
+    /// what an earlier one named allocates nothing. Cost: one removal per
+    /// name the previous replay assigned in the program scope.
+    fn reset(&mut self, zero: &mut Vec<Name>, budget: usize) {
+        self.scopes.truncate(1);
+        if self.scopes.is_empty() {
+            self.scopes.push(Scope::default());
+        }
+        let root = &mut self.scopes[0];
+        for id in root.assigned.drain(..) {
+            let (Some(base), Some(name)) = (self.converted.get(&id.name_atom()), self.visible.get(&id)) else { continue };
+            if let Some(group) = root.groups.get_mut(base) {
+                group.stamps.remove(&id.stamp());
+                group.used.remove(name);
+            }
+        }
+        for base in zero.drain(..) {
+            if let Some(group) = root.groups.get_mut(&base)
+                && let Some(name) = group.stamps.remove(&0)
+            {
+                group.used.remove(&name);
+            }
+        }
+        for group in root.groups.values_mut() {
+            group.next = 0;
+        }
+        root.previous_groups.clear();
+        self.printed.clear();
+        self.finishes.clear();
+        self.visible.clear();
+        self.raw.clear();
+        self.free.clear();
+        self.method_this.clear();
+        self.steps = 0;
+        self.budget = budget;
+    }
+
+    /// `add`, returning the name. One hash lookup more.
+    fn add_named(&mut self, id: Ident) -> Result<Name, Unsupported> {
+        self.add(id, false)?;
+        Ok(self.printed[&id])
+    }
+
+    /// `reserve`, remembering the stamp-zero bases the program scope
+    /// reserves for `reset`.
+    fn reserve_replayed(&mut self, ids: &[Ident], zero: &mut Vec<Name>) -> Result<(), Unsupported> {
+        if self.scopes.len() == 1 {
+            for id in ids {
+                if id.stamp() == 0 {
+                    let base = self.base(*id);
+                    zero.push(base);
+                }
+            }
+        }
+        self.reserve(ids)
+    }
+}
+
+/// The names of the replay against the names of the pass, by identifier.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct NameStats {
+    /// Identifiers the pass names, other than the imported modules (named
+    /// from the module list, not from the log) and stamp-zero identifiers
+    /// (printed as they are spelled).
+    pub(crate) names_pass: usize,
+    /// Variables the replay names.
+    pub(crate) names_replayed: usize,
+    /// Identifiers with different names, or named by one side only.
+    pub(crate) name_differences: usize,
+}
+
+/// Assign the printed names of a unit from its naming log (THREE_TREES
+/// section 2; the rule is this file's header): the events in order, through
+/// `Names::add`, `reserve`, `enter` and `leave`, the same group and suffix
+/// tables the pass uses. `Declare` and `Binder` are `add`; `Enter` reserves
+/// the scope's free variables and the binder of its declaration (the
+/// `Declare` that follows, when it is of the same statement) and enters;
+/// `Params` adds the function's parameters; `Leave` leaves. An event whose
+/// statement `live` rejects is skipped, with the events of a function
+/// literal it holds. `printed[var]` receives the name of every variable
+/// named (by variable, through `idents` for the base and stamp). Returns
+/// the steps: one per event read and one per reserved free variable.
+///
+/// Cost: that, plus the suffix probes of `Names::assign`; nothing is
+/// allocated when `tables` has replayed a log of this size before, except
+/// the spelling of a new suffixed name.
+#[cfg(test)]
+pub(crate) fn replay(
+    tables: &mut ReplayTables,
+    log: &crate::bir::lower::names::Log,
+    vars: &crate::bir::VarTable,
+    idents: &[Ident],
+    program: &ProgramNames<'_>,
+    live: impl Fn(crate::bir::NodeId) -> bool,
+    printed: &mut [Option<Name>],
+) -> Result<usize, Unsupported> {
+    use crate::bir::lower::names::EventKind;
+    let ReplayTables { names, reservation, zero } = tables;
+    let events = &log.events;
+    let budget = 64 * (events.len() + log.free.len() + program.imports.len() + program.reservations.len() + program.exports.len() + 1);
+    names.reset(zero, budget);
+    let ident = |var: crate::bir::VarId| idents[vars.origin(var).index()];
+    for id in program.imports {
+        names.add(*id, true)?;
+    }
+    names.reserve_replayed(program.reservations, zero)?;
+    let mut steps = 0;
+    // The `Declare` of a function declaration's binder, named at its `Enter`.
+    let mut named_binder = usize::MAX;
+    let mut at = 0;
+    while at < events.len() {
+        let event = events[at];
+        steps += 1;
+        match event.kind() {
+            EventKind::Declare | EventKind::Binder => {
+                if at != named_binder && live(event.statement) {
+                    let var = event.var();
+                    printed[var.index()] = Some(names.add_named(ident(var))?);
+                }
+            }
+            EventKind::Enter if !live(event.statement) => {
+                // The function's events leave with its statement.
+                let mut depth = 0usize;
+                loop {
+                    match events[at].kind() {
+                        EventKind::Enter => depth += 1,
+                        EventKind::Leave => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                    at += 1;
+                    steps += 1;
+                }
+            }
+            EventKind::Enter => {
+                // naming.rs `function`: the free variables and the binder,
+                // in `Ident`'s order, are reserved; the binder is named; the
+                // scope inherits the groups of exactly those bases.
+                let free = log.free_variables(event.payload());
+                steps += free.len();
+                reservation.clear();
+                reservation.extend(free.iter().map(|&var| ident(var)));
+                let binder = events.get(at + 2).filter(|declare| {
+                    declare.kind() == EventKind::Declare && declare.statement == event.statement
+                });
+                let binder = binder.map(|declare| declare.var());
+                if let Some(var) = binder {
+                    let id = ident(var);
+                    if let Err(position) = reservation.binary_search(&id) {
+                        reservation.insert(position, id);
+                    }
+                    named_binder = at + 2;
+                }
+                names.reserve_replayed(reservation, zero)?;
+                for &var in free {
+                    printed[var.index()] = Some(names.printed.get(&ident(var)).copied().unwrap_or_else(|| ident(var).name_atom()));
+                }
+                if let Some(var) = binder {
+                    printed[var.index()] = Some(names.add_named(ident(var))?);
+                }
+                names.enter(reservation)?;
+            }
+            EventKind::Params => {
+                let function = event.function();
+                for var in vars.parameters(function) {
+                    printed[var.index()] = Some(names.add_named(ident(var))?);
+                }
+            }
+            EventKind::Leave => names.leave(),
+        }
+        at += 1;
+    }
+    for id in program.exports {
+        names.add(*id, false)?;
+    }
+    Ok(steps)
+}
+
+/// Check mode: the names of a replay against `Names::collect` on
+/// `program`, the lowering's own program before the JS passes with its
+/// module list filled in. `idents[var]` is the identifier `printed[var]`
+/// belongs to. `Err` when the pass does not support the unit (no
+/// comparison). Check mode only. Builds two hash sets (the modules and the
+/// replayed identifiers) and does one hash lookup per named variable and
+/// one per entry of the pass's table (the pass is keyed by identifier).
+#[cfg(test)]
+pub(crate) fn compare_with_pass(
+    printed: &[Option<Name>],
+    idents: &[Ident],
+    program: &JsDepsProgram,
+    resolver: &ModulePathResolver,
+    jsx_preserve: bool,
+) -> Result<NameStats, Unsupported> {
+    let pass = Names::collect(program, resolver, jsx_preserve)?;
+    let modules: HashSet<Ident> = program.modules.iter().map(|module| module.id).collect();
+    let counted = |id: &Ident| id.stamp() != 0 && !modules.contains(id);
+    let mut stats = NameStats {
+        names_pass: pass.printed.keys().filter(|id| counted(id)).count(),
+        ..NameStats::default()
+    };
+    let mut replayed = HashSet::with_capacity(printed.len());
+    for (name, id) in printed.iter().zip(idents) {
+        let Some(name) = name else { continue };
+        stats.names_replayed += 1;
+        let named = pass.printed.get(id);
+        stats.name_differences += usize::from(named != Some(name));
+        if named.is_some() && counted(id) {
+            replayed.insert(*id);
+        }
+    }
+    // Named by the pass only.
+    stats.name_differences += stats.names_pass - replayed.len();
+    Ok(stats)
+}
+
 // Child order is the legacy printer's order. Shape decisions remain in walk;
 // constructs not yet handled by Build keep exactly their existing fallback.
 fn children(
@@ -974,5 +1219,35 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+
+    #[test]
+    fn replay_sizes() {
+        assert_eq!(std::mem::size_of::<ProgramNames<'_>>(), 48);
+        assert_eq!(std::mem::size_of::<NameStats>(), 24);
+    }
+
+    #[test]
+    fn the_comparison_counts_a_name_the_replay_gets_wrong() {
+        // `let x = 1`, exported: the pass names it `x`.
+        let mut a = JsArena::new();
+        let x = Ident::new("x", 1, crate::ident::IdentFlags::NONE);
+        let one = crate::js_ir::build::exp::int(1, &mut a);
+        let declaration = crate::js_ir::build::stmt::define(x, Some(one), crate::lambda::lam_compat::LetKind::Strict, &mut a);
+        let program = JsDepsProgram {
+            program: crate::js_ir::arena::JsProgram::new_in(vec![declaration], vec![x], a),
+            modules: vec![],
+            side_effect: None,
+        };
+        let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+        let equal = compare_with_pass(&[Some(Name::new("x"))], &[x], &program, &resolver, false).unwrap();
+        assert_eq!(equal, NameStats { names_pass: 1, names_replayed: 1, name_differences: 0 });
+        let wrong = compare_with_pass(&[Some(Name::new("x$1"))], &[x], &program, &resolver, false).unwrap();
+        assert_eq!(wrong.name_differences, 1);
     }
 }

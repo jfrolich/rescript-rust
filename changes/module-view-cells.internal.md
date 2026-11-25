@@ -1,0 +1,1 @@
+- Build the component view of a dependency unit once per build and share it between workers.

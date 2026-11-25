@@ -244,6 +244,19 @@ mod tests {
         arena::LamArena, lam_compile::LambdaCompiler, lam_compile_arguments::HeldArgs,
     };
 
+    #[test]
+    fn normalized_arithmetic_stays_after_later_argument_statements() {
+        use crate::lambda::{LamLoc, lam_constant::Constant, lam_primitive::Primitive as P};
+        let mut a = LamArena::new();
+        let x = a.var(Ident::new("x",10,crate::ident::IdentFlags::NONE));
+        let number = a.prim_raw(P::Pintoffloat,&[x],LamLoc::NONE);
+        let effect = a.prim_raw(P::PinitMod,&[],LamLoc::NONE);
+        let value = a.const_(Constant::Int { i: 1, comment: None });
+        let later = a.seq_raw(effect,value);
+        let root = a.prim_raw(P::Pmakearray,&[number,later],LamLoc::NONE);
+        oracle_tests::compare(a,root);
+    }
+
     /// A:408 sequence_arguments_allocates_temporaries_right_to_left, and A:378
     /// sequence_arguments_holds_method_object_not_property_read.
     #[test]

@@ -355,6 +355,9 @@ pub(crate) trait ListElem: Copy + 'static {
     /// One thread-local acquisition, then O(retained arrays) lease probes;
     /// a fresh allocation initializes LIST_FIRST_LEN elements, reuse none.
     fn first_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]>;
+    /// An array for a ladder-only pool to hold and never touch. One list
+    /// read; a thread without an array yet initializes one.
+    fn placeholder_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]>;
 }
 
 // Smallest measured size within 0.2% of 65,536 slots on both workloads.
@@ -367,12 +370,26 @@ thread_local! {
     static LIST_WRITES: Cell<usize> = const { Cell::new(0) };
 }
 
+/// Number of first list arrays this thread has created (items, arguments).
+#[cfg(test)]
+pub(crate) fn first_list_arrays() -> (usize, usize) {
+    (
+        FIRST_TYPE_LISTS.with(|arrays| arrays.borrow().len()),
+        FIRST_ARG_LISTS.with(|arrays| arrays.borrow().len()),
+    )
+}
+
 impl ListElem for TypeExprRef {
     const FILL: Self = TypeExprRef(0);
     /// One acquisition and a linear lease scan; initializes only a fresh array.
     fn first_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]> {
         FIRST_TYPE_LISTS
             .with(|arrays| super::context::lease_first_array(arrays, || Cell::new(Self::FILL)))
+    }
+    fn placeholder_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]> {
+        FIRST_TYPE_LISTS.with(|arrays| {
+            super::context::placeholder_first_array(arrays, || Cell::new(Self::FILL))
+        })
     }
 }
 
@@ -387,6 +404,11 @@ impl ListElem for TypeArg {
     fn first_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]> {
         FIRST_ARG_LISTS
             .with(|arrays| super::context::lease_first_array(arrays, || Cell::new(Self::FILL)))
+    }
+    fn placeholder_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]> {
+        FIRST_ARG_LISTS.with(|arrays| {
+            super::context::placeholder_first_array(arrays, || Cell::new(Self::FILL))
+        })
     }
 }
 
@@ -409,6 +431,17 @@ impl<T: ListElem> Default for ListChunks<T> {
 }
 
 impl<T: ListElem> ListChunks<T> {
+    /// A pool whose lists are all in the ladder (see
+    /// `TypeNodes::ladder_only`): its positions start at `LIST_FIRST_LEN`
+    /// and the first array it holds is never touched. One list read.
+    fn ladder_only() -> Self {
+        Self {
+            first: T::placeholder_chunk(),
+            far: PayloadChunks::default(),
+            len: Cell::new(LIST_FIRST_LEN),
+        }
+    }
+
     /// Append a nonempty list: exactly items.len() writes, with no allocation
     /// in the first array. The ladder may scan O(log n) chunk sizes and
     /// initialize a new chunk (O(chunk size)); lists never cross boundaries.
@@ -670,6 +703,17 @@ impl TypePayloadPool {
         TypePayloadPool {
             tag,
             ..Default::default()
+        }
+    }
+
+    /// A pool that takes no first arrays (see `TypeNodes::ladder_only`).
+    pub(crate) fn ladder_only(tag: u32) -> Self {
+        TypePayloadPool {
+            items: ListChunks::ladder_only(),
+            args: ListChunks::ladder_only(),
+            rows: Default::default(),
+            lids: Default::default(),
+            tag,
         }
     }
 
@@ -1409,6 +1453,16 @@ impl TypeArgLabel {
         }
     }
 
+    /// Build a compact label from an already interned name, with no string
+    /// allocation or interner lookup at the arrow-parameter boundary.
+    pub(crate) const fn from_name(name: crate::name::Name, optional: bool, loc: DeclLoc) -> Self {
+        Self {
+            name: Some(name),
+            optional,
+            loc,
+        }
+    }
+
     /// The owned label (same text and location).
     pub fn to_arg_label(self) -> ArgLabel {
         match self.name {
@@ -1684,6 +1738,44 @@ impl MutabilityRef {
             super::asttypes::MutableFlag::Mutable => 1,
         };
         Self(STORE_REF_TAG | (id << 1) | bit)
+    }
+
+    /// Reserve a publication's cell identities in one atomic reservation.
+    /// Each input flag gets a distinct identity; repeated references reuse
+    /// the returned handle rather than allocating another cell. Exhaustion
+    /// leaves the counter unchanged, including when a caller catches a panic.
+    pub(crate) fn new_persistent_batch(
+        flags: impl ExactSizeIterator<Item = super::asttypes::MutableFlag>,
+    ) -> Vec<Self> {
+        let count = u32::try_from(flags.len()).expect("persistent mutability cell count");
+        if count == 0 {
+            return Vec::new();
+        }
+        // A checked CAS reservation works on the crate's MSRV too;
+        // fetch_update is deprecated and try_update requires a newer Rust.
+        let mut base = NEXT_PERSISTENT_MUTABILITY.load(std::sync::atomic::Ordering::Relaxed);
+        loop {
+            let end = base
+                .checked_add(count)
+                .filter(|&end| end <= (1 << 30))
+                .expect("persistent mutability cells exhausted");
+            match NEXT_PERSISTENT_MUTABILITY.compare_exchange_weak(
+                base,
+                end,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => base = current,
+            }
+        }
+        flags
+            .enumerate()
+            .map(|(i, flag)| {
+                let bit = u32::from(flag == super::asttypes::MutableFlag::Mutable);
+                Self(STORE_REF_TAG | ((base + i as u32) << 1) | bit)
+            })
+            .collect()
     }
 
     /// Whether the cell is a persistent one, shared process-wide, rather than

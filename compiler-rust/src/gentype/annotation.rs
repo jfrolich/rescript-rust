@@ -553,6 +553,13 @@ pub fn structure_item_check_annotation(
         StructureItemDesc::Tstr_value(_, value_bindings) => exists(ta.value_bindings(*value_bindings), |vb| {
             check_annotation(vb.vb_loc, &vb.vb_attributes)
         }),
+        // The bindings of a derived item, as the `let` bindings they stand for.
+        StructureItemDesc::Tstr_derived(idx) => {
+            let plans = arena.plans();
+            exists(plans.bindings(plans.item(*idx)), |binding| {
+                check_annotation(arena.dummy_loc(), &binding.attributes)
+            })
+        }
         StructureItemDesc::Tstr_primitive(value_description) => {
             let value_description = ta.value_description(*value_description);
             check_annotation(value_description.val_loc, &value_description.val_attributes)

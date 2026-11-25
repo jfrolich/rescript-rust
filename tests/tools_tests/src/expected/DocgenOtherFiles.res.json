@@ -1,0 +1,222 @@
+{
+  "name": "DocgenOtherFiles",
+  "docstrings": [ "Items that other files declare." ],
+  "source": { "filepath": "src/DocgenOtherFiles.res", "line": 1, "col": 1 },
+  "items": [
+    {
+      "id": "DocgenOtherFiles.t",
+      "kind": "type",
+      "name": "t",
+      "signature": "type t = DocExtraction2.t",
+      "docstrings": [ "Type t is pretty cool." ],
+      "source": {
+        "filepath": "src/DocExtraction2.resi",
+        "line": 4,
+        "col": 1
+      }
+    },
+    {
+      "id": "DocgenOtherFiles.make",
+      "kind": "value",
+      "name": "make",
+      "signature": "let make: unit => t",
+      "docstrings": [ "Makerz of stuffz." ],
+      "source": {
+        "filepath": "src/DocExtraction2.resi",
+        "line": 6,
+        "col": 1
+      },
+      "detail": {
+        "kind": "signature",
+        "details": {
+          "parameters": [
+            {
+              "optional": false,
+              "type": {
+                "kind": "constructor",
+                "path": "unit",
+                "genericTypeParameters": []
+              }
+            }
+          ],
+          "returnType": {
+            "kind": "constructor",
+            "path": "t",
+            "genericTypeParameters": []
+          }
+        }
+      }
+    },
+    {
+      "id": "DocgenOtherFiles.InnerModule",
+      "kind": "moduleAlias",
+      "name": "InnerModule",
+      "docstrings": [],
+      "source": {
+        "filepath": "src/DocExtraction2.resi",
+        "line": 9,
+        "col": 8
+      },
+      "items": []
+    },
+    {
+      "id": "DocgenOtherFiles.log",
+      "kind": "value",
+      "name": "log",
+      "signature": "let log: 'a => unit",
+      "docstrings": [],
+      "source": {
+        "filepath": "src/DocExtraction2.resi",
+        "line": 21,
+        "col": 1
+      },
+      "deprecated": "Use log instead",
+      "detail": {
+        "kind": "signature",
+        "details": {
+          "parameters": [
+            {
+              "optional": false,
+              "type": { "kind": "variable", "name": "a", "weak": false }
+            }
+          ],
+          "returnType": {
+            "kind": "constructor",
+            "path": "unit",
+            "genericTypeParameters": []
+          }
+        }
+      }
+    },
+    {
+      "id": "DocgenOtherFiles.online",
+      "kind": "type",
+      "name": "online",
+      "signature": "type online = {name: string, online: bool, since: float}",
+      "docstrings": [ "A record that spreads another file's record." ],
+      "source": {
+        "filepath": "src/DocgenOtherFiles.res",
+        "line": 7,
+        "col": 1
+      },
+      "detail": {
+        "kind": "record",
+        "items": [
+          {
+            "name": "name",
+            "optional": false,
+            "docstrings": [ "The name of the stuff." ],
+            "signature": "string"
+          },
+          {
+            "name": "online",
+            "optional": false,
+            "docstrings": [ "Whether stuff is online." ],
+            "signature": "bool"
+          },
+          {
+            "name": "since",
+            "optional": false,
+            "docstrings": [ "When it went online." ],
+            "signature": "float"
+          }
+        ]
+      }
+    },
+    {
+      "id": "DocgenOtherFiles.User",
+      "kind": "moduleAlias",
+      "name": "User",
+      "docstrings": [ "Another file under a new name." ],
+      "source": {
+        "filepath": "src/DocgenOtherFiles.res",
+        "line": 14,
+        "col": 8
+      },
+      "items": [
+        {
+          "id": "DocgenOtherFiles.User.User",
+          "name": "User",
+          "kind": "module",
+          "docstrings": [ "User Module from interface file" ],
+          "source": { "filepath": "src/ModC.resi", "line": 4, "col": 8 },
+          "items": [
+            {
+              "id": "DocgenOtherFiles.User.User.name",
+              "kind": "value",
+              "name": "name",
+              "signature": "let name: string",
+              "docstrings": [],
+              "source": { "filepath": "src/ModC.resi", "line": 5, "col": 3 }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "DocgenOtherFiles.Local",
+      "name": "Local",
+      "kind": "module",
+      "docstrings": [],
+      "source": {
+        "filepath": "src/DocgenOtherFiles.res",
+        "line": 16,
+        "col": 8
+      },
+      "items": [
+        {
+          "id": "DocgenOtherFiles.Local.base",
+          "kind": "type",
+          "name": "base",
+          "signature": "type base = {name: string}",
+          "docstrings": [ "A record within this file." ],
+          "source": {
+            "filepath": "src/DocgenOtherFiles.res",
+            "line": 18,
+            "col": 3
+          },
+          "detail": {
+            "kind": "record",
+            "items": [
+              {
+                "name": "name",
+                "optional": false,
+                "docstrings": [ "The name of the base." ],
+                "signature": "string"
+              }
+            ]
+          }
+        },
+        {
+          "id": "DocgenOtherFiles.Local.extended",
+          "kind": "type",
+          "name": "extended",
+          "signature": "type extended = {name: string, extra: int}",
+          "docstrings": [ "A record that spreads one of this file." ],
+          "source": {
+            "filepath": "src/DocgenOtherFiles.res",
+            "line": 24,
+            "col": 3
+          },
+          "detail": {
+            "kind": "record",
+            "items": [
+              {
+                "name": "name",
+                "optional": false,
+                "docstrings": [ "The name of the base." ],
+                "signature": "string"
+              },
+              {
+                "name": "extra",
+                "optional": false,
+                "docstrings": [],
+                "signature": "int"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

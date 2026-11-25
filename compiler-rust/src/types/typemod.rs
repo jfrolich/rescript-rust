@@ -414,6 +414,80 @@ fn open_direct_persistent_module(
     }
 }
 
+/// Open a `-open M` module (command line or `@@config` flags) into the
+/// initial environment `env`.
+///
+/// OCaml `Res_compmisc.open_implicit_module` (compiler/core/res_compmisc.ml:42-46)
+/// runs `Typemod.type_open_ Override` on `Longident.parse m` located at
+/// `Location.in_file "command line"`, so a module that is not found stops the
+/// compile with the usual unbound-module error reported at "command line".
+pub(crate) fn type_command_line_open(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &mut Env,
+    name: &str,
+) -> TypeModResult<()> {
+    let ctx = tctx.type_ctx;
+    if !name.contains('.')
+        && let Some(pers) = tctx.persistent_env.as_mut()
+        && pers.open_module(
+            name,
+            Path::pident(Ident::create_persistent(name)),
+            env,
+            ctx,
+            None,
+        )
+    {
+        // Env.open_signature (env.ml:1874-1877) exposes the opened components
+        // without a root module binding; keep the raw signature registered for
+        // descriptor lookup.
+        pers.register_opened_raw_sig(ctx, name);
+        return Ok(());
+    }
+    // A dotted name, or one the environment binds (such as a module of the
+    // implicitly opened Stdlib): look it up like a source `open`.
+    let arena = tctx.arena;
+    let lid = command_line_longident(arena, name);
+    let lookup_env = env.clone();
+    if lookup_module_path_by_lid(&lid, arena, &lookup_env, &mut tctx.persistent_env, ctx).is_none()
+    {
+        let loc = arena.push_typecheck_command_line_loc();
+        return Err(TypeModError::CoreError(
+            crate::types::typecore::unbound_module_lookup_error(tctx, &lookup_env, loc, &lid),
+        ));
+    }
+    if crate::types::typecore::open_module_lid_components_into_env(
+        &lid,
+        arena,
+        &lookup_env,
+        env,
+        &mut tctx.persistent_env,
+        ctx,
+        None,
+    )
+    .is_none()
+    {
+        let loc = arena.push_typecheck_command_line_loc();
+        if let Some(err) = structure_expected_error_for_open(tctx, &lookup_env, arena, &lid, loc) {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// `Longident.parse` (compiler/ml/longident.ml): split a dotted module path.
+fn command_line_longident(arena: &ParseArena, name: &str) -> Longident {
+    let mut components = name.split('.');
+    let head = components.next().unwrap_or_default();
+    let mut lid = Longident::Lident(arena.push_shared_string(head.to_string()));
+    for component in components {
+        lid = Longident::Ldot(
+            Box::new(lid),
+            arena.push_shared_string(component.to_string()),
+        );
+    }
+    lid
+}
+
 fn flattened_persistent_alias_path(
     path: &Path,
     pers_env: Option<&crate::cmi::persistent_env::PersistentEnv>,
@@ -478,20 +552,11 @@ fn lookup_rebind_constructor<'a>(
     lid: &Located<LidentIdx>,
 ) -> TypeModResult<(Path, crate::types::decl::ConstructorDescription)> {
     let longident = tctx.resolve_lid(lid.txt).clone();
-    let result = match &longident {
-        Longident::Lident(name_idx) => {
-            let name = tctx.arena.get_string(*name_idx);
-            env.find_constructor(name).ok().map(|desc| {
-                let desc = desc.clone();
-                let path = match &desc.cstr_kind {
-                    crate::types::ConstructorKind::Extension(path) => *path,
-                    crate::types::ConstructorKind::Ordinary(_) => {
-                        Path::pident(Ident::create_persistent(name))
-                    }
-                };
-                (path, desc)
-            })
-        }
+    let desc = match &longident {
+        Longident::Lident(name_idx) => env
+            .find_constructor(tctx.arena.get_string(*name_idx))
+            .ok()
+            .cloned(),
         Longident::Ldot(_, _) => crate::types::typecore::lookup_constructor_in_module(
             &longident,
             tctx.arena,
@@ -499,14 +564,26 @@ fn lookup_rebind_constructor<'a>(
             &mut tctx.persistent_env,
             tctx.type_ctx,
             None,
-        ),
+        )
+        .map(|(_, desc)| desc),
         Longident::Lapply(_, _) => None,
     };
-    result.ok_or_else(|| {
+    let desc = desc.ok_or_else(|| {
         TypeModError::CoreError(crate::types::typecore::unbound_constructor_lookup_error(
             tctx, env, lid.loc, &longident,
         ))
-    })
+    })?;
+    // The path the rebound constructor is read at is the one its description
+    // carries (compiler/ml/typedecl.ml:1745-1749): for `M.E` the field `E`
+    // of `M`, not a name of its own. A constructor that is no extension is
+    // rejected by the caller, which unifies its type with the extended one.
+    let path = match &desc.cstr_kind {
+        crate::types::ConstructorKind::Extension(path) => *path,
+        crate::types::ConstructorKind::Ordinary(_) => Path::pident(Ident::create_persistent(
+            tctx.arena.get_string(longident.last_idx()),
+        )),
+    };
+    Ok((path, desc))
 }
 
 /// The arguments of a rebound extension constructor (compiler/ml/
@@ -3269,6 +3346,10 @@ pub enum UnboundTypeVarDetail {
 pub enum TypeModError {
     /// Core type checking error.
     CoreError(TypeCoreError),
+    /// An obligation of a derived item's plan failed
+    /// (`TypeCheckContext::derived_fallback`): no diagnostic, the unit is
+    /// compiled again with plans off.
+    DerivedFallback,
     /// Module type not found.
     UnboundModtype {
         /// Source location to report.
@@ -7380,7 +7461,7 @@ fn lookup_module_paths_by_lid(
                 ctx,
                 |components| {
                     components
-                        .lookup_module(submod_name)
+                        .lookup_module(submod_name, ctx)
                         .map(|(runtime_pos, _, _md)| {
                             (
                                 Path::pdot_pos(
@@ -7723,7 +7804,7 @@ fn lookup_module_alias_by_lid(
                 ctx,
                 |components| {
                     components
-                        .lookup_module(submod_name)
+                        .lookup_module(submod_name, ctx)
                         .and_then(|(_, _, md)| alias_of_module_type(&md.md_type))
                 },
             )
@@ -13654,6 +13735,21 @@ fn extract_module_type_from_mod_expr_inner(
                 let current_env_snapshot = local_env.clone();
                 let current_env = current_env_snapshot.as_ref().or(env);
                 match &item.str_desc {
+                    // A derived item declares its bindings as regular values.
+                    StructureItemDesc::Tstr_derived(idx) => {
+                        for bound in ta.derived.bound(*idx) {
+                            sig_items.push(SigItem::SigValue(
+                                bound.ident,
+                                crate::types::decl::ValueDescription {
+                                    val_type: bound.ty,
+                                    val_kind: crate::types::decl::ValueKind::ValReg,
+                                    val_loc: crate::types::DeclLoc::none(),
+                                    val_attributes: Default::default(),
+                                    val_path: None,
+                                },
+                            ));
+                        }
+                    }
                     StructureItemDesc::Tstr_value(_, bindings) => {
                         for vb in ta.value_bindings(*bindings) {
                             extract_sig_values_from_pattern(
@@ -16233,19 +16329,20 @@ fn type_structure_item_with_census<'a>(
     let counter_before = tctx
         .derived_census
         .as_ref()
-        .and_then(|c| c.counter_snapshot());
+        .and_then(|c| c.counter_snapshot(tctx.type_ctx));
     let (typed_item, item_sig, new_env) = type_structure_item(tctx, env, arena, item)?;
     if let (Some(census), Some(start)) = (&mut tctx.derived_census, census_start) {
-        let derived = match item.pstr_desc {
-            ParsedStructureItemDesc::Pstr_value((_, group)) => arena.is_derived_value_group(group),
-            _ => false,
-        };
-        census.account_counters(derived, counter_before);
+        let derived = crate::binary_ast::derive::is_derived_item(item, arena);
+        census.account_counters(tctx.type_ctx, derived, counter_before);
         let children = census.typecheck.total() - census_before;
-        census.typecheck.add(
-            derived,
-            crate::derived_census::nanos(start.elapsed()).saturating_sub(children),
-        );
+        let elapsed = crate::derived_census::nanos(start.elapsed()).saturating_sub(children);
+        census.typecheck.add(derived, elapsed);
+        if let Some(reason) = census.general_group(item) {
+            census.general_typecheck_ns[reason.census_index()] += elapsed;
+        }
+        if matches!(typed_item.str_desc, StructureItemDesc::Tstr_derived(_)) {
+            census.planned_typecheck_ns += elapsed;
+        }
         if derived && let StructureItemDesc::Tstr_value(_, group) = typed_item.str_desc {
             census.mark_typed_group(group.start());
         }
@@ -16836,6 +16933,26 @@ fn type_structure_item<'a>(
                 vec![],
                 env.clone(),
             ))
+        }
+
+        // A derived item: discharge the obligations of its plan. When one
+        // fails the unit is compiled again with plans off.
+        ParsedStructureItemDesc::Pstr_derived(idx) => {
+            match crate::types::derived::discharge(tctx, env, *idx) {
+                Ok(discharged) => Ok((
+                    StructureItem {
+                        str_desc: StructureItemDesc::Tstr_derived(*idx),
+                        str_loc: loc,
+                        str_env: EnvRef(0),
+                    },
+                    discharged.sig_items,
+                    discharged.env,
+                )),
+                Err(crate::types::derived::Fallback) => {
+                    tctx.derived_fallback = true;
+                    Err(TypeModError::DerivedFallback)
+                }
+            }
         }
 
         ParsedStructureItemDesc::Pstr_value(inner) => {

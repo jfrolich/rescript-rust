@@ -2514,6 +2514,9 @@ impl<'a> Mapper<'a> {
         desc: &current::StructureItemDesc,
     ) -> pt0::StructureItemDesc {
         match desc {
+            current::StructureItemDesc::Pstr_derived(_) => {
+                unreachable!("{}", crate::binary_ast::derive::NO_SYNTAX)
+            }
             current::StructureItemDesc::Pstr_eval(inner) => {
                 let (ref e_idx, ref attrs) = **inner;
                 pt0::StructureItemDesc::Eval(self.map_expr_idx(*e_idx), self.map_attributes(attrs))

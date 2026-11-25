@@ -789,7 +789,8 @@
     "lib/rescript/Stdlib_WeakSet.cmi",
     "lib/rescript/Stdlib_WeakSet.cmj",
     "lib/rescript/Stdlib_WeakSet.cmt",
-    "package.json"
+    "package.json",
+    "rescript.json"
   ],
   "@rescript/belt": [
     "README.md",

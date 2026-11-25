@@ -37,6 +37,8 @@ fn compile(source: &str, ts: &[(&str, &str)]) -> Result<String, String> {
     let options = CompilerOptions {
         source_filename: Some("/app/src/Demo.res".to_string()),
         module_name: Some("Demo".to_string()),
+        // `RESCRIPT_BACKEND=check` also compares the shadow backend's lowering.
+        backend: rescript_compiler::bir::shadow::BackendMode::from_env(),
         ts_files: Some(ts.iter().map(|(path, text)| (path.to_string(), text.to_string())).collect()),
         ..Default::default()
     };

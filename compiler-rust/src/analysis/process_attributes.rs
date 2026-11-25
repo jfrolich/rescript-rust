@@ -4,7 +4,7 @@
 //! parse tree's (resolved through its arena) and the portable copies type
 //! declarations carry (`types::decl::Attribute`); [`Attrs`] reads either.
 
-use super::shared_types::{Declared, Loc, Located, ModulePath, ModulePathList};
+use super::shared_types::{Declared, Extent, Located, ModulePath, ModulePathList};
 use crate::ast_payload::payload_expression;
 use crate::parse_arena::{ExprIdx, ParseArena};
 use crate::parser::ast::{Attribute, ExpressionDesc, Payload};
@@ -279,7 +279,7 @@ fn reversed_deprecated(attrs: Attrs<'_>) -> Result<Option<String>, InvalidEscape
 /// `new_declared`.
 pub fn new_declared<T>(
     item: T,
-    extent: Loc,
+    extent: Extent,
     name: Located<String>,
     stamp: i32,
     module_path: ModulePath,
@@ -293,7 +293,8 @@ pub fn new_declared<T>(
     Declared {
         name,
         stamp,
-        extent_loc: extent,
+        extent_loc: extent.loc,
+        extent_file: extent.file,
         is_exported,
         module_path,
         deprecated,

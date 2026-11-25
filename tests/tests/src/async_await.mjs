@@ -42,6 +42,14 @@ async function f1() {
   return (await import("@rescript/runtime/lib/es6/Stdlib_Option.mjs")).forEach;
 }
 
+async function directAnnotatedAsync(n) {
+  if (n > 0) {
+    return await directAnnotatedAsync(n - 1 | 0);
+  } else {
+    return 1;
+  }
+}
+
 export {
   next,
   useNext,
@@ -53,5 +61,6 @@ export {
   f,
   f0,
   f1,
+  directAnnotatedAsync,
 }
 /* toplevelAwait Not a pure module */

@@ -56,6 +56,22 @@ def summarize(directory, stage, prefix=None):
     return result
 
 
+def lower_counts(directory, prefix=None):
+    """Work of successful lowering invocations, deduplicated by unit path."""
+    totals = collections.Counter()
+    seen = set()
+    for path in sorted(directory.rglob("lower.identical.json")):
+        report = json.loads(path.read_text())
+        if prefix and not Path(report["unit"]).resolve().is_relative_to(prefix):
+            continue
+        if report["unit"] in seen:
+            continue
+        seen.add(report["unit"])
+        totals["units"] += 1
+        totals.update(report.get("lower", {}))
+    return dict(sorted(totals.items()))
+
+
 def rule_counts(directory, prefix=None):
     """Rows of the normalising-rule table fired per corpus (not ratcheted)."""
     totals = {"calls": 0, "replayed": collections.Counter(),
@@ -147,6 +163,7 @@ def main():
                REWATCH_BIN=str(binary))
     results = {stage: {} for stage in STAGES}
     rules = {}
+    lowering_work = {}
     flatten_rules = {}
     exits_rules = {}
     alias_rules = {}
@@ -174,6 +191,7 @@ def main():
                         print(log.read_text())
                         raise RuntimeError(f"{corpus}: oracle command failed ({result.returncode})")
             prefix = ROOT / folder if folder else None
+            lowering_work[corpus] = lower_counts(reports, prefix)
             for stage in STAGES:
                 results[stage][corpus] = summarize(reports, stage, prefix)
                 if not results[stage][corpus]["units"]:
@@ -196,6 +214,7 @@ def main():
     print(json.dumps(alias_rules, indent=2, sort_keys=True))
     print("lambda-alias binders compared with the legacy table, per kind (not ratcheted):")
     print(json.dumps(alias_facts, indent=2, sort_keys=True))
+    print("Lowering work (successful units only): " + json.dumps(lowering_work, indent=2, sort_keys=True))
     if args.record:
         RATCHET.write_text(text)
     else:

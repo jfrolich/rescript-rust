@@ -1,0 +1,1 @@
+- Compile runtime package builds only through the project scheduler, and normalize source directory paths before forming unit paths.

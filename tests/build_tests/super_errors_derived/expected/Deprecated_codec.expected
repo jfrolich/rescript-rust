@@ -1,0 +1,12 @@
+Warning number 3
+  /.../fixtures/Deprecated_codec/Main.res
+
+  deprecated: M.t_encodeJson
+  Use another codec
+
+
+  Warning number 3
+  /.../fixtures/Deprecated_codec/Main.res
+
+  deprecated: M.t_encodeJson
+  Use another codec

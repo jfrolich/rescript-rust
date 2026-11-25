@@ -1,0 +1,1 @@
+- Cache checker compatibility conversions lazily per world unit and share each completed result across workers.

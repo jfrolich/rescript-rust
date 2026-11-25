@@ -260,7 +260,7 @@ pub(super) fn build(
 /// No checker traversal or portable intermediate is needed here.
 pub(super) fn promote(
     source: &mut super::super::shared_reader::PublishedGraph,
-    filename: &str,
+    unit: &str,
     pool: &crate::types::shared_store::SharedTypePool,
 ) -> Option<super::super::shared_reader::PublishedGraph> {
     assert!(source.graph.is_detached());
@@ -284,7 +284,7 @@ pub(super) fn promote(
         let intern = |name: &str| pool.intern_longident_name(name);
         let files = FileRemap::new(&parts.carried.file_names, &intern);
         let map_file = |file| files.map(file);
-        let namespace = interface_namespace(filename);
+        let namespace = interface_namespace(unit);
         let scopes = locations.remap_for_import_with(&map_file, |scope| {
             crate::types::variant_runtime::identity_in_namespace(namespace, scope)
         });

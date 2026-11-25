@@ -30,3 +30,11 @@ let f1 = async () => {
   module O: MT = await Option
   O.forEach
 }
+
+let rec directAnnotatedAsync = async (n: int): int => {
+  if n > 0 {
+    await directAnnotatedAsync(n - 1)
+  } else {
+    1
+  }
+}

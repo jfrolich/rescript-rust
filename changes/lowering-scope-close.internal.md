@@ -1,0 +1,1 @@
+- Record how the backend lowering has to order its scope-close decisions to reproduce the legacy JS passes, with tests of the legacy pass order.

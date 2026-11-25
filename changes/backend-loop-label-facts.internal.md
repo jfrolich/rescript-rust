@@ -1,0 +1,1 @@
+- Lower loops and mixed recursive value/function groups to the backend IR, with construction-time loop control facts and oracle coverage.

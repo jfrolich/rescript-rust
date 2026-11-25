@@ -377,3 +377,709 @@ setup remain uninstrumented there and are charged to other work by reconciliatio
 No identifier-table lookup or typechecking algorithm was changed. Instruction
 measurements, rather than a presumed inlining explanation, decide whether this
 removes the reported default-path cost.
+
+
+## Slice 3b census — 2026-11-13
+
+Measured at `5ff9f97de` with a release compiler and one worker. These are single-run census timings, not benchmark speedups. General groups are charged to their first blocking reason; generated body syntax nodes come from the existing shape walk. Failure events report the last obligation and its expected owner shape, not a diagnostic or a resolved actual type. Abandoned attempts are not counted again as completed modules.
+
+### A 3,735-module application
+
+Modules/interfaces: 3760
+
+| Phase | Derived ms | Other ms | Attribution |
+|---|---:|---:|---|
+| parse_other | 0.000 | 640.899 | measured |
+| generation | 90.109 | 2.294 | measured |
+| frontend | 9.938 | 248.014 | node-weighted estimate |
+| environment | 0.000 | 102.813 | measured |
+| typecheck | 422.467 | 4150.779 | measured |
+| signature | 0.000 | 248.595 | measured |
+| conversion | 199.503 | 638.622 | measured |
+| lambda_lowering | 16.480 | 211.805 | node-weighted estimate |
+| lambda_passes | 52.153 | 474.404 | node-weighted estimate |
+| lowering | 77.584 | 854.431 | node-weighted estimate |
+| printing | 26.884 | 303.303 | node-weighted estimate |
+| gentype | 0.000 | 203.757 | measured |
+
+Path timing availability: 3760/3760 records.
+
+| Phase | Bindings on a plan ms | General bindings ms |
+|---|---:|---:|
+| typecheck | 247.055 | 175.412 |
+| conversion | 157.671 | 41.833 |
+
+| Path | Bindings |
+|---|---:|
+| custom_codec | 36 |
+| failed_obligation | 21 |
+| not_yet_planned | 136 |
+| plan | 6392 |
+| recursive_group | 6 |
+| shared_names | 0 |
+| switch | 0 |
+| type_parameters | 9 |
+| unboxed | 0 |
+| unmeasured_shape | 87 |
+| unsupported_variant | 9 |
+| user_expression | 504 |
+
+| Failed obligation / expected type shape | Abandoned attempts |
+|---|---:|
+| constructor / result | 2 |
+
+General cost availability: 3760/3760 records.
+
+| General reason | Bindings | Generated body syntax nodes | Typecheck ms |
+|---|---:|---:|---:|
+| custom_codec | 36 | 5700 | 6.415 |
+| user_expression | 504 | 124796 | 138.336 |
+| type_parameters | 9 | 480 | 0.561 |
+| recursive_group | 6 | 1016 | 1.202 |
+| shared_names | 0 | 0 | 0.000 |
+| unmeasured_shape | 87 | 4335 | 6.991 |
+| unboxed | 0 | 0 | 0.000 |
+| not_yet_planned | 136 | 15248 | 19.415 |
+| unsupported_variant | 9 | 571 | 0.684 |
+| switch | 0 | 0 | 0.000 |
+| failed_obligation | 21 | 1070 | 1.809 |
+
+| First unplanned form | Bindings |
+|---|---:|
+| json_identity | 136 |
+| applied_user_codec | 0 |
+| applied_module_path | 0 |
+| unsupported_type | 0 |
+| constant_fallback | 0 |
+| empty_record | 0 |
+| template_literal | 0 |
+| declaration_shape | 0 |
+
+| Size | Derived | Other |
+|---|---:|---:|
+| bindings | 7200 | 22320 |
+| syntax_nodes | 156442 | 1668982 |
+| js_bytes (estimated split) | 3590189 | 26000666 |
+| js_lines (estimated split) | 92530 | 793278 |
+
+Counter availability: 0/3760 records.
+
+| Shape | Bindings | Min nodes | P50 | P90 | P99 | Max |
+|---|---:|---:|---:|---:|---:|---:|
+| constructor_application | 18 | 20 | 24 | 96 | 98 | 98 |
+| parameterised (overlap) | 9 | 23 | 38 | 132 | 132 | 132 |
+| polymorphic_variant | 57 | 13 | 28 | 81 | 147 | 147 |
+| record | 712 | 21 | 100 | 460 | 1856 | 4584 |
+| recursive group (overlap) | 6 | 39 | 136 | 529 | 529 | 529 |
+| variant | 21 | 5 | 49 | 596 | 2775 | 2775 |
+
+Distinct templates: 481 among 805 supported bindings; duplicate bindings: 324; unsupported templates: 3.
+Distinct-template body nodes: 119396 / 153216 (77.9%); unsupported body nodes: 4846.
+Singleton templates: 219; highest frequencies: [10, 6, 6, 6, 5, 4].
+
+
+### tests/ppx_spice
+
+Modules/interfaces: 37
+
+| Phase | Derived ms | Other ms | Attribution |
+|---|---:|---:|---|
+| parse_other | 0.000 | 3.691 | measured |
+| generation | 3.047 | 0.009 | measured |
+| frontend | 0.793 | 0.417 | node-weighted estimate |
+| environment | 0.000 | 1.671 | measured |
+| typecheck | 27.162 | 9.277 | measured |
+| signature | 0.000 | 1.440 | measured |
+| conversion | 8.934 | 0.704 | measured |
+| lambda_lowering | 1.604 | 0.465 | node-weighted estimate |
+| lambda_passes | 5.800 | 1.712 | node-weighted estimate |
+| lowering | 12.351 | 2.366 | node-weighted estimate |
+| printing | 2.587 | 0.879 | node-weighted estimate |
+| gentype | 0.000 | 0.000 | measured |
+
+Path timing availability: 37/37 records.
+
+| Phase | Bindings on a plan ms | General bindings ms |
+|---|---:|---:|
+| typecheck | 4.618 | 22.543 |
+| conversion | 2.817 | 6.117 |
+
+| Path | Bindings |
+|---|---:|
+| custom_codec | 3 |
+| failed_obligation | 12 |
+| not_yet_planned | 6 |
+| plan | 226 |
+| recursive_group | 27 |
+| shared_names | 0 |
+| switch | 0 |
+| type_parameters | 18 |
+| unboxed | 12 |
+| unmeasured_shape | 136 |
+| unsupported_variant | 0 |
+| user_expression | 9 |
+
+| Failed obligation / expected type shape | Abandoned attempts |
+|---|---:|
+| value / codec_function | 1 |
+
+General cost availability: 37/37 records.
+
+| General reason | Bindings | Generated body syntax nodes | Typecheck ms |
+|---|---:|---:|---:|
+| custom_codec | 3 | 1001 | 0.896 |
+| user_expression | 9 | 387 | 0.605 |
+| type_parameters | 18 | 1721 | 1.607 |
+| recursive_group | 27 | 4614 | 4.044 |
+| shared_names | 0 | 0 | 0.000 |
+| unmeasured_shape | 136 | 14238 | 14.232 |
+| unboxed | 12 | 366 | 0.650 |
+| not_yet_planned | 6 | 361 | 0.365 |
+| unsupported_variant | 0 | 0 | 0.000 |
+| switch | 0 | 0 | 0.000 |
+| failed_obligation | 12 | 84 | 0.143 |
+
+| First unplanned form | Bindings |
+|---|---:|
+| json_identity | 3 |
+| applied_user_codec | 3 |
+| applied_module_path | 0 |
+| unsupported_type | 0 |
+| constant_fallback | 0 |
+| empty_record | 0 |
+| template_literal | 0 |
+| declaration_shape | 0 |
+
+| Size | Derived | Other |
+|---|---:|---:|
+| bindings | 449 | 66 |
+| syntax_nodes | 23148 | 2557 |
+| js_bytes (estimated split) | 364553 | 99681 |
+| js_lines (estimated split) | 13310 | 3442 |
+
+Counter availability: 0/37 records.
+
+| Shape | Bindings | Min nodes | P50 | P90 | P99 | Max |
+|---|---:|---:|---:|---:|---:|---:|
+| constructor_application | 15 | 5 | 7 | 9 | 21 | 21 |
+| parameterised (overlap) | 18 | 25 | 45 | 234 | 595 | 595 |
+| polymorphic_variant | 40 | 14 | 36 | 228 | 405 | 405 |
+| record | 21 | 25 | 44 | 99 | 281 | 281 |
+| recursive group (overlap) | 27 | 21 | 68 | 446 | 1133 | 1133 |
+| tuple | 9 | 18 | 44 | 188 | 188 | 188 |
+| variant | 138 | 13 | 54 | 366 | 799 | 1133 |
+
+Distinct templates: 134 among 223 supported bindings; duplicate bindings: 89; unsupported templates: 0.
+Distinct-template body nodes: 18661 / 22772 (81.9%); unsupported body nodes: 0.
+Singleton templates: 65; highest frequencies: [6, 4, 4, 4, 4, 4].
+
+
+### Measurement order and limits
+
+Planned discharge is the largest actionable typechecking bucket. All 136 application bindings classified `not_yet_planned` stop at the JSON identity codec. Both abandoned application attempts last visited a result-constructor obligation. This orders investigation as planned discharge, JSON identity plans, then upfront classification of constructor conflicts. User expressions remain general under Q5.
+
+An initial census-disabled Cachegrind run at `a4c557d1c` retired 65,265,265,045 instructions. Its exclusive symbol counts include 53,962,454 in the discharge closure, 44,185,701 in skeleton instantiation and 39,410,903 in plan lowering node visits. Shared callees such as unification include ordinary code too: these numbers **do not** establish inclusive costs by obligation kind or per field. The required attributed profile and before/after validation remain outstanding.
+
+
+### Constructor-description sharing experiment
+
+An unqualified constructor description is now stored once per name per binding,
+indexed by its interned string handle. The binding's obligation-start handle is
+the epoch, so no description crosses an environment boundary. Every obligation
+still performs its original lookup, usage marking, instantiation and unification.
+No cache is keyed by a template or by type equality. Qualified descriptions retain
+their existing lookup ownership. The 10,000-field record test keeps exactly seven
+description slots, the same as one or two fields; its existing discharge step
+counts are unchanged.
+
+`bench_project.sh`, one worker, isolated experiment against the census compiler:
+
+| Measurement | Before | After |
+|---|---:|---:|
+| Application instructions | 65,146,787,362 | 65,127,051,438 |
+| Generated files | 3,980 | 3,980 |
+
+Difference: **−0.0302945%**. Both output digests:
+`0a3d301322cf7febdbf8793ae8c3dcbc1ecbadf44670c3b52cecbc5437a02408`.
+`compare_checker_builds.py` reports no difference in 3,735 signatures, diagnostics
+in 18 files, or 3,980 generated files. This is a small measured saving, not evidence
+that constructor cloning is the largest avoidable obligation cost. No default-path
+saving is claimed; the census-disabled +0.02% gate remains to be measured against
+trunk.
+
+
+### Additional validation of constructor sharing
+
+- Compiler build and focused derive/plan/discharge/lowering tests pass; the full
+  compiler suite was not run locally.
+- Rewatch build and tests pass: 210 unit, one integration and eight snapshot tests.
+- Clippy with warnings denied passes for all targets with all features and with
+  no default features.
+- Check-mode builds of both Spice projects and the application finish compilation.
+- All 15 existing derived diagnostic fixtures pass in default/general/check modes.
+  They were invoked through their `input.js`, the same entry used by
+  `scripts/test.js`; the latter has no per-fixture selector and runs all build tests.
+- Application outputs at one worker, ten workers and ten-worker general mode:
+  3,980 files in each, digest
+  `0a3d301322cf7febdbf8793ae8c3dcbc1ecbadf44670c3b52cecbc5437a02408`.
+- `test_worker_determinism.py tests/ppx_spice` passes for 1/8 workers and two shuffle
+  seeds: 74 signatures and 144 stored entries agree. That script excludes the
+  fixture's `lib` outputs, so its generated-file comparison contains zero files;
+  it is not evidence of JavaScript equality (the check-mode build supplies that).
+- Census integration passes, including phase reconciliation within 2% and both
+  negative codec cases. Eleven summary unit tests pass.
+
+The `script-tests` job in `.github/workflows/rust-rewrite-validation.yml` does not
+run the summary unit tests. The pull request supplies the exact additional step;
+no workflow file is changed here.
+
+
+### JSON identity plans
+
+The plan now expresses the identity encoder and `v => Ok(v)` decoder with a
+body-shape equality obligation, a relative local for the closed nested function,
+and explicit constructor/function source locations. The equality uses ordinary
+unification: it does not skip checks for supposedly ground types. Constructor
+lookup and usage marking stay in general typing order.
+
+The application census moves from 6,392 planned bindings before this slice to
+6,534: all 136 `not_yet_planned` bindings and six variant bindings now use plans.
+Two result-constructor retries still remain. The application check-mode build
+finishes compilation. Raw Lambda equality tests cover aliases, arrays, required
+and optional record fields and variant payloads; the inline-source-map oracle
+also passes. The source-map test initially exposed missing function and
+constructor expression locations; those locations now use the existing `At`
+node and a dense explicit-constructor-location side table.
+
+| JSON record work | 1 field | 2 fields | 10,000 fields |
+|---|---:|---:|---:|
+| Discharge lookups | 32 | 52 | 200,012 |
+| Instances | 23 | 37 | 140,009 |
+| Counted unifications | 32 | 55 | 230,009 |
+| Body nodes / lowering visits | 86 | 140 | 540,032 |
+| Raw Lambda terms | 101 | 161 | 600,041 |
+
+An isolated one-worker application comparison against constructor sharing:
+65,145,326,775 → 65,029,449,437 instructions (**−0.1778751%**).
+Both produce 3,980 files with digest
+`0a3d301322cf7febdbf8793ae8c3dcbc1ecbadf44670c3b52cecbc5437a02408`.
+Counts from separate comparison runs vary; this delta uses the two sides of the
+same run, not a baseline borrowed from the previous experiment.
+
+#### Application lowering experiment (not retained)
+
+A sequential, one-worker Cachegrind comparison on the same 3,735-module
+application measured these three release binaries (census disabled):
+
+| Candidate | Instructions | Change from this run's base |
+|---|---:|---:|
+| Constructor sharing, before JSON identity plans | 65,135,411,254 | — |
+| JSON identity plans, without application lowering | 65,035,855,522 | −0.1528% |
+| JSON identity plans, generic application-callee lowering | 65,217,553,800 | +0.1261% |
+
+The experiment instances an applied generic value in a definition scope, then
+calls `lower_args` outside that scope before discharging argument equations;
+it does not lower values merely passed as arguments. It passes the unchanged
+Spice check-mode oracle, including `JSONIdentity`, and all 14 discharge tests,
+but fails the required improvement of at least 0.05% against base. The lowering
+change was therefore not retained. All three candidates produce the same 3,980
+files and the digest reported above.
+
+A fresh application check-mode build without the lowering succeeds. All 136
+formerly unplanned bindings are in 23 units; neither of the two units that retry
+general typing is among those 23. Thus **136 agree and zero differ** in this
+application comparison; the container-sharing counterexample is demonstrated
+by the separate `JSONIdentity` fixture, not by those application bindings.
+The oracle, fixture and classification remain unchanged pending the decision
+on that counterexample. See `DERIVED_CODECS.md` for its traced memo mechanism.
+
+#### Upfront JSON identity argument classification
+
+`json_identity_argument` keeps an encoder-bearing manifest application on the
+syntax path when its exposed argument contains a JSON identity codec, except
+for a direct identity or a single `option<JSON.t>`. It is decided from type facts
+before a plan is built, never by retrying a comparison. The oracle experiments
+on individual declarations gave this table; `Js.Json.t` uses a local compatibility
+module alias because this fixture's runtime no longer supplies `Js`.
+
+| Shape (`@spice`, unless noted) | Path | Oracle result without the classification |
+|---|---|---|
+| `JSON.t` | plan | agrees; no library application |
+| `array<JSON.t>` | general: `json_identity_argument` | encoder result and element sharing differ |
+| `option<JSON.t>` | plan | agrees; first encoder returns `option<JSON.t>` |
+| `list<JSON.t>` | general: `json_identity_argument` | encoder result and element sharing differ |
+| `dict<JSON.t>` | general: `json_identity_argument` | encoder result and element sharing differ |
+| `array<option<JSON.t>>` | general: `json_identity_argument` | nested encoder argument sharing differs |
+| `(JSON.t, int)` | general: existing `unmeasured_shape` | tuples were not planned |
+| `result<JSON.t, string>` (either argument position) | general: `json_identity_argument` | encoder result and argument sharing differ |
+| record field `array<JSON.t>` | plan | agrees; exported parameter is the declared record type |
+| variant payload `array<JSON.t>` | plan | agrees; exported parameter is the declared variant type |
+| `array<Js.Json.t>` | general: `json_identity_argument` | same as modern spelling |
+| `option<Js.Json.t>` | plan | same as modern spelling |
+| `list<Js.Json.t>` | general: `json_identity_argument` | same as modern spelling |
+| `dict<Js.Json.t>` | general: `json_identity_argument` | same as modern spelling |
+| `option<option<JSON.t>>` | general: `json_identity_argument` | inner application expands JSON before the later instance |
+| `option<array<JSON.t>>` (also list/dict) | general: `json_identity_argument` | inner application expands JSON before the later instance |
+| `dict<option<JSON.t>>` | general: `json_identity_argument` | nested encoder argument sharing differs |
+| `Null.t<JSON.t>` | general: `json_identity_argument` | encoder result and argument sharing differ |
+| decode-only array, option, nested array/option, result | plan | each agrees without encoder application lowering |
+| `j = JSON.t`, then `array<j>` | general: `json_identity_argument` | oracle differs: result is separate in plan, shared with element in general |
+| `option<array<j>>` | general: `json_identity_argument` | exposed nested identity alias |
+| record field `array<j>` | plan | declared record hides the payload |
+| `j`, `option<j>` | plan | identity and single-option exceptions agree |
+| nested module `array<j>` | general: `json_identity_argument` | inherits the preceding local alias |
+| `array<AliasOwner.j>` | plan with `NotJsonIdentity`; retries when JSON | resolved manifest identifies the external JSON alias |
+| `option<array<AliasOwner.j>>` | plan with `NotJsonIdentity`; retries when JSON | guard follows the pooled argument position |
+| `array<Local.j>`, `module Local = AliasOwner` | plan with `NotJsonIdentity`; retries when JSON | comparison is not based on the module alias spelling |
+| `open AliasOwner; array<j>` | plan with `NotJsonIdentity`; retries when JSON | owning declaration already contains the resolved path |
+| `array<AliasOwner.legacy>`, owner `Js.Json.t` | plan with `NotJsonIdentity`; retries when JSON | same endpoint as the binding's JSON side |
+| `array<Records.t>` | plan, guard holds | record endpoint differs from JSON; isolated discharge test retains plans |
+| local `j = int`, then `open AliasOwner` or `include AliasOwner`, then `array<j>` | plan with `NotJsonIdentity`; retries when imported `j` is JSON | import epoch invalidates the earlier non-identity fact |
+
+The rule covers the remaining plan-supported shapes because only manifest
+applications expose these generic codec argument types in the binding scheme:
+application level lowering expands the JSON abbreviation, whereas records and
+variants hide the argument behind their declared type and the direct identity,
+single option and decode-only cases above do not cause the differing sharing.
+
+Acceptance after classification:
+
+- The exact CI Spice clean/build command with `RESCRIPT_DERIVED_PATH=check`
+  ends `Parsed 32 source files`, `Compiled 32 modules`, `Finished compilation`.
+- All 16 diagnostic fixtures (the original 15 plus the encoder-use probe) pass
+  unchanged in default, general and check modes.
+- Application census: **6,534 planned**, **0 `json_identity_argument`**, zero
+  `not_yet_planned`; the existing 21 failed-obligation bindings remain for the
+  separate retry-classification work.
+- The application check-mode build ends `Finished compilation`; all 3,980 output
+  files match the identity-plan candidate, with the same digest reported above.
+- Classification tests cover both encoder annotations and decode-only forms;
+  the dense reason counts merge correctly at 10,000 bindings. The summary
+  accepts both old eleven-bucket and new twelve-bucket census records.
+
+#### Inclusive obligation profile
+
+A census-disabled, one-worker application build was profiled with Callgrind's
+instruction counter (Valgrind 3.22), collecting only inside temporary non-inlined
+wrappers around the six obligation arms. Each wrapper included its callees;
+`--separate-callers=2` separated shared checker functions from ordinary typing.
+The wrappers and their `black_box` return barriers were removed after profiling.
+This is attribution evidence, not a production instruction-gate measurement.
+
+| Obligation | Inclusive instructions | Share of collected work |
+|---|---:|---:|
+| Value | 1,279,549,876 | 59.46% |
+| Constructor | 428,322,821 | 19.90% |
+| Label | 367,978,833 | 17.10% |
+| Type | 53,159,685 | 2.47% |
+| Literal | 22,469,497 | 1.04% |
+| Equality | 566,609 | 0.03% |
+| Total | 2,152,047,321 | 100% |
+
+Within Value, inclusive unification accounts for 604,966,456 instructions,
+instantiation for 333,003,351, and skeleton construction for 100,341,035.
+A census-only observation immediately before each Value instance counts the
+looked-up scheme's representative level: on the application **0 non-generic**
+and **86,633 generic** Value obligations, with zero failed obligations. Command:
+`RESCRIPT_FULL_BUILD=1 RESCRIPT_DERIVED_CENSUS=<file> rescript build`, run from the
+application with its runtime; sum the JSONL `value_schemes` pair in
+`[non_generic, generic]` order. Thus this corpus offers no root-level
+non-generic instance-copy shortcut. The observation belongs to the census
+observer only, is erased for `Steps = ()`, and changes no inference operation.
+These are children of the Value total, not additional costs. The first two perform
+required inference work; no lookup, instance, usage mark or unification was
+removed to improve a measurement.
+
+The same instrumented binary compiled an isolated generated record with two
+and 10,000 integer fields. Both runs recompiled only that module. Subtracting
+the two-field total and dividing by 9,998 gives the marginal inclusive cost:
+
+| Obligation | Instructions per added field |
+|---|---:|
+| Value | 233,986.08 |
+| Constructor | 63,241.52 |
+| Label | 61,593.54 |
+| Type | 4,820.99 |
+
+Per-variant-constructor inclusive instruction attribution: **not measured**.
+The constructor row above is a per-record-field marginal cost, not a cost per
+variant constructor. Collect the two warmed record builds with the same
+Callgrind wrapper command, annotate with `callgrind_annotate --inclusive=yes`,
+and compute each arm's `(instructions_10000 - instructions_2) / 9998`.
+
+The existing constructor-description sharing change removes repeated metadata
+copies without skipping any inference operations; its isolated measurement
+above saves 0.0302945%. Two further attempts to reduce skeleton construction's
+temporary vectors were tested and **not retained**:
+
+- Borrowed constructor APIs in `TypeContext`: 65,028,457,344 → 65,062,460,883
+  instructions (**+0.0522902%**), identical 3,980 outputs.
+- A helper local to skeleton construction: 65,032,097,813 → 65,033,845,066
+  (**+0.0026868%**), identical 3,980 outputs. The candidate count was restarted
+  after the benchmark command timed out; it used the same prepared runtime and
+  clean-build command, not a baseline from another experiment.
+
+Hyperfine, one worker, one warmup and five clean runs, also gave no reason to
+retain the local helper: base 12.415 ± 0.342 s (12.089–12.914), candidate
+18.909 ± 0.316 s (18.538–19.363). The candidate's five runs were restarted after
+the combined benchmark timed out; these timings do not establish a speedup.
+The retained production code is unchanged by these experiments.
+
+#### Local result-constructor scope
+
+`shadowed_result_constructor` is selected before building a decoder-bearing
+plan when the source-order scope contains a local `Ok` or `Error` constructor.
+The frontend lazily computes dense prefix flags at the first mapped item that
+derives (scanning each preceding item at most once), despite its reverse schedule;
+nested modules inherit the flag and keep their local additions within their
+own scope. Encoder-only groups remain eligible for plans. This handles direct
+local variant declarations, exceptions and type extensions, not arbitrary
+constructor exports from an `open`
+or an external module; any obligation failure outside the covered form remains
+visible rather than being guessed away.
+
+Application census (`RESCRIPT_FULL_BUILD=1 RESCRIPT_DERIVED_CENSUS=<file>
+rescript build`, run from the application with its runtime): 6,534 plans,
+21 `shadowed_result_constructor`, **zero `failed_obligation`**. These replace
+the 21 retry bindings in two units; no binding remains to name as a retry.
+Spice and application check-mode builds finish successfully. The original
+constructor-shadow diagnostic and a new nested-scope diagnostic agree in all
+three modes; all 19 diagnostic fixtures pass without changing old expectations.
+
+
+#### Census-off instruction gate: CI release profile
+
+The `Instruction count` workflow's `compare` job on `40a94389a3` is the gate:
+fat LTO, **one codegen unit**, five one-worker runs with the minimum per side.
+Base **4,048,840,695**, head **4,049,834,110**, **+0.025%**, with approximately
+0.08% run-to-run spread on each side. This is level at the observed variation;
+it is not a claim of a measured speedup or a numeric result below +0.02%.
+The job passed: https://github.com/jfrolich/rescript-rust/actions/runs/43538246812/job/132274627634.
+The workflow builds each revision with
+`CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 cargo build --release --locked --manifest-path rewatch/Cargo.toml`
+and runs `python3 scripts/compare_build_instructions.py --base <base-binary>
+<base-checkout> --head <head-binary> <head-checkout>` (five runs by default).
+
+A unit with no derives still executes these additions over trunk:
+
+- `binary_ast/ppx.rs:9695`: retain the first-presence result and dispatch once
+  to `rewrite_structure_scoped::<false>` (O(1) beyond the existing scan).
+- `binary_ast/ppx.rs:9812`: initialize `result_prefix = None` (O(1), no allocation).
+- `binary_ast/ppx.rs:10474`: probe the optional census per rewritten structure
+  item; when disabled, no general-group lookup runs.
+- `binary_ast/spice_ppx.rs:5632`: probe the optional census per type declaration
+  when the builtin derive mapper is enabled; when disabled, no shape walk runs.
+
+Constant empty scope arguments are also passed through the expansion seam.
+There is no constructor/alias prefix traversal, buffer allocation or JSON-identity
+classification in the no-derive specialization. This is zero **scope** work,
+not a claim of zero total added work. The derive-seam census probe itself
+predates this slice. CI for reviewed head `d306a20b68` measured base
+4,050,478,354 versus head 4,049,915,981 (**-0.014%**) using the command above:
+https://github.com/jfrolich/rescript-rust/actions/runs/43543824916/job/132292186553.
+The final correction-head result is tracked separately in the PR body.
+`ten_thousand_items_without_derives_do_no_result_scope_work` asserts zero scope
+steps and no prefix allocation; `result_scope_is_lazy_and_scans_the_prefix_once`
+checks lazy activation and reuse. Run both with
+`cargo test --manifest-path compiler-rust/Cargo.toml result_scope`.
+
+#### Local census-off comparison: fat LTO, default 16 codegen units
+
+This separate-profile local result is retained as evidence, not substituted
+for the one-codegen-unit CI gate.
+Base `be1b3a482e5a989d1a1bbecf33a9b4f1aab98fec` and candidate `40a94389a`
+were built sequentially in the same disposable source directory with
+`cargo build --release --locked --manifest-path <source>/rewatch/Cargo.toml`.
+After replacing the base archive with the candidate archive, changed source
+files were touched to invalidate Cargo's mtime cache; distinct binary SHA-256
+hashes verified that both revisions were actually rebuilt. Both binaries then
+built the same checkout, keeping runtime and source paths identical:
+
+```sh
+python3 scripts/compare_build_instructions.py \
+  --base "$BASE_BINARY" "$PWD" --head "$HEAD_BINARY" "$PWD" \
+  --project tests/tests --runs 3 --threshold 0.02 --sequential \
+  --work-dir "$COUNTS" --summary "$REPORT"
+```
+
+| | Instructions, three runs | Minimum |
+|---|---|---:|
+| Base | 4,073,364,802; 4,072,876,325; 4,073,549,768 | 4,072,876,325 |
+| Candidate | 4,080,736,147; 4,080,528,469; 4,080,586,846 | 4,080,528,469 |
+| Change | both compile 743 modules | **+0.1879%** |
+
+Earlier local comparisons with different checkout
+paths also failed (+0.303%); using one input checkout reduced but did not remove
+the difference (+0.087% with separately located compiler builds). An extra
+mapper-disabled fast path and boxing the plan pool did not pass the gate and
+were discarded. A run that accidentally reused the base binary after archive
+replacement was detected by identical binary hashes and excluded entirely.
+
+`--sequential` was added to the comparison script so these measurements never
+run two heavy builds together; only that mode permits sharing a project path.
+No source, oracle, compiler options or threshold was weakened to obtain a pass.
+Different codegen-unit settings change inlining; the local table does not
+establish a regression under the CI profile. No further layout or mapper
+experiments are retained.
+
+
+The alias rows were built with `RESCRIPT_DERIVED_PATH=check`, together with the
+previously tabulated `dict<option<JSON.t>>` and `option<list<JSON.t>>`, now explicit
+fixture declarations. The first unclassified `array<j>` probe printed:
+
+```text
+plans:   value viaAlias_encodeJson: &0((&1(array<&2(Stdlib.JSON@16.t)>)) => &3(Stdlib.JSON@16.t))
+general: value viaAlias_encodeJson: &0((&1(array<&2(Stdlib.JSON@16.t)>)) => @2)
+```
+
+Local identity aliases are now recorded during the same lazy source-prefix scan
+as constructor scope, with flat version records so reverse mapping and nested
+scope borrowing preserve declaration order. Parsed occurrence handles are not
+canonical names: registering an existing spelling in the interner avoids both
+copying its bytes and allocating a per-name string. The existing dense name
+slots then resolve alias versions. Unresolved external or opened nullary type arguments now receive a
+`NotJsonIdentity` obligation: it reads the checked declaration rather than
+guessing an alias from its name. Final fixture check: `Parsed 32 source files`, `Compiled 32 modules`,
+`Finished compilation`; the nested/local alias classification unit test passes.
+
+
+`shadowed_result_constructor` also recognizes exception declarations and type
+extensions whose constructor is `Ok` or `Error`, before building a plan.
+Constructor exports through `open` remain guarded by the obligation retry; type-alias exports invalidate prefix facts and receive `NotJsonIdentity` checks at exposed argument positions.
+Constructor exports through `include` remain guarded by the obligation retry; type-alias exports likewise invalidate prefix facts and receive the guard.
+The `%%private` route through `handle_private_extension` remains guarded by the
+obligation retry, not claimed as syntactically classified.
+
+
+The constructor-description cache key is now `(interned name, binding obligation
+start, Owner)`; switching between a declared constructor and predefined result
+constructor cannot reuse the wrong description. The owner/epoch unit test and
+the two-unit fresh-cache test run with
+`cargo test --manifest-path compiler-rust/Cargo.toml constructor_name_cache`.
+A `DerivedTable` belongs to a fresh typed arena per unit: `driver.rs:10360`
+constructs `TypeCheckContext::new`, `types/typecore.rs:1669` initializes
+`typed: TypedArena::new()`, and `types/tast_arena.rs:455` returns `Self::default()`.
+It is not reset and reused across units; no cache-clearing convention is needed.
+
+Scope step tests now use a test-only per-arena observer (no production fields,
+locks or TLS). Run each with `cargo test --manifest-path compiler-rust/Cargo.toml
+<test-name>`:
+
+| Test name | Observed work |
+|---|---|
+| `ten_thousand_items_without_derives_do_no_result_scope_work` | real `rewrite_structure_impl` dispatch, zero prefix/constructor/nested steps |
+| `ten_thousand_derived_items_visit_each_prefix_slot_once` | one 10,000-derived-item structure, 10,000 prefix steps in reverse query order |
+| `ten_thousand_variant_constructors_take_ten_thousand_scope_steps` | one variant, 10,000 constructor-name checks |
+| `ten_thousand_nested_items_take_one_scope_visit_each` | nested module mapper, 10,000 items and exactly 10,000 `shadows_result` visits |
+
+The whole-structure presence scan now returns its first deriving item's index.
+The per-item scope query reuses the known-false preceding range and that
+known-true item; it examines attributes only for later items that the first
+scan never visited. `scope_presence_does_not_rescan_the_known_prefix` places the
+first derive halfway through 10,000 items and asserts exactly 10,000 presence
+visits total across detection and reverse mapping queries.
+
+
+### External JSON identity guard
+
+`NotJsonIdentity` carries the owning type declaration's source name handle and
+a span of argument indices in a dense pool; `Obligation` remains **16 bytes**.
+Only exposed encoder-bearing manifest arguments need it. A direct identity,
+a single option identity, and record/variant payloads keep their established
+exceptions. Prefix facts distinguish known non-JSON types from unresolved aliases.
+
+Discharge reads the immediately preceding declaration from its current scope,
+walks its checked manifest to the argument, and follows nullary manifests through
+`lookup_type_decl_for_path_exact`. `SameNameRecovery::Refused` disables only the
+identifier spelling recovery; every existing caller retains `Allowed` with its
+old behavior. Qualified component lookup and ordinary lazy forcing remain.
+Each alias step takes one exact lookup and one declaration read, at most **64**
+steps per endpoint. A miss, invalid position, parameters, applied constructor,
+or exhausted bound fails closed and requests the existing whole-unit retry.
+There is no instantiation, unification, `expand_head`, abbreviation-memo write,
+or linking of distinct representatives in the guard; `repr` compression is allowed.
+
+Endpoint comparison first checks shared declaration pointer identity. Component
+views can copy declarations and expose no universal declaration uid, so it also
+compares their canonical stored paths (or the resolved endpoint path), normalized
+through module aliases. This normalized-path comparison is explicit, not a test
+of source path spelling. The encoder's JSON side comes from its already established
+skeleton; the optional encoder's single predefined option wrapper is read through.
+
+Tests (`cargo test --manifest-path compiler-rust/Cargo.toml not_json_identity`)
+cover alias depths 1 and 3 (2 and 4 declaration reads), record and abstract
+endpoints (1 read), a 10,000-alias environment stopped after exactly 64 reads,
+strict missing-identifier behavior, independent qualified/module-alias/open/legacy
+JSON retries, and qualified record controls that retain all their plans. The
+isolated seam fixtures receive the same prefix facts as the production frontend;
+no comparison, signature oracle or existing expected output was weakened.
+
+`AliasOwner.res` / `AliasUser.res` add the cross-unit fixture. The same CI command
+listed above ends `Parsed 34 source files`, `Compiled 34 modules`,
+`Finished compilation`. A census build emits an actual
+`not_json_identity / manifest_argument` failure event for AliasUser: **12 guards
+emitted, 1 failed**, followed by its whole-unit general retry (**18 bindings**).
+The record control is consequently general in that retried unit; its independent
+unit test proves that its guard holds and it retains a plan without a failing peer.
+Failure events retain guard counters from abandoned attempts; summaries aggregate
+those events and successful records without double-counting bindings.
+
+Application comparison, before → after the guard:
+
+| Counter | Before | After |
+|---|---:|---:|
+| planned bindings | 6,534 | 6,534 |
+| shadowed_result_constructor | 21 | 21 |
+| failed_obligation bindings | 0 | 0 |
+| json_identity_argument bindings | 0 | 0 |
+| NotJsonIdentity emitted / failed | not present | **6 / 0** |
+
+Commands: `RESCRIPT_FULL_BUILD=1 RESCRIPT_DERIVED_CENSUS=<file> rescript build`,
+then `python3 scripts/derived_census_summary.py <file>`; sum
+`not_json_identity_emitted` and `not_json_identity_failed` across records and
+failure events. Application `RESCRIPT_DERIVED_PATH=check` ends
+`Finished compilation`. `scripts/bench_project.sh <application> <saved-before>
+<candidate> --runtime-from <checkout> --no-instructions` compares **3,980 files**,
+identical SHA-256 `0a3d301322cf7febdbf8793ae8c3dcbc1ecbadf44670c3b52cecbc5437a02408`.
+The saved comparison binary is the previously measured `40a94389a` build; no
+new instruction or speedup claim is made from this output comparison. All **19**
+diagnostic fixtures still pass default/general/check with unchanged expectations.
+
+
+### Open/include shadowing of prefix alias facts
+
+An explicit structure `open` or `include` advances the scope's import epoch.
+Facts declared before that epoch, and inherited facts, are unresolved afterwards;
+builtin spellings are not exempt. A later concrete declaration establishes a new
+fact; an alias whose right-hand side is still unresolved remains unresolved.
+`is_json_identity` uses these same facts, so it cannot accidentally select the
+syntactic reason while guard emission sees a different answer.
+
+`PrefixScope` stores one current import position. The existing dense prefix rows
+also snapshot it: reverse mapping must distinguish positions between multiple
+imports, not just the most recently scanned import. The additional epoch test is
+O(1) per scope level, with no second source scan and no allocation per item;
+existing name-version/scope lookup costs remain as documented. No-derive units
+still allocate no prefix. The 10,000-derived-item test still counts 10,000 visits.
+
+A derived type cannot occur directly in an expression, but a local module under
+an expression-level `open` can contain one; the mapper therefore applies an
+import barrier while walking that expression and restores its enclosing scope
+afterwards. Tests cover same-scope and inherited facts, later redeclarations,
+builtin names, reverse queries across two imports, and a module under a local
+expression open inside a containing module.
+
+Commands: `cargo test --manifest-path compiler-rust/Cargo.toml import_epochs`
+and `cargo test --manifest-path compiler-rust/Cargo.toml ten_thousand_derived_items`.
+Both compiler clippy configurations pass. `ShadowUser.res` retains the reported
+open/include reproduction and adds the expression-open module case. The CI Spice
+check command finishes successfully with **35 source modules**; the extra local
+module fixture may report the ordinary unused-type warning in both forms.
+
+On the application, the same census/check commands used above report **6,534
+plans**, **6 guards emitted / 0 failed**, **0 failed-obligation bindings**, and
+**21 shadowed-result bindings**. Check mode ends `Finished compilation`; the
+output comparison still finds **3,980 identical files** with SHA-256
+`0a3d301322cf7febdbf8793ae8c3dcbc1ecbadf44670c3b52cecbc5437a02408`.
+All 19 diagnostic fixtures pass unchanged in default/general/check. These gates
+were run after integrating the current rewrite trunk without rewriting history.

@@ -1,0 +1,1 @@
+- Run the checker coverage ratchet (`scripts/tc_coverage.py`) and its unit tests in CI.

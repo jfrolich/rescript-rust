@@ -1,0 +1,7 @@
+{
+  "name": "@derived-code-monorepo/shared",
+  "sources": [{"dir": "src", "subdirs": true}],
+  "package-specs": {"module": "esmodule", "in-source": false},
+  "compiler-flags": ["-w -30-8", "-warn-error -A"],
+  "ppx-flags": ["ppx-spice"]
+}

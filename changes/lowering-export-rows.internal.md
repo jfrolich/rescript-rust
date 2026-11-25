@@ -1,0 +1,1 @@
+- The backend lowering extracts and coerces a unit's exports on top-level rows, so the new side of the `lower` check no longer runs the legacy export code.

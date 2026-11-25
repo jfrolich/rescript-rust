@@ -801,6 +801,7 @@ mod tests {
                 ps_deprecated: None,
                 ps_crcs: vec![],
                 ps_alias_rewrites: Default::default(),
+                ps_view: Default::default(),
             },
             &ctx,
             None,

@@ -5,7 +5,7 @@ use crate::bir::*;
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
-use std::collections::BTreeMap;
+use crate::bir::dense::DenseTable;
 
 /// Only Catch enables the round (simplify_exits' has_static_catch test).
 /// Inside the round, EXIT|CATCH prunes substitution descent. Counts are taken
@@ -27,17 +27,21 @@ pub static EXITS: Round = Round {
 /// lam_exit_count.ml:58-60. Compute the ordered legacy count once, explicitly.
 /// Maintaining this fact would require conditional handler activation, not
 /// just incrementing/decrementing every Exit's weighted structural count.
-pub(crate) fn count(b: &Bir, root: NodeId) -> BTreeMap<u32, u32> {
+/// O(visited nodes), with one dense entry per catch header. Source labels
+/// are arbitrary signed integers cast to u32, so only label-to-CatchId uses
+/// the arena's existing sparse index.
+pub(crate) fn count(b: &Bir, root: NodeId) -> Vec<u32> {
     enum Work {
         Node(NodeId),
-        Handler(u32, NodeId),
+        Handler(CatchId, NodeId),
     }
-    let mut counts = BTreeMap::new();
+    let mut counts = vec![0; b.pools.catches.len()];
     let mut work = vec![Work::Node(root)];
     while let Some(task) = work.pop() {
         let n = match task {
-            Work::Handler(label, handler) => {
-                if counts.get(&label).copied().unwrap_or(0) == 0 {
+            Work::Handler(header, handler) => {
+                b.visit();
+                if counts[header.index()] == 0 {
                     continue;
                 }
                 handler
@@ -47,7 +51,8 @@ pub(crate) fn count(b: &Bir, root: NodeId) -> BTreeMap<u32, u32> {
         match b.view(n) {
             // lam_exit_count.ml:55-57: count the raise before its arguments.
             View::Exit { label, args } => {
-                *counts.entry(label).or_default() += 1;
+                b.visit();
+                counts[b.pools.catch_labels[&label].index()] += 1;
                 work.extend(args.iter().rev().copied().map(Work::Node));
             }
             // lam_exit_count.ml:58-60: body before conditionally live handler.
@@ -56,7 +61,7 @@ pub(crate) fn count(b: &Bir, root: NodeId) -> BTreeMap<u32, u32> {
                 handler,
                 header,
             } => {
-                work.push(Work::Handler(b.catch(header).label, handler));
+                work.push(Work::Handler(header, handler));
                 work.push(Work::Node(body));
             }
             // lam_exit_count.ml:70-72: body before value, NOT shallow_map order.
@@ -210,7 +215,7 @@ enum Work {
 fn catch(
     e: &mut Engine<'_>,
     n: NodeId,
-    counts: &BTreeMap<u32, u32>,
+    counts: &[u32],
     work: &mut Vec<Work>,
     revision: &mut u64,
 ) {
@@ -223,7 +228,7 @@ fn catch(
         unreachable!()
     };
     let label = e.bir().catch(header).label;
-    let uses = counts.get(&label).copied().unwrap_or(0);
+    let uses = counts.get(header.index()).copied().unwrap_or(0);
     if uses == 0 {
         e.promote(n, body);
         fired(e, "drop-catch");
@@ -239,7 +244,8 @@ fn catch(
 
 /// subst_lambda replaces Var only (not Assign's target), rebuilding changed
 /// ancestors through shallow_map. No binders are renamed here.
-fn substitute(e: &mut Engine<'_>, root: NodeId, params: &BTreeMap<VarId, VarId>) {
+/// O(visited nodes + rewritten nodes), with O(1) parameter lookups.
+fn substitute(e: &mut Engine<'_>, root: NodeId, params: &DenseTable<VarId>) {
     let mut work = vec![(root, false, 0)];
     let mut revision = 0;
     while let Some((n, done, before)) = work.pop() {
@@ -249,7 +255,7 @@ fn substitute(e: &mut Engine<'_>, root: NodeId, params: &BTreeMap<VarId, VarId>)
             }
             e.finish_candidate(n);
         } else if let View::Var { var } = e.bir().view(n) {
-            if let Some(&var) = params.get(&var) {
+            if let Some(var) = params.get(var.index()) {
                 let weight = e.weight(n);
                 let replacement = e.node(View::Var { var }, 0, weight);
                 e.replace(n, replacement);
@@ -274,14 +280,15 @@ fn substitute(e: &mut Engine<'_>, root: NodeId, params: &BTreeMap<VarId, VarId>)
 fn raise(
     e: &mut Engine<'_>,
     n: NodeId,
-    table: &BTreeMap<u32, usize>,
+    table: &[Option<usize>],
+    params: &mut DenseTable<VarId>,
     handlers: &mut [Handler],
     revision: &mut u64,
 ) {
     let View::Exit { label, args } = e.bir().view(n) else {
         unreachable!()
     };
-    let Some(&index) = table.get(&label) else {
+    let Some(index) = table.get(e.bir().pools.catch_labels[&label].index()).copied().flatten() else {
         return;
     };
     let args = args.to_vec();
@@ -293,13 +300,11 @@ fn raise(
     };
     if !args.is_empty() {
         let fresh: Vec<_> = h.params.iter().map(|&v| e.rename_var(v)).collect();
-        let params = h
-            .params
-            .iter()
-            .copied()
-            .zip(fresh.iter().copied())
-            .collect();
-        substitute(e, tree, &params);
+        for (&original, &fresh) in h.params.iter().zip(&fresh) {
+            params.insert(original.index(), fresh);
+        }
+        substitute(e, tree, params);
+        params.clear();
         let weight = e.weight(n);
         for (&var, arg) in fresh.iter().zip(args).rev() {
             e.detach(arg);
@@ -332,7 +337,8 @@ fn shallow(e: &mut Engine<'_>, n: NodeId, work: &mut Vec<Work>, revision: u64) {
 
 fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
     let counts = count(e.bir(), root);
-    let mut table = BTreeMap::new();
+    let mut table = vec![None; e.bir().pools.catches.len()];
+    let mut params = DenseTable::new(e.bir().vars().len());
     let mut handlers: Vec<Handler> = Vec::new();
     let mut work = vec![Work::Enter(root)];
     let mut revision = 0;
@@ -380,7 +386,7 @@ fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
                 if immediate || small {
                     let single = uses == 1;
                     e.detach(handler);
-                    table.insert(h.label, handlers.len());
+                    table[header.index()] = Some(handlers.len());
                     handlers.push(Handler {
                         params: h.params.iter().collect(),
                         tree: Some(handler),
@@ -408,7 +414,7 @@ fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
                 if let Some(shell) = shell {
                     e.close_shell(n, shell);
                 }
-                raise(e, n, &table, &mut handlers, &mut revision);
+                raise(e, n, &table, &mut params, &mut handlers, &mut revision);
                 e.finish_candidate(n);
             }
         }
@@ -441,13 +447,11 @@ mod tests {
         let mut imported = import_lambda(&a, root).unwrap();
         let counts = count(&imported.arena, imported.root);
         let expected_counts = crate::lambda::lam_pass_exits::count_helper(&a, root);
-        assert_eq!(
-            counts,
-            expected_counts
-                .into_iter()
-                .map(|(l, c)| (l as u32, c))
-                .collect()
-        );
+        assert_eq!(counts.iter().filter(|&&n| n != 0).count(), expected_counts.len());
+        for (label, count) in expected_counts {
+            let header = imported.arena.pools.catch_labels[&(label as u32)];
+            assert_eq!(counts[header.index()], count);
+        }
         let generator = crate::context::IdGenerator::new();
         let stamp = a.ident_stamp_bound();
         generator.set_current_stamp(stamp);
@@ -493,7 +497,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(imported.arena.catch(header).uses(), 1);
-        assert_eq!(count(&imported.arena, imported.root).get(&1), None);
+        assert_eq!(count(&imported.arena, imported.root)[header.index()], 0);
         assert_eq!(compare(a, root).rules["drop-catch"], 2);
     }
 
@@ -654,6 +658,27 @@ mod tests {
             imported.arena.validate(Some(imported.root)).unwrap();
             eprintln!("exits wide={wide}: {steps} steps");
         }
+    }
+
+    #[test]
+    fn ten_thousand_sparse_exits_use_linear_dense_count_accesses() {
+        let mut b = Bir::default();
+        b.begin_bulk();
+        let mut root = b.new_node(View::JNull, 0);
+        for i in 0..10_000 {
+            let label = u32::MAX - 2 * i;
+            b.catch_header(label, VarSpan::default());
+            let first = b.new_node(View::Exit { label, args: &[] }, 0);
+            root = b.new_node(View::Seq { first, second: root }, 0);
+        }
+        b.finish_bulk(root);
+        b.steps.set(0);
+        let counts = count(&b, root);
+        assert_eq!(counts, vec![1; 10_000]);
+        // Counts include an explicit visit at each table access, in addition
+        // to inspected nodes. Sparse source label magnitudes do not affect it.
+        assert!(b.steps.get() <= 3 * b.nodes.len() as u64);
+        b.validate(Some(root)).unwrap();
     }
 
     #[test]

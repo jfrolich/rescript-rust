@@ -1,0 +1,1 @@
+- Add checker selection and decline coverage, sharing-aware canonical signatures, and test-only step counters for the type checker rewrite. The existing checker remains the default.
