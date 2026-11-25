@@ -425,9 +425,7 @@ module Sexp_ast = struct
         Sexp.list
           (match vd.pval_prim with
           | None -> []
-          | Some (Prim_name s) -> [string s]
-          | Some (Prim_ffi {name}) -> [string name; string "<ffi spec>"]
-          | Some (Prim_inline_const _) -> [string "<inline const>"]);
+          | Some s -> [string s]);
         attributes vd.pval_attributes;
       ]
       @ jsx_component vd.pval_jsx_component)
@@ -1624,7 +1622,7 @@ module SexpAstWithLocs = struct
         Sexp.list (map_empty ~f:string
              (match vd.pval_prim with
              | None -> []
-             | Some prim -> Ffi_debug.primitive_repr prim));
+             | Some prim -> [prim]));
         attributes vd.pval_attributes;
       ]
       @ jsx_component vd.pval_jsx_component)
