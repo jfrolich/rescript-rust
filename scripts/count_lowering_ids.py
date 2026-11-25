@@ -16,7 +16,7 @@ the lowering's files with at least one such call and no more than
 import re,glob,os,collections,sys
 T=['from_node','node','at','stmt_from_node','stmt_node','list_from','list_id']
 # The most transition calls src/bir/lower may hold (`--self-test`).
-CEILING=21
+CEILING=8
 def non_test(text):
     """The text of a file above its test module."""
     lines=text.split('\n'); cut=len(lines)
