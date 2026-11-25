@@ -5505,10 +5505,11 @@ mod tests {
 
     /// A relation that answers the opposite is reported: the harness
     /// compares the answers.
+    ///
+    /// Reaches: R3i.
     #[test]
     #[ignore = "R3i build"]
     fn a_wrong_answer_of_a_relation_is_reported() {
-        // Reaches: R3i.
         let program = compile(FIXED.to_string());
         let plan = Plan::new(Tier::Full, RELATIONS);
         let ops = [Op::Instance(0), Op::Instance(0), Op::Equal(0, 1, true), Op::Matches(0, 1)];
