@@ -1139,7 +1139,8 @@ fn preprocess_signature_for_typecheck_with_source(
     };
 
     if file_config.no_builtin_ppx(options) {
-        Ok(signature)
+        ppx::resolve_top_level_externals_signature(signature, arena)
+            .map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
     } else {
         arena.set_builtin_spice(options.builtin_spice());
         let (rewritten, warnings) =
@@ -2911,6 +2912,17 @@ fn type_mod_error_to_anyhow_styled(
         }
         TypeModError::InconsistentConstraint { loc, trace } => UserDiagnostic::new(
             format_inconsistent_constraint_report(type_ctx, arena, source, filename, *loc, trace),
+            2,
+        )
+        .into(),
+        TypeModError::ReservedInlinePrimitive { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "\"#rescript-inline\" is reserved for @inline constants",
+            ),
             2,
         )
         .into(),
@@ -6482,7 +6494,8 @@ pub fn run_implementation_frontend(
     };
 
     let structure = if file_config.no_builtin_ppx(options) {
-        structure
+        ppx::resolve_top_level_externals_structure(structure, parser.arena_mut())
+            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
     } else {
         // OCaml `Ast_config.process_str` marks the leading `@@config` before
         // the builtin mapper runs (compiler/frontend/ppx_entry.ml:48-50).

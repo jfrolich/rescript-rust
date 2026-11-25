@@ -1338,6 +1338,60 @@ fn primitive_description_from_value_decl(
     }
 }
 
+/// The kind of an external declared in a signature (typedecl.ml
+/// `transl_value_decl`): other modules call an external with a relative path
+/// through the value its module exports, so in a signature it is a regular
+/// value (`Primitive.no_cross_module_inline`). A structure exports it through
+/// the include the built-in PPX wraps it in.
+fn signature_value_kind(prim: crate::types::PrimitiveDescription) -> crate::types::decl::ValueKind {
+    use crate::types::decl::{PrimKind, ValueKind};
+    use crate::types::external_ffi_types::{ExternalFfi, is_relative};
+    match &prim.prim_kind {
+        PrimKind::KindExternal(spec)
+            if matches!(&**spec, ExternalFfi::FfiBs(_, _, decl) if is_relative(decl, &prim.prim_name)) =>
+        {
+            ValueKind::ValReg
+        }
+        _ => ValueKind::ValPrim(std::sync::Arc::new(prim)),
+    }
+}
+
+/// What `Ast_external.resolve` checks when the type checker reaches an
+/// external: the primitive name `@inline` constants use is not available to
+/// externals, and a resolved FFI external's warnings are reported within its
+/// warning scope (typedecl.ml `transl_value_decl` is wrapped in
+/// `Builtin_attributes.warning_scope`).
+fn check_resolved_external(
+    tctx: &mut TypeCheckContext<'_>,
+    arena: &ParseArena,
+    vd: &crate::parser::ast::ValueDescription,
+) -> TypeModResult<()> {
+    use crate::parser::ast::PrimitiveRepr;
+    match &vd.pval_prim {
+        Some(PrimitiveRepr::PrimName(name)) if arena.get_string(*name) == INLINE_CONST_PRIM => {
+            Err(TypeModError::ReservedInlinePrimitive { loc: vd.pval_loc })
+        }
+        Some(PrimitiveRepr::PrimFfi { .. }) => {
+            let warnings = crate::binary_ast::ppx::resolved_external_warnings(vd, arena);
+            if warnings.is_empty() {
+                return Ok(());
+            }
+            with_warning_scope(tctx, arena, &vd.pval_attributes, false, |tctx| {
+                for warning in warnings {
+                    let index = tctx.warnings.len();
+                    tctx.report_warning_at(index, warning.loc, warning.warning);
+                }
+                Ok::<(), TypeModError>(())
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `Ast_external_mk.inline_const_prim`: the primitive of an `@inline`
+/// constant's declaration.
+const INLINE_CONST_PRIM: &str = "#rescript-inline";
+
 fn decl_attrs_to_parser_attrs(
     arena: &ParseArena,
     attrs: &[crate::types::decl::Attribute],
@@ -3436,6 +3490,12 @@ pub enum TypeModError {
         loc: LocIdx,
         /// The unification trace of the failed constraint.
         trace: Vec<(TypeExprRef, TypeExprRef)>,
+    },
+    /// An external names the primitive of `@inline` constants
+    /// (ast_external.ml `resolve`).
+    ReservedInlinePrimitive {
+        /// The declaration's location.
+        loc: LocIdx,
     },
     /// An ordinary external declaration has no function arguments.
     NullArityExternal {
@@ -11691,15 +11751,15 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 val_type,
                                 val_kind: match &vd.pval_prim {
                                     None => crate::types::decl::ValueKind::ValReg,
-                                    Some(prim) => crate::types::decl::ValueKind::ValPrim(
-                                        std::sync::Arc::new(primitive_description_from_value_decl(
+                                    Some(prim) => signature_value_kind(
+                                        primitive_description_from_value_decl(
                                             arena,
                                             ctx,
                                             &sig_env,
                                             prim,
                                             vd.pval_type,
                                             val_type,
-                                        )),
+                                        ),
                                     ),
                                 },
                                 val_loc: tctx.intern_ast_loc(arena, sig_item.psig_loc),
@@ -15922,6 +15982,7 @@ pub fn transl_signature<'a>(
         let desc = match &item.psig_desc {
             PSigDesc::Psig_value(vd) => {
                 let name_str = arena.get_string(vd.pval_name.txt).to_string();
+                check_resolved_external(tctx, arena, vd)?;
                 // Use transl_type_scheme pattern: begin_def/end_def/generalize
                 // OCaml: reset_type_variables() for each val declaration
                 tctx.reset_type_variables();
@@ -15939,16 +16000,14 @@ pub fn transl_signature<'a>(
                 // Env.enter_value allocates val_id at typedecl.ml:1916-1919.
                 let val_kind = match &vd.pval_prim {
                     None => crate::types::decl::ValueKind::ValReg,
-                    Some(prim) => crate::types::decl::ValueKind::ValPrim(
-                        std::sync::Arc::new(primitive_description_from_value_decl(
-                            arena,
-                            ctx,
-                            &sig_env,
-                            prim,
-                            vd.pval_type,
-                            val_ty,
-                        )),
-                    ),
+                    Some(prim) => signature_value_kind(primitive_description_from_value_decl(
+                        arena,
+                        ctx,
+                        &sig_env,
+                        prim,
+                        vd.pval_type,
+                        val_ty,
+                    )),
                 };
                 // OCaml typedecl.ml:1875-1914 translates the type scheme before
                 // Env.enter_value creates the value ident. Keep the same order so
@@ -17391,6 +17450,7 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_primitive(vd) => {
             // Primitive declaration: external f : t = "..."
             let name_str = arena.get_string(vd.pval_name.txt).to_string();
+            check_resolved_external(tctx, arena, vd)?;
 
             // Translate the type annotation using transl_type_scheme pattern:
             // OCaml: reset_type_variables() clears type var map so each declaration

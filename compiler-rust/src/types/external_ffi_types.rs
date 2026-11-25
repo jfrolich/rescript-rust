@@ -239,6 +239,33 @@ pub enum ExternalFfi {
     FfiObjCreate(Vec<ObjParam>),
 }
 
+/// `External_ffi_types.is_package_relative_path`: a path that starts with
+/// `./` or `../`.
+pub fn is_package_relative_path(s: &str) -> bool {
+    s.starts_with("./") || s.starts_with("../")
+}
+
+/// `External_ffi_types.is_relative`: does the declaration name a
+/// package-relative path? A zero-arity value also counts its own name.
+pub fn is_relative(decl: &ExternalDecl, prim_name: &str) -> bool {
+    let bundle_relative = match &decl.module_ {
+        Some(ModuleSource::ModuleItself) => return is_package_relative_path(prim_name),
+        Some(ModuleSource::ModuleNamed(emn)) => is_package_relative_path(&emn.bundle),
+        None => false,
+    };
+    match &decl.kind {
+        DeclKind::DeclVal { name } => {
+            bundle_relative || (decl.effective_arity == 0 && is_package_relative_path(name))
+        }
+        DeclKind::DeclNew { .. } => bundle_relative,
+        DeclKind::DeclSend { .. }
+        | DeclKind::DeclSet { .. }
+        | DeclKind::DeclGet { .. }
+        | DeclKind::DeclGetIndex
+        | DeclKind::DeclSetIndex => false,
+    }
+}
+
 #[cfg(test)]
 impl ExternalDecl {
     /// A plain global `@val` call, for tests that need some FFI call.

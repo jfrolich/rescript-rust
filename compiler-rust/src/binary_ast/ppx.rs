@@ -1243,6 +1243,9 @@ struct UnusedAttributeSweep<'w> {
     stopped: bool,
     /// An error raised by the sweep (`Location.raise_errorf`).
     error: Option<PpxError>,
+    /// The location of the last resolved FFI external the sweep skipped. The
+    /// signature of the include that wraps a relative one has it too.
+    ffi_loc: Option<LocIdx>,
 }
 
 impl UnusedAttributeSweep<'_> {
@@ -1300,6 +1303,19 @@ macro_rules! validation_methods {
             }
             if sweep_state!(self, $state).stopped {
                 return;
+            }
+            // bs_ast_invariant.ml `emit_external_warnings`: the type checker
+            // checks a resolved FFI external in its resolved form
+            // (`resolved_external_warnings`), within its warning scope; so
+            // the signature of the include that wraps a relative one, which
+            // has its location, is not checked again.
+            match &vd.pval_prim {
+                Some(PrimitiveRepr::PrimFfi { .. }) => {
+                    sweep_state!(self, $state).ffi_loc = Some(vd.pval_loc);
+                    return;
+                }
+                None if sweep_state!(self, $state).ffi_loc == Some(vd.pval_loc) => return,
+                _ => {}
             }
             // bs_ast_invariant.ml:119-142.
             if let Some(PrimitiveRepr::PrimName(byte_name)) = &vd.pval_prim {
@@ -1572,6 +1588,22 @@ fn mark_first_config_attribute<'a>(
     }
 }
 
+/// OCaml `Bs_ast_invariant.emit_external_warnings_on_resolved_external`: the
+/// warnings for a resolved FFI external, which the type checker reports when
+/// it types the declaration, within its warning scope
+/// (`Ast_external.resolve`). The structure and signature sweeps skip it.
+pub fn resolved_external_warnings(vd: &ValueDescription, arena: &ParseArena) -> Vec<PpxWarning> {
+    let mut warnings = Vec::new();
+    let mut sweep = UnusedAttributeSweep {
+        warnings: &mut warnings,
+        stopped: false,
+        error: None,
+        ffi_loc: None,
+    };
+    super::ast_iter::walk_value_description(&mut sweep, arena, vd);
+    warnings
+}
+
 /// OCaml `Bs_ast_invariant.emit_external_warnings_on_structure`: the warnings
 /// in traversal order, and the error the sweep raised (if any).
 /// O(visited syntax occurrences); counting shares this validation traversal.
@@ -1590,6 +1622,7 @@ pub fn collect_unused_attribute_warnings_structure(
             warnings: &mut warnings,
             stopped: false,
             error: None,
+            ffi_loc: None,
         };
         super::ast_iter::walk_structure(&mut sweep, arena, items);
         let error = sweep.error.take();
@@ -1609,6 +1642,7 @@ pub fn collect_unused_attribute_warnings_structure(
             warnings: &mut warnings,
             stopped: false,
             error: None,
+            ffi_loc: None,
         };
         let mut counts = super::derive::census::SyntaxCounts::default();
         super::ast_iter::walk_structure(
@@ -1699,6 +1733,7 @@ pub fn collect_unused_attribute_warnings_signature(
             warnings: &mut warnings,
             stopped: false,
             error: None,
+            ffi_loc: None,
         };
         super::ast_iter::walk_signature(&mut sweep, arena, items);
         let error = sweep.error.take();
@@ -1718,6 +1753,7 @@ pub fn collect_unused_attribute_warnings_signature(
             warnings: &mut warnings,
             stopped: false,
             error: None,
+            ffi_loc: None,
         };
         let mut counts = super::derive::census::SyntaxCounts::default();
         super::ast_iter::walk_signature(
@@ -4404,10 +4440,7 @@ fn build_external_decl(desc: &ExternalDesc, prim_name: &str, arity: usize) -> Ex
     }
 }
 
-/// Check if a path string is a package-relative path (starts with "./" or "../").
-fn is_package_relative_path(s: &str) -> bool {
-    s.starts_with("./") || s.starts_with("../")
-}
+use crate::types::external_ffi_types::is_package_relative_path;
 
 fn valid_js_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '$'
@@ -4944,6 +4977,37 @@ fn transform_inline_binding(
                             loc: pval_name.loc,
                         },
                         pval_type: arena.ast_literal_type_int(),
+                        pval_prim: Some(prim),
+                        pval_attributes: Attributes::new(),
+                        pval_loc: pvb_loc,
+                    })),
+                    pstr_loc,
+                })
+            }
+            // @inline let x = 10n (ast_external_mk.ml
+            // `inline_const_of_expression`, shared with signatures)
+            Constant::Integer(s, Some('n')) => {
+                let prim = inline_bigint_primitive(arena.get_string(*s));
+                let bigint = arena.push_lident_static("bigint");
+                let pval_type = arena.push_core_type(CoreType {
+                    ptyp_desc: CoreTypeDesc::Ptyp_constr((
+                        Located {
+                            txt: bigint,
+                            loc: LocIdx::none(),
+                        },
+                        crate::parse_arena::ArenaList::EMPTY,
+                    )),
+                    ptyp_loc: LocIdx::none(),
+                    ptyp_attributes: Attributes::new(),
+                });
+                Some(StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
+                        pval_jsx_component: None,
+                        pval_name: Located {
+                            txt: pval_name.txt,
+                            loc: pval_name.loc,
+                        },
+                        pval_type,
                         pval_prim: Some(prim),
                         pval_attributes: Attributes::new(),
                         pval_loc: pvb_loc,
@@ -10485,6 +10549,50 @@ fn try_rewrite_structure_item(
         result.extend(rewrite_structure_item_no_spice(&expanded, arena));
     }
     Ok(result)
+}
+
+/// Without the built-in PPX, the type checker still resolves an FFI external
+/// (ast_external.ml `resolve`, which `Ppx_entry` registers for every
+/// driver): the externals of the structure's top level are resolved as the
+/// built-in PPX resolves them, and nothing else is rewritten. Externals in
+/// nested modules are left as written.
+pub fn resolve_top_level_externals_structure(
+    structure: Vec<StructureItem>,
+    arena: &mut ParseArena,
+) -> PpxResult<Vec<StructureItem>> {
+    let mut resolved = Vec::with_capacity(structure.len());
+    for item in structure {
+        match &item.pstr_desc {
+            StructureItemDesc::Pstr_primitive(vd)
+                if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) =>
+            {
+                validate_external_attribute_errors(vd, arena, &mut Vec::new())?;
+                resolved.extend(rewrite_structure_item_body(&item, arena));
+            }
+            _ => resolved.push(item),
+        }
+    }
+    Ok(resolved)
+}
+
+/// [`resolve_top_level_externals_structure`] for a signature.
+pub fn resolve_top_level_externals_signature(
+    signature: Vec<SignatureItem>,
+    arena: &mut ParseArena,
+) -> PpxResult<Vec<SignatureItem>> {
+    let mut resolved = Vec::with_capacity(signature.len());
+    for item in signature {
+        match &item.psig_desc {
+            SignatureItemDesc::Psig_value(vd)
+                if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) =>
+            {
+                validate_external_attribute_errors(vd, arena, &mut Vec::new())?;
+                resolved.push(rewrite_signature_item_no_spice(&item, arena));
+            }
+            _ => resolved.push(item),
+        }
+    }
+    Ok(resolved)
 }
 
 /// Rewrite a structure item, potentially returning multiple items for @deriving.
