@@ -27,7 +27,7 @@ pub(crate) fn record(layout: &Layout) {
                 match p.stored_test(id) {
                     Test::Equals(tag) => format!("eq({:?})", p.metadata.owned_literal(*tag)),
                     Test::Typeof(kind) => format!("typeof({:?})", kind.block_type()),
-                    Test::Instance(id) => if p.metadata.is_class(*id) { format!("instance({})", p.metadata.instance_name(*id)) } else { "array".into() },
+                    Test::Instance(id) => if p.metadata.is_class(*id) { format!("instance({})", crate::types::ClassName::from_key(p.metadata.instance_name(*id))) } else { "array".into() },
                     Test::NotNull => "nonnull".into(),
                     Test::Not(t) => format!("not({})", test(p, *t)),
                     Test::And(a,b) => format!("and({},{})", test(p,*a),test(p,*b)),

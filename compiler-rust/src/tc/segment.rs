@@ -694,7 +694,7 @@ mod schema_tests {
             ValueRow => 24, ModuleRow => 20, ModuleTypeRow => 16,
             TypeDetailsRow => 48, InlinedRecordRow => 12, RecordRepresentationRow => 16,
             LabelRow => 28, ConstructorArgumentsRow => 12, ConstructorRow => 28,
-            ExtensionRow => 36, BlockTypeRow => 16, ShapeRow => 8, LiteralRow => 16,
+            ExtensionRow => 36, BlockTypeRow => 20, ShapeRow => 8, LiteralRow => 16,
             LayoutRow => 16, RuntimeConstructorRow => 16, AttributeRow => 16,
             AttributePayloadRow => 16, SemanticStringValue => 8, SemanticStringRow => 16,
             DeprecatedRow => 20, StringPair => 8, StringIntPair => 16,
