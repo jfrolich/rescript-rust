@@ -1067,10 +1067,11 @@ impl Config {
 
     pub fn get_package_specs(&self) -> Vec<PackageSpec> {
         match self.package_specs.clone() {
+            // No suffix of its own, so the top-level "suffix" applies.
             None => vec![PackageSpec {
                 module: PackageModule::EsModule,
                 in_source: true,
-                suffix: Some(".js".to_string()),
+                suffix: None,
             }],
             Some(OneOrMore::Single(spec)) => vec![spec],
             Some(OneOrMore::Multiple(vec)) => vec,
@@ -1479,6 +1480,21 @@ pub mod tests {
         let spec = specs.first().unwrap();
         assert_eq!(spec.module, PackageModule::EsModule);
         assert_eq!(config.get_suffix(spec), ".mjs");
+    }
+
+    #[test]
+    fn test_default_package_spec_uses_top_level_suffix() {
+        let suffix_of = |json: &str| {
+            let config = Config::new_from_json_string(json).unwrap();
+            let specs = config.get_package_specs();
+            assert_eq!(specs.len(), 1);
+            config.get_suffix(&specs[0])
+        };
+        assert_eq!(
+            suffix_of(r#"{ "name": "default-spec", "sources": ".", "suffix": ".res.mjs" }"#),
+            ".res.mjs"
+        );
+        assert_eq!(suffix_of(r#"{ "name": "default-spec", "sources": "." }"#), ".js");
     }
 
     #[test]
