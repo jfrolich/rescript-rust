@@ -5600,6 +5600,288 @@ mod tests {
     /// `false`.
     const UNIVARS_OLD_FREE_UNIVAR_DIFFERS: [u64; 2] = [5000086, 13000118];
 
+    /// The way today's checker differs from OCaml on the seeds of one
+    /// of the five lists above, each stated as what today's checker does
+    /// differently and nothing more.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SeedClass {
+        /// [`ROWS_OLD_EQUAL_DIFFERS`], [`UNIVARS_OLD_EQUAL_DIFFERS`]:
+        /// today's `equal` answers `false` for a row that a unification
+        /// extended, where OCaml answers `true`.
+        Equal,
+        /// [`ROWS_OLD_NIL_DIFFERS`], [`UNIVARS_OLD_NIL_DIFFERS`]: today's
+        /// copy inside `moregeneral` keeps a `nil` node where OCaml copies
+        /// it, so a `nil` of the subject is the node of a `nil` of the
+        /// pattern on the old side and a node of its own on the new.
+        Nil,
+        /// [`UNIVARS_OLD_FREE_UNIVAR_DIFFERS`]: today's `moregeneral`
+        /// accepts a weak variable against a free universal variable and
+        /// links it, where OCaml refuses.
+        FreeUnivar,
+    }
+
+    /// O(line): the operation index, the relation and the answer of an
+    /// answer line of a form (`3: equal = true`, `Outcome` and
+    /// `New::answer`; the old side prints the same line in `run_old`).
+    fn answer_line(line: &str) -> Option<(usize, &str, bool)> {
+        let (index, rest) = line.split_once(": ")?;
+        let index = index.parse().ok()?;
+        let (relation, answer) = rest.split_once(" = ")?;
+        if !["moregeneral", "equal", "matches"].contains(&relation) {
+            return None;
+        }
+        let answer = match answer {
+            "true" => true,
+            "false" => false,
+            _ => return None,
+        };
+        Some((index, relation, answer))
+    }
+
+    /// O(text): a form with the sharing of `nil` nodes taken out. A node
+    /// prints as `&n[level]` and its description at its first visit and
+    /// as `@n` at every later one (`old_form`, `New::node_form`). Every
+    /// `nil` node, its mark `&n[level]nil` and every reference `@n` to
+    /// it, becomes the bare `nil`, with no number and no level, as the
+    /// harness prints the `nil` of an equation (`OldSeen::bare_nil`):
+    /// the copy of the new side may be made at another level than the
+    /// node the old side kept (seed 54,000,224: `@8`, a `nil` at level 0,
+    /// against `&20[1]nil`). Every other mark and reference is then
+    /// renumbered in the order of first appearance, so that a `nil`
+    /// taken out does not shift the numbers of the nodes after it.
+    /// Nothing else is changed: a node other than a `nil` that is shared
+    /// on one side and not on the other still prints differently.
+    fn unshare_nil(form: &str) -> String {
+        let bytes = form.as_bytes();
+        // The number after a mark or a reference at `at`, and its end.
+        let number = |at: usize| -> Option<(usize, usize)> {
+            let end = (at + 1..bytes.len()).find(|&i| !bytes[i].is_ascii_digit()).unwrap_or(bytes.len());
+            form[at + 1..end].parse().ok().map(|n| (n, end))
+        };
+        // The end of `[level]nil` at `at`, when that is what is there.
+        let nil_at = |at: usize| -> Option<usize> {
+            if bytes.get(at) != Some(&b'[') {
+                return None;
+            }
+            let close = at + form[at..].find(']')?;
+            let end = close + 1 + "nil".len();
+            let word = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'\'');
+            (form[close + 1..].starts_with("nil") && !word(end)).then_some(end)
+        };
+        let mut nils = std::collections::HashSet::new();
+        for (at, &byte) in bytes.iter().enumerate() {
+            if byte == b'&'
+                && let Some((n, end)) = number(at)
+                && nil_at(end).is_some()
+            {
+                nils.insert(n);
+            }
+        }
+        let mut renumbered: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut out = String::with_capacity(form.len());
+        let (mut at, mut copied) = (0, 0);
+        while at < bytes.len() {
+            let Some((n, end)) = matches!(bytes[at], b'&' | b'@').then(|| number(at)).flatten() else {
+                at += 1;
+                continue;
+            };
+            out.push_str(&form[copied..at]);
+            if nils.contains(&n) {
+                out.push_str("nil");
+                at = match bytes[at] {
+                    b'&' => nil_at(end).expect("a nil mark"),
+                    _ => end,
+                };
+            } else {
+                let next = renumbered.len();
+                let _ = write!(out, "{}{}", bytes[at] as char, renumbered.entry(n).or_insert(next));
+                at = end;
+            }
+            copied = at;
+        }
+        out.push_str(&form[copied..]);
+        out
+    }
+
+    /// O(text): `Ok` when the two outcomes of a listed seed differ and
+    /// differ as `class` says; otherwise the reason, with the first line
+    /// that does not fit, old beside new.
+    fn fits(class: SeedClass, old: &Outcome, new: &Outcome) -> Result<(), String> {
+        let refuse = |why: &str, old: Option<&str>, new: Option<&str>| {
+            Err(format!(
+                "{class:?}: {why}\n  old: {}\n  new: {}",
+                old.unwrap_or("(no line)"),
+                new.unwrap_or("(no line)")
+            ))
+        };
+        let (o, n): (Vec<&str>, Vec<&str>) = (old.form.lines().collect(), new.form.lines().collect());
+        let lines = o.len().max(n.len());
+        let first = (0..lines).find(|&at| o.get(at) != n.get(at));
+        let same_rest = old.failed == new.failed && old.unchanged == new.unchanged && old.changed == new.changed;
+        let failed = || {
+            refuse(
+                "the outcomes differ outside the form",
+                Some(&format!("failed {:?}, {} unchanged, {} changed", old.failed, old.unchanged, old.changed)),
+                Some(&format!("failed {:?}, {} unchanged, {} changed", new.failed, new.unchanged, new.changed)),
+            )
+        };
+        match class {
+            SeedClass::Equal => {
+                if !same_rest {
+                    return failed();
+                }
+                let Some(first) = first else {
+                    return refuse("no line differs", None, None);
+                };
+                if o.len() != n.len() {
+                    return refuse("the forms have a different number of lines", o.get(first).copied(), n.get(first).copied());
+                }
+                for at in first..lines {
+                    if o[at] == n[at] {
+                        continue;
+                    }
+                    match (answer_line(o[at]), answer_line(n[at])) {
+                        (Some((left, "equal", false)), Some((right, "equal", true))) if left == right => {}
+                        _ => {
+                            return refuse(
+                                "a line differs that is not `equal = false` (old) against `equal = true` (new)",
+                                Some(o[at]),
+                                Some(n[at]),
+                            );
+                        }
+                    }
+                }
+                Ok(())
+            }
+            SeedClass::FreeUnivar => {
+                let Some(first) = first else {
+                    return refuse("no line differs", None, None);
+                };
+                match (o.get(first).and_then(|l| answer_line(l)), n.get(first).and_then(|l| answer_line(l))) {
+                    (Some((left, "moregeneral", true)), Some((right, "moregeneral", false))) if left == right => Ok(()),
+                    _ => refuse(
+                        "the first line that differs is not `moregeneral = true` (old) against `moregeneral = false` (new)",
+                        o.get(first).copied(),
+                        n.get(first).copied(),
+                    ),
+                }
+            }
+            SeedClass::Nil => {
+                if !same_rest {
+                    return failed();
+                }
+                let Some(_) = first else {
+                    return refuse("no line differs", None, None);
+                };
+                for at in 0..lines {
+                    let (left, right) = (o.get(at).copied(), n.get(at).copied());
+                    let answer = left.and_then(answer_line).is_some() || right.and_then(answer_line).is_some();
+                    if answer && left != right {
+                        return refuse("an answer line differs", left, right);
+                    }
+                }
+                let (old_unshared, new_unshared) = (unshare_nil(&old.form), unshare_nil(&new.form));
+                let (o, n): (Vec<&str>, Vec<&str>) = (old_unshared.lines().collect(), new_unshared.lines().collect());
+                match (0..o.len().max(n.len())).find(|&at| o.get(at) != n.get(at)) {
+                    None => Ok(()),
+                    Some(at) => refuse(
+                        "the forms differ with the sharing of `nil` nodes taken out",
+                        o.get(at).copied(),
+                        n.get(at).copied(),
+                    ),
+                }
+            }
+        }
+    }
+
+    /// `fits` takes each class's real pair and refuses a fault the
+    /// seed list alone does not see. The pairs are cut from the forms
+    /// both sides print against the prototype of R3i: `Equal` from seed
+    /// 1,000,013 of [`ROWS_OLD_EQUAL_DIFFERS`], `Nil` from seed
+    /// 54,000,224 of [`ROWS_OLD_NIL_DIFFERS`], `FreeUnivar` from seed
+    /// 5,000,086 of [`UNIVARS_OLD_FREE_UNIVAR_DIFFERS`]; each fault edits
+    /// one or two lines of one side.
+    #[test]
+    fn a_listed_seed_must_fit_its_class() {
+        let outcome = |form: &str| Outcome {
+            failed: None,
+            form: form.to_string(),
+            unchanged: 0,
+            changed: 0,
+        };
+        let pair = |class: SeedClass, old: &str, new: &str| fits(class, &outcome(old), &outcome(new));
+        // Seed 1,000,013.
+        let equal_old = "1: matches = true\n9: moregeneral = false\n10: equal = false\n11: matches = true\n\
+            0 = &0[0]pv<&1[0](&2[0][closed #B?c() | &3[0]'], &4[0](&5[0]rv, &6[0]'))>\n\
+            1 = &7[G]pv<&8[G](&9[G][closed #B?c() | &10[G]'], &11[G](&12[G]rv, &13[G]'))>\n\
+            2 = @0\n";
+        let equal_new = equal_old.replace("10: equal = false", "10: equal = true");
+        assert_eq!(pair(SeedClass::Equal, equal_old, &equal_new), Ok(()));
+        let failing: [(&str, String); 4] = [
+            ("no line differs", equal_old.to_string()),
+            ("a second, non-answer line differs", equal_new.replace("2 = @0", "2 = @7")),
+            ("the answer the other way round", equal_old.replace("10: equal = false", "10: equal = true")),
+            ("an answer of `moregeneral` differs", equal_new.replace("9: moregeneral = false", "9: moregeneral = true")),
+        ];
+        let refused = pair(SeedClass::Equal, equal_old, &failing[0].1).unwrap_err();
+        assert!(refused.contains("no line differs"), "{}: {refused}", failing[0].0);
+        let refused = pair(SeedClass::Equal, equal_old, &failing[1].1).unwrap_err();
+        assert!(refused.contains("old: 2 = @0\n  new: 2 = @7"), "{}: {refused}", failing[1].0);
+        let refused = pair(SeedClass::Equal, &failing[2].1, equal_old).unwrap_err();
+        assert!(refused.contains("old: 10: equal = true\n  new: 10: equal = false"), "{refused}");
+        let refused = pair(SeedClass::Equal, equal_old, &failing[3].1).unwrap_err();
+        assert!(refused.contains("old: 9: moregeneral = false\n  new: 9: moregeneral = true"), "{refused}");
+        // A failure on one side only.
+        let ended = Outcome { failed: Some(9), ..outcome("") };
+        assert!(fits(SeedClass::Equal, &outcome(equal_old), &ended).is_err());
+
+        // Seed 54,000,224: the old subject (operand 2) refers to the
+        // pattern's `nil` nodes (`@8`, `@12`), the new one has its own.
+        let nil_old = "4: equal = true\n6: moregeneral = true\n8: equal = true\n\
+            0 = &0[0]obj{&1[0]x: &2[0]poly(&3[0][closed #A?c() | &4[0]'];); &5[0]y: &6[0]poly(&7[0][closed #A #B | &8[0]nil];); &9[0]z: &10[0]poly(&11[0]a2;); &12[0]nil}\n\
+            1 = @0\n\
+            2 = &13[1]obj{&14[1]x: &15[1]poly(&16[1][closed #A?c() | @4];); &17[1]y: &18[1]poly(&19[1][closed #A #B | @8];); &20[1]z: &21[1]poly(&22[1]a2;); @12}\n";
+        let nil_new = "4: equal = true\n6: moregeneral = true\n8: equal = true\n\
+            0 = &0[0]obj{&1[0]x: &2[0]poly(&3[0][closed #A?c() | &4[0]'];); &5[0]y: &6[0]poly(&7[0][closed #A #B | &8[0]nil];); &9[0]z: &10[0]poly(&11[0]a2;); &12[0]nil}\n\
+            1 = @0\n\
+            2 = &13[1]obj{&14[1]x: &15[1]poly(&16[1][closed #A?c() | @4];); &17[1]y: &18[1]poly(&19[1][closed #A #B | &20[1]nil];); &21[1]z: &22[1]poly(&23[1]a2;); &24[1]nil}\n";
+        assert_eq!(pair(SeedClass::Nil, nil_old, nil_new), Ok(()));
+        assert!(pair(SeedClass::Nil, nil_old, nil_old).is_err(), "Nil took: no line differs");
+        let refused = pair(SeedClass::Nil, nil_old, &nil_new.replace("6: moregeneral = true", "6: moregeneral = false")).unwrap_err();
+        assert!(refused.contains("an answer line differs"), "{refused}");
+        // The row variable `@4`, not a `nil`, printed in place on the new
+        // side: shared on the old side only.
+        let unshared_variable = nil_new.replace(
+            "2 = &13[1]obj{&14[1]x: &15[1]poly(&16[1][closed #A?c() | @4];); &17[1]y: &18[1]poly(&19[1][closed #A #B | &20[1]nil];); &21[1]z: &22[1]poly(&23[1]a2;); &24[1]nil}",
+            "2 = &13[1]obj{&14[1]x: &15[1]poly(&16[1][closed #A?c() | &17[0]'];); &18[1]y: &19[1]poly(&20[1][closed #A #B | &21[1]nil];); &22[1]z: &23[1]poly(&24[1]a2;); &25[1]nil}",
+        );
+        assert_ne!(unshared_variable, nil_new);
+        let refused = pair(SeedClass::Nil, nil_old, &unshared_variable).unwrap_err();
+        assert!(refused.contains("taken out"), "{refused}");
+        // A level that differs on a node that is not a `nil`.
+        let refused = pair(SeedClass::Nil, nil_old, &nil_new.replace("&22[1]poly(&23[1]a2;)", "&22[1]poly(&23[0]a2;)")).unwrap_err();
+        assert!(refused.contains("taken out"), "{refused}");
+
+        // Seed 5,000,086.
+        let univar_old = "1: equal = true\n2: matches = true\n5: moregeneral = true\n0 = &0[0]!\n1 = @0\n2 = @0\n";
+        let univar_new = "1: equal = true\n2: matches = true\n5: moregeneral = false\n0 = &0[0]'\n1 = &1[0]!\n2 = @0\n";
+        assert_eq!(pair(SeedClass::FreeUnivar, univar_old, univar_new), Ok(()));
+        let refused = pair(SeedClass::FreeUnivar, univar_old, &univar_new.replace("moregeneral = false", "moregeneral = true")).unwrap_err();
+        assert!(refused.contains("old: 0 = &0[0]!\n  new: 0 = &0[0]'"), "{refused}");
+        let refused = pair(SeedClass::FreeUnivar, univar_new, univar_old).unwrap_err();
+        assert!(refused.contains("old: 5: moregeneral = false\n  new: 5: moregeneral = true"), "{refused}");
+        let refused = pair(SeedClass::FreeUnivar, univar_old, &univar_new.replace("1: equal = true", "1: equal = false")).unwrap_err();
+        assert!(refused.contains("old: 1: equal = true\n  new: 1: equal = false"), "{refused}");
+        assert!(pair(SeedClass::FreeUnivar, univar_old, univar_old).is_err());
+
+        // The normalisation itself: a `nil` by reference and in place are
+        // one text, and the marks after it are renumbered.
+        assert_eq!(unshare_nil("0 = &0[0]nil\n1 = &1[1]t<@0, &2[0]'>\n"), "0 = nil\n1 = &0[1]t<nil, &1[0]'>\n");
+        assert_eq!(unshare_nil("0 = &0[0]nil\n1 = &1[1]t<&2[G]nil, &3[0]'>\n"), "0 = nil\n1 = &0[1]t<nil, &1[0]'>\n");
+        // A constructor whose name starts with `nil` is not a `nil`.
+        assert_eq!(unshare_nil("0 = &0[0]nilx\n1 = @0\n"), "0 = &0[0]nilx\n1 = @0\n");
+    }
+
     /// The plan of the cases of GADT instances.
     const INSTANCE_PLAN: u16 = PATTERN_PLAN | INSTANCES;
 
