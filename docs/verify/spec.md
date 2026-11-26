@@ -2,6 +2,8 @@
 
 Status: proposed, implemented in the Rust compiler (`compiler-rust/src/verify/specs.rs`) and the build system (`rescript verify`). Builds on [`@pure`](pure.md) and [`@law`](law.md).
 
+RFC 4 of 4 in the [verification series](README.md). Previous: [Proofs](proof.md).
+
 ## Summary
 
 A spec is a state machine and what must be true of it: where it starts, its

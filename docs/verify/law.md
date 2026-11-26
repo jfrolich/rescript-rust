@@ -2,6 +2,8 @@
 
 Status: proposed, implemented in the Rust compiler (`compiler-rust/src/verify/laws.rs`) and the build system (`rescript verify`). Builds on [`@pure`](pure.md).
 
+RFC 2 of 4 in the [verification series](README.md). Previous: [Purity](pure.md). Next: [Proofs](proof.md).
+
 ## Summary
 
 A law is a property of the program: a function that returns `bool` and is

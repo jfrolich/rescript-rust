@@ -2,6 +2,8 @@
 
 Status: proposed, implemented in the Rust compiler (`compiler-rust/src/verify/purity.rs`).
 
+RFC 1 of 4 in the [verification series](README.md). Next: [Laws](law.md).
+
 ## Summary
 
 `@pure` on a `let` is a promise the compiler checks: the binding reads

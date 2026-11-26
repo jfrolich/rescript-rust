@@ -45,7 +45,8 @@ function useActiveHeading(ids) {
  * in the repository and what the page shows around it: `doc` (its
  * directory), `branch`, `pullRequest`, `status` (the second chip), `jump` (a
  * link into the page), `pages` (documents of the directory that have a page
- * of their own, by file name) and `colophon`.
+ * of their own, by file name), `series` (the RFCs the pages are, in order),
+ * `current` (which of them this page is, or `"overview"`) and `colophon`.
  */
 export function Page({ markdown, title, lede, about }) {
   const [dark, toggleTheme] = useTheme();
@@ -80,6 +81,8 @@ export function Page({ markdown, title, lede, about }) {
     ? `${REPOSITORY}/pull/${pullRequest}`
     : `${REPOSITORY}/tree/${about.branch}/${about.doc}`;
   const source = { href: github, text: pullRequest ? `Pull request #${pullRequest} ↗` : "Source ↗" };
+  const index = about.series?.findIndex((rfc) => rfc.page === about.current) ?? -1;
+  const position = index >= 0 ? { index, previous: about.series[index - 1], next: about.series[index + 1] } : null;
 
   return (
     <>
@@ -92,8 +95,8 @@ export function Page({ markdown, title, lede, about }) {
           <span>Submodule</span>
         </a>
         <nav>
-          <a className="on" href="./">
-            RFC
+          <a className={about.current === "overview" ? "on" : ""} href="./">
+            Series
           </a>
           <a href={github} target="_blank" rel="noreferrer">
             GitHub ↗
@@ -104,10 +107,14 @@ export function Page({ markdown, title, lede, about }) {
         </nav>
       </header>
 
+      {about.series && <SeriesBar series={about.series} current={about.current} />}
+
       <div className="hero">
         <p className="eyebrow">
           <span />
-          ReScript · request for comments
+          {position ? `Verification · RFC ${position.index + 1} of ${about.series.length}` : about.current === "overview"
+              ? `Verification · a series of ${about.series.length} RFCs`
+              : "ReScript · request for comments"}
         </p>
         <h1>{title}</h1>
         <p className="lede">{lede}</p>
@@ -144,12 +151,14 @@ export function Page({ markdown, title, lede, about }) {
             ))}
         </aside>
         <main className="prose">
+          {about.current === "overview" && about.series && <SeriesCards series={about.series} />}
           {parts.map((part, index) => {
             if (part.type === "markdown") return <Markdown key={index} tokens={part.tokens} links={links} />;
             const example = examples.find((candidate) => candidate.id === part.id);
             if (!example) return null;
             return <Example key={index} example={example} prebuilt={prebuilt[example.id]} />;
           })}
+          {position && <SeriesNext previous={position.previous} next={position.next} />}
           <footer className="colophon">
             <p>
               This page is <code>{about.doc}</code> of{" "}
@@ -162,5 +171,93 @@ export function Page({ markdown, title, lede, about }) {
         </main>
       </div>
     </>
+  );
+}
+
+/** The RFCs of the series, with the one this page is marked. */
+function SeriesBar({ series, current }) {
+  // On a narrow screen the strip scrolls: show the RFC this page is.
+  useEffect(() => {
+    document.querySelector(".series ol a.on")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, []);
+  return (
+    <nav className="series" aria-label="The verification RFCs">
+      <div className="series-inner">
+        <a className={current === "overview" ? "series-home on" : "series-home"} href="./">
+          Verification series
+        </a>
+        <ol>
+          {series.map((rfc, index) => (
+            <li key={rfc.page}>
+              <a
+                href={rfc.href}
+                className={rfc.page === current ? "on" : ""}
+                aria-current={rfc.page === current ? "page" : undefined}
+              >
+                <span className="series-number">{index + 1}</span>
+                <span className="series-name">{rfc.name}</span>
+                <span className="series-adds">{rfc.adds}</span>
+              </a>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </nav>
+  );
+}
+
+/** The series on the overview page: one card per RFC, in reading order. */
+function SeriesCards({ series }) {
+  return (
+    <ol className="series-cards">
+      {series.map((rfc, index) => (
+        <li key={rfc.page}>
+          <a href={rfc.href}>
+            <span className="series-card-number">RFC {index + 1}</span>
+            <span className="series-card-name">{rfc.name}</span>
+            <code className="series-card-adds">{rfc.adds}</code>
+            <span className="series-card-summary">{rfc.summary}</span>
+            <span className="series-card-checked">
+              <span>Checked {rfc.checked}</span>
+              <span>Read →</span>
+            </span>
+          </a>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** Where to go from the end of an RFC: the one before it and the one after. */
+function SeriesNext({ previous, next }) {
+  return (
+    <nav className="series-next" aria-label="Previous and next RFC">
+      {previous ? (
+        <a className="previous" href={previous.href}>
+          <span>← Previous</span>
+          <strong>{previous.name}</strong>
+          <em>{previous.adds}</em>
+        </a>
+      ) : (
+        <a className="previous" href="./">
+          <span>← The series</span>
+          <strong>Overview</strong>
+          <em>all four RFCs</em>
+        </a>
+      )}
+      {next ? (
+        <a className="next" href={next.href}>
+          <span>Next →</span>
+          <strong>{next.name}</strong>
+          <em>{next.adds}</em>
+        </a>
+      ) : (
+        <a className="next" href="./">
+          <span>The series →</span>
+          <strong>Overview</strong>
+          <em>all four RFCs</em>
+        </a>
+      )}
+    </nav>
   );
 }

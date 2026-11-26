@@ -14,6 +14,6 @@ createRoot(window.document.getElementById("root")).render(
       </>
     }
     lede="A thousand lists that satisfy a law are evidence, not all lists. rescript verify now tries to prove each law from its code: it computes with unknowns, splits into cases, uses induction on lists and trees, and uses the laws proved before. There is no proof to write, and what it cannot prove it still runs. Every example on this page is live: the proofs are found in your browser."
-    about={{ ...about, pullRequest: 271, jump: { href: "#reference", text: "The rules →" } }}
+    about={{ ...about, current: "proof", pullRequest: 271, jump: { href: "#reference", text: "The rules →" } }}
   />,
 );

@@ -2,6 +2,8 @@
 
 Status: proposed, implemented in the Rust compiler (`compiler-rust/src/verify/prove.rs`) and `rescript verify`. Builds on [`@law`](law.md).
 
+RFC 3 of 4 in the [verification series](README.md). Previous: [Laws](law.md). Next: [Specs](spec.md).
+
 ## Summary
 
 `rescript verify` runs a [law](law.md) on values. With this proposal it first
