@@ -1,0 +1,1 @@
+- Type checker rewrite: GADT instance tracing (instance sets, own memos of traced expansions, tracing around unification) built in the new checker (R3s). Its review found that the sets shared one array of marks with the walks that expand types, which then lost their place on a type that reaches itself; the sets have marks of their own, with tests.

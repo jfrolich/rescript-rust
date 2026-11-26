@@ -156,10 +156,23 @@ impl View<'_> {
     pub(super) fn block_type_text(&self, out: &mut String, row: u32) {
         match self.p.block_types[row as usize] {
             BlockTypeRow::Array => out.push_str("Instance(Array)"),
-            BlockTypeRow::Class { name, ancestors } => {
-                let _ = write!(out, "Instance({} extends ", self.str(name));
-                self.string_list_debug(out, ancestors);
-                out.push(')');
+            BlockTypeRow::Class {
+                module,
+                name,
+                ancestors,
+            } => {
+                // `ClassName::to_key` of the name and each ancestor.
+                let key = |module: u32, path: u32| match module {
+                    NONE => self.str(path).to_string(),
+                    module => format!("{}\0{}", self.str(module), self.str(path)),
+                };
+                let ancestors: Vec<String> = (0..ancestors.len / 2)
+                    .map(|i| {
+                        let at = (ancestors.start + 2 * i) as usize;
+                        key(self.p.indices[at], self.p.indices[at + 1])
+                    })
+                    .collect();
+                let _ = write!(out, "Instance({} extends {ancestors:?})", key(module, name));
             }
             BlockTypeRow::Number => out.push_str("Number"),
             BlockTypeRow::String => out.push_str("String"),

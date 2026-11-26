@@ -10,12 +10,13 @@ use crate::js_ir::ForDirection;
 pub(super) struct Loop(pub u32);
 
 /// Saved child outputs as lists in flight (`L`, the interface's statement
-/// list), not per-loop owned collections.
-pub(super) struct Plan<L> {
+/// list) and values in flight (`E`, its expression), not per-loop owned
+/// collections.
+pub(super) struct Plan<L, E> {
     node: NodeId,
     nodes: [Option<NodeId>; 3],
     blocks: [Option<L>; 3],
-    values: [Option<NodeId>; 2],
+    values: [Option<E>; 2],
     start: Span,
     var: Option<VarId>,
     direction: u16,
@@ -52,7 +53,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             _ => unreachable!("loop dispatch"),
         };
         let frame = Loop(self.loops.len() as u32);
-        self.loops.push(Plan { node, nodes, blocks: [None; 3], values: [None; 2],
+        self.loops.push(Plan { node, nodes, blocks: [None; 3], values: [None, None],
             start: self.statements.mark(), var, direction, label: None,
             needs_label: self.source.loop_needs_label_in_context(node, cx.switch_depth != 0) });
         frame
@@ -75,7 +76,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(s) for the child's emitted statements: seal them once into a list.
     /// For loops the end and start are lowered in allocation order, then their
     /// saved lists are attached in execution order without moving statements.
-    pub(super) fn loop_child(&mut self, cx: Cx, frame: Loop, index: usize, child: Probed) -> Probed {
+    pub(super) fn loop_child(&mut self, cx: Cx, frame: Loop, index: usize, child: Probed<B>) -> Probed<B> {
         let mut out = self.realize(cx, child);
         let body_index = if self.loops[frame.0 as usize].nodes[2].is_some() { 2 } else { 1 };
         if index == body_index {
@@ -99,7 +100,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(1), apart from formatting a newly requested label's bounded integer.
     /// A jump only consults its innermost frame and the switch depth.
-    pub(super) fn loop_jump(&mut self, cx: Cx, continue_: bool) -> Result<Probed, Unsupported> {
+    pub(super) fn loop_jump(&mut self, cx: Cx, continue_: bool) -> Result<Probed<B>, Unsupported> {
         assert!(cx.loops.0 != 0, "jump outside a loop");
         let index = cx.loops.0 as usize - 1;
         let label = if cx.switch_depth == 0 { None } else {
@@ -114,7 +115,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let statement = if continue_ { self.js.continue_(&mut self.arena, label) } else { self.js.break_(&mut self.arena, label) };
         self.statements.push(statement);
         let value = self.js.undefined(&mut self.arena, false);
-        Ok(Probed::Out(Out { stmts: self.statements.since(start), value: Some(B::node(value)), finished: Finished::True }))
+        Ok(Probed::Out(Out { stmts: self.statements.since(start), value: Some(value), finished: Finished::True }))
     }
 
     /// O(s): attach s saved prelude statements in execution order. Each
@@ -128,17 +129,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(s) for the saved preludes and (only for statement-valued while
     /// conditions) the body's immediate statements; never walks subtrees.
-    pub(super) fn finish_loop(&mut self, cx: Cx, frame: Loop) -> Probed {
-        let plan = &self.loops[frame.0 as usize];
+    pub(super) fn finish_loop(&mut self, cx: Cx, frame: Loop) -> Probed<B> {
+        let plan = &mut self.loops[frame.0 as usize];
         let start = plan.start;
         let blocks = plan.blocks;
-        let values = plan.values;
+        let [end, init] = std::mem::take(&mut plan.values);
         let var = plan.var;
         let direction = plan.direction;
         let label = plan.label;
         let op = self.source.node(plan.node).op();
-        let end = match values[0] {
-            Some(value) => B::from_node(value),
+        let end = match end {
+            Some(value) => value,
             None => self.js.undefined(&mut self.arena, false),
         };
         let statement = if op == Op::While {
@@ -150,7 +151,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.statements.push(break_);
                 let yes = self.statements.since(mark);
                 let no = self.statements.mark();
-                let guard = self.if_statement(B::node(negated), yes, no);
+                let guard = self.if_statement(negated, yes, no);
                 let mark = self.statements.mark();
                 self.push_loop_list(blocks[0].unwrap());
                 self.statements.push(guard);
@@ -167,8 +168,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.js.for_of(&mut self.arena, var.unwrap(), end, body, label, op == Op::ForAwaitOf)
         } else {
             let var = var.unwrap();
-            let init = match values[1] {
-                Some(value) => B::from_node(value),
+            let init = match init {
+                Some(value) => value,
                 None => self.js.undefined(&mut self.arena, false),
             };
             let end_block = blocks[0].unwrap();
@@ -188,7 +189,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         self.statements.push(statement);
         let unit = self.js.undefined(&mut self.arena, false);
-        let mut out = self.leaf(cx, B::node(unit));
+        let mut out = self.leaf(cx, unit);
         out.stmts = self.statements.since(start);
         Probed::Out(out)
     }
@@ -290,7 +291,7 @@ mod tests {
     #[test]
     fn loop_plan_layout() {
         assert_eq!(std::mem::size_of::<Loop>(), 4);
-        assert_eq!(std::mem::size_of::<Plan<crate::bir::ListId>>(), 96);
+        assert_eq!(std::mem::size_of::<Plan<crate::bir::ListId, <crate::bir::j::rows::Rows as crate::bir::lower::js::Js>::E>>(), 96);
     }
 
     #[test]
@@ -337,7 +338,7 @@ mod tests {
             let output = s.probe(Cx::effect(), root).unwrap();
             let output = s.realize(Cx::effect(), output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
-            if let Some(value) = output.value { s.arena.release(value); }
+            if let Some(value) = output.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(output.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

@@ -619,32 +619,7 @@ pub fn flatten_flags(flags: &Option<Vec<OneOrMore<String>>>) -> Vec<String> {
 }
 
 fn namespace_from_package_name(package_name: &str) -> String {
-    let len = package_name.len();
-    let mut buf = String::with_capacity(len);
-
-    fn aux(s: &str, capital: bool, buf: &mut String, off: usize) {
-        if off >= s.len() {
-            return;
-        }
-
-        let ch = s.as_bytes()[off] as char;
-        match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => {
-                let new_capital = false;
-                buf.push(if capital { ch.to_ascii_uppercase() } else { ch });
-                aux(s, new_capital, buf, off + 1);
-            }
-            '/' | '-' => {
-                aux(s, true, buf, off + 1);
-            }
-            _ => {
-                aux(s, capital, buf, off + 1);
-            }
-        }
-    }
-
-    aux(package_name, true, &mut buf, 0);
-    buf
+    rescript_compiler::gentype::gen_type_common::scoped_package::namespace_of_package_name(package_name)
 }
 
 /// A module name as the ReScript scanner reads an upper-case identifier
@@ -1067,10 +1042,11 @@ impl Config {
 
     pub fn get_package_specs(&self) -> Vec<PackageSpec> {
         match self.package_specs.clone() {
+            // No suffix of its own, so the top-level "suffix" applies.
             None => vec![PackageSpec {
                 module: PackageModule::EsModule,
                 in_source: true,
-                suffix: Some(".js".to_string()),
+                suffix: None,
             }],
             Some(OneOrMore::Single(spec)) => vec![spec],
             Some(OneOrMore::Multiple(vec)) => vec,
@@ -1479,6 +1455,21 @@ pub mod tests {
         let spec = specs.first().unwrap();
         assert_eq!(spec.module, PackageModule::EsModule);
         assert_eq!(config.get_suffix(spec), ".mjs");
+    }
+
+    #[test]
+    fn test_default_package_spec_uses_top_level_suffix() {
+        let suffix_of = |json: &str| {
+            let config = Config::new_from_json_string(json).unwrap();
+            let specs = config.get_package_specs();
+            assert_eq!(specs.len(), 1);
+            config.get_suffix(&specs[0])
+        };
+        assert_eq!(
+            suffix_of(r#"{ "name": "default-spec", "sources": ".", "suffix": ".res.mjs" }"#),
+            ".res.mjs"
+        );
+        assert_eq!(suffix_of(r#"{ "name": "default-spec", "sources": "." }"#), ".js");
     }
 
     #[test]

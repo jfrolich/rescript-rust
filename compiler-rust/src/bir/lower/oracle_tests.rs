@@ -6,6 +6,16 @@ use crate::lambda::arena::{Lam, LamArena};
 use crate::lambda::lam_compile::LambdaCompiler;
 use crate::lambda::lam_constant::{Constant as C, PointerInfo};
 
+/// The tail-call inlining pass on a module that assigns no variable.
+fn inline(program: JsDepsProgram) -> JsDepsProgram {
+    crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass(program, &Default::default())
+}
+
+/// The substitution and dead-mark pass on a module that assigns no variable.
+fn dead(program: JsDepsProgram, jsx_preserve: bool) -> JsDepsProgram {
+    crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_and_mark_dead_pass(program, &Default::default(), jsx_preserve)
+}
+
 pub(super) fn compare(arena: LamArena, root: Lam) {
     compare_with_resolver(arena, root, None);
 }
@@ -247,7 +257,7 @@ fn strict_and_delay_safe_flags_use_variable_facts() {
     let mut state = State::new(input);
     let probed = state.probe(Cx::value(), source_root).unwrap();
     let out = state.realize(Cx::value(), probed);
-    let flags = state.arena.node(out.value.unwrap()).flags();
+    let flags = state.arena.node(crate::bir::lower::out::row(out.value.unwrap())).flags();
     assert!(flags.contains(crate::bir::NodeFlags::PURE));
     assert!(flags.contains(crate::bir::NodeFlags::STRICT));
     assert!(!flags.contains(crate::bir::NodeFlags::DELAY_SAFE));
@@ -665,8 +675,6 @@ fn block_substitution_and_dead_removal_do_not_commute_with_tailcall_inlining() {
     use crate::lambda::{ApInfo, ApplyStatus, LamLoc, TagInfo};
     use crate::lambda::lam_primitive::{Primitive, Mutable};
     use crate::lambda::lam_compat::FieldDbgInfo;
-    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_and_mark_dead_pass as dead;
-    use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass as inline;
     use crate::lambda::js_shake::apply_js_shake_pass as shake;
     let mut a = LamArena::new();
     let p = Ident::new("pair", 10, IdentFlags::NONE);
@@ -875,8 +883,7 @@ fn cross_module_inline_of_a_body_that_holds_a_function() {
 /// 4 record rest, 5 substitution and dead marks, 6 shake), printed. For the T4
 /// ordering findings below.
 fn legacy_text(build: impl Fn(&mut LamArena) -> Lam, order: &[u8]) -> String {
-    use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_and_mark_dead_pass as dead, apply_js_flatten_pass as flatten};
-    use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass as inline;
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass as flatten;
     use crate::lambda::js_shake::apply_js_shake_pass as shake;
     let mut a = LamArena::new();
     let root = build(&mut a);
@@ -1050,9 +1057,8 @@ fn flattening_a_copied_return_branch_changes_the_simplify_if_head_reader() {
     use crate::js_ir::arena::ExprKind;
     use crate::js_ir::build::stmt;
     use crate::lambda::{LamLoc, lam_primitive::Primitive};
-    use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_pass as flatten, apply_js_flatten_and_mark_dead_pass as dead};
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass as flatten;
     use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass as shadow;
-    use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass as inline;
     use crate::lambda::js_pass_record_rest::apply_js_record_rest_pass as rest;
     use crate::lambda::js_shake::apply_js_shake_pass as shake;
     let mut a = LamArena::new();
@@ -1444,9 +1450,10 @@ fn a_copied_function_doubles_the_legacy_count_of_the_variables_declared_inside_i
     let mut state = State::new(input);
     let probed = state.probe(Cx::value(), source_root).unwrap();
     let out = state.realize(Cx::value(), probed);
-    let copy = crate::bir::j::logic::copy_j(&mut state.arena, out.value.unwrap());
+    let row = crate::bir::lower::out::row_of(&state.arena, out.value.as_ref().unwrap());
+    let copy = crate::bir::j::logic::copy_j(&mut state.arena, row);
     let statement = state.arena.new_node(View::SExp { value: copy }, 0);
-    state.statements.push(<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::stmt_from_node(statement));
+    state.statements.push(crate::bir::j::rows::Rows::stmt_from_node(statement));
     let lowered = state.complete(Cx::value(), Probed::Out(out));
     lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
     let scope = lowered.program.arena.js_scope.as_ref().unwrap();
@@ -1569,7 +1576,7 @@ fn cached_external_templates_keep_fresh_binders_and_import_once() {
             assert_eq!(state.inline_templates.len(), 1); assert_eq!(state.inline_param_stats.len(), width as usize);
             assert!(state.inline_foreign.is_empty() && state.inline_engine.stats.renames.is_empty());
             for node in state.statements.statements(out.stmts) { state.arena.release(node); }
-            if let Some(value) = out.value { state.arena.release(value); }
+            if let Some(value) = out.value { state.arena.release(crate::bir::lower::out::row(value)); }
             state.statements.kill(out.stmts);
         }
     }
@@ -1581,7 +1588,7 @@ fn cached_external_templates_keep_fresh_binders_and_import_once() {
 /// names (as `legacy_text`), printed. `order` never holds pass 2 here: the
 /// new side runs no external-shadow pass (THREE_TREES 11.4, "T5 design").
 fn new_text(build: impl Fn(&mut LamArena) -> Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, order: &[u8]) -> (String, usize) {
-    use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_and_mark_dead_pass as dead, apply_js_flatten_pass as flatten};
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass as flatten;
     let mut a = LamArena::new();
     let root = build(&mut a);
     let exported = Ident::new("run", 900, IdentFlags::NONE);
@@ -1596,7 +1603,7 @@ fn new_text(build: impl Fn(&mut LamArena) -> Lam, resolver: Option<&crate::js_ir
     // As `bir_lower_oracle`: the statements, without a value.
     let out = state.realize(cx, probed);
     let run = state.statements.since(Span { start: out.stmts.start, len: 0 });
-    let list = <crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::list_id(state.statements.take_list(&mut state.js, &mut state.arena, run));
+    let list = crate::bir::j::rows::Rows::list_id(state.statements.take_list(&mut state.js, &mut state.arena, run));
     let lowered = state.finish(list, out.finished, Default::default());
     lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
     let bridge_j::Exported { mut program, qualified } = bridge_j::export_lowered(&lowered.program).unwrap();
@@ -1605,7 +1612,7 @@ fn new_text(build: impl Fn(&mut LamArena) -> Lam, resolver: Option<&crate::js_ir
     for pass in order {
         program = match pass {
             1 => flatten(program),
-            3 => crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass(program),
+            3 => inline(program),
             4 => crate::lambda::js_pass_record_rest::apply_js_record_rest_pass(program),
             5 => dead(program, false),
             6 => crate::lambda::js_shake::apply_js_shake_pass(program),

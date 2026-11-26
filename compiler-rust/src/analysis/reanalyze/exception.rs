@@ -434,27 +434,10 @@ fn is_non_zero_constant(constant: &tt::Constant) -> bool {
     }
 }
 
-/// The `@doesNotThrow` annotation, in every spelling the OCaml tool reads.
+/// The `@doesNotThrow` annotation: its only spelling since the old ones
+/// (`@doesNotRaise`, `@doNotThrow`, ...) were dropped.
 fn is_does_not_throw_name(name: &str) -> bool {
-    matches!(
-        name,
-        "doesNotRaise"
-            | "doesnotraise"
-            | "DoesNoRaise"
-            | "doesNotraise"
-            | "doNotRaise"
-            | "donotraise"
-            | "DoNoRaise"
-            | "doNotraise"
-            | "doesNotThrow"
-            | "doesnotthrow"
-            | "DoesNoThrow"
-            | "doesNotthrow"
-            | "doNotThrow"
-            | "donotthrow"
-            | "DoNoThrow"
-            | "doNotthrow"
-    )
+    name == "doesNotThrow"
 }
 
 /// The exceptions an annotation's payload names.
@@ -507,7 +490,7 @@ impl<'t> Traverse<'t, '_, '_> {
         let mut exceptions = Exceptions::new();
         let payload = annotation::get_attribute_payload(
             self.tree.arena,
-            |s| matches!(s, "throws" | "throw" | "raises" | "raise"),
+            |s| s == "throws",
             attributes.iter(),
         );
         if let Some(payload) = payload {

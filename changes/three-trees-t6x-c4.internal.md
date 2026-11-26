@@ -1,0 +1,1 @@
+- Backend lowering: loops, recursive bindings and self calls hold and pass expression handles of the lowering interface.

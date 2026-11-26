@@ -1,0 +1,1 @@
+- Build `instance_poly` and `instance_label` in the new type checker: copy a polymorphic type with its free universal variables unshared, in one copy session for the parts without one.

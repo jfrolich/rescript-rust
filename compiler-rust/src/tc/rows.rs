@@ -11,7 +11,7 @@
 
 use std::cmp::Ordering;
 
-use super::expand::{ABBREV, ExpandMode, Manifest, NEWTYPE, Newtype, TypeInfo, TypeTable};
+use super::expand::{ABBREV, DATATYPE, ExpandMode, Manifest, NEWTYPE, Newtype, TypeInfo, TypeTable};
 use super::graph::{ARROW, CONSTR, GENERIC, Graph, LINK, Mode, NONE, Node, TUPLE, Ty, VAR};
 use super::segment::{
     EXTENDED, ExtraDescriptor, PackageRow, Range, RowFieldKind, RowFieldRow, Segment, VariantRow,
@@ -68,6 +68,8 @@ pub struct Extras {
     /// this one read. Kept by [`Extras::from_segment`] and
     /// [`Extras::univar`], the only two makers of such a row. (R3g)
     pub univars: u32,
+    /// The tables of `Checker::instance_poly`. (R3q)
+    pub poly: PolyCopy,
 }
 
 /// Names as text: one buffer and a span per name index. For a graph made
@@ -386,6 +388,63 @@ pub fn ref_node(level: u32, holders: u32) -> Node {
     }
 }
 
+/// One row a node of the graph, for the walk of
+/// [`Checker::instance_poly`] (R3q; CHECKER_REWRITE 8.10): 16 bytes. The
+/// table is [`PolyCopy::slots`], indexed by the node's handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct PolySlot {
+    /// `2 * call` when `Checker::mark_holders` of the call met the
+    /// node, `2 * call + 1` when a universal variable is free below it;
+    /// anything else is a row of an earlier call.
+    pub stamp: u32,
+    /// The first [`PolyEdge`] of its parents, or `NONE`. Read only while
+    /// the stamp is the call's.
+    pub parents: u32,
+    /// Its copy while it is on the way of `Checker::copy_sep`, and for
+    /// a universal variable while a binder on the way binds it; `NONE`
+    /// otherwise, and always between two calls.
+    pub copy: Ty,
+    /// [`PolyCopy::depth`] when `copy` was set.
+    pub depth: u32,
+}
+
+/// One edge of the inverse graph of `Checker::mark_holders`
+/// (`inv_parents`, compiler/ml/ctype.ml:678-681): 8 bytes. `next` is the
+/// next edge of the same child or `NONE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct PolyEdge {
+    pub parent: Ty,
+    pub next: u32,
+}
+
+/// The tables and pools of [`Checker::instance_poly`], kept between
+/// calls for their capacity and empty for a unit that never calls it.
+#[derive(Default)]
+pub struct PolyCopy {
+    /// One row a node of the graph.
+    pub slots: Vec<PolySlot>,
+    /// The inverse graph of the call.
+    pub edges: Vec<PolyEdge>,
+    /// The polymorphic types with bound variables below the body, in
+    /// the order the first walk met them.
+    pub binders: Vec<Ty>,
+    /// `delayed_copy` (compiler/ml/ctype.ml:1027-1028): a stub and the generic
+    /// node, without a universal variable, whose copy it becomes a link
+    /// to.
+    pub delayed: Vec<[Ty; 2]>,
+    /// The field nodes the walk made, for their cells.
+    pub fields: Vec<Ty>,
+    /// The types of one `Reither` field while a row is copied.
+    pub types: Vec<Ty>,
+    /// The number of the call; a stamp is `2 * call` or `2 * call + 1`.
+    pub call: u32,
+    /// How many binders are entered on the way (`List.length bound`,
+    /// counted in binders and not in variables).
+    pub depth: u32,
+}
+
 /// What a field is after its reference is followed (`row_field_repr`,
 /// compiler/ml/btype.ml:112-121): 16 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -556,6 +615,7 @@ impl Extras {
             rigid_variants: false,
             open_polys: Vec::new(),
             univars,
+            poly: PolyCopy::default(),
         }
     }
 
@@ -656,7 +716,7 @@ impl Checker {
     /// O(1): the descriptor row of an extended node, or `Nil` for a node
     /// that is not extended (what ends a list either way).
     #[inline]
-    fn field_descriptor(&self, node: Node) -> ExtraDescriptor {
+    pub(super) fn field_descriptor(&self, node: Node) -> ExtraDescriptor {
         if node.head & EXTENDED != 0 {
             self.extras.descriptors[node.a as usize]
         } else {
@@ -935,7 +995,7 @@ impl Checker {
 
     /// O(1): the cell of field node `field`.
     #[inline]
-    fn cell_of(&self, field: Ty) -> Ty {
+    pub(super) fn cell_of(&self, field: Ty) -> Ty {
         let node = self.g.nodes[field.0 as usize];
         match self.extras.descriptors[node.a as usize] {
             ExtraDescriptor::Field { mutability, .. } => Ty(mutability),
@@ -1541,7 +1601,7 @@ impl Checker {
             }
         };
         // A row that is not fixed has a variant node as its `more` now
-        // (`link_type rm ty`, ctype.ml:2616), so its name's arguments are
+        // (`link_type rm ty`, ctype.ml:2619), so its name's arguments are
         // children no longer (`iter_row`, btype.ml:229-241).
         // The home of row 1 is the left node itself when `last1` is none.
         // In expression mode `unify3` has linked that node away and it
@@ -1612,7 +1672,7 @@ impl Checker {
     /// two compares of the caller. (CHECKER_REWRITE 8.6, decision 60)
     #[cold]
     #[inline(never)]
-    fn drop_name_children(&mut self, home: Ty, row: VariantRow) {
+    pub(super) fn drop_name_children(&mut self, home: Ty, row: VariantRow) {
         if self.g.mode == Mode::Explain {
             let node = self.g.nodes[home.0 as usize];
             let extra = self.saved.len() as u32;
@@ -1637,7 +1697,7 @@ impl Checker {
     /// before the clash and `unify3`'s handler puts back the left
     /// descriptor only, ctype.ml:2436-2438). O(slots of the node), one
     /// list of that length.
-    fn forget_name_children(&mut self, home: Ty, row: VariantRow) {
+    pub(super) fn forget_name_children(&mut self, home: Ty, row: VariantRow) {
         let node = self.g.nodes[home.0 as usize];
         let b = self.g.lists.len() as u32;
         self.g
@@ -1655,7 +1715,7 @@ impl Checker {
     /// ([`field_repr`]; its home is opened, so every `Reither` field of it
     /// has its reference slot).
     #[inline]
-    fn field_now_at(&self, at: usize) -> FieldRepr {
+    pub(super) fn field_now_at(&self, at: usize) -> FieldRepr {
         let field = self.extras.row_scratch[at];
         field_repr(&self.g, field.ty.0, u32::MAX, self.extras.row_fields[field.at as usize])
     }
@@ -1683,7 +1743,7 @@ impl Checker {
     /// `RowFieldRow` a field and those slots; two row loads per field
     /// (one to count the slots, one to fill them), no allocation beyond
     /// the pools.
-    fn build_variant(
+    pub(super) fn build_variant(
         &mut self,
         fields: std::ops::Range<usize>,
         more: Ty,
@@ -1775,12 +1835,20 @@ impl Checker {
     /// descriptor load, one `VariantRow` load and one node load a chain
     /// node, then, when the row has a name, one `TypeInfo` load and one
     /// compare of its scope (`get_level`, as for a constructor). No
-    /// write, no step, when the row has no name or its name's scope is
-    /// not above `level`. Otherwise [`Checker::unname_row`].
-    /// (CHECKER_REWRITE 8.6, decision 75)
+    /// write when the row has no name or its name's scope is not above
+    /// `level`. Otherwise [`Checker::unname_row`]. One step a chain
+    /// node. The caller walks the chain a second time for the children
+    /// (`Checker::lower_scoped`, in line, as `iter_row`,
+    /// btype.ml:229-241): the name decides what `ty` is before its
+    /// children are known, and the inner nodes of the chain are not
+    /// handed to this function, so a chain of n nodes costs 2n loads
+    /// when its first node is lowered and not n squared over two.
+    /// (CHECKER_REWRITE 8.6, decisions 75 and 89)
     pub(super) fn lower_row_name(&mut self, ty: Ty, node: Node, level: u32) -> Node {
         let mut current = node;
         let row = loop {
+            #[cfg(test)]
+            super::steps::tick();
             let ExtraDescriptor::Variant(index) = self.extras.descriptors[current.a as usize]
             else {
                 unreachable!("a variant node");
@@ -1843,7 +1911,7 @@ impl Checker {
                 && matches!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Univar(_)))
     }
 
-    /// `set_more row rest` (compiler/ml/ctype.ml:2596-2616). `rest` is
+    /// `set_more row rest` (compiler/ml/ctype.ml:2597-2619). `rest` is
     /// `extras.row_scratch[rest]`, the fields the other row has and `row`
     /// lacks; `row` is the `VariantRow` of the row that gains them, `rm`
     /// its `more`, `fixed` its [`Checker::row_is_fixed`]; `more`, `closed`
@@ -2288,7 +2356,7 @@ impl Checker {
     /// OCaml's order ([`each_field_types`]), appended to
     /// `extras.row_scratch` as the `ty` of a [`FieldRef`]. O(types +
     /// chain), no allocation once the scratch has the capacity.
-    fn read_types(&mut self, home: u32, field: RowFieldRow) {
+    pub(super) fn read_types(&mut self, home: u32, field: RowFieldRow) {
         let scratch = &mut self.extras.row_scratch;
         each_field_types(&self.g, home, u32::MAX, field, |types| {
             scratch.extend(types.iter().map(|&ty| FieldRef { name: 0, at: 0, ty }));
@@ -2709,7 +2777,7 @@ impl Checker {
     /// annotation has matched fields when it is fixed
     /// (`make_fixed_univars`, typetexp.ml:684-696); the rows `reify`
     /// fixes do not (CHECKER_REWRITE 8.6, decision 47). O(fields of the
-    /// node + their chains).
+    /// node + their chains), one step a field.
     fn match_fixed_fields(&mut self, copy: Ty, first: u32) {
         let node = self.g.nodes[copy.0 as usize];
         let ExtraDescriptor::Variant(row) = self.extras.descriptors[node.a as usize] else {
@@ -2717,6 +2785,8 @@ impl Checker {
         };
         let row = self.extras.variants[row as usize];
         for index in row.fields.start..row.fields.start + row.fields.len {
+            #[cfg(test)]
+            super::steps::tick();
             let field = self.extras.row_fields[index as usize];
             let now = field_repr(&self.g, node.b, node.arity(), field);
             if matches!(now.kind, RowFieldKind::Either { matched: false, .. }) {
@@ -3700,7 +3770,15 @@ impl Checker {
         if self.umode == super::unify::UnifyMode::Expression {
             return Err(Clash);
         }
-        todo!("R3r")
+        for package in [left, right] {
+            let node = self.g.nodes[package.0 as usize];
+            let arguments = self.package_row(node).arguments;
+            for slot in arguments.start..arguments.start + arguments.len {
+                let argument = self.g.lists[(node.b + slot) as usize];
+                self.reify(argument)?;
+            }
+        }
+        Ok(())
     }
 
     /// `reify env t` (compiler/ml/ctype.ml:1813-1859): every variable
@@ -3912,6 +3990,8 @@ impl Checker {
         if newtype_level != 0 {
             self.types.scoped += 1;
         }
+        // `Env.add_local_type` (compiler/ml/ctype.ml:1823). (R3s)
+        self.gadt |= super::unify::GADT_LOCAL;
         let b = self.g.lists.len() as u32;
         self.g.lists.push(Ty(NONE));
         self.g.push(Node { head: CONSTR, level, a: fresh, b })
@@ -3976,6 +4056,8 @@ impl Checker {
         let expansion_level = self.newtype_level;
         self.types.newtypes.push(Newtype { level, expansion_level });
         self.equations.push(Equation { type_index: source, previous });
+        // `Env.add_local_constraint` (compiler/ml/ctype.ml:2099). (R3s)
+        self.gadt |= super::unify::GADT_LOCAL;
         let flags = previous.flags | ABBREV | NEWTYPE;
         self.types.rows[source as usize] = TypeInfo { manifest, newtype, flags, ..previous };
         Ok(())
@@ -4010,24 +4092,83 @@ impl Checker {
     /// for a data type `box` are equations, while `a := M.t<a>` for an
     /// abstract `M.t` is none (both compilers; 8.9, decision 67).
     ///
-    /// OCaml's `visited` is the list of the nodes on the way from `ty`,
-    /// which only stops a cycle and walks a shared node once per path.
-    /// The kernel marks: two generations, one for a node visited strictly
-    /// and one for a node visited otherwise; a strict visit of a node
-    /// that was visited otherwise visits it again (it reaches more), so a
-    /// node is visited at most twice and the answer is OCaml's. The stack
-    /// is [`Checker::frames`] above the length the call finds: an
-    /// expansion lowers and unifies, which use `g.work` and the frames
-    /// above. Cost: at most two steps a node reached, one `TypeInfo` load
-    /// a constructor, one [`Checker::expand_head`] a constructor that is
-    /// entered. (R3h; CHECKER_REWRITE 8.9, decision 67)
+    /// OCaml's `visited` is the list of the nodes on the way from `ty`
+    /// (`if not (List.memq ty visited)`, 1505; `let visited = ty ::
+    /// visited`, 1511 and 1528): a node that is on the way is skipped
+    /// WHATEVER the strictness it was entered with, and a shared node
+    /// is walked once per path. The kernel keeps both facts in the
+    /// marks of one node, five generations:
+    ///
+    /// - *on the way* (entered strictly, entered otherwise, or entered
+    ///   otherwise and met again strictly: "met"): set when a
+    ///   constructor is entered or a structure is entered strictly, and
+    ///   taken off by a LEAVE entry of the stack that lies below the
+    ///   node's children. A node on the way is skipped, as line 1505
+    ///   skips it.
+    /// - *done* (strictly, or otherwise): what the LEAVE entry writes.
+    ///   A node that is done is not entered again, except strictly
+    ///   after a visit that was not strict (it reaches more). That
+    ///   memory across paths is not OCaml's, and it is sound only for a
+    ///   node whose walk skipped nothing a later path would enter. The
+    ///   one skip that breaks it is a STRICT meeting of a node that is
+    ///   on the way and was entered otherwise: on a later path that
+    ///   node is entered strictly. So while such a "met" node is on the
+    ///   way (`met`, a count), a node that is left is not remembered
+    ///   (its mark goes back to none), and is walked once per path as
+    ///   in OCaml. Every other skip is of a node whose own walk, once
+    ///   it is left, covered at least what the later visit would.
+    ///
+    /// The stack is [`Checker::frames`] above the length the call
+    /// finds: an expansion lowers and unifies, which use `g.work` and
+    /// the frames above. Cost: at most two entries and two LEAVE
+    /// entries a node reached, one `TypeInfo` load a constructor, one
+    /// [`Checker::expand_head`] a constructor that is entered; a node
+    /// below a "met" node is entered once per path that reaches it
+    /// while that node is on the way (a type that reaches itself
+    /// through a parameter that is not constrained and again through
+    /// one that is: only pattern mode makes one). (R3h; corrected in
+    /// the eighth skeleton turn; CHECKER_REWRITE 8.9, decision 67)
+    ///
+    /// It traces GADT instances while it runs (`wrap_trace_gadt_instances
+    /// env (local_non_recursive_abbrev false [] env p) ty`, compiler/ml/
+    /// ctype.ml:1534, PR#7397): one load of `Checker::gadt` and one
+    /// branch a call. (R3s; CHECKER_REWRITE 8.11, (iv))
     pub fn non_recursive_abbrev(&mut self, source: u32, ty: Ty) -> Result<bool, Clash> {
+        let turned_on = self.gadt & super::unify::GADT_LOCAL != 0 && self.trace_on();
+        let result = self.non_recursive_abbrev_walk(source, ty);
+        self.trace_off(turned_on);
+        result
+    }
+
+    /// The walk of [`Checker::non_recursive_abbrev`], whose text
+    /// describes it.
+    fn non_recursive_abbrev_walk(&mut self, source: u32, ty: Ty) -> Result<bool, Clash> {
+        /// The bit of `extra` that makes an entry a LEAVE entry.
+        const LEAVE: u32 = 2;
         let lax = self.fresh_marks();
         let strictly = self.fresh_marks();
+        let on_lax = self.fresh_marks();
+        let on_strict = self.fresh_marks();
+        let on_met = self.fresh_marks();
+        // How many nodes on the way are "met".
+        let mut met = 0u32;
         let base = self.frames.len();
         self.push_visit(ty, false);
         while self.frames.len() > base {
             let frame = self.frames.pop().expect("an entry above the base");
+            if frame.extra & LEAVE != 0 {
+                // The node's frame is left: `visited` loses it.
+                let slot = frame.left.0 as usize;
+                let mut done = if self.marks[slot] == on_strict { strictly } else { lax };
+                if self.marks[slot] == on_met {
+                    met -= 1;
+                }
+                if met != 0 {
+                    done = 0;
+                }
+                self.marks[slot] = done;
+                continue;
+            }
             let strict = frame.extra != 0;
             let t = self.g.repr(frame.left);
             // An expansion of the walk adds nodes past the marks.
@@ -4035,25 +4176,37 @@ impl Checker {
                 self.marks.resize(self.g.nodes.len(), 0);
             }
             let mark = self.marks[t.0 as usize];
+            if mark == on_lax || mark == on_strict || mark == on_met {
+                // `if not (List.memq ty visited)` (1505).
+                if strict && mark == on_lax {
+                    self.marks[t.0 as usize] = on_met;
+                    met += 1;
+                }
+                continue;
+            }
             if mark == strictly || (mark == lax && !strict) {
                 continue;
             }
-            self.marks[t.0 as usize] = if strict { strictly } else { lax };
+            let (done, on_the_way) = if strict { (strictly, on_strict) } else { (lax, on_lax) };
             #[cfg(test)]
             super::steps::tick();
             let node = self.g.nodes[t.0 as usize];
             if node.tag() != CONSTR {
                 // `| _ -> if strict then ... iter_type_expr` (1525-1529).
-                if strict {
-                    let count = match node.tag() {
-                        ARROW => node.arity() + 1,
-                        TUPLE => node.arity(),
-                        _ => 0,
-                    };
-                    for index in (0..count).rev() {
-                        let child = self.child(node, index).expect("a child below the count");
-                        self.push_visit(child, true);
-                    }
+                let count = match node.tag() {
+                    ARROW if strict => node.arity() + 1,
+                    TUPLE if strict => node.arity(),
+                    _ => 0,
+                };
+                if count == 0 {
+                    self.marks[t.0 as usize] = done;
+                    continue;
+                }
+                self.marks[t.0 as usize] = on_the_way;
+                self.frames.push(Frame { left: t, right: Ty(NONE), kind: FrameKind::Pair, extra: LEAVE });
+                for index in (0..count).rev() {
+                    let child = self.child(node, index).expect("a child below the count");
+                    self.push_visit(child, true);
                 }
                 continue;
             }
@@ -4062,8 +4215,12 @@ impl Checker {
                 return Ok(false);
             }
             if !strict && TypeTable::contractive(self.types.info(node.a)) {
+                self.marks[t.0 as usize] = done;
                 continue;
             }
+            // `let visited = ty :: visited in` (1511).
+            self.marks[t.0 as usize] = on_the_way;
+            self.frames.push(Frame { left: t, right: Ty(NONE), kind: FrameKind::Pair, extra: LEAVE });
             let head = match self.expand_head(t, ExpandMode::Unif) {
                 Ok(head) => self.g.repr(head),
                 Err(clash) => {
@@ -4101,29 +4258,52 @@ impl Checker {
     /// `duplicate_type` for an equation (`Subst.type_expr Subst.identity`,
     /// compiler/ml/ctype.ml:496; subst.ml:132-158): a copy of `ty` in
     /// which every node is generic, sharing kept; `ty` is as it was
-    /// afterwards. Made of parts that exist: `g.speculate()`;
-    /// `Graph::generalize(ty)` with `g.level` 0, which makes every node
-    /// of `ty` generic and logs each level it writes; [`Checker::copy`]
-    /// with `g.level` generic; `g.level` put back; `Graph::restore` of
-    /// the token, which puts the levels of `ty` back. The copy's nodes
-    /// are new and not on the trail, so they stay. It is
-    /// `Graph::generalize` and not [`Checker::generalize`]: the second
-    /// forgets the memo of constructors without arguments, which is not
-    /// on the trail (the caller has cleaned the memos already, step 2 of
+    /// afterwards. `g.speculate()`; then a walk over `ty` that makes
+    /// every node of it generic and goes THROUGH a node that is generic
+    /// already (OCaml's copy copies every node whatever its level,
+    /// `| _ ->` of `Subst.typexp`, subst.ml:144-158; `Graph::generalize`
+    /// stops at a generic node and would leave the nodes below it shared
+    /// with the copy): on `g.work`, one new generation of marks
+    /// ([`Checker::fresh_marks`]), each representative visited once, its
+    /// level written generic with `Graph::write` when it is not (logged,
+    /// so the restore puts it back), its children pushed as
+    /// `Graph::generalize` pushes them (`Graph::children` with the
+    /// memo); [`Checker::copy`] with `g.level` generic; `g.level` put
+    /// back; `Graph::restore` of the token, which puts the levels of `ty`
+    /// back. The copy's nodes are new and not on the trail, so they stay.
+    /// The walk does not forget the memo of constructors without
+    /// arguments, as [`Checker::generalize`] does: that memo is not on
+    /// the trail (the caller has cleaned the memos already, step 2 of
     /// [`Checker::add_gadt_equation`], so no copy is linked to a
     /// memorized node). OCaml's copy keeps a variable and a universal
     /// variable as the node they are (subst.ml:135-143); the destination
     /// of an equation has no variable (`reify` ran first, or it is a
     /// constructor without arguments), and a universal variable that is
     /// free in it is COPIED here: no program is known that has one
-    /// (8.9, decision 67). Cost: three passes over `ty`: one step and
-    /// one trail entry (20 bytes) a node generalized, one step a node
-    /// copied, one step a level restored. (R3h)
+    /// (8.9, decision 67). Cost: three passes over `ty`: one step a node
+    /// visited and one trail entry (20 bytes) a level written, one step
+    /// a node copied, one step a level restored. (R3h; total in R3r)
     pub fn duplicate(&mut self, ty: Ty) -> Ty {
         let token = self.g.speculate();
-        let level = std::mem::replace(&mut self.g.level, 0);
-        self.g.generalize(ty);
-        self.g.level = GENERIC;
+        let generation = self.fresh_marks();
+        self.g.work.clear();
+        self.g.work.push(ty);
+        while let Some(next) = self.g.work.pop() {
+            let next = self.g.repr(next);
+            let mark = &mut self.marks[next.0 as usize];
+            if *mark == generation {
+                continue;
+            }
+            *mark = generation;
+            #[cfg(test)]
+            super::steps::tick();
+            let node = self.g.nodes[next.0 as usize];
+            if node.level != GENERIC {
+                self.g.write(next, Node { level: GENERIC, ..node });
+            }
+            self.g.children(node, true);
+        }
+        let level = std::mem::replace(&mut self.g.level, GENERIC);
         let copy = self.copy(ty);
         self.g.level = level;
         self.g.restore(token);
@@ -4158,21 +4338,1092 @@ impl Checker {
     /// (`univar_pairs := old_univars`, ctype.ml:1677-1679). One step a
     /// pair popped; O(pairs). (R3r)
     pub fn mcomp(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
-        todo!("R3r")
+        let (base, scopes) = (self.frames.len(), self.scopes.len());
+        self.push_compatible(left, right);
+        let result = self.mcomp_frames(base);
+        if result.is_err() {
+            self.frames.truncate(base);
+            self.scopes.truncate(scopes);
+        }
+        if !self.compatible.keys.is_empty() {
+            self.compatible.keys.clear();
+        }
+        result
     }
 
     /// One more pair for the `mcomp` in progress: what
     /// [`LocalDecls::compare`] calls for each pair of member types.
     /// O(1) amortized: one [`FrameKind::Pair`] frame. (R3r)
     pub fn push_compatible(&mut self, left: Ty, right: Ty) {
-        todo!("R3r")
+        self.frames.push(Frame { left, right, kind: FrameKind::Pair, extra: 0 });
     }
 
+    /// The loop of [`Checker::mcomp`] over the frames above `base`, the
+    /// arms of compiler/ml/ctype.ml:1905-1965 (CHECKER_REWRITE 8.9,
+    /// decision 70). The pairs a pair gives are pushed so that they are
+    /// popped in the order OCaml's recursion takes them. Per pair: two
+    /// `repr`, two `expand_head` in [`ExpandMode::Opt`], one table
+    /// lookup and insert, then one frame a child pair, or one of the
+    /// callees. One step a pair popped; a [`FrameKind::LeavePoly`]
+    /// frame is one `truncate` and no step. O(pairs) plus the
+    /// expansions.
+    fn mcomp_frames(&mut self, base: usize) -> Result<(), Clash> {
+        while self.frames.len() > base {
+            let frame = self.frames.pop().expect("a frame above the base");
+            if frame.kind == FrameKind::LeavePoly {
+                self.scopes.truncate(frame.extra as usize);
+                continue;
+            }
+            debug_assert_eq!(frame.kind, FrameKind::Pair);
+            #[cfg(test)]
+            super::steps::tick();
+            let (t1, t2) = (self.g.repr(frame.left), self.g.repr(frame.right));
+            if t1 == t2 {
+                continue;
+            }
+            let (d1, d2) = (self.g.nodes[t1.0 as usize], self.g.nodes[t2.0 as usize]);
+            // `Tvar _, _ | _, Tvar _`; `Tconstr (p1, [], _), Tconstr (p2,
+            // [], _) when Path.same p1 p2` (ctype.ml:1913-1914).
+            if d1.tag() == VAR || d2.tag() == VAR || (d1.head == CONSTR && d2.head == CONSTR && d1.a == d2.a) {
+                continue;
+            }
+            let t1x = self.expand_head(t1, ExpandMode::Opt)?;
+            let t2x = self.expand_head(t2, ExpandMode::Opt)?;
+            let (t1x, t2x) = (self.g.repr(t1x), self.g.repr(t2x));
+            // `Type_pairs.find type_pairs (t1', t2')`: ordered pairs.
+            if t1x == t2x || !self.compatible.keys.insert(u64::from(t1x.0) << 32 | u64::from(t2x.0)) {
+                continue;
+            }
+            let (d1, d2) = (self.g.nodes[t1x.0 as usize], self.g.nodes[t2x.0 as usize]);
+            let start = self.frames.len();
+            let plain = (d1.head | d2.head) & EXTENDED == 0;
+            match (d1.tag(), d2.tag()) {
+                (VAR, VAR) => unreachable!("mcomp: two variables after expansion (ctype.ml:1926)"),
+                (ARROW, ARROW) if plain && d1.arity() == d2.arity() => {
+                    let optional = |label: u32| label != NONE && label & 1 != 0;
+                    for i in 0..d1.arity() {
+                        let (p1, p2) = (self.g.params[(d1.b + i) as usize], self.g.params[(d2.b + i) as usize]);
+                        if p1.label != p2.label && (optional(p1.label) || optional(p2.label)) {
+                            return Err(Clash);
+                        }
+                        self.push_compatible(p1.ty, p2.ty);
+                    }
+                    self.push_compatible(Ty(d1.a), Ty(d2.a));
+                }
+                (TUPLE, TUPLE) if plain => {
+                    if d1.arity() != d2.arity() {
+                        return Err(Clash);
+                    }
+                    self.push_slots(d1.b, d2.b, d1.arity());
+                }
+                (CONSTR, CONSTR) => self.mcomp_type_decl(d1, d2)?,
+                (CONSTR, _) | (_, CONSTR) => {
+                    let path = if d1.tag() == CONSTR { d1.a } else { d2.a };
+                    if let Some(&row) = self.types.rows.get(path as usize)
+                        && (TypeTable::non_aliasable(row) || row.flags & DATATYPE != 0)
+                    {
+                        return Err(Clash);
+                    }
+                }
+                _ if d1.head & d2.head & EXTENDED == 0 => return Err(Clash),
+                _ => match (self.extras.descriptors[d1.a as usize], self.extras.descriptors[d2.a as usize]) {
+                    (ExtraDescriptor::Package(_), ExtraDescriptor::Package(_))
+                    | (ExtraDescriptor::Nil, ExtraDescriptor::Nil) => {}
+                    (ExtraDescriptor::Variant(_), ExtraDescriptor::Variant(_)) => self.mcomp_row(t1x, t2x)?,
+                    (ExtraDescriptor::Object, ExtraDescriptor::Object) => {
+                        let (fields1, fields2) = (self.g.lists[d1.b as usize], self.g.lists[d2.b as usize]);
+                        self.mcomp_fields(fields1, fields2)?;
+                    }
+                    // "Actually unused" (ctype.ml:1956-1958).
+                    (ExtraDescriptor::Field { .. }, ExtraDescriptor::Field { .. }) => self.mcomp_fields(t1x, t2x)?,
+                    (ExtraDescriptor::Poly, ExtraDescriptor::Poly) if d1.arity() == 1 && d2.arity() == 1 => {
+                        let (body1, body2) = (self.g.lists[d1.b as usize], self.g.lists[d2.b as usize]);
+                        self.push_compatible(body1, body2);
+                    }
+                    // The `LeavePoly` frame below the pair of the bodies:
+                    // nothing to reverse.
+                    (ExtraDescriptor::Poly, ExtraDescriptor::Poly) => {
+                        self.enter_poly(d1, d2)?;
+                        continue;
+                    }
+                    (ExtraDescriptor::Univar(_), ExtraDescriptor::Univar(_)) => self.unify_univar(t1x, t2x)?,
+                    _ => return Err(Clash),
+                },
+            }
+            // Pushed in OCaml's order, popped in it.
+            self.frames[start..].reverse();
+        }
+        Ok(())
+    }
+
+    /// O(len): the pairs of two list ranges, first first (the caller
+    /// reverses what a pair pushed).
+    fn push_slots(&mut self, left: u32, right: u32, len: u32) {
+        for i in 0..len {
+            let (l, r) = (self.g.lists[(left + i) as usize], self.g.lists[(right + i) as usize]);
+            self.push_compatible(l, r);
+        }
+    }
+
+    /// `mcomp_type_decl` (compiler/ml/ctype.ml:2011-2039) for two
+    /// constructor descriptors, pushing first first. A type without a row
+    /// on either side: compatible (`with Not_found -> ()`). One type:
+    /// the arguments whose parameter is [`TypeTable::injective`]. Two
+    /// types, both `non_aliasable`: a clash. Two data types: the
+    /// arguments (a clash when their numbers differ), then what
+    /// [`LocalDecls::compare`] pushes or a clash; without a supplier a
+    /// clash. One data type and an abstract type that is not
+    /// `non_aliasable`, or two abstract types: compatible; else a clash.
+    /// O(arguments) plus the supplier.
+    fn mcomp_type_decl(&mut self, d1: Node, d2: Node) -> Result<(), Clash> {
+        let (Some(&row1), Some(&row2)) = (self.types.rows.get(d1.a as usize), self.types.rows.get(d2.a as usize))
+        else {
+            return Ok(());
+        };
+        if d1.a == d2.a {
+            for i in 0..d1.arity().min(d2.arity()) {
+                if self.types.injective(d1.a, i) {
+                    let (l, r) = (self.g.lists[(d1.b + 1 + i) as usize], self.g.lists[(d2.b + 1 + i) as usize]);
+                    self.push_compatible(l, r);
+                }
+            }
+            return Ok(());
+        }
+        if TypeTable::non_aliasable(row1) && TypeTable::non_aliasable(row2) {
+            return Err(Clash);
+        }
+        match (row1.flags & DATATYPE != 0, row2.flags & DATATYPE != 0) {
+            (true, true) => {
+                if d1.arity() != d2.arity() {
+                    return Err(Clash);
+                }
+                self.push_slots(d1.b + 1, d2.b + 1, d1.arity());
+                let Some(mut decls) = self.locals.take() else {
+                    return Err(Clash);
+                };
+                let answer = decls.compare(self, d1.a, d2.a);
+                self.locals = Some(decls);
+                if answer == DeclMatch::Clash { Err(Clash) } else { Ok(()) }
+            }
+            (false, false) => Ok(()),
+            (false, true) if !TypeTable::non_aliasable(row1) => Ok(()),
+            (true, false) if !TypeTable::non_aliasable(row2) => Ok(()),
+            _ => Err(Clash),
+        }
+    }
+
+    /// `mcomp_fields` (compiler/ml/ctype.ml:1971-1981) of two field lists:
+    /// both flattened into `extras.fields` ([`Checker::flatten_fields`]),
+    /// the pair of the two rests pushed, then one merge of the two sorted
+    /// lists (`associate_fields`) pushing the pair of the types of every
+    /// common name; a clash when a side lacks a name and the other's rest
+    /// is `Tnil`. O(fields) plus the flattenings, one step a merge step;
+    /// the scratch is cut back to where it was.
+    fn mcomp_fields(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
+        let mut fields = std::mem::take(&mut self.extras.fields);
+        let base = fields.len();
+        let rest1 = self.flatten_fields(left, &mut fields);
+        let n1 = fields.len();
+        let rest2 = self.flatten_fields(right, &mut fields);
+        self.push_compatible(rest1, rest2);
+        let (mut i, mut j) = (base, n1);
+        let (mut miss1, mut miss2) = (false, false);
+        while i < n1 || j < fields.len() {
+            #[cfg(test)]
+            super::steps::tick();
+            let order = if i == n1 {
+                Ordering::Greater
+            } else if j == fields.len() {
+                Ordering::Less
+            } else if fields[i].name == fields[j].name {
+                Ordering::Equal
+            } else {
+                let names = &self.extras.names;
+                names.text(fields[i].name).cmp(names.text(fields[j].name))
+            };
+            match order {
+                Ordering::Equal => self.push_compatible(fields[i].ty, fields[j].ty),
+                Ordering::Less => miss1 = true,
+                Ordering::Greater => miss2 = true,
+            }
+            i += usize::from(order != Ordering::Greater);
+            j += usize::from(order != Ordering::Less);
+        }
+        fields.truncate(base);
+        self.extras.fields = fields;
+        let nil = |c: &Checker, rest: Ty| {
+            let node = c.g.nodes[rest.0 as usize];
+            node.head & EXTENDED != 0 && c.extras.descriptors[node.a as usize] == ExtraDescriptor::Nil
+        };
+        if (miss1 && nil(self, rest2)) || (miss2 && nil(self, rest1)) {
+            return Err(Clash);
+        }
+        Ok(())
+    }
+
+    /// `mcomp_row` (compiler/ml/ctype.ml:1983-2009) of two variant nodes:
+    /// both opened and flattened ([`Checker::flatten_row`]) and merged
+    /// ([`Checker::merge_rows`]); a clash when a closed row lacks a tag
+    /// the other has present; then, per common tag in the merge's order,
+    /// the table of ctype.ml:1996-2008: a clash, the pair of the two
+    /// present types, or the present type against each type of the
+    /// other's conjunction. O(tags + chains) plus the merge, one step a
+    /// tag flattened, a merge step, a tag only one row has (when the
+    /// other row is closed) and a common tag; no allocation once the
+    /// scratch has the capacity; the scratch is cut back to where it
+    /// was.
+    fn mcomp_row(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
+        let base = self.extras.row_scratch.len();
+        let top1 = self.open_row(left);
+        let (last1, _) = self.flatten_row(top1);
+        let n1 = self.extras.row_scratch.len() - base;
+        let top2 = self.open_row(right);
+        let (last2, _) = self.flatten_row(top2);
+        let n2 = self.extras.row_scratch.len() - base - n1;
+        let closed = |c: &Checker, last: Ty, top: Node| {
+            let node = if last.0 == NONE { top } else { c.g.nodes[last.0 as usize] };
+            let ExtraDescriptor::Variant(row) = c.extras.descriptors[node.a as usize] else {
+                unreachable!("a variant node");
+            };
+            c.extras.variants[row as usize].closed
+        };
+        let (closed1, closed2) = (closed(self, last1, top1), closed(self, last2, top2));
+        let pairs = self.merge_rows(base, n1);
+        let r1 = base..base + n1 - pairs;
+        let r2 = r1.end..r1.end + n2 - pairs;
+        let present = |c: &Checker, range: std::ops::Range<usize>| {
+            range.into_iter().any(|at| {
+                #[cfg(test)]
+                super::steps::tick();
+                c.field_now_at(at).kind == RowFieldKind::Present
+            })
+        };
+        let mut result = if (closed1 && present(self, r2.clone())) || (closed2 && present(self, r1.clone())) {
+            Err(Clash)
+        } else {
+            Ok(())
+        };
+        for k in 0..pairs {
+            if result.is_err() {
+                break;
+            }
+            #[cfg(test)]
+            super::steps::tick();
+            let at = r2.end + 2 * k;
+            let (f1, f2) = (self.field_now_at(at), self.field_now_at(at + 1));
+            result = match (mcomp_shape(f1), mcomp_shape(f2)) {
+                (Shape::Present(false), Shape::Present(true) | Shape::Either { typed: true, .. } | Shape::Absent)
+                | (Shape::Present(true), Shape::Present(false) | Shape::Either { constant: true, .. } | Shape::Absent)
+                | (Shape::Either { typed: true, .. } | Shape::Absent, Shape::Present(false))
+                | (Shape::Either { constant: true, .. } | Shape::Absent, Shape::Present(true)) => Err(Clash),
+                (Shape::Present(true), Shape::Present(true)) => {
+                    self.push_compatible(f1.first, f2.first);
+                    Ok(())
+                }
+                (Shape::Present(true), Shape::Either { constant: false, .. }) => {
+                    self.push_against(f1.first, at + 1);
+                    Ok(())
+                }
+                (Shape::Either { constant: false, .. }, Shape::Present(true)) => {
+                    self.push_against(f2.first, at);
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+        self.extras.row_scratch.truncate(base);
+        result
+    }
+
+    /// The pairs of `single` and each type of the conjunction of the
+    /// field `extras.row_scratch[at]` (`List.iter (mcomp t1) tl2`), in
+    /// order. O(types + chain), no allocation.
+    fn push_against(&mut self, single: Ty, at: usize) {
+        let field = self.extras.row_scratch[at];
+        let row_field = self.extras.row_fields[field.at as usize];
+        let frames = &mut self.frames;
+        each_field_types(&self.g, field.ty.0, u32::MAX, row_field, |types| {
+            for &ty in types {
+                frames.push(Frame { left: single, right: ty, kind: FrameKind::Pair, extra: 0 });
+            }
+        });
+    }
+
+}
+
+// -----------------------------------------------------------------
+// `instance_poly` and `instance_label` (R3q; CHECKER_REWRITE 8.10)
+// -----------------------------------------------------------------
+impl Checker {
+    /// `instance_poly ?keep_names ~fixed univars sch`
+    /// (compiler/ml/ctype.ml:1081-1095) for the polymorphic type node
+    /// `poly` (`Tpoly (sch, univars)`: slot 0 the body, slots 1.. the
+    /// bound variables; every caller of OCaml's passes the two parts of
+    /// one `Tpoly`): the instance of the body, and one new variable for
+    /// each bound variable pushed on `vars` in order (named as the
+    /// universal variable when `keep_names`, ctype.ml:1085-1086; at the
+    /// current level).
+    ///
+    /// Three parts, in this order:
+    /// 1. `Checker::mark_holders` (`compute_univars sch`);
+    /// 2. the new variables, each the copy of its universal variable in
+    ///    [`PolySlot::copy`] (`pairs`, ctype.ml:1090), then
+    ///    `Checker::copy_sep` of the body; the pairs are taken out
+    ///    again;
+    /// 3. `Checker::poly_session` with no result: the delayed copies
+    ///    (`List.iter Lazy.force !delayed_copy`, ctype.ml:1093).
+    ///
+    /// Cost: the three parts. Linear in the nodes below the body for a
+    /// body in which no node that holds a universal variable is reached
+    /// by two paths; such a node is copied once per path, as in OCaml
+    /// ("Copy without sharing until there are no free univars left",
+    /// ctype.ml:1030). A unit that never calls it pays nothing: the
+    /// tables of [`PolyCopy`] are empty until the first call.
+    pub fn instance_poly(&mut self, fixed: bool, keep_names: bool, poly: Ty, vars: &mut Vec<Ty>) -> Ty {
+        self.poly_begin();
+        let body = self.poly_walk(fixed, keep_names, poly, vars);
+        self.poly_session(Ty(NONE));
+        body
+    }
+
+    /// `instance_label fixed lbl` (compiler/ml/ctype.ml:1097-1105): the
+    /// instances of a label's argument type and of its record type, made
+    /// in ONE copy session, so that a generic node both reach is one node
+    /// in both instances (the record's parameters). Returns `(argument,
+    /// result)`; when the argument is a polymorphic type its new
+    /// variables are pushed on `vars` (`instance_poly ~fixed tl ty`,
+    /// 1102), otherwise nothing is.
+    ///
+    /// - The argument is not a polymorphic type (its representative is
+    ///   not a `Poly` node): [`Graph::copy_begin`], `copy_ref(result)`,
+    ///   `copy_ref(argument)` (OCaml copies the result first, 1099),
+    ///   [`Graph::copy_drain`], then the pass of
+    ///   `Checker::poly_session` over the nodes made. No table of
+    ///   [`PolyCopy`] is touched and no stub is made: this is the label
+    ///   of every record field without a polymorphic type.
+    /// - It is one: parts 1 and 2 of [`Checker::instance_poly`] (with
+    ///   `keep_names` false), then `Checker::poly_session` with
+    ///   `result`, whose copy is made first in the session. The walk
+    ///   comes before the copy of the result where OCaml's comes after
+    ///   it; the two share nodes only through the session, so the order
+    ///   cannot be seen.
+    ///
+    /// Cost: one copy of the two types, plus [`Checker::instance_poly`]'s
+    /// for a polymorphic argument.
+    pub fn instance_label(&mut self, fixed: bool, argument: Ty, result: Ty, vars: &mut Vec<Ty>) -> (Ty, Ty) {
+        let argument = self.g.repr(argument);
+        let node = self.g.nodes[argument.0 as usize];
+        let poly = node.head & EXTENDED != 0 && self.extras.descriptors[node.a as usize] == ExtraDescriptor::Poly;
+        if !poly {
+            let first = self.g.nodes.len();
+            self.g.copy_begin();
+            let result = self.g.copy_ref(result);
+            let argument = self.g.copy_ref(argument);
+            self.g.copy_drain();
+            self.poly_pass(first);
+            return (argument, result);
+        }
+        self.poly_begin();
+        let argument = self.poly_walk(fixed, false, argument, vars);
+        let result = self.poly_session(result);
+        (argument, result)
+    }
+
+    /// Start a call: [`PolyCopy::slots`] grown to the graph (new rows
+    /// have no stamp and no copy), a new [`PolyCopy::call`], the pools
+    /// and the depth emptied. When the call counter would overflow the
+    /// stamps (`2 * call + 1`), every stamp is cleared once. O(1)
+    /// amortized.
+    fn poly_begin(&mut self) {
+        let poly = &mut self.extras.poly;
+        let empty = PolySlot { stamp: 0, parents: NONE, copy: Ty(NONE), depth: 0 };
+        poly.slots.resize(self.g.nodes.len(), empty);
+        if poly.call >= u32::MAX / 2 - 1 {
+            for slot in &mut poly.slots {
+                slot.stamp = 0;
+            }
+            poly.call = 0;
+        }
+        poly.call += 1;
+        poly.edges.clear();
+        poly.binders.clear();
+        debug_assert!(poly.delayed.is_empty() && poly.fields.is_empty());
+        poly.depth = 0;
+    }
+
+    /// Parts 1 and 2 of [`Checker::instance_poly`] for the `Poly` node
+    /// `poly`, after [`Checker::poly_begin`]. Its cost is theirs.
+    fn poly_walk(&mut self, fixed: bool, keep_names: bool, poly: Ty, vars: &mut Vec<Ty>) -> Ty {
+        let poly = self.g.repr(poly);
+        let node = self.g.nodes[poly.0 as usize];
+        debug_assert_eq!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Poly);
+        let body = self.g.lists[node.b as usize];
+        self.mark_holders(node, body);
+        for index in 1..node.arity() {
+            let univar = self.g.repr(self.g.lists[(node.b + index) as usize]);
+            let ExtraDescriptor::Univar(name) = self.extras.descriptors[self.g.nodes[univar.0 as usize].a as usize]
+            else {
+                unreachable!("a bound variable is a universal variable (ctype.ml:1087)");
+            };
+            let name = if keep_names { name } else { NONE };
+            let var = self.g.push(Node { head: VAR, level: self.g.level, a: name, b: 0 });
+            let slot = &mut self.extras.poly.slots[univar.0 as usize];
+            (slot.copy, slot.depth) = (var, 0);
+            vars.push(var);
+        }
+        let instance = self.copy_sep(fixed, body);
+        for index in 1..node.arity() {
+            let univar = self.g.repr(self.g.lists[(node.b + index) as usize]);
+            self.extras.poly.slots[univar.0 as usize].copy = Ty(NONE);
+        }
+        instance
+    }
+
+    /// `compute_univars sch` (compiler/ml/ctype.ml:693-713), as far as
+    /// [`Checker::copy_sep`] reads it: for every node below `body`,
+    /// whether a universal variable is FREE below it (one that is not
+    /// bound by a polymorphic type on the way from the node to it:
+    /// `| Tpoly (_ty, tl) when List.memq univ (List.map repr tl) -> ()`,
+    /// 699). `poly` is the descriptor of the node whose body `body` is.
+    /// The answer is [`PolySlot::stamp`] `== 2 * call + 1`.
+    ///
+    /// Two steps, as OCaml's:
+    /// - *the inverse graph* (`inv_type`, 680-691): a walk from `body` on
+    ///   `g.work` that meets each representative once (its stamp becomes
+    ///   `2 * call`) and pushes one [`PolyEdge`] for each child slot of
+    ///   each node (`Checker::child`: every slot of an extended node, the
+    ///   bound variables of a polymorphic type included). A polymorphic
+    ///   type with bound variables is pushed on [`PolyCopy::binders`].
+    /// - *the propagation* (`add_univar`, 696-707), one CLASS at a time:
+    ///   first the bound variables of `poly` (no binder below `body`
+    ///   stops them), then those of each binder met, in the order met.
+    ///   For one class, one new generation of `marks`: from each of its
+    ///   variables that the first step met, up the edges, never through
+    ///   the class's own binder, each node once; every node reached, the
+    ///   variable included, gets the stamp `2 * call + 1`. A node that
+    ///   another class marked is NOT a place to stop: a variable of an
+    ///   outer binder is free further up than one of an inner binder.
+    ///
+    /// Cost: one step a node and one edge (8 bytes) a child slot for the
+    /// first step; for the second, one step a node for each class that
+    /// has a variable free below it: linear for a body without a
+    /// polymorphic type inside, at most nodes times the depth of nested
+    /// binders otherwise (OCaml keeps a set of variables a node: the same
+    /// bound with a set operation a step).
+    fn mark_holders(&mut self, poly: Node, body: Ty) {
+        let seen = 2 * self.extras.poly.call;
+        let holder = seen + 1;
+        self.g.work.clear();
+        let body = self.g.repr(body);
+        let slot = &mut self.extras.poly.slots[body.0 as usize];
+        (slot.stamp, slot.parents) = (seen, NONE);
+        self.g.work.push(body);
+        while let Some(t) = self.g.work.pop() {
+            #[cfg(test)]
+            super::steps::tick();
+            let node = self.g.nodes[t.0 as usize];
+            if node.head & EXTENDED != 0
+                && node.arity() > 1
+                && self.extras.descriptors[node.a as usize] == ExtraDescriptor::Poly
+            {
+                self.extras.poly.binders.push(t);
+            }
+            let mut index = 0;
+            while let Some(child) = self.child(node, index) {
+                index += 1;
+                let child = self.g.repr(child);
+                let poly = &mut self.extras.poly;
+                let slot = &mut poly.slots[child.0 as usize];
+                if slot.stamp != seen {
+                    (slot.stamp, slot.parents) = (seen, NONE);
+                    self.g.work.push(child);
+                }
+                poly.edges.push(PolyEdge { parent: t, next: slot.parents });
+                slot.parents = poly.edges.len() as u32 - 1;
+            }
+        }
+        for class in 0..=self.extras.poly.binders.len() {
+            let (binder, vars) = match class {
+                0 => (Ty(NONE), poly),
+                _ => {
+                    let binder = self.extras.poly.binders[class - 1];
+                    (binder, self.g.nodes[binder.0 as usize])
+                }
+            };
+            let generation = self.fresh_marks();
+            for index in 1..vars.arity() {
+                let univar = self.g.repr(self.g.lists[(vars.b + index) as usize]);
+                let slot = &mut self.extras.poly.slots[univar.0 as usize];
+                if slot.stamp & !1 != seen || self.marks[univar.0 as usize] == generation {
+                    continue;
+                }
+                self.marks[univar.0 as usize] = generation;
+                slot.stamp = holder;
+                self.g.work.push(univar);
+            }
+            while let Some(t) = self.g.work.pop() {
+                #[cfg(test)]
+                super::steps::tick();
+                let mut edge = self.extras.poly.slots[t.0 as usize].parents;
+                while edge != NONE {
+                    let PolyEdge { parent, next } = self.extras.poly.edges[edge as usize];
+                    edge = next;
+                    if parent == binder || self.marks[parent.0 as usize] == generation {
+                        continue;
+                    }
+                    self.marks[parent.0 as usize] = generation;
+                    self.extras.poly.slots[parent.0 as usize].stamp = holder;
+                    self.g.work.push(parent);
+                }
+            }
+        }
+    }
+
+    /// `copy_sep fixed free bound visited ty` (compiler/ml/ctype.ml:
+    /// 1033-1079) for `root`, after [`Checker::mark_holders`]: the copy.
+    /// A loop over [`Checker::frames`] above the length it finds, no
+    /// recursion:
+    /// - `root` goes to [`Checker::sep_child`], whose answer is the
+    ///   result;
+    /// - a [`FrameKind::Pair`] frame (`left` a source node, `right` the
+    ///   stub of its copy) goes to [`Checker::sep_fill`];
+    /// - a [`FrameKind::Linked`] frame puts `right` and `extra` back as
+    ///   the [`PolySlot::copy`] and [`PolySlot::depth`] of `left`: the
+    ///   node, or the bound variable, is off the way again (OCaml's
+    ///   `visited` is an argument: what a call adds is gone when it
+    ///   returns);
+    /// - a [`FrameKind::LeavePoly`] frame puts `extra` back as
+    ///   [`PolyCopy::depth`].
+    ///
+    /// A frame's children are filled after it and before the frames
+    /// below it, so the `Linked` frames on the stack are exactly the
+    /// nodes on the way to the node being filled. Cost: one step a node
+    /// filled; three frames at most a node (16 bytes each); what
+    /// [`Checker::sep_fill`] makes.
+    fn copy_sep(&mut self, fixed: bool, root: Ty) -> Ty {
+        let base = self.frames.len();
+        let result = self.sep_child(root);
+        while self.frames.len() > base {
+            let frame = self.frames.pop().expect("a frame above the base");
+            match frame.kind {
+                FrameKind::Linked => {
+                    let slot = &mut self.extras.poly.slots[frame.left.0 as usize];
+                    (slot.copy, slot.depth) = (frame.right, frame.extra);
+                }
+                FrameKind::LeavePoly => self.extras.poly.depth = frame.extra,
+                _ => self.sep_fill(fixed, frame.left, frame.right),
+            }
+        }
+        result
+    }
+
+    /// The first lines of `copy_sep` for one child (compiler/ml/ctype.ml:
+    /// 1034-1049): what stands for `child` in the copy. Per
+    /// representative `c`:
+    /// - no universal variable is free below it (its stamp is not `2 *
+    ///   call + 1`): `c` itself when it is not generic (1037); otherwise
+    ///   a new variable at the current level, pushed with `c` on
+    ///   [`PolyCopy::delayed`] (`delayed_copy`, 1039-1041:
+    ///   [`Checker::poly_session`] makes it a link to the copy);
+    /// - it has a [`PolySlot::copy`] (it is on the way, or it is a bound
+    ///   variable): that copy (`List.assq ty visited`, 1044), unless a
+    ///   binder was entered since ([`PolySlot::depth`] is below
+    ///   [`PolyCopy::depth`]), `c` is not a universal variable (`if
+    ///   is_Tunivar ty then []`, 1045) and [`Checker::sep_conflicts`]
+    ///   holds (1046): then it is copied again;
+    /// - otherwise a new variable at the current level, the stub (`let t
+    ///   = newvar ()`, 1049), and a [`FrameKind::Pair`] frame of `c` and
+    ///   the stub.
+    ///
+    /// O(1) besides `sep_conflicts`: one `repr`, one [`PolySlot`] load
+    /// and, for a node that is copied, one node and one frame.
+    fn sep_child(&mut self, child: Ty) -> Ty {
+        let c = self.g.repr(child);
+        let slot = self.extras.poly.slots[c.0 as usize];
+        if slot.stamp != 2 * self.extras.poly.call + 1 {
+            if self.g.nodes[c.0 as usize].level != GENERIC {
+                return c;
+            }
+            let stub = self.g.push(Node { head: VAR, level: self.g.level, a: NONE, b: 0 });
+            self.extras.poly.delayed.push([stub, c]);
+            return stub;
+        }
+        if slot.copy.0 != NONE && (slot.depth == self.extras.poly.depth || self.is_univar(c) || !self.sep_conflicts(c))
+        {
+            return slot.copy;
+        }
+        let stub = self.g.push(Node { head: VAR, level: self.g.level, a: NONE, b: 0 });
+        self.frames.push(Frame { left: c, right: stub, kind: FrameKind::Pair, extra: 0 });
+        stub
+    }
+
+    /// `conflicts univars dl` (compiler/ml/ctype.ml:1046, 1023-1025) for
+    /// `c`, a node on the way that is met again after a binder was
+    /// entered: whether a variable bound SINCE `c` was entered is free in
+    /// `c`. The binders entered since are the [`FrameKind::LeavePoly`]
+    /// frames above the topmost [`FrameKind::Linked`] frame of `c`
+    /// (`left` of a `LeavePoly` frame is the polymorphic type). For each,
+    /// one new generation of `marks` and a walk on `g.work` above the
+    /// length it finds: from its bound variables up the edges of
+    /// [`Checker::mark_holders`], never through the binder; `c` reached
+    /// is "free". When it holds OCaml copies the node again, with the
+    /// new binding; when a node is its own way back to the binder with
+    /// nothing between, OCaml does not end, and neither does this.
+    ///
+    /// Cost: one step a frame scanned and a node walked: for each binder
+    /// entered since, the nodes its variables are free in. Reached only
+    /// by a type that reaches itself through a polymorphic type.
+    fn sep_conflicts(&mut self, c: Ty) -> bool {
+        let mut at = self.frames.len();
+        loop {
+            at -= 1;
+            let frame = self.frames[at];
+            #[cfg(test)]
+            super::steps::tick();
+            if frame.kind == FrameKind::Linked && frame.left == c {
+                return false;
+            }
+            if frame.kind != FrameKind::LeavePoly {
+                continue;
+            }
+            let binder = frame.left;
+            let node = self.g.nodes[binder.0 as usize];
+            let generation = self.fresh_marks();
+            let start = self.g.work.len();
+            for index in 1..node.arity() {
+                let univar = self.g.repr(self.g.lists[(node.b + index) as usize]);
+                self.marks[univar.0 as usize] = generation;
+                self.g.work.push(univar);
+            }
+            while self.g.work.len() > start {
+                let t = self.g.work.pop().expect("an entry above the start");
+                #[cfg(test)]
+                super::steps::tick();
+                if t == c {
+                    self.g.work.truncate(start);
+                    return true;
+                }
+                let mut edge = self.extras.poly.slots[t.0 as usize].parents;
+                while edge != NONE {
+                    let PolyEdge { parent, next } = self.extras.poly.edges[edge as usize];
+                    edge = next;
+                    if parent != binder && self.marks[parent.0 as usize] != generation {
+                        self.marks[parent.0 as usize] = generation;
+                        self.g.work.push(parent);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The rest of `copy_sep` for one node (compiler/ml/ctype.ml:
+    /// 1049-1079): `stub` becomes the copy of `c`, a node below which a
+    /// universal variable is free, at the current level.
+    ///
+    /// First the way (`(ty, (t, bound)) :: visited`, 1052-1056): for an
+    /// arrow, a tuple, a constructor, an object, a variant and a package
+    /// (and for no other node: a field, a polymorphic type and a
+    /// universal variable are not in `visited`), a [`FrameKind::Linked`]
+    /// frame with the [`PolySlot::copy`] and [`PolySlot::depth`] `c` had,
+    /// and then `stub` and [`PolyCopy::depth`] in their place.
+    ///
+    /// Then the descriptor, each child through [`Checker::sep_child`]:
+    /// - an arrow: the result, then the parameters, into new `Param`
+    ///   rows (label and location kept);
+    /// - a tuple, a constructor (a new empty memo slot: `ref Mnil`,
+    ///   btype.ml:514): a new list;
+    /// - a polymorphic type (1070-1077): a [`FrameKind::LeavePoly`] frame
+    ///   (`left` the node `c`, `extra` the depth) and the depth one more;
+    ///   for each bound variable a new node with the variable's
+    ///   descriptor at the current level (`newty t.desc`), a `Linked`
+    ///   frame with the slot the variable had, and the new node and the
+    ///   depth as its slot; then the body; a new list, the body in slot
+    ///   0;
+    /// - a variant: [`Checker::copy_sep_row`];
+    /// - any other extended node (an object, a field, a package, a
+    ///   universal variable no binder on the way binds): a new list, the
+    ///   descriptor row shared; a field is pushed on
+    ///   [`PolyCopy::fields`], for the cells.
+    ///
+    /// One step; one list or `Param` slot a child; no trail entry (the
+    /// stub is a node of this call).
+    fn sep_fill(&mut self, fixed: bool, c: Ty, stub: Ty) {
+        #[cfg(test)]
+        super::steps::tick();
+        let node = self.g.nodes[c.0 as usize];
+        let level = self.g.level;
+        let descriptor = (node.head & EXTENDED != 0).then(|| self.extras.descriptors[node.a as usize]);
+        let on_the_way = matches!(
+            descriptor,
+            None | Some(ExtraDescriptor::Object | ExtraDescriptor::Variant(_) | ExtraDescriptor::Package(_))
+        );
+        if on_the_way {
+            let slot = self.extras.poly.slots[c.0 as usize];
+            self.frames.push(Frame { left: c, right: slot.copy, kind: FrameKind::Linked, extra: slot.depth });
+            let depth = self.extras.poly.depth;
+            let slot = &mut self.extras.poly.slots[c.0 as usize];
+            (slot.copy, slot.depth) = (stub, depth);
+        }
+        let filled = match (node.tag(), descriptor) {
+            (ARROW, _) => {
+                let result = self.sep_child(Ty(node.a));
+                let start = self.g.params.len() as u32;
+                for index in 0..node.arity() {
+                    let param = self.g.params[(node.b + index) as usize];
+                    let ty = self.sep_child(param.ty);
+                    self.g.params.push(super::graph::Param { ty, ..param });
+                }
+                Node { level, a: result.0, b: start, ..node }
+            }
+            (_, Some(ExtraDescriptor::Poly)) => {
+                let b = self.g.lists.len() as u32;
+                self.g.lists.resize((b + node.arity()) as usize, Ty(NONE));
+                let depth = self.extras.poly.depth;
+                self.frames.push(Frame { left: c, right: Ty(NONE), kind: FrameKind::LeavePoly, extra: depth });
+                self.extras.poly.depth = depth + 1;
+                for index in 1..node.arity() {
+                    let univar = self.g.repr(self.g.lists[(node.b + index) as usize]);
+                    let copy = self.g.push(Node { level, ..self.g.nodes[univar.0 as usize] });
+                    let slot = self.extras.poly.slots[univar.0 as usize];
+                    self.frames.push(Frame {
+                        left: univar,
+                        right: slot.copy,
+                        kind: FrameKind::Linked,
+                        extra: slot.depth,
+                    });
+                    let slot = &mut self.extras.poly.slots[univar.0 as usize];
+                    (slot.copy, slot.depth) = (copy, depth + 1);
+                    self.g.lists[(b + index) as usize] = copy;
+                }
+                let body = self.sep_child(self.g.lists[node.b as usize]);
+                self.g.lists[b as usize] = body;
+                Node { level, b, ..node }
+            }
+            (_, Some(ExtraDescriptor::Variant(_))) => self.copy_sep_row(fixed, c, node),
+            (CONSTR | TUPLE, _) => {
+                let memo = u32::from(node.tag() == CONSTR);
+                let b = self.g.lists.len() as u32;
+                if memo != 0 {
+                    self.g.lists.push(Ty(NONE));
+                }
+                for index in 0..node.arity() {
+                    let child = self.g.lists[(node.b + memo + index) as usize];
+                    let child = self.sep_child(child);
+                    self.g.lists.push(child);
+                }
+                if matches!(descriptor, Some(ExtraDescriptor::Field { .. })) {
+                    self.extras.poly.fields.push(stub);
+                }
+                Node { level, b, ..node }
+            }
+            _ => unreachable!("a variable holds no universal variable"),
+        };
+        self.g.nodes[stub.0 as usize] = filled;
+    }
+
+    /// The variant arm of `copy_sep` (compiler/ml/ctype.ml:1061-1069)
+    /// with `copy_row` (compiler/ml/btype.ml:366-392) for variant node
+    /// `c`, whose descriptor is `node`: the descriptor of its copy, ONE
+    /// row of every field of its chain (`row_repr`, btype.ml:126-135),
+    /// at the current level.
+    ///
+    /// ```text
+    /// | Tvariant row0 ->
+    ///   let row = row_repr row0 in
+    ///   let more = repr row.row_more in
+    ///   (* We shall really check the level on the row variable *)
+    ///   let keep = is_Tvar more && more.level <> generic_level in
+    ///   let more' = copy_rec more in
+    ///   let fixed' = fixed && is_Tvar (repr more') in
+    ///   let row = copy_row copy_rec fixed' row keep more' in
+    ///   Tvariant row
+    /// ```
+    ///
+    /// The chain is read and not opened ([`field_repr`] with each
+    /// node's own arity; `each_field_types` for the types of a `Reither`
+    /// field), twice: once to its end for the last row (its `closed`,
+    /// `fixed`, name and `more`), once for the fields.
+    /// - `keep`: the representative of the last `more` is a variable
+    ///   that is not generic.
+    /// - `more'` is [`Checker::sep_child`] of it, and `fixed'` is `fixed`
+    ///   and "`more'` is a variable node now" (a stub is one: OCaml reads
+    ///   `is_Tvar` before the delayed copy is linked).
+    /// - The slots: `more'`, the copies of the name's arguments, then
+    ///   the copies of the types of each field in order: one for
+    ///   `Rpresent (Some _)`, all of `tl` for `Reither`.
+    /// - A new `RowFieldRow` a field with what the field reads NOW:
+    ///   `Present`, `Absent`, or `Either` with its `c` and `m`, where `m`
+    ///   is `fixed'` when the source row is fixed (`let m = if
+    ///   row.row_fixed then fixed else m`, btype.ml:375). A new
+    ///   `VariantRow` with the last row's `closed` and name and `fixed =
+    ///   row.row_fixed && fixed'` (btype.ml:389), and a new descriptor
+    ///   row.
+    /// - Not `keep`: the node is UNOPENED: each `Reither` field stands
+    ///   for a reference of its own (`let e = if keep then e else ref
+    ///   None`, btype.ml:374).
+    /// - `keep`, and the row has a `Reither` field: the copy shares each
+    ///   field's reference. The home of the field is opened when it is
+    ///   not ([`Checker::open_row`], and the references that made get the
+    ///   level of the row variable, as in `Checker::copy_refs`); the copy
+    ///   is built opened: a field without types has the source's
+    ///   unresolved reference in its reference slot, one with types a
+    ///   new [`RES_EITHER`] node with its `c` and `m`, its copied types
+    ///   and that reference, in its reference slot and in each of its
+    ///   type slots, and it is a holder of the reference
+    ///   (`Checker::hold`).
+    ///
+    /// O(fields + chain + types), one step a field; [`PolyCopy::types`]
+    /// above the length it finds is the scratch of the types of one
+    /// field. Per
+    /// field one `RowFieldRow` (20 bytes) and one slot a type; with
+    /// `keep`, per `Reither` field with types one node, its slots and 8
+    /// bytes of holder.
+    fn copy_sep_row(&mut self, fixed: bool, c: Ty, node: Node) -> Node {
+        let level = self.g.level;
+        let row_of = |c: &Checker, node: Node| {
+            let ExtraDescriptor::Variant(row) = c.extras.descriptors[node.a as usize] else {
+                unreachable!("a variant node");
+            };
+            c.extras.variants[row as usize]
+        };
+        let is_variant = |c: &Checker, node: Node| {
+            node.head & EXTENDED != 0 && matches!(c.extras.descriptors[node.a as usize], ExtraDescriptor::Variant(_))
+        };
+        // The last row of the chain and its `more`.
+        let (mut last, mut last_node) = (row_of(self, node), node);
+        let more = loop {
+            let more = self.g.repr(self.g.lists[(last_node.b + last.more) as usize]);
+            let next = self.g.nodes[more.0 as usize];
+            if !is_variant(self, next) {
+                break more;
+            }
+            (last, last_node) = (row_of(self, next), next);
+        };
+        let more_node = self.g.nodes[more.0 as usize];
+        let keep = more_node.tag() == VAR && more_node.level != GENERIC;
+        let copied_more = self.sep_child(more);
+        let fixed = fixed && self.g.nodes[copied_more.0 as usize].tag() == VAR;
+        let b = self.g.lists.len() as u32;
+        self.g.lists.push(copied_more);
+        let arguments = if last.name == NONE { Range::default() } else { last.name_arguments };
+        for index in 0..arguments.len {
+            let argument = self.g.lists[(last_node.b + arguments.start + index) as usize];
+            let argument = self.sep_child(argument);
+            self.g.lists.push(argument);
+        }
+        // The fields, home by home.
+        let start = self.extras.row_fields.len() as u32;
+        let shared = self.extras.row_scratch.len();
+        let scratch = self.extras.poly.types.len();
+        let (mut home, mut home_node) = (c, node);
+        loop {
+            let row = row_of(self, home_node);
+            for at in row.fields.start..row.fields.start + row.fields.len {
+                #[cfg(test)]
+                super::steps::tick();
+                let field = self.extras.row_fields[at as usize];
+                let now = field_repr(&self.g, home_node.b, home_node.arity(), field);
+                let mut copy = RowFieldRow { name: field.name, types: Range::default(), link: NONE, kind: now.kind };
+                match now.kind {
+                    RowFieldKind::Present if now.types != 0 => {
+                        let ty = self.sep_child(now.first);
+                        copy.types = Range { start: self.g.lists.len() as u32 - b, len: 1 };
+                        self.g.lists.push(ty);
+                    }
+                    RowFieldKind::Either { constant, matched } => {
+                        let types = &mut self.extras.poly.types;
+                        each_field_types(&self.g, home_node.b, home_node.arity(), field, |own| {
+                            types.extend_from_slice(own)
+                        });
+                        copy.types =
+                            Range { start: self.g.lists.len() as u32 - b, len: (types.len() - scratch) as u32 };
+                        for index in scratch..self.extras.poly.types.len() {
+                            let ty = self.sep_child(self.extras.poly.types[index]);
+                            self.g.lists.push(ty);
+                        }
+                        self.extras.poly.types.truncate(scratch);
+                        copy.kind =
+                            RowFieldKind::Either { constant, matched: if last.fixed { fixed } else { matched } };
+                        if keep {
+                            let name = self.extras.row_fields.len() as u32;
+                            self.extras.row_scratch.push(FieldRef { name, at, ty: home });
+                        }
+                    }
+                    _ => {}
+                }
+                self.extras.row_fields.push(copy);
+            }
+            let next = self.g.repr(self.g.lists[(home_node.b + row.more) as usize]);
+            let next_node = self.g.nodes[next.0 as usize];
+            if !is_variant(self, next_node) {
+                break;
+            }
+            (home, home_node) = (next, next_node);
+        }
+        let published = self.g.lists.len() as u32 - b;
+        let mut references = 0;
+        for field in &mut self.extras.row_fields[start as usize..] {
+            if matches!(field.kind, RowFieldKind::Either { .. }) {
+                field.link = published + references;
+                references += 1;
+            }
+        }
+        let row = self.extras.variants.len() as u32;
+        self.extras.variants.push(VariantRow {
+            fields: Range { start, len: self.extras.row_fields.len() as u32 - start },
+            more: 0,
+            name: last.name,
+            name_arguments: Range { start: 1, len: arguments.len },
+            closed: last.closed,
+            fixed: last.fixed && fixed,
+        });
+        let a = self.extras.descriptors.len() as u32;
+        self.extras.descriptors.push(ExtraDescriptor::Variant(row));
+        let mut arity = published;
+        if self.extras.row_scratch.len() > shared {
+            // `keep`: the copy is opened onto the references of its source.
+            arity += references;
+            self.g.lists.resize((b + arity) as usize, Ty(NONE));
+            let (mut opened_home, mut fresh) = (Ty(NONE), false);
+            for index in shared..self.extras.row_scratch.len() {
+                let FieldRef { name, at, ty: home } = self.extras.row_scratch[index];
+                let source = self.extras.row_fields[at as usize];
+                if home != opened_home {
+                    fresh = self.g.nodes[home.0 as usize].arity() <= source.link;
+                    opened_home = home;
+                }
+                let home_node = self.open_row(home);
+                let end = field_repr(&self.g, home_node.b, home_node.arity(), source).end;
+                if fresh {
+                    self.g.nodes[end.0 as usize].level = more_node.level;
+                }
+                let field = self.extras.row_fields[name as usize];
+                let RowFieldKind::Either { constant, matched } = field.kind else {
+                    unreachable!("a shared field is a `Reither`");
+                };
+                let slot = if field.types.len == 0 {
+                    end
+                } else {
+                    let own = (b + field.types.start) as usize..(b + field.types.start + field.types.len) as usize;
+                    let list = self.g.lists.len() as u32;
+                    self.g.lists.extend_from_within(own.clone());
+                    self.g.lists.push(end);
+                    let chain = self.g.push(Node {
+                        head: TUPLE | (field.types.len + 1) << 8,
+                        level,
+                        a: either_flags(constant, matched),
+                        b: list,
+                    });
+                    self.hold(chain, end);
+                    self.g.lists[own].fill(chain);
+                    chain
+                };
+                self.g.lists[(b + field.link) as usize] = slot;
+            }
+            self.extras.row_scratch.truncate(shared);
+        }
+        Node { head: TUPLE | EXTENDED | arity << 8, level, a, b }
+    }
+
+    /// The copy session of [`Checker::instance_poly`] and
+    /// [`Checker::instance_label`], after the walk
+    /// (`with_copy_session`; `List.iter Lazy.force !delayed_copy`,
+    /// compiler/ml/ctype.ml:1093): [`Graph::copy_begin`]; the copy of
+    /// `result` when it is not `NONE` (returned; `NONE` otherwise); for
+    /// each pair of [`PolyCopy::delayed`], in order, `copy_ref` of the
+    /// source and the stub written as a link to it (`t.desc <- Tlink
+    /// (copy ty)`; the stub is this call's: a plain store);
+    /// [`Graph::copy_drain`]; then [`Checker::poly_pass`] over the nodes
+    /// the session made. The session comes after the walk so that its
+    /// nodes are the last and in the order of its queue, which
+    /// `Checker::copy_refs` reads. Cost: one [`Checker::copy`] of all the
+    /// roots.
+    fn poly_session(&mut self, result: Ty) -> Ty {
+        let first = self.g.nodes.len();
+        self.g.copy_begin();
+        let copied = if result.0 == NONE { result } else { self.g.copy_ref(result) };
+        for index in 0..self.extras.poly.delayed.len() {
+            let [stub, source] = self.extras.poly.delayed[index];
+            let target = self.g.copy_ref(source);
+            let node = self.g.nodes[stub.0 as usize];
+            self.g.nodes[stub.0 as usize] = super::expand::link_node(node, target);
+        }
+        self.g.copy_drain();
+        self.poly_pass(first);
+        // Empty between calls: the pass of a plain label reads `fields`.
+        self.extras.poly.delayed.clear();
+        self.extras.poly.fields.clear();
+        copied
+    }
+
+    /// The pass of [`Checker::copy`] over the nodes a session made since
+    /// `first`, in one cell session with the fields the walk made:
+    /// nothing when no memorized expansion is live and the graph has no
+    /// descriptor row; otherwise `begin_cell_session`, `extras.copying`
+    /// set, `Checker::memorized_node` for each node of the session
+    /// (the memo of constructors without arguments, the cells of copied
+    /// fields, the references of copied rows), `extras.copying` cleared,
+    /// then [`Checker::dup_cell`] for each node of [`PolyCopy::fields`]
+    /// (`copy_type_desc` for `Tfield`, compiler/ml/btype.ml:516-532: the
+    /// cell is duplicated when the row ends in a generic variable, which
+    /// is when the copy's row ends in a variable the session made; a
+    /// class the session duplicated already is found through its
+    /// temporary link), and `end_cell_session`. Cost: one step a node of
+    /// the session and what `dup_cell` says a field.
+    fn poly_pass(&mut self, first: usize) {
+        let cells = !self.extras.descriptors.is_empty();
+        if self.memo.live == 0 && !cells {
+            return;
+        }
+        let end = self.g.nodes.len();
+        if cells {
+            self.begin_cell_session();
+        }
+        self.extras.copying = true;
+        for index in first..end {
+            self.memorized_node(index, first, NONE, cells);
+        }
+        self.extras.copying = false;
+        if cells {
+            for index in 0..self.extras.poly.fields.len() {
+                let field = self.extras.poly.fields[index];
+                let node = self.g.nodes[field.0 as usize];
+                self.dup_cell(field, node, first as u32);
+            }
+            self.end_cell_session();
+        }
+    }
+}
+
+/// A field of a row as the table of `mcomp_row` reads it
+/// (compiler/ml/ctype.ml:1996-2007): `Rpresent` with or without a type,
+/// `Reither` with its `c` and whether it has a type, `Rabsent`.
+#[derive(Clone, Copy)]
+enum Shape {
+    Present(bool),
+    Either { constant: bool, typed: bool },
+    Absent,
+}
+
+/// O(1): the [`Shape`] of a field read now.
+fn mcomp_shape(field: FieldRepr) -> Shape {
+    match field.kind {
+        RowFieldKind::Present => Shape::Present(field.first.0 != NONE),
+        RowFieldKind::Either { constant, .. } => Shape::Either { constant, typed: field.types != 0 },
+        RowFieldKind::Absent => Shape::Absent,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_of_the_instance_of_a_polymorphic_type() {
+        // One a node of the graph, and one a child slot of a body.
+        assert_eq!(std::mem::size_of::<PolySlot>(), 16);
+        assert_eq!(std::mem::size_of::<PolyEdge>(), 8);
+    }
 
     #[test]
     fn sizes() {
@@ -4470,6 +5721,103 @@ mod tests {
         ends.dedup();
         assert_eq!(ends.len(), 10_000);
         assert_ne!(reference(&c, ty, 0), reference(&c, copied, 0));
+    }
+
+    /// A chain of `n` variant nodes, each with the one tag `f(i)` and
+    /// its row variable linked to the next, at level 2; the first node
+    /// and the last. With `named` the last row has the name of type 0,
+    /// whose scope is `scope`.
+    fn chain_of_rows(n: u32, scope: Option<u32>) -> (Checker, Ty, Ty) {
+        let mut c = Checker::new(Graph::default(), Default::default());
+        let last = add_row(&mut c, 0..1, false, |_| RowFieldKind::Present);
+        if let Some(scope) = scope {
+            let row = c.extras.variants.len() - 1;
+            c.extras.variants[row].name = 0;
+            c.types.rows.push(TypeInfo { manifest: NONE, scope, newtype: NONE, arity: 0, flags: 0, reserved: 0 });
+        }
+        let mut first = last;
+        for i in 1..n {
+            let node = add_row(&mut c, i..i + 1, false, |_| RowFieldKind::Present);
+            c.g.link(Ty(node.0 - 1), first);
+            first = node;
+        }
+        for node in &mut c.g.nodes {
+            node.level = 2;
+        }
+        c.types.scoped = 1;
+        c.g.level = 2;
+        (c, first, last)
+    }
+
+    /// The loops of the variant arm of a lowering, as relations between
+    /// 1,000 and 10,000 (`update_level`, compiler/ml/ctype.ml:615-623;
+    /// `iter_row`, btype.ml:229-241, which walks a `more` that is a
+    /// variant IN LINE and does not hand the inner node to
+    /// `update_level`):
+    ///
+    /// - `lower_row_name` over a chain of n variant nodes whose name
+    ///   does not escape (and one without a name): linear. Seen to fail
+    ///   before the inner nodes were skipped (each inner node the walk
+    ///   visited read the chain to its end: 1,002,000 steps at 1,000
+    ///   and 100,020,000 at 10,000). The inner nodes
+    ///   keep their level, as in OCaml; the row variable at the end is
+    ///   lowered.
+    /// - `unname_row` over the same chain when the name escapes: one
+    ///   row of n fields, linear.
+    #[test]
+    fn lowering_a_chain_of_ten_thousand_rows_is_linear() {
+        let run = |n: u32, scope: Option<u32>| {
+            let (mut c, first, last) = chain_of_rows(n, scope);
+            let steps = super::super::steps::scope(|| c.lower(first, 1).unwrap());
+            let more = c.g.repr(Ty(last.0 - 1));
+            assert_eq!(c.g.nodes[first.0 as usize].level, 1);
+            assert_eq!(c.g.nodes[more.0 as usize].level, 1);
+            let escaped = scope == Some(2);
+            let node = c.g.nodes[first.0 as usize];
+            let ExtraDescriptor::Variant(row) = c.extras.descriptors[node.a as usize] else {
+                unreachable!("a variant node");
+            };
+            let row = c.extras.variants[row as usize];
+            // The name is dropped, and the node is one row of n fields.
+            assert_eq!(row.fields.len, if escaped { n } else { 1 });
+            assert_eq!(row.name, NONE);
+            if !escaped && n > 1 {
+                // `iter_row` does not hand an inner node to `update_level`.
+                assert_eq!(c.g.nodes[last.0 as usize].level, 2);
+            }
+            steps
+        };
+        for scope in [None, Some(1), Some(2)] {
+            let (small, large) = (run(1_000, scope), run(10_000, scope));
+            assert!(large <= 11 * small, "{scope:?}: {small} {large}");
+        }
+    }
+
+    /// `match_fixed_fields` over the copy of a fixed row of n `Reither`
+    /// fields that read matched (`let m = if row.row_fixed then fixed
+    /// else m`, compiler/ml/btype.ml:375): one step a field, linear
+    /// between 1,000 and 10,000, and `match_unmatched` is not reached
+    /// (no node beyond the copy's own).
+    #[test]
+    fn matching_the_fields_of_a_fixed_row_is_one_step_a_field() {
+        let run = |n: u32| {
+            let either = |_| RowFieldKind::Either { constant: false, matched: true };
+            let (mut c, ty) = row_of(n, true, either);
+            let row = c.extras.variants.len() - 1;
+            c.extras.variants[row].fixed = true;
+            c.g.nodes[ty.0 as usize].level = GENERIC;
+            c.g.nodes[ty.0 as usize - 1].level = GENERIC;
+            let nodes = c.g.nodes.len();
+            let mut copied = ty;
+            let steps = super::super::steps::scope(|| copied = c.copy(ty));
+            assert_ne!(copied, ty);
+            let made = c.g.nodes.len() - nodes;
+            (steps, made)
+        };
+        let (small, large) = (run(1_000), run(10_000));
+        assert!(large.0 <= 11 * small.0, "{small:?} {large:?}");
+        assert!(small.0 >= 1_000 && large.0 >= 10_000, "{small:?} {large:?}");
+        assert_eq!(small.1, large.1, "nodes made do not grow with the fields");
     }
 
     /// `merge_rows` of two lists of 10,000 tags, every other tag common:

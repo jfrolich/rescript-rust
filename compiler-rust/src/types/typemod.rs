@@ -1338,6 +1338,60 @@ fn primitive_description_from_value_decl(
     }
 }
 
+/// The kind of an external declared in a signature (typedecl.ml
+/// `transl_value_decl`): other modules call an external with a relative path
+/// through the value its module exports, so in a signature it is a regular
+/// value (`Primitive.no_cross_module_inline`). A structure exports it through
+/// the include the built-in PPX wraps it in.
+fn signature_value_kind(prim: crate::types::PrimitiveDescription) -> crate::types::decl::ValueKind {
+    use crate::types::decl::{PrimKind, ValueKind};
+    use crate::types::external_ffi_types::{ExternalFfi, is_relative};
+    match &prim.prim_kind {
+        PrimKind::KindExternal(spec)
+            if matches!(&**spec, ExternalFfi::FfiBs(_, _, decl) if is_relative(decl, &prim.prim_name)) =>
+        {
+            ValueKind::ValReg
+        }
+        _ => ValueKind::ValPrim(std::sync::Arc::new(prim)),
+    }
+}
+
+/// What `Ast_external.resolve` checks when the type checker reaches an
+/// external: the primitive name `@inline` constants use is not available to
+/// externals, and a resolved FFI external's warnings are reported within its
+/// warning scope (typedecl.ml `transl_value_decl` is wrapped in
+/// `Builtin_attributes.warning_scope`).
+fn check_resolved_external(
+    tctx: &mut TypeCheckContext<'_>,
+    arena: &ParseArena,
+    vd: &crate::parser::ast::ValueDescription,
+) -> TypeModResult<()> {
+    use crate::parser::ast::PrimitiveRepr;
+    match &vd.pval_prim {
+        Some(PrimitiveRepr::PrimName(name)) if arena.get_string(*name) == INLINE_CONST_PRIM => {
+            Err(TypeModError::ReservedInlinePrimitive { loc: vd.pval_loc })
+        }
+        Some(PrimitiveRepr::PrimFfi { .. }) => {
+            let warnings = crate::binary_ast::ppx::resolved_external_warnings(vd, arena);
+            if warnings.is_empty() {
+                return Ok(());
+            }
+            with_warning_scope(tctx, arena, &vd.pval_attributes, false, |tctx| {
+                for warning in warnings {
+                    let index = tctx.warnings.len();
+                    tctx.report_warning_at(index, warning.loc, warning.warning);
+                }
+                Ok::<(), TypeModError>(())
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `Ast_external_mk.inline_const_prim`: the primitive of an `@inline`
+/// constant's declaration.
+const INLINE_CONST_PRIM: &str = "#rescript-inline";
+
 fn decl_attrs_to_parser_attrs(
     arena: &ParseArena,
     attrs: &[crate::types::decl::Attribute],
@@ -3437,6 +3491,12 @@ pub enum TypeModError {
         /// The unification trace of the failed constraint.
         trace: Vec<(TypeExprRef, TypeExprRef)>,
     },
+    /// An external names the primitive of `@inline` constants
+    /// (ast_external.ml `resolve`).
+    ReservedInlinePrimitive {
+        /// The declaration's location.
+        loc: LocIdx,
+    },
     /// An ordinary external declaration has no function arguments.
     NullArityExternal {
         /// Source location to report.
@@ -4769,6 +4829,12 @@ fn check_declaration_runtime_annotation(
             name: arena.get_string(name.txt),
             semantic: crate::ast_payload::semantic_string_of_payload(arena, payload)
                 .map_err(|error| arena.to_location(error.loc)),
+            strings: if crate::types::variant_layout::is_scope_attribute(arena.get_string(name.txt))
+            {
+                crate::ast_payload::strings_of_payload(arena, payload).ok().flatten()
+            } else {
+                None
+            },
             loc: arena.to_location(name.loc),
         }
     });
@@ -5582,6 +5648,16 @@ pub enum AstUntaggedVariantError {
     },
     /// An `@instanceOf` payload that is not the name of a global class.
     InvalidInstanceOf,
+    /// An `@instanceOf` payload that is not the name of a class the module
+    /// of `@module` exports.
+    InvalidModuleClass(String),
+    /// A `@module` on an `@instanceOf` type that names no module.
+    InvalidClassModule,
+    /// A `@scope` on an `@instanceOf` type that cannot lead to a class.
+    InvalidClassScope(crate::types::variant_layout::InvalidScope),
+    /// A `@module` or `@scope`, by name, on a declaration without an
+    /// `@instanceOf` class for it to locate, and why.
+    ClassLocationWithoutClass(String, crate::types::variant_layout::MissingClass),
     /// An `@instanceOf` class, by name, that cannot be used, and why.
     UnsupportedInstanceOf(String, crate::types::variant_layout::UnsupportedClass),
     /// An `@typeOf` payload that is not a `typeof` result, if it is a string.
@@ -5603,7 +5679,8 @@ pub enum AstUntaggedVariantError {
     /// An annotation that contradicts the one of the abbreviated type, both
     /// as printed.
     RuntimeAnnotationContradictsManifest(String, String),
-    /// An `@instanceOf` class, by name, on an abbreviation of an array type.
+    /// An `@instanceOf` annotation, as printed, on an abbreviation of an
+    /// array type.
     SubclassOfArray(String),
     /// A class, by name, declared as a public abbreviation of its
     /// superclass, by name.
@@ -5654,6 +5731,43 @@ impl AstUntaggedVariantError {
             AstUntaggedVariantError::InvalidInstanceOf => {
                 "@instanceOf expects the name of a global class, such as @instanceOf(\"Date\") or @instanceOf(\"Intl.Locale\").".to_string()
             }
+            AstUntaggedVariantError::InvalidModuleClass(module_) => format!(
+                "@instanceOf expects the name of a class that \"{}\" exports, such as @instanceOf(\"Mesh\"), or @instanceOf(\"default\") for its default export.",
+                crate::string_literal::encode_js_string(module_)
+            ),
+            AstUntaggedVariantError::InvalidClassModule => {
+                "@module on an @instanceOf type expects the module that exports the class, such as @module(\"three\") or @module(\"./shapes.js\").".to_string()
+            }
+            AstUntaggedVariantError::InvalidClassScope(reason) => {
+                use crate::types::variant_layout::InvalidScope;
+                match reason {
+                    InvalidScope::NotProperties => "@scope on an @instanceOf type expects the properties the class is read through, such as @scope(\"THREE\") or @scope((\"lib\", \"shapes\")).".to_string(),
+                    InvalidScope::KeywordGlobal(global) => format!(
+                        "Without @module, the first property of @scope is a global, which cannot be named like the keyword \"{global}\"."
+                    ),
+                    InvalidScope::ScopeThroughGlobalThis => "Remove \"globalThis\" from @scope: the compiler reads the class through globalThis itself where a local binding shadows it.".to_string(),
+                }
+            }
+            AstUntaggedVariantError::ClassLocationWithoutClass(attribute, missing) => {
+                use crate::types::variant_layout::MissingClass;
+                let names = if attribute == "module" {
+                    "the module a class is imported from"
+                } else {
+                    "the properties a class is read through"
+                };
+                let advice = match missing {
+                    MissingClass::NoAnnotation => format!(
+                        " too. Add @instanceOf with the name of the class, or remove @{attribute}."
+                    ),
+                    MissingClass::OtherAnnotation(annotation) => format!(
+                        ", and this type has @{annotation} instead. Remove @{attribute}, or write @instanceOf instead of @{annotation} if its values are instances of a class."
+                    ),
+                    MissingClass::RepresentedType => format!(
+                        ", which only abstract types and type abbreviations can have. Remove @{attribute}."
+                    ),
+                };
+                format!("@{attribute} on a type declaration names {names}, so it needs @instanceOf{advice}")
+            }
             AstUntaggedVariantError::UnsupportedInstanceOf(name, reason) => {
                 use crate::types::variant_layout::UnsupportedClass;
                 match reason {
@@ -5703,8 +5817,8 @@ impl AstUntaggedVariantError {
             AstUntaggedVariantError::RuntimeAnnotationContradictsManifest(outer, inner) => format!(
                 "This annotation, {outer}, contradicts the abbreviated type, whose values are recognized by {inner}."
             ),
-            AstUntaggedVariantError::SubclassOfArray(name) => format!(
-                "@instanceOf(\"{name}\") cannot describe the values of an array type: they are recognized by Array.isArray, and subclasses of Array are not supported."
+            AstUntaggedVariantError::SubclassOfArray(annotation) => format!(
+                "{annotation} cannot describe the values of an array type: they are recognized by Array.isArray, and subclasses of Array are not supported."
             ),
             AstUntaggedVariantError::ClassOnPublicAbbreviation(name) => format!(
                 "A class must be declared on an abstract type or a private abbreviation: write `= private ...`, so that values of the abbreviated type are not instances of {name} without a coercion, and another abbreviation cannot declare them instances of another class."
@@ -7758,9 +7872,14 @@ fn lookup_module_alias_by_lid(
                 pers_env,
                 ctx,
                 |components| {
-                    components
-                        .lookup_module(submod_name, ctx)
-                        .and_then(|(_, _, md)| alias_of_module_type(&md.md_type))
+                    let (_, _, md) = components.lookup_module(submod_name, ctx)?;
+                    let (alias_presence, _) = alias_of_module_type(&md.md_type)?;
+                    // The target under the prefix of the components, as
+                    // `Env.find_module` returns it (compiler/ml/env.ml:
+                    // components substitute their items' paths): an alias
+                    // `module AliasSet = MakeSet` of `Src` is `Src.MakeSet`.
+                    let target = components.lookup_module_alias_target(submod_name, false, ctx)?;
+                    Some((alias_presence, target))
                 },
             )
             .flatten()
@@ -11691,15 +11810,15 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 val_type,
                                 val_kind: match &vd.pval_prim {
                                     None => crate::types::decl::ValueKind::ValReg,
-                                    Some(prim) => crate::types::decl::ValueKind::ValPrim(
-                                        std::sync::Arc::new(primitive_description_from_value_decl(
+                                    Some(prim) => signature_value_kind(
+                                        primitive_description_from_value_decl(
                                             arena,
                                             ctx,
                                             &sig_env,
                                             prim,
                                             vd.pval_type,
                                             val_type,
-                                        )),
+                                        ),
                                     ),
                                 },
                                 val_loc: tctx.intern_ast_loc(arena, sig_item.psig_loc),
@@ -15922,6 +16041,7 @@ pub fn transl_signature<'a>(
         let desc = match &item.psig_desc {
             PSigDesc::Psig_value(vd) => {
                 let name_str = arena.get_string(vd.pval_name.txt).to_string();
+                check_resolved_external(tctx, arena, vd)?;
                 // Use transl_type_scheme pattern: begin_def/end_def/generalize
                 // OCaml: reset_type_variables() for each val declaration
                 tctx.reset_type_variables();
@@ -15939,16 +16059,14 @@ pub fn transl_signature<'a>(
                 // Env.enter_value allocates val_id at typedecl.ml:1916-1919.
                 let val_kind = match &vd.pval_prim {
                     None => crate::types::decl::ValueKind::ValReg,
-                    Some(prim) => crate::types::decl::ValueKind::ValPrim(
-                        std::sync::Arc::new(primitive_description_from_value_decl(
-                            arena,
-                            ctx,
-                            &sig_env,
-                            prim,
-                            vd.pval_type,
-                            val_ty,
-                        )),
-                    ),
+                    Some(prim) => signature_value_kind(primitive_description_from_value_decl(
+                        arena,
+                        ctx,
+                        &sig_env,
+                        prim,
+                        vd.pval_type,
+                        val_ty,
+                    )),
                 };
                 // OCaml typedecl.ml:1875-1914 translates the type scheme before
                 // Env.enter_value creates the value ident. Keep the same order so
@@ -17391,6 +17509,7 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_primitive(vd) => {
             // Primitive declaration: external f : t = "..."
             let name_str = arena.get_string(vd.pval_name.txt).to_string();
+            check_resolved_external(tctx, arena, vd)?;
 
             // Translate the type annotation using transl_type_scheme pattern:
             // OCaml: reset_type_variables() clears type var map so each declaration

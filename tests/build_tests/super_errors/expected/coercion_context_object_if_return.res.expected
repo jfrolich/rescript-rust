@@ -1,0 +1,12 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/coercion_context_object_if_return.res[0m:[2m1:62-76[0m
+
+  [1;31m1[0m [2m│[0m let f = (x: {"a": int, "b": int}) => if true { "s" } else { ([1;31mx :> {"a": [0m
+    [2m│[0m [1;31mint}) }[0m
+  2 [2m│[0m 
+
+  This has type: [1;31m{"a": int}[0m
+  But this [1;33mif[0m statement is expected to return: [1;33mstring[0m
+
+  [1;33mif[0m expressions must return the same type in all branches ([1;33mif[0m, [1;33melse if[0m, [1;33melse[0m).

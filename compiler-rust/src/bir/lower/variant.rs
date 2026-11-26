@@ -107,13 +107,14 @@ impl std::ops::IndexMut<usize> for Sides {
     fn index_mut(&mut self, index: usize) -> &mut Side { self.0[index].as_mut().expect("initialized named side") }
 }
 
-/// One named dispatch, never copied down a walk.
-pub(super) struct Plan {
+/// One named dispatch, never copied down a walk. `E` is the interface's
+/// expression: the bound scrutinee is held as a handle.
+pub(super) struct Plan<E> {
     scrutinee: NodeId,
     cont: Cont,
     start: Span,
     target: Option<VarId>,
-    value: Option<NodeId>,
+    value: Option<E>,
     sides: Sides,
     active: usize,
     mixed: bool,
@@ -243,8 +244,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// V: switch_case_expr. O(literal spelling), one owned J literal.
-    pub(super) fn switch_key_expression(&mut self, key: &CaseKey) -> NodeId {
-        let key = match key {
+    pub(super) fn switch_key_expression(&mut self, key: &CaseKey) -> B::E {
+        match key {
             CaseKey::String(text) => self.js.str(&mut self.arena, *text),
             CaseKey::Float(text) | CaseKey::BigInt(text) => {
                 let slot = usize::from(matches!(key, CaseKey::BigInt(_)));
@@ -283,20 +284,19 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 Tag::Undefined => self.js.undefined(&mut self.arena, false),
             },
             _ => unreachable!("lowered switch key"),
-        };
-        B::node(key)
+        }
     }
 
     /// V: named_variant_switch_needs_bound_scrutinee. O(1): the mixed shape
     /// selected at entry needs at most one binding, even for a pure expression.
-    fn bind_named_scrutinee(&mut self, plan: &mut Plan, value: NodeId) {
+    fn bind_named_scrutinee(&mut self, plan: &mut Plan<B::E>, value: B::E) {
         plan.value = Some(
-            if plan.mixed && self.js.kind(&self.arena, B::at(value)) != crate::emit::row::Kind::Var {
+            if plan.mixed && self.js.kind(&self.arena, B::of(&value)) != crate::emit::row::Kind::Var {
                 let var = self.fresh_variable("tmp");
                 let statement =
-                    self.js.declare(&mut self.arena, LetKind::Strict, var, Some(B::from_node(value)));
+                    self.js.declare(&mut self.arena, LetKind::Strict, var, Some(value));
                 self.statements.push(statement);
-                B::node(self.js.var(&mut self.arena, var))
+                self.js.var(&mut self.arena, var)
             } else {
                 value
             },
@@ -304,11 +304,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// Read the shared scrutinee without cloning a tree. O(1).
-    fn named_scrutinee(&mut self, plan: &mut Plan) -> NodeId {
-        let value = plan.value.unwrap();
+    fn named_scrutinee(&mut self, plan: &mut Plan<B::E>) -> B::E {
         if plan.mixed {
-            let var = self.js.var_of(&self.arena, B::at(value)).expect("bound mixed scrutinee");
-            B::node(self.js.var(&mut self.arena, var))
+            let value = plan.value.as_ref().unwrap();
+            let var = self.js.var_of(&self.arena, B::of(value)).expect("bound mixed scrutinee");
+            self.js.var(&mut self.arena, var)
         } else {
             plan.value.take().unwrap()
         }
@@ -342,7 +342,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// Finish a side and activate the next before its first source child.
     /// O(1) side transitions (at most two), plus the common switch costs.
-    fn advance_variant(&mut self, cx: Cx, plan: &mut Plan, finish: bool) {
+    fn advance_variant(&mut self, cx: Cx, plan: &mut Plan<B::E>, finish: bool) {
         let cx = Cx {
             cont: plan.target.map_or(plan.cont, Cont::Assign),
             ..cx
@@ -353,7 +353,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 unreachable!("switch never probes")
             };
             if let Some(value) = out.value {
-                self.js.release(&mut self.arena, B::from_node(value));
+                self.js.release(&mut self.arena, value);
             }
             side.run = out.stmts;
             plan.active += 1;
@@ -368,7 +368,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 .keys
                 .is_empty();
             let value = if has_keys {
-                let value = B::from_node(self.named_scrutinee(plan));
+                let value = self.named_scrutinee(plan);
                 if block {
                     self.js.dot(&mut self.arena, value, plan.tag_name, crate::js_ir::arena::FieldPos::NONE, false)
                 } else {
@@ -386,7 +386,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let p = self.switches[frame.0 as usize].as_mut().unwrap();
             p.start = start;
             p.head = head;
-            p.value = Some(B::node(value));
+            p.value = Some(value);
             if plan.sides[plan.active].count > 0 {
                 break;
             }
@@ -394,7 +394,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 unreachable!()
             };
             if let Some(value) = out.value {
-                self.js.release(&mut self.arena, B::from_node(value));
+                self.js.release(&mut self.arena, value);
             }
             plan.sides[plan.active].run = out.stmts;
             plan.active += 1;
@@ -408,8 +408,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         cx: Cx,
         frame: Variant,
         index: usize,
-        child: Probed,
-    ) -> Probed {
+        child: Probed<B>,
+    ) -> Probed<B> {
         let mut plan = self.variants[frame.0 as usize].take().unwrap();
         if index == 0 {
             let out = self.realize(cx, child);
@@ -436,10 +436,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// V: is_int_tag. O(1), using literal-kind facts recorded at entry.
-    fn named_literal_test(&mut self, plan: &mut Plan) -> NodeId {
+    fn named_literal_test(&mut self, plan: &mut Plan<B::E>) -> B::E {
         let flags = plan.literals;
-        let eq = |state: &mut Self, plan: &mut Plan, null| {
-            let left = B::from_node(state.named_scrutinee(plan));
+        let eq = |state: &mut Self, plan: &mut Plan<B::E>, null| {
+            let left = state.named_scrutinee(plan);
             let right = if null { state.js.null(&mut state.arena) } else { state.js.undefined(&mut state.arena, false) };
             state.js.bin(&mut state.arena, crate::js_ir::BinOp::EqEqEq, left, right)
         };
@@ -447,12 +447,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             if flags & 3 == 3 {
                 let a = eq(self, plan, true);
                 let b = eq(self, plan, false);
-                return B::node(self.js.bin(&mut self.arena, crate::js_ir::BinOp::Or, a, b));
+                return self.js.bin(&mut self.arena, crate::js_ir::BinOp::Or, a, b);
             }
-            return B::node(eq(self, plan, flags & 1 != 0));
+            return eq(self, plan, flags & 1 != 0);
         }
         let null = (flags & 1 != 0).then(|| eq(self, plan, true));
-        let value = B::from_node(self.named_scrutinee(plan));
+        let value = self.named_scrutinee(plan);
         let typeof_ = self.js.typeof_plain(&mut self.arena, value);
         let object = self.js.string(&mut self.arena, "object");
         let test = self.js.bin(
@@ -461,16 +461,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             typeof_,
             object,
         );
-        B::node(if let Some(null) = null {
+        if let Some(null) = null {
             self.js.bin(&mut self.arena, crate::js_ir::BinOp::Or, null, test)
         } else {
             test
-        })
+        }
     }
 
     /// V: dispatch_named_variant_branches / compile_effect_if. O(statements
     /// consumed by J-S3); the two branch runs enter child lists once.
-    pub(super) fn finish_variant(&mut self, cx: Cx, frame: Variant) -> Probed {
+    pub(super) fn finish_variant(&mut self, cx: Cx, frame: Variant) -> Probed<B> {
         let mut plan = self.variants[frame.0 as usize].take().unwrap();
         while self.variants.last().is_some_and(Option::is_none) {
             self.variants.pop();
@@ -484,15 +484,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.place(plan.head, statement);
             }
         }
-        if let Some(value) = plan.value {
-            self.js.release(&mut self.arena, B::from_node(value));
+        if let Some(value) = plan.value.take() {
+            self.js.release(&mut self.arena, value);
         }
         if matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
             self.unnest(plan.start.start);
         }
         let value = match cx.cont {
-            Cont::Value(_) => Some(B::node(self.js.var(&mut self.arena, plan.target.unwrap()))),
-            Cont::Effect(Tail::No) => Some(B::node(self.js.undefined(&mut self.arena, false))),
+            Cont::Value(_) => Some(self.js.var(&mut self.arena, plan.target.unwrap())),
+            Cont::Effect(Tail::No) => Some(self.js.undefined(&mut self.arena, false)),
             _ => None,
         };
         Probed::Out(Out {
@@ -721,7 +721,7 @@ mod tests {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;
@@ -767,6 +767,6 @@ mod tests {
         assert_eq!(std::mem::size_of::<Side>(), 24);
         assert_eq!(std::mem::size_of::<Sides>(), 48);
         assert_eq!(std::mem::size_of::<Imported>(), 12);
-        assert_eq!(std::mem::size_of::<Plan>(), 112);
+        assert_eq!(std::mem::size_of::<Plan<<crate::bir::j::rows::Rows as crate::bir::lower::js::Js>::E>>(), 112);
     }
 }

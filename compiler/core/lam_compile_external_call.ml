@@ -290,6 +290,20 @@ let translate_scoped_module_val
       let start = E.js_global x in
       Ext_list.fold_left (Ext_list.append_one rest fn) start E.dot)
 
+(* The constructor of a class, read like the value of an external: a global
+   path, such as "Intl.Locale", is a global with properties, so that a binding
+   that shadows the global's name is noticed; an export of a module is
+   imported as [@module] imports it. *)
+let class_constructor ({module_; path} : Variant_runtime.Instance.class_name) =
+  let scopes, name = Ext_list.split_at_last (String.split_on_char '.' path) in
+  let module_name =
+    Option.map
+      (fun bundle : External_ffi_types.external_module_name ->
+        {bundle; module_bind_name = Phint_nothing; import_attributes = None})
+      module_
+  in
+  translate_scoped_module_val module_name name scopes
+
 (* The function a JSX external refers to; [Translcore] only builds [Pjsx]
    for [Decl_val] externals that aren't the module itself *)
 let jsx_callee
@@ -358,7 +372,7 @@ let translate_ffi (cxt : Lam_compile_context.t) arg_types ~(prim_name : string)
        E.new_ fn args)
   | ( (Decl_send _ | Decl_get _ | Decl_set _ | Decl_get_index | Decl_set_index),
       Some Module_itself ) ->
-    assert false (* rejected during digestion *)
+    assert false (* rejected during resolution *)
   | Decl_val {name}, _ when decl.effective_arity = 0 ->
     (* a global value *)
     let e = translate_scoped_module_val named_module name scopes in

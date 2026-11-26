@@ -391,13 +391,6 @@ let check_return_wrapper loc (wrapper : External_ffi_types.return_wrapper)
     if Ast_core_type.is_user_option result_type then wrapper
     else Bs_syntaxerr.err loc Expect_opt_in_bs_return_to_opt
 
-type response = {
-  pval_type: Parsetree.core_type;
-  pval_prim: Parsetree.primitive_repr;
-  pval_attributes: Parsetree.attributes;
-  no_inline_cross_module: bool;
-}
-
 (* A fixed argument means what [@as(value) _] means, so decode it with the
    same reader. *)
 let fixed_arg_type
@@ -605,6 +598,19 @@ let process_obj (loc : Location.t) (st : external_desc) (prim_name : string)
       External_ffi_types.ffi_obj_create arg_kinds )
   | _ -> Location.raise_errorf ~loc "Attribute found that conflicts with %@obj"
 
+(* A [unit] argument is left out of the JS code, so property and index
+   accesses would be missing their object, index or value. *)
+let reject_unit_arg ~loc attr (arg_type_specs : External_arg_spec.params) =
+  if
+    List.exists
+      (function
+        | ({arg_type = Extern_unit} : External_arg_spec.param) -> true
+        | _ -> false)
+      arg_type_specs
+  then
+    Location.raise_errorf ~loc
+      "Ill defined attribute %@%s (unit argument is not allowed)" attr
+
 let external_decl_of_non_obj (loc : Location.t) (st : external_desc)
     (prim_name_or_pval_prim : bundle_source) (arg_type_specs_length : int)
     (arg_type_specs : External_arg_spec.params) :
@@ -630,7 +636,9 @@ let external_decl_of_non_obj (loc : Location.t) (st : external_desc)
    return_wrapper = _;
    mk_obj = _;
   } ->
-    if arg_type_specs_length = 3 then mk ~scopes Decl_set_index
+    if arg_type_specs_length = 3 then (
+      reject_unit_arg ~loc "set_index" arg_type_specs;
+      mk ~scopes Decl_set_index)
     else
       Location.raise_errorf ~loc
         "Ill defined attribute %@set_index (arity of 3)"
@@ -653,7 +661,9 @@ let external_decl_of_non_obj (loc : Location.t) (st : external_desc)
    mk_obj = _;
    return_wrapper = _;
   } ->
-    if arg_type_specs_length = 2 then mk ~scopes Decl_get_index
+    if arg_type_specs_length = 2 then (
+      reject_unit_arg ~loc "get_index" arg_type_specs;
+      mk ~scopes Decl_get_index)
     else
       Location.raise_errorf ~loc
         "Ill defined attribute %@get_index (arity expected 2 : while %d)"
@@ -871,7 +881,9 @@ let external_decl_of_non_obj (loc : Location.t) (st : external_desc)
    return_wrapper = _;
    scopes;
   } ->
-    if arg_type_specs_length = 2 then mk ~scopes (Decl_set {name})
+    if arg_type_specs_length = 2 then (
+      reject_unit_arg ~loc "set" arg_type_specs;
+      mk ~scopes (Decl_set {name}))
     else
       Location.raise_errorf ~loc
         "Ill defined attribute %@set (two args required)"
@@ -893,23 +905,24 @@ let external_decl_of_non_obj (loc : Location.t) (st : external_desc)
    return_wrapper = _;
    scopes;
   } ->
-    if arg_type_specs_length = 1 then
-      (* Check if the first argument is unit, which is invalid for @get *)
-      match arg_type_specs with
-      | [{arg_type = Extern_unit}] ->
-        Location.raise_errorf ~loc
-          "Ill defined attribute %@get (unit argument is not allowed)"
-      | _ -> mk ~scopes (Decl_get {name})
+    if arg_type_specs_length = 1 then (
+      reject_unit_arg ~loc "get" arg_type_specs;
+      mk ~scopes (Decl_get {name}))
     else
       Location.raise_errorf ~loc
         "Ill defined attribute %@get (only one argument)"
   | {get_name = Some _} ->
     Location.raise_errorf ~loc "Attribute found that conflicts with %@get"
 
+type resolution = {
+  pval_type: Parsetree.core_type;
+  spec: External_ffi_types.t;
+  pval_attributes: Parsetree.attributes;
+}
+
 (** Note that the passed [type_annotation] is already processed by visitor pattern before*)
-let handle_attributes (loc : Location.t) (type_annotation : Parsetree.core_type)
-    (prim_attributes : Ast_attributes.t) (prim_name : string) :
-    Parsetree.core_type * External_ffi_types.t * Parsetree.attributes * bool =
+let resolve (loc : Location.t) (type_annotation : Parsetree.core_type)
+    (prim_attributes : Ast_attributes.t) (prim_name : string) : resolution =
   let prim_name_with_source = {name = prim_name; source = External} in
   let result_type, arg_types_ty =
     (* Note this assumes external type is syntatic (no abstraction)*)
@@ -925,7 +938,7 @@ let handle_attributes (loc : Location.t) (type_annotation : Parsetree.core_type)
     let _arity, new_type, spec =
       process_obj loc external_desc prim_name arg_types_ty result_type
     in
-    (new_type, spec, unused_attrs, false)
+    {pval_type = new_type; spec; pval_attributes = unused_attrs}
   else
     let splice = external_desc.splice in
     let arg_type_specs, args, arg_type_specs_length =
@@ -991,6 +1004,9 @@ let handle_attributes (loc : Location.t) (type_annotation : Parsetree.core_type)
             new_arg_types,
             if arg_type = Ignore then i else i + 1 ))
     in
+    (* The checks of [external_decl_of_non_obj] are about the declared
+       arguments, not the [unit] parameter added below. *)
+    let declared_arg_type_specs = arg_type_specs in
     (* If every original argument was erased (e.g. all `@as(json ...) _`),
        keep the external binding callable by threading a final `unit`
        parameter through the type and arg specs. *)
@@ -1013,30 +1029,20 @@ let handle_attributes (loc : Location.t) (type_annotation : Parsetree.core_type)
     in
     let decl : External_ffi_types.external_decl =
       external_decl_of_non_obj loc external_desc prim_name_with_source
-        arg_type_specs_length arg_type_specs
+        arg_type_specs_length declared_arg_type_specs
     in
-    let relative = External_ffi_types.check_decl ~loc decl ~prim_name in
+    External_ffi_types.check_decl ~loc decl ~prim_name;
     (* result type can not be labeled *)
     (* currently we don't process attributes of
        return type, in the future we may *)
     let return_wrapper =
       check_return_wrapper loc external_desc.return_wrapper result_type
     in
-    ( (match args with
-      | [] -> result_type
-      | _ -> Ast_helper.Typ.arrow ~loc args result_type),
-      External_ffi_types.ffi_bs arg_type_specs return_wrapper decl,
-      unused_attrs,
-      relative )
-
-let handle_attributes_as_prim (pval_loc : Location.t) (typ : Ast_core_type.t)
-    (attrs : Ast_attributes.t) (prim_name : string) : response =
-  let pval_type, ffi, pval_attributes, no_inline_cross_module =
-    handle_attributes pval_loc typ attrs prim_name
-  in
-  {
-    pval_type;
-    pval_prim = Prim_ffi {name = prim_name; spec = ffi};
-    pval_attributes;
-    no_inline_cross_module;
-  }
+    {
+      pval_type =
+        (match args with
+        | [] -> result_type
+        | _ -> Ast_helper.Typ.arrow ~loc args result_type);
+      spec = External_ffi_types.ffi_bs arg_type_specs return_wrapper decl;
+      pval_attributes = unused_attrs;
+    }

@@ -32,8 +32,8 @@ let raw_expression loc ~is_function (exp : Parsetree.expression) =
   {
     exp with
     pexp_desc =
-      Ast_external_mk.local_external_apply loc
-        ~pval_prim:(Prim_name "#raw_expr") ~pval_type:(raw_type ()) [exp];
+      Ast_external_mk.local_external_apply loc ~pval_prim:"#raw_expr"
+        ~pval_type:(raw_type ()) [exp];
     pexp_attributes =
       (match !is_function with
       | None -> exp.pexp_attributes
@@ -54,7 +54,7 @@ let ffi_expression loc ~is_function (exp : Parsetree.expression) =
     let arrow ~arity =
       let effective_arity = if arity = 0 then 1 else arity in
       let args =
-        Ext_list.init effective_arity (fun _ ->
+        List.init effective_arity (fun _ ->
             Parsetree.Parg_type {attrs = []; lbl = Nolabel; typ = any})
       in
       Ast_helper.Typ.arrow ~loc args any
@@ -72,8 +72,8 @@ let raw_structure loc (exp : Parsetree.expression) =
     {
       exp with
       pexp_desc =
-        Ast_external_mk.local_external_apply loc
-          ~pval_prim:(Prim_name "#raw_stmt") ~pval_type:(raw_type ()) [exp];
+        Ast_external_mk.local_external_apply loc ~pval_prim:"#raw_stmt"
+          ~pval_type:(raw_type ()) [exp];
     }
 
 let handle_raw loc payload =

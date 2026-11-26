@@ -41,27 +41,6 @@ pub struct SourcePaths {
     pub interface: Option<PathBuf>,
 }
 
-/// A package whose modules `reanalyze` reads.
-#[derive(Debug, Clone)]
-pub struct LocalPackage {
-    /// The package's build directory, where the OCaml compiler writes its
-    /// `.cmt` files.
-    pub build_root: String,
-    /// The package's modules.
-    pub modules: Vec<LocalModule>,
-}
-
-/// A module of a [`LocalPackage`].
-#[derive(Debug, Clone)]
-pub struct LocalModule {
-    /// The module's name.
-    pub name: String,
-    /// The base name of the artifacts the OCaml compiler writes for the
-    /// module: its source file's, with the package's namespace
-    /// (`foo-Namespace`), not capitalized.
-    pub artifact: String,
-}
-
 /// The project a command runs in: its modules, including those of
 /// dependencies and the runtime, and on-demand type-checking.
 pub trait Project {
@@ -83,21 +62,6 @@ pub trait Project {
     /// Type-check a module's interface or implementation from its current
     /// source.
     fn typecheck(&self, module_name: &str, interface: bool) -> Option<TypedSource>;
-    /// The packages `reanalyze` reads: the project's own and the local
-    /// packages it depends on, in the order of their build directories.
-    fn local_packages(&self) -> Vec<LocalPackage> {
-        Vec::new()
-    }
-    /// Run `job` on each of `0..count`: on several threads at once where
-    /// the project has them, each with the stack type-checking needs. A
-    /// command that reads every module (`reanalyze`) type-checks them this
-    /// way. Each index must run exactly once, and all jobs must complete
-    /// before this method returns.
-    fn run_jobs(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
-        for index in 0..count {
-            job(index);
-        }
-    }
 }
 
 /// A loaded module: OCaml's `full` (a `File.t` and its `extra`).
@@ -263,7 +227,7 @@ impl<'p> ProjectSession<'p> {
     /// from that source.
     pub fn full_from_path(&self, path: &Path) -> Option<&Loaded> {
         let module_name = self.project.module_for_path(path)?;
-        let interface = path.to_string_lossy().ends_with('i');
+        let interface = super::uri::is_interface(&path.to_string_lossy());
         self.load(&module_name, interface)
     }
 }

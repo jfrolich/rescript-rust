@@ -47,7 +47,7 @@ pub(crate) use super::row::{Kind, Row, flag, num, var};
 use super::{Unsupported, literal, walk};
 use crate::js_ir::op::{BinOp, Number};
 use crate::js_ir::printer::normalize_float_literal_for_js_into;
-use oxc_allocator::{Allocator, GetAllocator, Vec as ArenaVec};
+use oxc_allocator::{Allocator, CloneIn, GetAllocator, Vec as ArenaVec};
 use oxc_ast::{ast::*, builder::AstBuilder};
 use oxc_span::SPAN;
 use oxc_syntax::{
@@ -175,6 +175,28 @@ pub(crate) struct S<'a> {
     pub row: Row,
 }
 
+impl<'a> S<'a> {
+    /// The expression the statement evaluates first, read in place: the
+    /// value of an expression statement, of a `return`, of a `throw` and of
+    /// a declaration that has one; the test of an `if` and of a `while`.
+    /// `None` for every other statement. (The lowering's `JsStmt::value_of`
+    /// also gives the scrutinee of a `switch`: the builder makes no
+    /// `switch` yet, and the slice that adds one adds its scrutinee here.)
+    /// Its row is [`Builder::row`] of it.
+    /// O(1): the statement's node and one field of it.
+    pub fn value(&self) -> Option<&Expression<'a>> {
+        match &self.stmt {
+            Statement::ExpressionStatement(statement) => Some(&statement.expression),
+            Statement::ReturnStatement(statement) => statement.argument.as_ref(),
+            Statement::ThrowStatement(statement) => Some(&statement.argument),
+            Statement::VariableDeclaration(declaration) => declaration.declarations.first()?.init.as_ref(),
+            Statement::IfStatement(statement) => Some(&statement.test),
+            Statement::WhileStatement(statement) => Some(&statement.test),
+            _ => None,
+        }
+    }
+}
+
 /// A statement list in flight: a run of [`Builder::pool`]. 8 bytes, `Copy`;
 /// a statement is taken out of it at most once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,6 +236,30 @@ pub(crate) struct Builder<'a> {
     /// cleared and reused: it grows to the longest literal of the builder's
     /// life and allocates nothing after that.
     float_text: String,
+    /// The member reads [`Builder::copy_members`] has still to write, the
+    /// innermost last: the copied property of each with the `aux` and the
+    /// payload of its row. Empty between calls and kept, so that a copy
+    /// allocates only when a chain is deeper than any before it.
+    members: Vec<(Property<'a>, u8, u32)>,
+    /// The declarations whose initialiser is a reference, as (`node_id` of
+    /// the statement, variable of the reference), in the order they were
+    /// made: sorted by id, since ids ascend. What [`Builder::alias_at`]
+    /// reads.
+    aliases: Vec<(u32, u32)>,
+}
+
+/// The property of a member read, taken from the read it is copied from.
+enum Property<'a> {
+    /// `object.name`.
+    Static(IdentifierName<'a>),
+    /// `object[key]`.
+    Computed(Expression<'a>),
+}
+
+/// What a walk of [`Builder::substitute`] has still to read.
+enum Pending<'s, 'a> {
+    Statement(&'s mut Statement<'a>),
+    Expression(&'s mut Expression<'a>),
 }
 
 impl<'a> Builder<'a> {
@@ -228,6 +274,8 @@ impl<'a> Builder<'a> {
             pool: Vec::new(),
             steps: 0,
             float_text: String::new(),
+            members: Vec::new(),
+            aliases: Vec::new(),
         }
     }
 
@@ -244,6 +292,7 @@ impl<'a> Builder<'a> {
         self.operands.clear();
         self.staged.clear();
         self.pool.clear();
+        self.aliases.clear();
         self.steps = 0;
     }
 
@@ -670,14 +719,104 @@ impl<'a> Builder<'a> {
     /// block; `tag` says the read is of a block's tag. O(length of the
     /// name).
     pub fn dot(&mut self, object: J<'a>, name: &str, position: Option<u32>, tag: bool) -> J<'a> {
-        let mut flags = of_operand(object.row, PURITY);
-        if position.is_some() && object.row.has(flag::DUPLICABLE) {
-            flags |= flag::DUPLICABLE;
-        }
-        let payload = position.map_or(0, |p| p + 1);
-        let row = Row { flags, kind: Kind::Dot, aux: u8::from(tag), payload };
+        let row = Self::dot_row(object.row, position.map_or(0, |p| p + 1), u8::from(tag));
         let expr = self.member(object.expr, name);
         self.attach(expr, row)
+    }
+
+    /// The row of a member read of `object` (the `Dot` row of the table):
+    /// `payload` is the position plus one, zero for none; `aux` the tag
+    /// bit. O(1).
+    fn dot_row(object: Row, payload: u32, aux: u8) -> Row {
+        let mut flags = of_operand(object, PURITY);
+        if payload != 0 && object.has(flag::DUPLICABLE) {
+            flags |= flag::DUPLICABLE;
+        }
+        Row { flags, kind: Kind::Dot, aux, payload }
+    }
+
+    /// The id of the node built last: a key (the lowering's `Js::id`).
+    /// O(1).
+    fn last_id(&self) -> u32 {
+        self.rows.len() as u32 - 1
+    }
+
+    /// A new leaf with the node and the row of the leaf `leaf`, which
+    /// stays where it is (the lowering's `Js::copy_leaf`). The row is the
+    /// original's: a leaf has every flag from its constructor, and no
+    /// function of the builder changes a row afterwards. O(1) but for a
+    /// string, a bigint and a name, whose text is copied into the arena:
+    /// O(length). Panics when `leaf` is not a `Var`, `Named`, `Number`,
+    /// `Str`, `Bool`, `Null` or `Undefined`.
+    pub fn copy_leaf(&mut self, leaf: &Expression<'a>) -> J<'a> {
+        let row = self.row(leaf);
+        assert!(
+            matches!(
+                row.kind,
+                Kind::Var | Kind::Named | Kind::Number | Kind::Str | Kind::Bool | Kind::Null | Kind::Undefined
+            ),
+            "a copy of a leaf that is a {:?}",
+            row.kind
+        );
+        // With its semantic ids: a reference is printed through its
+        // reference id, which a plain clone leaves out.
+        let expr = leaf.clone_in_with_semantic_ids(self.ast.allocator());
+        self.attach(expr, row)
+    }
+
+    /// A copy of a chain of member reads (the lowering's
+    /// `Js::copy_members`): of the reads from `chain` down to the first
+    /// node that is not a `Dot`, and of that node, a leaf
+    /// ([`Builder::copy_leaf`]). Each read is written again from the
+    /// innermost out with the property, the position and the tag bit of
+    /// its original, and its row is computed from the row of the copy
+    /// below it, as [`Builder::dot`] computes it. `made` is given the id
+    /// of each node made, in that order. `chain` is the caller's node (a
+    /// handle's, or one inside a statement it holds) and stays whole.
+    ///
+    /// One step per node made; the chain is read once more on the way
+    /// down, which counts nothing. A property is copied into the arena
+    /// (O(length of its name)). Allocates outside the arena only when the
+    /// chain is deeper than any copied before (`Builder::members`).
+    pub fn copy_members(&mut self, chain: &Expression<'a>, mut made: impl FnMut(u32)) -> J<'a> {
+        let base = self.members.len();
+        let mut at = chain;
+        loop {
+            let row = self.row(at);
+            if row.kind != Kind::Dot {
+                break;
+            }
+            let (property, object) = match at {
+                Expression::StaticMemberExpression(member) => (
+                    Property::Static(member.property.clone_in(self.ast.allocator())),
+                    &member.object,
+                ),
+                Expression::ComputedMemberExpression(member) => (
+                    Property::Computed(member.expression.clone_in(self.ast.allocator())),
+                    &member.object,
+                ),
+                _ => unreachable!("a `Dot` is built as a member expression"),
+            };
+            self.members.push((property, row.aux, row.payload));
+            at = object;
+        }
+        let mut copy = self.copy_leaf(at);
+        made(self.last_id());
+        while self.members.len() > base {
+            let (property, aux, payload) = self.members.pop().expect("a member read");
+            let row = Self::dot_row(copy.row, payload, aux);
+            let expr = match property {
+                Property::Static(property) => {
+                    Expression::new_static_member_expression(SPAN, copy.expr, property, false, &self.ast)
+                }
+                Property::Computed(key) => {
+                    Expression::new_computed_member_expression(SPAN, copy.expr, key, false, &self.ast)
+                }
+            };
+            copy = self.attach(expr, row);
+            made(self.last_id());
+        }
+        copy
     }
 
     /// `value.length`. O(1).
@@ -866,7 +1005,11 @@ impl<'a> Builder<'a> {
         (!list.is_empty()).then(|| self.row_at(list, list.len() - 1))
     }
 
-    /// Statement `index` of `list`, by reference. O(1).
+    /// Statement `index` of `list`, by reference: the statement stays in
+    /// the list, and no other statement of it is read. It is what the
+    /// lowering's `JsStmt::with_stmt_at` gives its reader on the builder.
+    /// O(1): one indexed read of the pool; counts no step. Panics when the
+    /// statement was taken.
     pub fn statement_at(&self, list: List, index: usize) -> &S<'a> {
         self.slot(list, index).as_ref().expect("a statement taken twice")
     }
@@ -911,6 +1054,12 @@ impl<'a> Builder<'a> {
     /// Whether the declaration prints, and as what, is the seal's. O(1).
     pub fn declare(&mut self, variable: u32, kind: u8, value: Option<J<'a>>) -> S<'a> {
         let flags = value.as_ref().map_or(0, |value| value.row.flags);
+        if let Some(value) = &value {
+            if value.row.kind == Kind::Var {
+                // The id `attach_statement` gives this declaration.
+                self.aliases.push((self.rows.len() as u32, value.row.payload));
+            }
+        }
         let row = Row { aux: kind, payload: variable, ..Self::statement(Kind::Declare, flags) };
         let binder = BindingIdentifier::new_with_symbol_id(
             SPAN,
@@ -986,6 +1135,268 @@ impl<'a> Builder<'a> {
     pub fn debugger(&mut self) -> S<'a> {
         let stmt = Statement::new_debugger_statement(SPAN, &self.ast);
         self.attach_statement(stmt, Self::statement(Kind::Debugger, 0))
+    }
+}
+
+/// What the lowering's export fold reads and edits where its rows are
+/// (THREE_TREES 11.4, "T6x-e and T6x-f: the fold reads where its rows
+/// are"): the statements of a block the caller holds, the references to a
+/// variable in a statement, and the alias of a declaration.
+///
+/// A statement inside a block is the node alone: its row is in the table
+/// ([`Builder::statement_row`]). So the read by reference gives the node,
+/// and the lowering's `JsStmt::with_block_stmt`, which lends a statement
+/// handle, needs a handle that is the node (T6v, decision 3 there).
+impl<'a> Builder<'a> {
+    /// The statements of the block statement `block`. O(1). Panics on a
+    /// statement that is not a block.
+    fn body<'s>(block: &'s S<'a>) -> &'s ArenaVec<'a, Statement<'a>> {
+        let Statement::BlockStatement(node) = &block.stmt else { panic!("not a block statement") };
+        &node.body
+    }
+
+    /// [`Builder::body`], to be changed. O(1).
+    fn body_mut<'s>(block: &'s mut S<'a>) -> &'s mut ArenaVec<'a, Statement<'a>> {
+        let Statement::BlockStatement(node) = &mut block.stmt else { panic!("not a block statement") };
+        &mut node.body
+    }
+
+    /// The number of statements of the block statement `block`, a hole
+    /// counted (the lowering's `JsStmt::block_len`). O(1); counts no step.
+    pub fn block_len(&self, block: &S<'a>) -> usize {
+        Self::body(block).len()
+    }
+
+    /// Statement `index` of the block statement `block`, read where it is
+    /// (the lowering's `JsStmt::with_block_stmt`): the node by reference;
+    /// its row is [`Builder::statement_row`] of it. O(1): one indexed
+    /// read; counts no step. Panics on an index outside the block and on a
+    /// hole.
+    pub fn block_statement<'s>(&self, block: &'s S<'a>, index: usize) -> &'s Statement<'a> {
+        let statement = &Self::body(block)[index];
+        assert!(!matches!(statement, Statement::EmptyStatement(_)), "a statement taken out of its block");
+        statement
+    }
+
+    /// Statement `index` of the block statement `block`, lent to be
+    /// changed where it is (the lowering's `JsStmt::lend_block_stmt`).
+    /// O(1); counts no step. Panics as [`Builder::block_statement`] does.
+    pub fn block_statement_mut<'s>(&mut self, block: &'s mut S<'a>, index: usize) -> &'s mut Statement<'a> {
+        let statement = &mut Self::body_mut(block)[index];
+        assert!(!matches!(statement, Statement::EmptyStatement(_)), "a statement taken out of its block");
+        statement
+    }
+
+    /// Statement `index` of the block statement `block` moved out (the
+    /// lowering's `JsStmt::take_block_stmt`). The slot keeps a hole: an
+    /// empty statement, which no constructor of the builder makes, so the
+    /// statements after it keep their indexes and a hole is told from a
+    /// statement. A block with a hole is read by the functions of this
+    /// block and released; it is not given to a list, so the hole is never
+    /// printed. One step; O(1): a move of 16 bytes and one node of the
+    /// arena for the hole. Panics on an index outside the block and on a
+    /// hole.
+    pub fn take_from_block(&mut self, block: &mut S<'a>, index: usize) -> S<'a> {
+        let hole = Statement::new_empty_statement(SPAN, &self.ast);
+        let slot = &mut Self::body_mut(block)[index];
+        assert!(!matches!(slot, Statement::EmptyStatement(_)), "a statement taken out of its block");
+        let stmt = std::mem::replace(slot, hole);
+        self.steps += 1;
+        let row = self.statement_row(&stmt);
+        S { stmt, row }
+    }
+
+    /// The variable the declaration with the id `id` binds its own to,
+    /// when its initialiser is a reference (the lowering's
+    /// `JsStmt::alias_at`). The id is a key: the node is not found. A
+    /// binary search among the declarations whose initialiser is a
+    /// reference: O(log of their number); counts no step.
+    pub fn alias_at(&self, id: u32) -> Option<u32> {
+        let at = self.aliases.binary_search_by_key(&id, |&(declaration, _)| declaration).ok()?;
+        Some(self.aliases[at].1)
+    }
+
+    /// Record that the initialiser of the declaration `id` is now `value`:
+    /// what [`Builder::substitute`] does when it replaces one. O(log of
+    /// the alias declarations), and the entries after it moved when the
+    /// declaration stops being an alias.
+    fn realias(&mut self, id: u32, value: Row) {
+        let Ok(at) = self.aliases.binary_search_by_key(&id, |&(declaration, _)| declaration) else {
+            return;
+        };
+        if value.kind == Kind::Var {
+            self.aliases[at].1 = value.payload;
+        } else {
+            self.aliases.remove(at);
+        }
+    }
+
+    /// Replace references to `variable` inside the statement `statement`,
+    /// which the caller holds, each by what `make` gives: at most `uses`,
+    /// and the walk stops at the last (the lowering's
+    /// `JsStmt::substitute`). Returns the number replaced. A reference is
+    /// a `Var` node of exactly that variable; what replaces it is not
+    /// entered. The statement stays where it is and keeps its id. The rows
+    /// of the nodes above a replaced reference are not written again: the
+    /// lowering replaces a strictly pure reference by a strictly pure
+    /// expression after the last rule that reads them ran, and neither
+    /// has `HAS_FUN` or `SEAL`.
+    ///
+    /// One step per node the walk reads, until the last reference
+    /// replaced: O(nodes of the statement). The work stack is one vector
+    /// of the call (its references borrow the statement, so the builder
+    /// cannot keep it): one allocation a call that has a use to replace,
+    /// none per node. Panics on a node no constructor of the builder
+    /// makes: the slice that adds a constructor adds its arm.
+    pub fn substitute(
+        &mut self,
+        statement: &mut S<'a>,
+        variable: u32,
+        uses: u32,
+        mut make: impl FnMut(&mut Self) -> J<'a>,
+    ) -> u32 {
+        let mut replaced = 0;
+        if uses == 0 {
+            return replaced;
+        }
+        let mut work = vec![Pending::Statement(&mut statement.stmt)];
+        while let Some(pending) = work.pop() {
+            self.steps += 1;
+            let expr = match pending {
+                Pending::Statement(statement) => {
+                    let id = statement.node_id().index() as u32;
+                    match statement {
+                        Statement::ExpressionStatement(node) => work.push(Pending::Expression(&mut node.expression)),
+                        Statement::ReturnStatement(node) => {
+                            work.extend(node.argument.as_mut().map(Pending::Expression))
+                        }
+                        Statement::ThrowStatement(node) => work.push(Pending::Expression(&mut node.argument)),
+                        Statement::VariableDeclaration(node) => {
+                            for declarator in node.declarations.iter_mut() {
+                                let Some(init) = &mut declarator.init else { continue };
+                                // The initialiser itself: the alias table
+                                // names this declaration.
+                                if self.is_reference(init, variable) {
+                                    let copy = make(self);
+                                    self.realias(id, copy.row);
+                                    *init = copy.expr;
+                                    replaced += 1;
+                                } else {
+                                    work.push(Pending::Expression(init));
+                                }
+                            }
+                        }
+                        Statement::IfStatement(node) => {
+                            let node = &mut **node;
+                            work.push(Pending::Expression(&mut node.test));
+                            work.push(Pending::Statement(&mut node.consequent));
+                            work.extend(node.alternate.as_mut().map(Pending::Statement));
+                        }
+                        Statement::BlockStatement(node) => work.extend(node.body.iter_mut().map(Pending::Statement)),
+                        Statement::WhileStatement(node) => {
+                            let node = &mut **node;
+                            work.push(Pending::Expression(&mut node.test));
+                            work.push(Pending::Statement(&mut node.body));
+                        }
+                        Statement::LabeledStatement(node) => work.push(Pending::Statement(&mut node.body)),
+                        Statement::BreakStatement(_)
+                        | Statement::ContinueStatement(_)
+                        | Statement::DebuggerStatement(_)
+                        | Statement::EmptyStatement(_) => {}
+                        _ => unreachable!("a statement no constructor of the builder makes"),
+                    }
+                    if replaced == uses {
+                        break;
+                    }
+                    continue;
+                }
+                Pending::Expression(expr) => expr,
+            };
+            if self.is_reference(expr, variable) {
+                *expr = make(self).expr;
+                replaced += 1;
+                if replaced == uses {
+                    break;
+                }
+                continue;
+            }
+            match expr {
+                Expression::UnaryExpression(node) => work.push(Pending::Expression(&mut node.argument)),
+                Expression::BinaryExpression(node) => {
+                    let node = &mut **node;
+                    work.push(Pending::Expression(&mut node.left));
+                    work.push(Pending::Expression(&mut node.right));
+                }
+                Expression::LogicalExpression(node) => {
+                    let node = &mut **node;
+                    work.push(Pending::Expression(&mut node.left));
+                    work.push(Pending::Expression(&mut node.right));
+                }
+                Expression::ConditionalExpression(node) => {
+                    let node = &mut **node;
+                    work.push(Pending::Expression(&mut node.test));
+                    work.push(Pending::Expression(&mut node.consequent));
+                    work.push(Pending::Expression(&mut node.alternate));
+                }
+                Expression::SequenceExpression(node) => {
+                    work.extend(node.expressions.iter_mut().map(Pending::Expression))
+                }
+                Expression::StaticMemberExpression(node) => work.push(Pending::Expression(&mut node.object)),
+                Expression::ComputedMemberExpression(node) => {
+                    let node = &mut **node;
+                    work.push(Pending::Expression(&mut node.object));
+                    work.push(Pending::Expression(&mut node.expression));
+                }
+                Expression::AssignmentExpression(node) => {
+                    let node = &mut **node;
+                    match &mut node.left {
+                        AssignmentTarget::StaticMemberExpression(target) => {
+                            work.push(Pending::Expression(&mut target.object))
+                        }
+                        AssignmentTarget::ComputedMemberExpression(target) => {
+                            let target = &mut **target;
+                            work.push(Pending::Expression(&mut target.object));
+                            work.push(Pending::Expression(&mut target.expression));
+                        }
+                        // The target of an assignment is not a reference
+                        // the lowering replaces: a moved variable is never
+                        // assigned.
+                        AssignmentTarget::AssignmentTargetIdentifier(_) => {}
+                        _ => unreachable!("an assignment target no constructor of the builder makes"),
+                    }
+                    work.push(Pending::Expression(&mut node.right));
+                }
+                Expression::CallExpression(node) => {
+                    let node = &mut **node;
+                    work.push(Pending::Expression(&mut node.callee));
+                    work.extend(node.arguments.iter_mut().map(|argument| {
+                        Pending::Expression(argument.as_expression_mut().expect("an argument that is an expression"))
+                    }));
+                }
+                Expression::NewExpression(node) => {
+                    let node = &mut **node;
+                    work.push(Pending::Expression(&mut node.callee));
+                    work.extend(node.arguments.iter_mut().map(|argument| {
+                        Pending::Expression(argument.as_expression_mut().expect("an argument that is an expression"))
+                    }));
+                }
+                Expression::Identifier(_)
+                | Expression::NullLiteral(_)
+                | Expression::BooleanLiteral(_)
+                | Expression::StringLiteral(_)
+                | Expression::NumericLiteral(_)
+                | Expression::BigIntLiteral(_) => {}
+                _ => unreachable!("an expression no constructor of the builder makes"),
+            }
+        }
+        replaced
+    }
+
+    /// Whether `expr` is a reference to `variable`: a `Var` row of that
+    /// variable. O(1): the node's `node_id` and its row.
+    fn is_reference(&self, expr: &Expression<'a>, variable: u32) -> bool {
+        let row = self.row(expr);
+        row.kind == Kind::Var && row.payload == variable
     }
 }
 

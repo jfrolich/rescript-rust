@@ -380,7 +380,7 @@ impl Processor<'_> {
             }
             SignatureItem::SigModule(ident, md, _) => {
                 let name = ident.name().to_string();
-                let item = self.for_type_module(&name, env, &md.md_type);
+                let item = self.for_type_module(&name, &env.add_module(&name), &md.md_type);
                 let extent = self.ctx.decl_extent(md.md_loc);
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
@@ -399,7 +399,10 @@ impl Processor<'_> {
                 );
                 vec![module_item_of(&declared)]
             }
-            _ => Vec::new(),
+            SignatureItem::SigModtype(..)
+            | SignatureItem::SigTypext(..)
+            | SignatureItem::SigClass
+            | SignatureItem::SigClassType => Vec::new(),
         }
     }
 
@@ -625,11 +628,7 @@ impl Processor<'_> {
         md: &tt::TypedModuleDeclaration,
     ) -> ModuleItem {
         let name = self.ctx.located(&md.md_name);
-        let item = self.for_type_module(
-            &name.txt,
-            &env.add_module(&name.txt),
-            &self.ctx.ta.module_type(md.md_type).mty_type,
-        );
+        let item = self.for_module_type(&name.txt, &env.add_module(&name.txt), md.md_type);
         let stamps = &mut self.stamps;
         let declared = add_declared(
             name,
@@ -705,8 +704,77 @@ impl Processor<'_> {
                     self.for_type_signature_item(&env, exported, item)
                 })
             }
+            tt::TypedSignatureItemDesc::Tsig_modtype(mtd) => {
+                self.for_module_type_declaration(env, exported, mtd)
+            }
             _ => Vec::new(),
         }
+    }
+
+    /// `for_module_type`: a module type written in source. A signature is
+    /// read from the typed tree, which has the location of each item's name;
+    /// any other module type from its type.
+    fn for_module_type(
+        &mut self,
+        name: &str,
+        env: &ProcessEnv,
+        module_type: tt::TModTypeIdx,
+    ) -> Module {
+        let ctx = self.ctx;
+        let module_type = ctx.ta.module_type(module_type);
+        match &module_type.mty_desc {
+            tt::ModuleTypeDesc::Tmty_signature(signature) => {
+                let mut exported = Exported::default();
+                // Right to left, as in `for_type_signature`, so that the last
+                // of several items with the same name is the one exported.
+                let items = fold_right_items(ctx.ta.signature_items(signature.sig_items), |item| {
+                    self.for_signature_item(env, &mut exported, &item.sig_desc)
+                });
+                Module::Structure(Arc::new(Structure {
+                    name: name.to_string(),
+                    docstring: Vec::new(),
+                    exported: Arc::new(exported),
+                    items,
+                    deprecated: None,
+                }))
+            }
+            tt::ModuleTypeDesc::Tmty_ident(..)
+            | tt::ModuleTypeDesc::Tmty_alias(..)
+            | tt::ModuleTypeDesc::Tmty_functor(..)
+            | tt::ModuleTypeDesc::Tmty_with(..)
+            | tt::ModuleTypeDesc::Tmty_typeof(..) => {
+                self.for_type_module(name, env, &module_type.mty_type)
+            }
+        }
+    }
+
+    /// `for_module_type_declaration`: a module type declaration written in
+    /// source.
+    fn for_module_type_declaration(
+        &mut self,
+        env: &ProcessEnv,
+        exported: &mut Exported,
+        mtd: &tt::ModuleTypeDeclaration,
+    ) -> Vec<ModuleItem> {
+        let Some(mtd_type) = mtd.mtd_type else {
+            return Vec::new();
+        };
+        let name = self.ctx.located(&mtd.mtd_name);
+        let env = env.add_module_type(&name.txt);
+        let item = self.for_module_type(&name.txt, &env, mtd_type);
+        let stamps = &mut self.stamps;
+        let declared = add_declared(
+            name,
+            self.ctx.extent(mtd.mtd_loc),
+            mtd.mtd_id.binding_time(),
+            &env,
+            item,
+            Attrs::Parsed(mtd.mtd_attributes.as_slice(), self.ctx.arena),
+            Some((exported, ExportedKind::Module)),
+            |stamp, d| stamps.add_module(stamp, d),
+            self.ctx.raised,
+        );
+        vec![module_item_of(&declared)]
     }
 
     /// `for_signature`.
@@ -919,29 +987,7 @@ impl Processor<'_> {
                 .map(|mb| self.for_module_binding(env, exported, mb))
                 .collect(),
             tt::StructureItemDesc::Tstr_modtype(mtd) => {
-                let Some(mtd_type) = &mtd.mtd_type else {
-                    return Vec::new();
-                };
-                let name = self.ctx.located(&mtd.mtd_name);
-                let env = env.add_module_type(&name.txt);
-                let item = self.for_type_module(
-                    &name.txt,
-                    &env,
-                    &self.ctx.ta.module_type(*mtd_type).mty_type,
-                );
-                let stamps = &mut self.stamps;
-                let declared = add_declared(
-                    name,
-                    self.ctx.extent(mtd.mtd_loc),
-                    mtd.mtd_id.binding_time(),
-                    &env,
-                    item,
-                    Attrs::Parsed(mtd.mtd_attributes.as_slice(), self.ctx.arena),
-                    Some((exported, ExportedKind::Module)),
-                    |stamp, d| stamps.add_module(stamp, d),
-                    self.ctx.raised,
-                );
-                vec![module_item_of(&declared)]
+                self.for_module_type_declaration(env, exported, mtd)
             }
             tt::StructureItemDesc::Tstr_include(incl) => {
                 let env = match get_module_path(
@@ -1063,11 +1109,35 @@ impl Processor<'_> {
                 let env = env.add_module(module_name);
                 self.for_type_module(module_name, &env, module_type)
             }
-            tt::ModuleExprDesc::Tmod_constraint(expr, typ, _, _) => {
+            // The type checker wraps an alias used where it cannot stay an
+            // alias, e.g. `Make` in `Make(Arg)` after `module Make =
+            // Fn.MakeSet`, in an implicit constraint with the expanded
+            // signature. Keep the alias, so that paths through it resolve to
+            // the module it names.
+            tt::ModuleExprDesc::Tmod_constraint(
+                expr,
+                _,
+                tt::ModuleTypeConstraint::Tmodtype_implicit,
+                _,
+            ) if matches!(
+                self.ctx.ta.module_expr(*expr).mod_desc,
+                tt::ModuleExprDesc::Tmod_ident(..)
+            ) =>
+            {
+                self.for_module(env, &self.ctx.ta.module_expr(*expr).mod_desc, module_name)
+            }
+            tt::ModuleExprDesc::Tmod_constraint(expr, typ, constraint, _) => {
                 let mod_kind =
                     self.for_module(env, &self.ctx.ta.module_expr(*expr).mod_desc, module_name);
                 let env = env.add_module(module_name);
-                let mod_type_kind = self.for_type_module(module_name, &env, typ);
+                let mod_type_kind = match constraint {
+                    tt::ModuleTypeConstraint::Tmodtype_explicit(module_type) => {
+                        self.for_module_type(module_name, &env, *module_type)
+                    }
+                    tt::ModuleTypeConstraint::Tmodtype_implicit => {
+                        self.for_type_module(module_name, &env, typ)
+                    }
+                };
                 Module::Constraint(Box::new(mod_kind), Box::new(mod_type_kind))
             }
         }

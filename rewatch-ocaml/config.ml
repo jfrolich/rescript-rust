@@ -86,7 +86,8 @@ let decode_package_specs path ~suffix fields =
   let package_specs =
     match optional_member "package-specs" fields with
     | None ->
-      [{module_format = Esmodule; in_source = true; suffix = Some ".js"}]
+      (* No suffix of its own, so the top-level "suffix" applies. *)
+      [{module_format = Esmodule; in_source = true; suffix = None}]
     | Some (`List values) -> List.map (parse_package_spec path) values
     | Some value -> [parse_package_spec path value]
   in
@@ -120,7 +121,7 @@ let decode_namespace path ~name fields =
            namespace source fix)
   in
   let from_package_name () =
-    namespace_from_package_name name
+    Ext_namespace.namespace_of_package_name name
     |> module_name
          ~source:(Printf.sprintf "package name \"%s\"" name)
          ~fix:" or rename the package"
@@ -140,7 +141,7 @@ let decode_namespace path ~name fields =
     | Some (`String value) when Option.is_some namespace_entry ->
       Some (from_value value (pascal_case value))
     | Some (`String value) ->
-      Some (from_value value (namespace_from_package_name value))
+      Some (from_value value (Ext_namespace.namespace_of_package_name value))
     | Some _ -> fail path "field \"namespace\" must be a boolean or string"
   in
   match (namespace_entry, namespace_name) with

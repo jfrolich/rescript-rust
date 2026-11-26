@@ -357,7 +357,7 @@ let ocaml_fun ?immutable_mask ?directive ~return_unit ~async ~one_unit_arg
     source_loc = None;
   }
 
-let method_ ~async ~return_unit params body : t =
+let method_ ?directive ~async ~return_unit params body : t =
   let len = List.length params in
   {
     expression_desc =
@@ -369,7 +369,7 @@ let method_ ~async ~return_unit params body : t =
           env = Js_fun_env.make len;
           return_unit;
           async;
-          directive = None;
+          directive;
         };
     comment = None;
     source_loc = None;
@@ -1418,19 +1418,9 @@ let literal_tag = function
   | Null -> nil
   | Undefined -> undefined
 
-(* The constructor of a class at a global path such as "Intl.Locale": a
-   global with properties, so that a binding that shadows the global's name
-   is noticed. *)
-let class_constructor (instance : Variant_runtime.Instance.t) =
-  match
-    String.split_on_char '.' (Variant_runtime.Instance.to_string instance)
-  with
-  | [] -> assert false
-  | global :: properties -> List.fold_left dot (js_global global) properties
-
 (* The [typeof] string an untagged payload answers to, as a [switch] key.
-   Instances are told apart by [is_instance_of], an unknown payload is not
-   checked *)
+   Instances are told apart by [instanceof] or [Array.isArray], an unknown
+   payload is not checked *)
 let block_type_name block_type =
   match Variant_runtime.typeof_name block_type with
   | Some name -> str name
@@ -1439,11 +1429,6 @@ let block_type_name block_type =
 let tag_type = function
   | Variant_runtime.Literal d -> literal_tag d
   | Payload_shape b -> block_type_name b
-
-let is_instance_of (instance : Variant_runtime.Instance.t) e =
-  match instance with
-  | Array -> is_array e
-  | Class _ -> instanceof e (class_constructor instance)
 
 (* Whether a value of a tagged variant is a constant rather than a block,
    given the literals of its constants *)
@@ -1510,7 +1495,7 @@ let to_int32 (e : J.expression) : J.expression = int32_bor e zero_int_literal
 let string_comp (cmp : Lambda.comparison) (e0 : t) (e1 : t) =
   match (string_literal_semantic e0, string_literal_semantic e1) with
   | Some a0, Some a1 -> (
-    let equal = Ext_string.equal a0 a1 in
+    let equal = String.equal a0 a1 in
     match cmp with
     | Ceq -> bool equal
     | Cneq -> bool (Stdlib.not equal)

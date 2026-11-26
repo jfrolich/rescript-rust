@@ -32,12 +32,14 @@ let suites =
       Ounit_analysis_config_tests.suites;
       Ounit_analysis_completion_tests.suites;
       Ounit_analysis_references_tests.suites;
+      Ounit_analysis_types_tests.suites;
       Ounit_ffi_inclusion_tests.suites;
       Ounit_typeopt_tests.suites;
       Ounit_gentype_tests.suites;
       Ounit_compiler_request_tests.suites;
       Ounit_find_in_path_tests.suites;
       Ounit_build_file_store_tests.suites;
+      Ounit_deferred_signature_tests.suites;
     ]
 
 let _ = OUnit.run_test_tt_main suites

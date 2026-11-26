@@ -847,9 +847,9 @@ and value_description ~with_locs vd =
     Sexp.list
       (Sexp.atom "prim"
       :: List.map string
-           (match vd.val_prim with
-           | None -> []
-           | Some prim -> Ffi_debug.primitive_repr prim));
+           (match vd.val_val.val_kind with
+           | Val_prim prim -> [prim.prim_name]
+           | _ -> []));
     attrs_sexp;
   ])
 

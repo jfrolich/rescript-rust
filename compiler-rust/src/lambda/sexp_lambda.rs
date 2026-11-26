@@ -263,8 +263,13 @@ fn variant_instance(instance: &crate::types::VariantInstance) -> Sexp {
             name, ancestors, ..
         } => Sexp::list(vec![
             Sexp::atom("Class"),
-            string(name),
-            Sexp::list(ancestors.iter().map(|ancestor| string(ancestor)).collect()),
+            string(&name.to_string()),
+            Sexp::list(
+                ancestors
+                    .iter()
+                    .map(|ancestor| string(&ancestor.to_string()))
+                    .collect(),
+            ),
         ]),
     }
 }

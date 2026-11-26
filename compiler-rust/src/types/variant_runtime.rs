@@ -7,13 +7,80 @@
 
 use super::context::TypeContext;
 
+/// OCaml `Variant_runtime.Instance.class_name`: where a class's constructor
+/// is found: at `path`, such as `"Date"` or `"Intl.Locale"`, among the
+/// globals or, with `module_`, among the exports of that module, as a
+/// `@module` external reads it. Two classes are the same class when both are
+/// equal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ClassName {
+    /// The module that exports the class (`@module`), if any.
+    pub module_: Option<String>,
+    /// The path of the class among the globals or the module's exports.
+    pub path: String,
+}
+
+impl ClassName {
+    /// `Instance.global`: the global class at a path.
+    pub fn global(path: impl Into<String>) -> Self {
+        ClassName {
+            module_: None,
+            path: path.into(),
+        }
+    }
+
+    /// One string standing for the class name, for tables that hold
+    /// strings: the path of a global, or the module and the path separated
+    /// by a NUL byte, which a path cannot contain. [`Self::from_key`]
+    /// inverts it.
+    pub fn to_key(&self) -> String {
+        match &self.module_ {
+            None => self.path.clone(),
+            Some(module_) => format!("{module_}\0{}", self.path),
+        }
+    }
+
+    /// The class name [`Self::to_key`] gave `key`.
+    pub fn from_key(key: &str) -> Self {
+        match key.rsplit_once('\0') {
+            None => ClassName::global(key),
+            Some((module_, path)) => ClassName {
+                module_: Some(module_.to_string()),
+                path: path.to_string(),
+            },
+        }
+    }
+}
+
+/// The global class at a path.
+impl From<&str> for ClassName {
+    fn from(path: &str) -> Self {
+        ClassName::global(path)
+    }
+}
+
+/// `Instance.class_name_to_string`: the path of a global class, or
+/// `Mesh from "three"` for an export.
+impl std::fmt::Display for ClassName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.module_ {
+            None => f.write_str(&self.path),
+            Some(module_) => write!(
+                f,
+                "{} from \"{}\"",
+                self.path,
+                crate::string_literal::encode_js_string(module_)
+            ),
+        }
+    }
+}
+
 /// OCaml `Variant_runtime.Instance.t`: a JavaScript class whose instances a
-/// value is recognized by. `name` is the global constructor's path, such as
-/// `"Date"` or `"Intl.Locale"`, and `ancestors` are the paths of its
-/// superclasses that are declared too, nearest first. Arrays are recognized
-/// by `Array.isArray` instead. Two instances are equal when their names and
-/// ancestors are, as OCaml's `=` compares them; `blocks` only tells which
-/// classes are one value.
+/// value is recognized by, with `ancestors` the superclasses that are
+/// declared too, nearest first. Arrays are recognized by `Array.isArray`
+/// instead. Two instances are equal when their names and ancestors are, as
+/// OCaml's `=` compares them; `blocks` only tells which classes are one
+/// value.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Instance {
     /// Arrays, and which `InstanceType Array` block this value is: a
@@ -22,10 +89,10 @@ pub enum Instance {
     Array(ShapeAllocation),
     /// Any other class.
     Class {
-        /// The global constructor's path, such as `Date` or `Intl.Locale`.
-        name: String,
-        /// The paths of its declared superclasses, nearest first.
-        ancestors: Vec<String>,
+        /// Where the constructor is found.
+        name: ClassName,
+        /// Its declared superclasses, nearest first.
+        ancestors: Vec<ClassName>,
         /// Which OCaml blocks this value is.
         blocks: ClassBlocks,
     },
@@ -81,9 +148,10 @@ impl std::hash::Hash for Instance {
 pub struct ClassBlocks {
     /// The `InstanceType` block, with the `Class` block allocated with it.
     pub block: ShapeAllocation,
-    /// The name string.
+    /// The class name's record.
     pub name: ShapeString,
-    /// The cons cell and the string of each ancestor, nearest first.
+    /// The cons cell and the class name record of each ancestor, nearest
+    /// first.
     pub ancestors: Vec<(ShapeAllocation, ShapeString)>,
 }
 
@@ -108,10 +176,10 @@ impl ClassBlocks {
 
 impl Instance {
     /// variant_runtime.ml `Instance.to_string`.
-    pub fn as_str(&self) -> &str {
+    pub fn to_ocaml_string(&self) -> String {
         match self {
-            Self::Array(_) => "Array",
-            Self::Class { name, .. } => name,
+            Self::Array(_) => "Array".to_string(),
+            Self::Class { name, .. } => name.to_string(),
         }
     }
 
@@ -332,19 +400,6 @@ pub enum ShapeString {
     Allocation(ShapeAllocation),
 }
 
-impl ShapeString {
-    /// The payload string of the attribute named at `loc`; a string of its
-    /// own when that location has no allocation identity to share.
-    pub(crate) fn attribute(ctx: &TypeContext, loc: super::DeclLoc) -> Self {
-        match ctx.location_identity(loc) {
-            Some(identity) => ShapeString::Attribute {
-                scope: identity.scope,
-                location: identity.location,
-            },
-            None => ShapeString::Allocation(ctx.fresh_shape_allocation()),
-        }
-    }
-}
 
 /// The shapes and payload kinds of an imported interface, given new
 /// allocations as unmarshalling allocates new blocks. Sharing within the
@@ -1059,8 +1114,8 @@ mod shape_import_tests {
 
     fn class(name: &str, blocks: ClassBlocks) -> BlockType {
         BlockType::Instance(Instance::Class {
-            name: name.to_string(),
-            ancestors: blocks.ancestors.iter().map(|_| "A".to_string()).collect(),
+            name: ClassName::global(name),
+            ancestors: blocks.ancestors.iter().map(|_| ClassName::global("A")).collect(),
             blocks,
         })
     }

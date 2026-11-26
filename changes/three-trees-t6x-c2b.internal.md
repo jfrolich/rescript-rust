@@ -1,0 +1,1 @@
+- Backend lowering: external calls, object-creating externals and JSX elements build and pass expression handles of the lowering interface; the row forms `primitive_runtime` and `static_member` are deleted.

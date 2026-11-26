@@ -1,0 +1,1 @@
+- The rewritten type checker falls back in pattern mode: an argument that is not injective and two variant rows are unified under a snapshot and reified when that fails, `mcomp` tells whether two types can have a common instance, and the body of an equation copies every node of its destination.

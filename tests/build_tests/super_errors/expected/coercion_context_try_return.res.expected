@@ -1,0 +1,14 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/coercion_context_try_return.res[0m:[2m1:45-52[0m
+
+  [1;31m1[0m [2m│[0m let f = (o: int) => try "s" catch { | _ => ([1;31mo :> int[0m) }
+  2 [2m│[0m 
+
+  This has type: [1;31mint[0m
+  But this try/catch is expected to return: [1;33mstring[0m
+
+  The [1;33mtry[0m body and the [1;33mcatch[0m block must return the same type.
+  To fix this, change your try/catch blocks to return the expected type.
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.

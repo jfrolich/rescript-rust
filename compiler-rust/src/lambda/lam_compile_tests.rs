@@ -16,10 +16,24 @@ pub(super) use crate::lambda::js_exp_make::{
     int_expr, int32_band, int32_bxor, int32_mul, ocaml_typeof_expr, to_int32,
 };
 pub(super) use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
-pub(super) use crate::lambda::js_pass_flatten_and_mark_dead::{
-    apply_js_flatten_and_mark_dead_pass, apply_js_flatten_pass,
-};
-pub(super) use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass;
+pub(super) use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass;
+
+/// The tail-call inlining pass on a module that assigns no variable.
+pub(super) fn apply_js_tailcall_inline_pass(deps: DepsProgram) -> DepsProgram {
+    crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass(deps, &Default::default())
+}
+
+/// The substitution and dead-mark pass on a module that assigns no variable.
+pub(super) fn apply_js_flatten_and_mark_dead_pass(
+    deps: DepsProgram,
+    jsx_preserve: bool,
+) -> DepsProgram {
+    crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_and_mark_dead_pass(
+        deps,
+        &Default::default(),
+        jsx_preserve,
+    )
+}
 pub(super) use crate::lambda::js_shake::apply_js_shake_pass;
 pub(super) use crate::lambda::lam_coercion::extract_toplevel_exports;
 pub(super) use crate::lambda::lam_compile_external::external_module_import_attributes;

@@ -232,12 +232,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Cost: O(A + H + S + J): consumes A child outputs, pops H dead call slots, sequences S
     /// held/statement slots, then call/eta/tail construction and J JS-normalizer/release
     /// visits. Each argument is appended to retained buffers, not cloned as a subtree.
+    /// The values are moved out of the retained vector once, in order.
     pub(super) fn finish_application(
         &mut self,
         cx: Cx,
         call: Call,
-        children: impl Iterator<Item = Probed>,
-    ) -> Probed {
+        children: impl Iterator<Item = Probed<B>>,
+    ) -> Probed<B> {
         let call = self.calls[call.0 as usize].take().expect("live call plan");
         while self.calls.last().is_some_and(Option::is_none) { self.calls.pop(); }
         let mut outputs = std::mem::take(&mut self.argument_outputs);
@@ -249,45 +250,52 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let method_callee = !call.inline && call.external.is_none()
             && matches!(self.source.view(self.source.lists.get(call.operands)[0]), View::Prim { primitive, .. }
                 if matches!(self.arena.primitive(primitive).primitive, crate::lambda::lam_primitive::Primitive::PjsObjectGet(_)));
-        let statements = self.sequence_arguments(method_callee, &outputs, &mut values);
+        let statements = self.sequence_arguments(method_callee, &mut outputs, &mut values);
         outputs.clear();
         self.argument_outputs = outputs;
         let result = (|| {
-        if let Some(frame) = call.tail { return self.finish_self_call(frame, statements, &values); }
+        // An inlined call is never a self call, so the order of the two
+        // tests decides nothing: `tail` needs the callee to be the
+        // enclosing function's variable (`self_call`), `inline` a module
+        // field of a global (`module_field_apply_target`).
+        debug_assert!(!(call.inline && call.tail.is_some()));
         if call.inline {
-            return self.primitive_result(cx, statements, values[0]);
+            let value = values.drain(..).next().expect("inlined value");
+            return self.primitive_result(cx, statements, value);
         }
+        if let Some(frame) = call.tail {
+            return self.finish_self_call(frame, statements, values.drain(..));
+        }
+        let mut values = values.drain(..);
         let mut value = if let Some((module, member, arity)) = call.external {
             let mut callee = self.js.qualified(&mut self.arena, module, Some(member));
             self.js.assume_strict(&mut self.arena, &mut callee);
-            let callee = B::node(callee);
             match call.status {
-                ApplyStatus::InferFull | ApplyStatus::Uncurry => self.call_node(
+                ApplyStatus::InferFull | ApplyStatus::Uncurry => self.call_values(
                     callee,
-                    &values,
+                    values,
                     Self::call_info_of_apply_status(call.status),
                 ),
                 ApplyStatus::Na => {
                     if let Some(arity) = arity {
-                        self.apply_with_arity(callee, arity, &values)
+                        self.apply_with_arity(callee, arity, &mut values)
                     } else {
-                        self.call_node(callee, &values, crate::js_ir::CallInfo::default())
+                        self.call_values(callee, values, crate::js_ir::CallInfo::default())
                     }
                 }
             }
         } else {
-            self.call_node(
-                values[0],
-                &values[1..],
+            let callee = values.next().expect("callee");
+            self.call_values(
+                callee,
+                values,
                 Self::call_info_of_apply_status(call.status),
             )
         };
         // C:1129 compile_apply_call: attach only a real, non-ghost location.
         if self.locations.and_then(|locations| locations.get(call.loc))
             .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0) {
-            let mut located = B::from_node(value);
-            self.js.locate(&mut self.arena, &mut located, call.loc);
-            value = B::node(located);
+            self.js.locate(&mut self.arena, &mut value, call.loc);
         }
         if !self.statements.has_statements(statements) {
             // Holes carry no effects; pop them before returning a free value.
@@ -362,21 +370,21 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         Some(AritySpan { start, len: arities.len() as u32 })
     }
 
-    /// C:1144 compile_apply_call_inner: the call constructor performs no rewrite.
-    /// Cost: O(A): one move and one step per argument.
-    pub(super) fn call_node(
+    /// C:1144 compile_apply_call_inner: `callee(args)`; the constructor
+    /// performs no rewrite. O(A): one move and one step per argument; allocates
+    /// nothing in a warm unit.
+    pub(super) fn call_values(
         &mut self,
-        callee: NodeId,
-        args: &[NodeId],
+        callee: B::E,
+        args: impl Iterator<Item = B::E>,
         info: crate::js_ir::CallInfo,
-    ) -> NodeId {
+    ) -> B::E {
         let info = self.arena.js_info(crate::bir::JsPayload::Call(info));
         let mark = self.js.mark();
-        for &arg in args {
-            self.js.push(B::from_node(arg));
+        for arg in args {
+            self.js.push(arg);
         }
-        let call = self.js.call(&mut self.arena, B::from_node(callee), mark, info);
-        B::node(call)
+        self.js.call(&mut self.arena, callee, mark, info)
     }
 
     /// C:1341 apply_with_arity: consume saturated groups once, then eta-expand
@@ -386,50 +394,51 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// groups consume disjoint argument slices.
     fn apply_with_arity(
         &mut self,
-        mut callee: NodeId,
+        mut callee: B::E,
         arity: AritySpan,
-        args: &[NodeId],
-    ) -> NodeId {
-        let mut offset = 0;
+        args: &mut std::vec::Drain<'_, B::E>,
+    ) -> B::E {
         let full = Self::call_info_of_apply_status(ApplyStatus::InferFull);
         for index in arity.start..arity.start + arity.len {
             let group = self.call_arities[index as usize];
-            if offset == args.len() {
+            if args.len() == 0 {
                 return callee;
             }
             let count = if group == 0 { 1 } else { group as usize };
-            let remaining = &args[offset..];
-            if remaining.len() >= count {
-                callee = self.call_node(callee, &remaining[..count], full.clone());
-                offset += count;
-            } else if remaining
+            let remaining = args.len();
+            if remaining >= count {
+                callee = self.call_values(callee, args.by_ref().take(count), full.clone());
+            } else if args
+                .as_slice()
                 .iter()
-                .all(|&node| self.js.has(&self.arena, B::at(node), flag::STRICT))
+                .all(|value| self.js.has(&self.arena, B::of(value), flag::STRICT))
             {
-                let missing = count - remaining.len();
+                let missing = count - remaining;
                 let params = crate::bir::VarSpan {
                     start: self.arena.vars.len() as u32,
                     len: missing as u32,
                 };
                 let mut full_args = std::mem::take(&mut self.eta_arguments);
                 debug_assert!(full_args.is_empty());
-                full_args.extend_from_slice(remaining);
+                full_args.extend(args.by_ref());
                 super::names::open(&mut self.arena);
                 for _ in 0..missing {
                     let var = self.fresh_variable("param");
-                    let mut param = self.js.var(&mut self.arena, var);
-                    self.js.assume_strict(&mut self.arena, &mut param);
-                    full_args.push(B::node(param));
+                    let param = self.js.var(&mut self.arena, var);
+                    full_args.push(param);
                 }
                 // The callee and the arguments were built before the
-                // function's scope opened and move into it (G10).
-                super::names::adopt(&mut self.arena, &self.idents, callee);
-                for &node in remaining {
+                // function's scope opened and move into it (G10). T6r:
+                // `names::adopt` takes a row, read here by its id.
+                let node = NodeId(self.js.id(&self.arena, B::of(&callee)));
+                super::names::adopt(&mut self.arena, &self.idents, node);
+                for value in &full_args[..remaining] {
+                    let node = NodeId(self.js.id(&self.arena, B::of(value)));
                     super::names::adopt(&mut self.arena, &self.idents, node);
                 }
-                let call = self.call_node(callee, &full_args, full);
-                full_args.clear(); self.eta_arguments = full_args;
-                let ret = self.js.return_(&mut self.arena, B::from_node(call));
+                let call = self.call_values(callee, full_args.drain(..), full);
+                self.eta_arguments = full_args;
+                let ret = self.js.return_(&mut self.arena, call);
                 let body = self.js.list(&mut self.arena, 1, std::iter::once(ret));
                 let header = self.arena.function_header(
                     params,
@@ -438,15 +447,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 );
                 let function = self.js.function(&mut self.arena, header, body);
                 super::names::close(&mut self.arena, &self.idents, header);
-                return B::node(function);
+                return function;
             } else {
-                return self.call_node(callee, remaining, crate::js_ir::CallInfo::default());
+                return self.call_values(callee, args, crate::js_ir::CallInfo::default());
             }
         }
-        if offset == args.len() {
+        if args.len() == 0 {
             callee
         } else {
-            self.call_node(callee, &args[offset..], crate::js_ir::CallInfo::default())
+            self.call_values(callee, args, crate::js_ir::CallInfo::default())
         }
     }
 }
@@ -483,7 +492,8 @@ mod tests {
                         let value = state.pure_expression(View::JNull, 0);
                         let old = exp::null(&mut legacy.j);
                         if effectful {
-                            args.push(state.call_node(value, &[], Default::default()));
+                            let call = state.call_values(crate::bir::lower::out::of_row(value), std::iter::empty(), Default::default());
+                            args.push(crate::bir::lower::out::row(call));
                             old_args.push(exp::call(old, &[], Default::default(), &mut legacy.j));
                         } else {
                             args.push(value);
@@ -492,7 +502,8 @@ mod tests {
                     }
                     let arity = Arity::info(groups.clone(), false);
                     let span = state.store_call_arity(&arity).unwrap();
-                    let value = state.apply_with_arity(func, span, &args);
+                    let mut args: Vec<_> = args.into_iter().map(crate::bir::lower::out::of_row).collect();
+                    let value = state.apply_with_arity(crate::bir::lower::out::of_row(func), span, &mut args.drain(..));
                     let lowered = state.complete(
                         Cx::value(),
                         Probed::Out(Out {
@@ -557,7 +568,7 @@ mod allocation_tests {
         let run = |s: &mut State<'_>| {
             let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0; let source_lists = state.source.lists.storage_shape().0;
@@ -646,7 +657,7 @@ mod inline_allocation_tests {
             let run = |s: &mut State<'_>, root| {
                 let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
                 for n in s.statements.statements(out.stmts) { s.arena.release(n); }
-                if let Some(n) = out.value { s.arena.release(n); } s.statements.kill(out.stmts);
+                if let Some(n) = out.value { s.arena.release(crate::bir::lower::out::row(n)); } s.statements.kill(out.stmts);
             };
             macro_rules! stores { ($m:ident, $s:ident) => {
                 $m!($s, arena.nodes); $m!($s, arena.parents); $m!($s, arena.free_nodes); $m!($s, arena.release_stack);

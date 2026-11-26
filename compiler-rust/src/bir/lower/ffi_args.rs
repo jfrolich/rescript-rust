@@ -30,8 +30,8 @@ impl LaterLiteral {
 
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// X:30 literal_polyvar_block. O(1), borrowing the literal header.
-    fn literal_polyvar_block(&self, _cx: Cx, arg: NodeId) -> bool {
-        self.polyvar_literal(B::at(arg))
+    fn literal_polyvar_block(&self, _cx: Cx, arg: &B::E) -> bool {
+        self.polyvar_literal(B::of(arg))
     }
 
     /// X:30 literal_polyvar_block of a node read by reference: a block
@@ -52,10 +52,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         _cx: Cx,
         label: LabelNoname,
         attr: &Attr,
-        arg: &mut Out,
+        arg: &mut Out<B>,
     ) {
-        let value = arg.value.expect("external argument value");
-        let r = B::at(value);
+        let r = B::of(arg.value.as_ref().expect("external argument value"));
         let wrapped =
             label == LabelNoname::ArgOptional && self.js.kind(&self.arena, r) == Kind::Optional;
         let target = if wrapped { self.js.operand(&self.arena, r, 0) } else { r };
@@ -75,8 +74,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if !hold {
             return;
         }
+        let value = arg.value.take().expect("external argument value");
         let held = if wrapped {
-            let mut shell = B::from_node(value);
+            let mut shell = value;
             self.js.take_operands(&mut self.arena, &mut shell);
             let target = self.js.pop();
             let replacement = self.hold_in_variable(arg, target);
@@ -86,29 +86,27 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.js.assume_strict(&mut self.arena, &mut wrapper);
             wrapper
         } else {
-            self.hold_in_variable(arg, B::from_node(value))
+            self.hold_in_variable(arg, value)
         };
-        arg.value = Some(B::node(held));
+        arg.value = Some(held);
     }
 
     /// `value` declared in a fresh variable in the argument's reserved
     /// suffix slot; the strictly pure reference to the variable is
     /// returned. O(1).
-    fn hold_in_variable(&mut self, arg: &Out, value: B::E) -> B::E {
+    fn hold_in_variable(&mut self, arg: &Out<B>, value: B::E) -> B::E {
         let var = self.fresh_variable("tmp");
         let statement = self.js.declare(&mut self.arena, LetKind::Strict, var, Some(value));
         self.statements.fill_held(
             arg.stmts.start + arg.stmts.len - 1,
             [statement],
         );
-        let mut replacement = self.js.var(&mut self.arena, var);
-        self.js.assume_strict(&mut self.arena, &mut replacement);
-        replacement
+        self.js.var(&mut self.arena, var)
     }
 
     /// X:254 hold_external_args. O(specs + arguments); constants
     /// consume no runtime argument, and unmatched arguments retain their order.
-    pub(super) fn hold_external_args(&mut self, cx: Cx, specs: &[Param], args: &mut [Out]) {
+    pub(super) fn hold_external_args(&mut self, cx: Cx, specs: &[Param], args: &mut [Out<B>]) {
         let mut args = args.iter_mut();
         for spec in specs {
             self.primitive_steps += 1;
@@ -124,7 +122,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// X:278 hold_external_obj_args. O(specs + arguments). One reverse pass records the suffix predicate, then holds are
     /// allocated in source order. No suffix is searched more than once.
-    pub(super) fn hold_external_obj_args(&mut self, cx: Cx, specs: &[ObjParam], args: &mut [Out]) {
+    pub(super) fn hold_external_obj_args(&mut self, cx: Cx, specs: &[ObjParam], args: &mut [Out<B>]) {
         let mut params = std::mem::take(&mut self.ffi_params);
         params.extend(specs.iter().enumerate().filter_map(|(i, p)| {
             (!matches!(
@@ -138,16 +136,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         for (i, arg) in args.iter().enumerate().rev() {
             self.primitive_steps += 1;
             suffix.push(later);
-            let value = arg.value.expect("object argument");
+            let value = B::of(arg.value.as_ref().expect("object argument"));
             if params.get(i).is_some_and(|&p| {
                 let p = &specs[p];
                 !matches!(p.obj_arg_label, Label::ObjOptional { .. })
                     || matches!(
-                        self.js.kind(&self.arena, B::at(value)),
+                        self.js.kind(&self.arena, value),
                         Kind::Undefined | Kind::Optional
                     )
             }) {
-                let r = B::at(value);
+                let r = value;
                 later.add(
                     self.js.has(&self.arena, r, flag::DELAY_SAFE),
                     self.js.has(&self.arena, r, flag::STRICT),
@@ -167,15 +165,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 Label::ObjOptional { .. } => LabelNoname::ArgOptional,
             };
             self.hold_external_arg(cx, label, &param.obj_arg_type, arg);
-            let value = arg.value.expect("object argument");
-            let r = B::at(value);
+            let r = B::of(arg.value.as_ref().expect("object argument"));
             if label == LabelNoname::ArgOptional
                 && !matches!(self.js.kind(&self.arena, r), Kind::Undefined | Kind::Optional)
                 && !self.js.has(&self.arena, r, flag::DELAY_SAFE)
                 && suffix[count - i - 1].conflicts(self.js.has(&self.arena, r, flag::STRICT))
             {
-                let held = self.hold_in_variable(arg, B::from_node(value));
-                arg.value = Some(B::node(held));
+                let value = arg.value.take().expect("object argument");
+                let held = self.hold_in_variable(arg, value);
+                arg.value = Some(held);
             }
         }
         params.clear();
@@ -186,15 +184,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// X:181 external_optional_to_undefined_expr. O(field spine + copied
     /// spine), or one runtime call. Optional payloads move without copying.
-    fn external_optional_to_undefined_expr(&mut self, cx: Cx, arg: NodeId) -> NodeId {
-        match self.js.kind(&self.arena, B::at(arg)) {
+    fn external_optional_to_undefined_expr(&mut self, cx: Cx, arg: B::E) -> B::E {
+        match self.js.kind(&self.arena, B::of(&arg)) {
             Kind::Undefined => {
-                self.js.release(&mut self.arena, B::from_node(arg));
-                B::node(self.js.undefined(&mut self.arena, false))
+                self.js.release(&mut self.arena, arg);
+                self.js.undefined(&mut self.arena, false)
             }
-            Kind::Optional => B::node(self.js.keep_operand(&mut self.arena, B::from_node(arg), 0)),
-            _ if self.optional_duplicable(cx, arg) => {
-                let copy = self.js.copy(&mut self.arena, B::at(arg));
+            Kind::Optional => self.js.keep_operand(&mut self.arena, arg, 0),
+            _ if self.optional_duplicable(cx, &arg) => {
+                let copy = self.js.copy(&mut self.arena, B::of(&arg));
                 let undefined = self.js.undefined(&mut self.arena, false);
                 let test = self.js.bin(
                     &mut self.arena,
@@ -202,30 +200,36 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     copy,
                     undefined,
                 );
-                let value = self.primitive_runtime("Primitive_option", "valFromOption", &[arg]);
+                let mark = self.js.mark();
+                self.js.push(arg);
+                let value = self.runtime_call("Primitive_option", "valFromOption", mark);
                 let undefined = self.js.undefined(&mut self.arena, false);
-                B::node(self.js.cond(&mut self.arena, test, B::from_node(value), undefined))
+                self.js.cond(&mut self.arena, test, value, undefined)
             }
-            _ => self.primitive_runtime("Primitive_option", "valFromOption", &[arg]),
+            _ => {
+                let mark = self.js.mark();
+                self.js.push(arg);
+                self.runtime_call("Primitive_option", "valFromOption", mark)
+            }
         }
     }
 
     /// A:69 is_okay_to_duplicate(false), used by X:181. O(field spine).
-    pub(super) fn optional_duplicable(&self, _cx: Cx, node: NodeId) -> bool {
-        let mut r = B::at(node);
+    /// A reference is read with `var_of` before the kind (THREE_TREES 11.4,
+    /// "For T6v: a dotted global").
+    pub(super) fn optional_duplicable(&self, _cx: Cx, node: &B::E) -> bool {
+        let mut r = B::of(node);
         loop {
+            if let Some(var) = self.js.var_of(&self.arena, r) {
+                return !self
+                    .arena
+                    .vars
+                    .flags(var)
+                    .contains(crate::bir::VarFlags::JS_GLOBAL)
+                    || !self.arena.vars.name(var).as_str().contains('.');
+            }
             match self.js.kind(&self.arena, r) {
-                Kind::Var => {
-                    let var = self.js.var_of(&self.arena, r).expect("a variable");
-                    return !self
-                        .arena
-                        .vars
-                        .flags(var)
-                        .contains(crate::bir::VarFlags::JS_GLOBAL)
-                        || !self.arena.vars.name(var).as_str().contains('.');
-                }
-                Kind::Named
-                | Kind::Qualified
+                Kind::Qualified
                 | Kind::Bool
                 | Kind::Str
                 | Kind::Template
@@ -245,29 +249,33 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// X:421 external_polyvar_unwrap_expr. O(1) shape inspection plus release
     /// of the unused literal tag, or one J-M11 member construction.
-    fn external_polyvar_unwrap_expr(&mut self, _cx: Cx, arg: NodeId) -> NodeId {
-        let r = B::at(arg);
+    fn external_polyvar_unwrap_expr(&mut self, _cx: Cx, arg: B::E) -> B::E {
+        let r = B::of(&arg);
         if self.js.kind(&self.arena, r) == Kind::BlockLit
             && self.js.arity(&self.arena, r) == 2
             && self.js.kind(&self.arena, self.js.operand(&self.arena, r, 0)) == Kind::Number
         {
-            return B::node(self.js.keep_operand(&mut self.arena, B::from_node(arg), 1));
+            return self.js.keep_operand(&mut self.arena, arg, 1);
         }
-        B::node(self.js.poly_var(&mut self.arena, B::from_node(arg), true))
+        self.js.poly_var(&mut self.arena, arg, true)
     }
 
     /// X:197 external_option_unwrap_expr. O(1) apart from releasing a literal.
-    fn external_option_unwrap_expr(&mut self, cx: Cx, arg: NodeId) -> NodeId {
-        match self.js.kind(&self.arena, B::at(arg)) {
+    fn external_option_unwrap_expr(&mut self, cx: Cx, arg: B::E) -> B::E {
+        match self.js.kind(&self.arena, B::of(&arg)) {
             Kind::Undefined => {
-                self.js.release(&mut self.arena, B::from_node(arg));
-                B::node(self.js.undefined(&mut self.arena, false))
+                self.js.release(&mut self.arena, arg);
+                self.js.undefined(&mut self.arena, false)
             }
             Kind::Optional => {
-                let value = self.js.keep_operand(&mut self.arena, B::from_node(arg), 0);
-                self.external_polyvar_unwrap_expr(cx, B::node(value))
+                let value = self.js.keep_operand(&mut self.arena, arg, 0);
+                self.external_polyvar_unwrap_expr(cx, value)
             }
-            _ => self.primitive_runtime("Primitive_option", "unwrapPolyVar", &[arg]),
+            _ => {
+                let mark = self.js.mark();
+                self.js.push(arg);
+                self.runtime_call("Primitive_option", "unwrapPolyVar", mark)
+            }
         }
     }
 
@@ -275,10 +283,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     fn external_dispatch<T>(
         &mut self,
         _cx: Cx,
-        arg: NodeId,
+        arg: B::E,
         cases: &[(String, T)],
         value: impl Fn(&mut B, &mut Bir, &T) -> B::E,
-    ) -> NodeId {
+    ) -> B::E {
         super::names::open(&mut self.arena);
         let keys = crate::bir::KeySpan {
             start: u32::try_from(self.arena.pools.switch_keys.len()).expect("key pool capacity"),
@@ -312,8 +320,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 });
         }
         // The scrutinee was built before the function's scope opened and
-        // moves into it (G10).
-        super::names::adopt(&mut self.arena, &self.idents, arg);
+        // moves into it (G10). `names::adopt` takes the row, read by its id
+        // until T6r.
+        let site = NodeId(self.js.id(&self.arena, B::of(&arg)));
+        super::names::adopt(&mut self.arena, &self.idents, site);
         let header = self.arena.switch_record(crate::bir::SwitchRecord {
             constants: keys.len,
             keys,
@@ -324,7 +334,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             dispatch: crate::lambda::SwitchDispatch::Direct,
         });
         let actions_list = self.statements.take_actions(&mut self.js, &mut self.arena, self.statements.since(mark));
-        let switch = self.js.switch(&mut self.arena, B::from_node(arg), actions_list, header, true);
+        let switch = self.js.switch(&mut self.arena, arg, actions_list, header, true);
         let body = self.js.list(&mut self.arena, 1, std::iter::once(switch));
         let header = self.arena.function_header(
             crate::bir::VarSpan { start: 0, len: 0 },
@@ -333,17 +343,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         );
         let callee = self.js.function(&mut self.arena, header, body);
         super::names::close(&mut self.arena, &self.idents, header);
-        self.call_node(B::node(callee), &[], Default::default())
+        self.call_values(callee, std::iter::empty(), Default::default())
     }
 
     /// X:344 external_polyvar_string_expr. O(dispatch cases + spelling bytes).
     fn external_polyvar_string_expr(
         &mut self,
         cx: Cx,
-        arg: NodeId,
+        arg: B::E,
         cases: &[(String, String)],
-    ) -> NodeId {
-        let r = B::at(arg);
+    ) -> B::E {
+        let r = B::of(&arg);
         match self.js.kind(&self.arena, r) {
             Kind::Undefined => return arg,
             Kind::Str => {
@@ -354,8 +364,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     .expect("polyvariant string tag")
                     .1;
                 let result = self.js.string(&mut self.arena, target);
-                self.js.release(&mut self.arena, B::from_node(arg));
-                return B::node(result);
+                self.js.release(&mut self.arena, arg);
+                return result;
             }
             _ => {}
         }
@@ -366,10 +376,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     fn external_polyvar_int_expr(
         &mut self,
         cx: Cx,
-        arg: NodeId,
+        arg: B::E,
         cases: &[(String, i64)],
-    ) -> NodeId {
-        let r = B::at(arg);
+    ) -> B::E {
+        let r = B::of(&arg);
         match self.js.kind(&self.arena, r) {
             Kind::Undefined => return arg,
             Kind::Str => {
@@ -379,8 +389,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     .find(|(key, _)| key == text)
                     .expect("polyvariant integer tag")
                     .1;
-                self.js.release(&mut self.arena, B::from_node(arg));
-                return B::node(self.js.int_literal(&mut self.arena, value as i32));
+                self.js.release(&mut self.arena, arg);
+                return self.js.int_literal(&mut self.arena, value as i32);
             }
             _ => {}
         }
@@ -394,26 +404,26 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     fn external_polyvar_event_exprs(
         &mut self,
         cx: Cx,
-        arg: NodeId,
+        arg: B::E,
         cases: Option<&[(String, String)]>,
-    ) -> [Option<NodeId>; 2] {
-        let (tag, value) = if self.literal_polyvar_block(cx, arg) {
-            self.js.unpack_rev(&mut self.arena, B::from_node(arg));
+    ) -> [Option<B::E>; 2] {
+        let (tag, value) = if self.literal_polyvar_block(cx, &arg) {
+            self.js.unpack_rev(&mut self.arena, arg);
             let tag = self.js.pop();
             let value = self.js.pop();
             (tag, value)
         } else {
-            let copy = self.js.copy(&mut self.arena, B::at(arg));
+            let copy = self.js.copy(&mut self.arena, B::of(&arg));
             (
-                self.js.poly_var(&mut self.arena, B::from_node(arg), false),
+                self.js.poly_var(&mut self.arena, arg, false),
                 self.js.poly_var(&mut self.arena, copy, true),
             )
         };
-        let tag = B::node(tag);
-        let tag = cases.map_or(tag, |cases| {
-            self.external_polyvar_string_expr(cx, tag, cases)
-        });
-        [Some(tag), Some(B::node(value))]
+        let tag = match cases {
+            Some(cases) => self.external_polyvar_string_expr(cx, tag, cases),
+            None => tag,
+        };
+        [Some(tag), Some(value)]
     }
 
     /// X:782 lower_external_arg_values_and_effect. O(argument conversion),
@@ -421,10 +431,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn lower_external_arg_values_and_effect(
         &mut self,
         cx: Cx,
-        raw: NodeId,
+        raw: B::E,
         label: LabelNoname,
         attr: &Attr,
-    ) -> ([Option<NodeId>; 2], Option<NodeId>) {
+    ) -> ([Option<B::E>; 2], Option<B::E>) {
         if matches!(attr, Attr::Unwrap) && label == LabelNoname::ArgOptional {
             return (
                 [Some(self.external_option_unwrap_expr(cx, raw)), None],
@@ -439,7 +449,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let value = match attr {
             Attr::Nothing => arg,
             Attr::ArgCst(_) => {
-                self.js.release(&mut self.arena, B::from_node(arg));
+                self.js.release(&mut self.arena, arg);
                 return ([None, None], None);
             }
             Attr::Ignore => return ([None, None], self.external_arg_effect(cx, arg)),
@@ -448,7 +458,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let values = if label == LabelNoname::ArgEmpty {
                     [None, None]
                 } else {
-                    [Some(B::node(self.js.undefined(&mut self.arena, true))), None]
+                    [Some(self.js.undefined(&mut self.arena, true)), None]
                 };
                 return (values, effect);
             }
@@ -470,42 +480,48 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         _cx: Cx,
         cst: &crate::types::external_ffi_types::Cst,
-    ) -> NodeId {
+    ) -> B::E {
         use crate::types::external_ffi_types::Cst;
         match cst {
-            Cst::ArgIntLit(value) => B::node(self.js.int_literal(&mut self.arena, *value as i32)),
-            Cst::ArgStringLit(value) => B::node(self.js.string(&mut self.arena, value)),
+            Cst::ArgIntLit(value) => self.js.int_literal(&mut self.arena, *value as i32),
+            Cst::ArgStringLit(value) => self.js.string(&mut self.arena, value),
             Cst::ArgJsonLit(value) => {
                 let text = self.arena.intern_text(value);
-                B::node(self.js.json(&mut self.arena, text))
+                self.js.json(&mut self.arena, text)
             }
         }
     }
 
     /// X:834 assemble_external_args_no_splice. O(specs + conversions + fused
-    /// effects). Trailing trimming zips assembled values with original specs.
+    /// effects). The values are pushed as operands as they are converted
+    /// and their number is returned; the caller takes the mark before the
+    /// call. Trailing trimming zips the pushed values with the original
+    /// specs from the end: one pop per value looked at, the trimmed ones
+    /// released in their order; nothing is allocated once
+    /// `State::external_values` has its capacity.
     pub(super) fn assemble_external_args_no_splice(
         &mut self,
         cx: Cx,
         specs: &[Param],
-        args: crate::bir::ListId,
-    ) -> (crate::bir::ListId, Option<NodeId>) {
-        let argc = self.arena.lists.get(args).len();
+        args: &mut std::vec::Drain<'_, B::E>,
+    ) -> (u32, Option<B::E>) {
+        let argc = args.len();
         let mut at = 0;
-        let mut values = std::mem::take(&mut self.external_values);
-        debug_assert!(values.is_empty());
+        let mut count = 0;
         let mut effect = None;
         for spec in specs {
             self.primitive_steps += 1;
             if let Attr::ArgCst(cst) = &spec.arg_type {
-                values.push(self.compile_external_arg_const(cx, cst));
+                let value = self.compile_external_arg_const(cx, cst);
+                self.js.push(value);
+                count += 1;
             } else {
                 let arg = if at < argc {
-                    let value = self.arena.lists.get(args)[at];
+                    let value = args.next().expect("an argument");
                     at += 1;
                     value
                 } else {
-                    B::node(self.js.undefined(&mut self.arena, false))
+                    self.js.undefined(&mut self.arena, false)
                 };
                 let (converted, next_effect) = self.lower_external_arg_values_and_effect(
                     cx,
@@ -513,97 +529,118 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     spec.arg_label,
                     &spec.arg_type,
                 );
-                values.extend(converted.into_iter().flatten());
+                for value in converted.into_iter().flatten() {
+                    self.js.push(value);
+                    count += 1;
+                }
                 if let Some(next) = next_effect {
                     effect = Some(self.add_external_effect(cx, effect, next));
                 }
             }
         }
         debug_assert_eq!(at, argc);
-        let trim = specs
-            .iter()
-            .rev()
-            .zip(values.iter().rev())
-            .take_while(|(spec, value)| {
-                spec.arg_label == LabelNoname::ArgOptional
-                    && self.js.kind(&self.arena, B::at(**value)) == Kind::Undefined
-                    && self.js.aux(&self.arena, B::at(**value)) == 0
-            })
-            .count();
-        for value in values.drain(values.len() - trim..) {
-            self.js.release(&mut self.arena, B::from_node(value));
+        let mut trimmed = std::mem::take(&mut self.external_values);
+        debug_assert!(trimmed.is_empty());
+        for spec in specs.iter().rev().take(count as usize) {
+            let value = self.js.pop();
+            let r = B::of(&value);
+            if spec.arg_label == LabelNoname::ArgOptional
+                && self.js.kind(&self.arena, r) == Kind::Undefined
+                && self.js.aux(&self.arena, r) == 0
+            {
+                trimmed.push(value);
+            } else {
+                self.js.push(value);
+                break;
+            }
         }
-        let result = self.arena.lists.push(&values);
-        values.clear();
-        self.external_values = values;
-        (result, effect)
+        count -= trimmed.len() as u32;
+        for value in trimmed.drain(..).rev() {
+            self.js.release(&mut self.arena, value);
+        }
+        self.external_values = trimmed;
+        (count, effect)
     }
 
     /// X:894 assemble_external_args_with_splice. O(specs + array elements +
     /// conversion work); the last runtime argument, not last spec, is spliced.
+    /// The values are pushed as operands as they are converted and their
+    /// number is returned; the caller takes the mark before the call. The
+    /// elements of a spliced array literal pass through
+    /// `State::external_values` to be pushed in order: two moves each,
+    /// nothing allocated once it has its capacity.
     pub(super) fn assemble_external_args_with_splice(
         &mut self,
         cx: Cx,
         specs: &[Param],
-        args: crate::bir::ListId,
-    ) -> (crate::bir::ListId, Option<NodeId>) {
-        let argc = self.arena.lists.get(args).len();
+        args: &mut std::vec::Drain<'_, B::E>,
+    ) -> (u32, Option<B::E>) {
+        let argc = args.len();
         let mut at = 0;
-        let mut values = std::mem::take(&mut self.external_values);
-        debug_assert!(values.is_empty());
+        let mut count = 0;
         let mut effect = None;
         let mut spread = false;
         for spec in specs {
             self.primitive_steps += 1;
             if let Attr::ArgCst(cst) = &spec.arg_type {
-                values.push(self.compile_external_arg_const(cx, cst));
+                let value = self.compile_external_arg_const(cx, cst);
+                self.js.push(value);
+                count += 1;
                 continue;
             }
             let arg = if at < argc {
-                let value = self.arena.lists.get(args)[at];
+                let value = args.next().expect("an argument");
                 at += 1;
                 value
             } else {
-                B::node(self.js.undefined(&mut self.arena, false))
+                self.js.undefined(&mut self.arena, false)
             };
             if at == argc {
-                if self.js.kind(&self.arena, B::at(arg)) == Kind::Array {
-                    let count = self.js.unpack_rev(&mut self.arena, B::from_node(arg));
-                    for _ in 0..count {
+                if self.js.kind(&self.arena, B::of(&arg)) == Kind::Array {
+                    let elements = self.js.unpack_rev(&mut self.arena, arg);
+                    let mut values = std::mem::take(&mut self.external_values);
+                    debug_assert!(values.is_empty());
+                    for _ in 0..elements {
                         self.primitive_steps += 1;
-                        values.push(B::node(self.js.pop()));
+                        values.push(self.js.pop());
                     }
+                    for value in values.drain(..) {
+                        self.js.push(value);
+                    }
+                    self.external_values = values;
+                    count += elements;
                     continue;
                 }
                 spread = true;
             }
             let (converted, next_effect) =
                 self.lower_external_arg_values_and_effect(cx, arg, spec.arg_label, &spec.arg_type);
-            values.extend(converted.into_iter().flatten());
+            for value in converted.into_iter().flatten() {
+                self.js.push(value);
+                count += 1;
+            }
             if let Some(next) = next_effect {
                 effect = Some(self.add_external_effect(cx, effect, next));
             }
         }
         debug_assert_eq!(at, argc);
-        if spread {
-            if let Some(value) = values.pop() {
-                values.push(B::node(self.js.spread(&mut self.arena, B::from_node(value))));
-            }
+        if spread && count > 0 {
+            let value = self.js.pop();
+            let value = self.js.spread(&mut self.arena, value);
+            self.js.push(value);
         }
-        let result = self.arena.lists.push(&values);
-        values.clear();
-        self.external_values = values;
-        (result, effect)
+        (count, effect)
     }
 
-    /// X:959 assemble_external_args. O(specs + selected assembly work).
+    /// X:959 assemble_external_args. O(specs + selected assembly work): the
+    /// values are pushed as operands and their number is returned.
     pub(super) fn assemble_external_args(
         &mut self,
         cx: Cx,
         specs: &[Param],
-        args: crate::bir::ListId,
+        args: &mut std::vec::Drain<'_, B::E>,
         splice: bool,
-    ) -> (crate::bir::ListId, Option<NodeId>) {
+    ) -> (u32, Option<B::E>) {
         if splice {
             self.assemble_external_args_with_splice(cx, specs, args)
         } else {
@@ -612,9 +649,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// X:741 external_arg_effect. O(1) cached ordinary purity lookup.
-    pub(super) fn external_arg_effect(&mut self, _cx: Cx, arg: NodeId) -> Option<NodeId> {
-        if self.js.has(&self.arena, B::at(arg), flag::PURE) {
-            self.js.release(&mut self.arena, B::from_node(arg));
+    pub(super) fn external_arg_effect(&mut self, _cx: Cx, arg: B::E) -> Option<B::E> {
+        if self.js.has(&self.arena, B::of(&arg), flag::PURE) {
+            self.js.release(&mut self.arena, arg);
             None
         } else {
             Some(arg)
@@ -626,12 +663,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn add_external_effect(
         &mut self,
         _cx: Cx,
-        effect: Option<NodeId>,
-        value: NodeId,
-    ) -> NodeId {
-        effect.map_or(value, |effect| {
-            B::node(self.js.seq_rule(&mut self.arena, B::from_node(effect), B::from_node(value)))
-        })
+        effect: Option<B::E>,
+        value: B::E,
+    ) -> B::E {
+        match effect {
+            Some(effect) => self.js.seq_rule(&mut self.arena, effect, value),
+            None => value,
+        }
     }
 }
 
@@ -680,7 +718,7 @@ mod tests {
             let out = state.probe(Cx::value(), root).unwrap();
             let out = state.realize(Cx::value(), out);
             assert!(!state.statements.has_statements(out.stmts));
-            state.arena.release(out.value.unwrap());
+            state.arena.release(crate::bir::lower::out::row(out.value.unwrap()));
             state.statements.kill(out.stmts);
         };
         let lists_before = state.arena.lists.storage_shape().0;
@@ -755,7 +793,7 @@ mod tests {
             unreachable!()
         };
         let children = children.to_vec();
-        let mut outputs: SmallVec<[Out; 4]> = SmallVec::new();
+        let mut outputs: SmallVec<[Out<_>; 4]> = SmallVec::new();
         let mut compiler = LambdaCompiler::new();
         let mut expected = crate::lambda::lam_compile_arguments::HeldArgs::new();
         let target = Ident::new("unused", 100, crate::ident::IdentFlags::NONE);
@@ -772,13 +810,14 @@ mod tests {
             expected.push((out.prelude, out.expr));
         }
         state.hold_external_args(Cx::value(), specs, &mut outputs);
-        let held = outputs;
+        let mut held = outputs;
         let mut args = Vec::new();
-        let stmts = state.sequence_arguments(false, &held, &mut args);
-        let args = state.arena.lists.push(&args);
-        let (args, effect) = state.assemble_external_args_no_splice(Cx::value(), specs, args);
-        let args = state.arena.lists.get(args).to_vec();
-        let value = plain::node(&mut state.arena, View::JArray { values: &args }, 0);
+        let stmts = state.sequence_arguments(false, &mut held, &mut args);
+        use crate::bir::lower::js::Js;
+        let mark = state.js.mark();
+        let (_, effect) =
+            state.assemble_external_args_no_splice(Cx::value(), specs, &mut args.drain(..));
+        let value = state.js.array(&mut state.arena, mark, 0);
         let value = state.add_external_effect(Cx::value(), effect, value);
         let lowered = state.complete(
             Cx::value(),
@@ -942,7 +981,7 @@ mod tests {
             let mut source = LamArena::new();
             let root = source.const_(Constant::JsNull);
             let mut state = State::new(bridge::import_lambda(&source, root).unwrap());
-            let mut args: SmallVec<[Out; 4]> = SmallVec::with_capacity(10_000);
+            let mut args: SmallVec<[Out<_>; 4]> = SmallVec::with_capacity(10_000);
             let mut specs = Vec::new();
             let mut obj_specs = Vec::new();
             for i in 0..10_000 {
@@ -952,7 +991,7 @@ mod tests {
                 state.statements.reserve();
                 args.push(Out {
                     stmts: state.statements.since(start),
-                    value: Some(value),
+                    value: Some(crate::bir::lower::out::of_row(value)),
                     finished: Finished::False,
                 });
                 specs.push(Param {
@@ -978,7 +1017,7 @@ mod tests {
             } else {
                 state.hold_external_args(Cx::value(), &specs, &mut args);
             }
-            let held = args;
+            let mut held = args;
             assert_eq!(held.len(), 10_000);
             assert_eq!(state.primitive_steps, if objects { 20_000 } else { 10_000 });
             assert_eq!(
@@ -986,7 +1025,7 @@ mod tests {
                 if objects { 5_000 } else { 10_000 }
             );
             let mut values = Vec::new();
-            state.sequence_arguments(false, &held, &mut values);
+            state.sequence_arguments(false, &mut held, &mut values);
             assert_eq!(values.len(), 10_000);
             assert!(state.sequence_steps <= 30_000);
         }

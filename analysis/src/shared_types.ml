@@ -341,6 +341,7 @@ and completion_type =
     }
   | Tbool of Query_env.t
   | Tarray of Query_env.t * inner_type
+  | Tlist of Query_env.t * inner_type
   | Tdict of Query_env.t * inner_type
   | Tstring of Query_env.t
   | TtypeT of {env: Query_env.t; path: Path.t}
@@ -429,9 +430,7 @@ let get_cmt_path ~uri p =
   match p with
   | Impl {cmt} -> cmt
   | Namespace {cmt} -> cmt
-  | IntfAndImpl {cmti; cmt} ->
-    let interface = Utils.ends_with (Uri.to_path uri) "i" in
-    if interface then cmti else cmt
+  | IntfAndImpl {cmti; cmt} -> if Uri.is_interface uri then cmti else cmt
 
 module Tip = struct
   type t = Value | Type | Field of string | Constructor of string | Module
@@ -582,6 +581,7 @@ module Completable = struct
         source_arity: int;
       }
     | NArray
+    | NList  (** An element of a list literal *)
     | NDictValue of {optional: bool}
         (** The pattern or expression of a dict entry, [?P] if [optional] *)
 
@@ -597,11 +597,13 @@ module Completable = struct
       "polyvariantPayload::" ^ constructor_name ^ "($" ^ string_of_int item_num
       ^ ")"
     | NArray -> "array"
+    | NList -> "list"
     | NDictValue {optional} -> if optional then "dictValue(?)" else "dictValue"
 
   type context_path =
     | CPString
     | CPArray of context_path option
+    | CPList of context_path option
     | CPDict of context_path option
     | CPInt
     | CPFloat
@@ -704,6 +706,8 @@ module Completable = struct
     | CPArray (Some ctx_path) ->
       "array<" ^ context_path_to_string ctx_path ^ ">"
     | CPArray None -> "array"
+    | CPList (Some ctx_path) -> "list<" ^ context_path_to_string ctx_path ^ ">"
+    | CPList None -> "list"
     | CPDict (Some ctx_path) -> "dict<" ^ context_path_to_string ctx_path ^ ">"
     | CPDict None -> "dict"
     | CPId {path; completion_context} ->

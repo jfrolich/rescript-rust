@@ -226,13 +226,9 @@ impl UriStyle {
     }
 }
 
-/// `Uri.is_interface`. OCaml writes `uri |> Lsp.Uri.to_string |>
-/// Filename.check_suffix "i"`, which asks whether `"i"` ends with the URI:
-/// false for every file. Interface handling across the analysis (and its
-/// expected test output) follows from that, so it is kept. `of_path`
-/// always gives a `file:` URI, so the answer is computed without building it.
-pub fn is_interface(_path: &str) -> bool {
-    false
+/// `Uri.is_interface`: whether the file at `path` is a `.resi`.
+pub fn is_interface(path: &str) -> bool {
+    path.ends_with(".resi")
 }
 
 #[cfg(test)]
@@ -248,6 +244,7 @@ mod tests {
         );
         let editor = UriStyle::default();
         assert_eq!(editor.lsp_string("/a b/C.res"), "file:///a%20b/C.res");
-        assert!(!is_interface("/a/C.resi"));
+        assert!(is_interface("/a/C.resi"));
+        assert!(!is_interface("/a/C.res"));
     }
 }

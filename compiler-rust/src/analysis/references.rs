@@ -485,7 +485,7 @@ pub fn type_definition_for_loc_item(
             };
             let (env, declared) = dig_constructor(session, &env, &path)?;
             Some((
-                session.file(env.file).uri.clone(),
+                resolve_path::get_source_uri(session, &env, &declared.module_path),
                 Loc::of_location(
                     &session
                         .types(env.file)

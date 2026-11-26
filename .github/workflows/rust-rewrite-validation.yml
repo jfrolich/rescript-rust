@@ -368,6 +368,12 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE"
           python3 scripts/check_lowering_cost_docs.py --self-test --base "$BASE"
 
+      # The count of transition calls is read by every slice of T6x: the
+      # script must find the lowering's files and count their calls.
+      - name: Test the lowering id count
+        working-directory: compiler-rust
+        run: python3 ../scripts/count_lowering_ids.py --self-test
+
   compiler-tests:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
@@ -421,8 +427,20 @@ jobs:
         run: |
           api="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           deadline=$((SECONDS + 1800))
+          # An artifact is listed a moment before it can be downloaded: a
+          # download two seconds after the upload found nothing. Each of the
+          # two jobs ends right after its upload, so this also waits until
+          # neither is running. A rerun of this job alone lists no running
+          # job, and its artifacts are old.
+          uploading() {
+            local running
+            running=$(gh api "$api/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq \
+              '.jobs[] | select((.name == "build" or .name == "ocaml") and .status != "completed") | .name') || return 0
+            [[ -n "$running" ]]
+          }
           until names=$(gh api "$api/artifacts" --jq '.artifacts[].name') &&
-                grep -qx rescript <<< "$names" && grep -qx ocaml <<< "$names"; do
+                grep -qx rescript <<< "$names" && grep -qx ocaml <<< "$names" &&
+                ! uploading; do
             failed=$(gh api "$api/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq \
               '.jobs[] | select((.name == "build" or .name == "ocaml") and .status == "completed" and .conclusion != "success") | .name' || true)
             if [[ -n "$failed" ]]; then

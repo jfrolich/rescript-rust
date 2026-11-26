@@ -5,17 +5,73 @@ Prints four Markdown tables over the non-test code: per file the functions
 with a NodeId or ListId in their signature and the transition calls; the
 J-touching functions called from other files; the structs and enums holding
 an id; and where outputs and statements are stored and read.
+
+From any other directory it finds no file and stops with an error (it used
+to print tables of zeros). `--self-test` checks the two things every count
+rests on, the cut of a file at its test module and the pattern of a
+transition call, on a text written here, and that the tree it is run in has
+the lowering's files and none of their transition calls; it prints nothing
+else. Since T6x-f it also checks that neither trait of the interface
+declares a transition function (nor `push_list`), and that the
+implementation on rows keeps them in impls compiled for tests only.
 """
-import re,glob,os,collections
+import re,glob,os,collections,sys
 T=['from_node','node','at','stmt_from_node','stmt_node','list_from','list_id']
-src={}
-for p in sorted(glob.glob('src/bir/lower/*.rs')):
-    f=os.path.basename(p)[:-3]
-    if f.endswith('_tests') or f in ('js','js_stmt'): continue
-    lines=open(p).read().split('\n'); cut=len(lines)
+def non_test(text):
+    """The text of a file above its test module."""
+    lines=text.split('\n'); cut=len(lines)
     for i,l in enumerate(lines):
         if (l.startswith('mod tests') or l.startswith('mod allocation_tests')) and l.rstrip().endswith('{') or (l.startswith('#[cfg(test)]') and i+1<len(lines) and lines[i+1].startswith('mod ') and lines[i+1].rstrip().endswith('{')): cut=i;break
-    src[f]='\n'.join(lines[:cut])
+    return '\n'.join(lines[:cut])
+def transitions(t):
+    """The transition calls of a text, by function: `B::name(`."""
+    return {k:len(re.findall(r'B::'+k+r'\(',t)) for k in T}
+PATHS=sorted(glob.glob('src/bir/lower/*.rs'))
+if not PATHS:
+    sys.exit('count_lowering_ids.py: no file matches src/bir/lower/*.rs; run it from compiler-rust')
+src={}
+for p in PATHS:
+    f=os.path.basename(p)[:-3]
+    if f.endswith('_tests') or f in ('js','js_stmt'): continue
+    src[f]=non_test(open(p).read())
+if '--self-test' in sys.argv[1:]:
+    sample='\n'.join([
+        'fn f(a: NodeId) -> NodeId {',
+        '    let e = B::from_node(a);',
+        '    let s = B::stmt_from_node(B::node(e));',
+        '    out.value.map(B::node);',
+        '    <Rows as Js>::node(e);',
+        '    B::at(B::list_id(B::list_from(l)));',
+        '    B::stmt_node(s)',
+        '}',
+        '#[cfg(test)]',
+        'mod tests {',
+        '    fn g() { B::at(B::node(x)); }',
+        '}',
+    ])
+    counted=transitions(non_test(sample))
+    # One call each above the test module; `.map(B::node)` and a call
+    # written on an implementation by name are not `B::name(` and are not
+    # counted (the plan lists them by hand); the test module is cut.
+    expected={k:1 for k in T}
+    assert counted==expected, f'transition pattern or test cut: {counted}'
+    assert transitions(sample)['at']==2, 'the sample has a call below the cut'
+    assert non_test('mod tests {\n}')=='' and non_test('fn f() {}\nmod allocation_tests {\n}')=='fn f() {}'
+    files=len(src); calls=sum(sum(transitions(t).values()) for t in src.values())
+    assert files>=25, f'{files} files of the lowering found'
+    # Since T6x-f the lowering has no transition call and the two traits
+    # declare no transition function, so generic code cannot name one; the
+    # implementation on rows keeps them for its tests only.
+    assert calls==0, f'{calls} transition calls in src/bir/lower: none may be left'
+    declared=[(f,k) for f in ('js','js_stmt') for k in T+['push_list'] if re.search(r'\n\s*fn '+k+r'\b', non_test(open(f'src/bir/lower/{f}.rs').read()))]
+    assert not declared, f'a trait of the lowering declares a transition function: {declared}'
+    for f in ('rows','rows_stmt'):
+        t=open(f'src/bir/j/{f}.rs').read()
+        for m in re.finditer(r'\n([^\n]*)\n[^\n]*fn ('+'|'.join(T+['push_list'])+r')\b', t):
+            start=t.rfind('\nimpl', 0, m.start())
+            assert t[:start].rstrip().endswith('#[cfg(test)]'), f'{f}.rs: `{m.group(2)}` is not in an impl compiled for tests'
+    print(f'count_lowering_ids self-test ok: {files} files, {calls} transition calls')
+    sys.exit(0)
 fn=re.compile(r'\n[ \t]*(?:pub(?:\([a-z:]+\))? )?fn (\w+)\s*(?:<[^>]*>)?\(([^{;]*?)\)\s*(->[^{;]*)?\{')
 def body(t,start):
     d=0;i=start
@@ -38,7 +94,7 @@ for f,t in src.items():
         if re.search(r'B::(from_node|node|at|stmt_from_node|stmt_node|list_from|list_id)\(',b) or 'self.js.' in b:
             jsig+=1; names.append(m.group(1))
         defs.setdefault(m.group(1),[]).append(f)
-    tc={k:len(re.findall(r'B::'+k+r'\(',t)) for k in T}
+    tc=transitions(t)
     extra={'function_of_block':len(re.findall(r'\.function_of_block\(',t)),'push_list':len(re.findall(r'\.push_list\(',t))}
     raw=len(re.findall(r'View::J|Op::J|View::S[A-Z]|Op::S[A-Z]|plain::|norm::|\.arena\.(?:view|node|release|detach|replace|new_node|cold|set_cold|copy_subtree\w*|copy_leaf|\w+_from_list)\(|pure_expression|bir::j::|arena\.nodes\b|arena\.parents',t))
     rows.append((f,lines,sig,jsig,sum(tc.values()),tc,extra,raw,names))
@@ -78,13 +134,7 @@ print()
 print('| File | `Out {` built | `.value` of an output read or written | `statements.push`/`fill`/`place` | `impl norm::IfLists` / `simplify_if_head` |')
 print('| --- | --- | --- | --- | --- |')
 tot=[0,0,0,0]
-for p in sorted(glob.glob('src/bir/lower/*.rs')):
-    f=os.path.basename(p)[:-3]
-    if f.endswith('_tests') or f in ('js','js_stmt'): continue
-    lines=open(p).read().split('\n'); cut=len(lines)
-    for i,l in enumerate(lines):
-        if (l.startswith('mod tests') or l.startswith('mod allocation_tests')) and l.rstrip().endswith('{') or (l.startswith('#[cfg(test)]') and i+1<len(lines) and lines[i+1].startswith('mod ') and lines[i+1].rstrip().endswith('{')): cut=i;break
-    t='\n'.join(lines[:cut])
+for f,t in src.items():
     a=len(re.findall(r'\bOut \{',t)); b=len(re.findall(r'\b(?:out|output|first|second|arg|body|child)\.value\b',t)); c=len(re.findall(r'statements\s*\.\s*(?:push|fill|fill_held)\(|\.place\(',t)); d=len(re.findall(r'IfLists|simplify_if_head',t))
     if a+b+c+d:
         print(f'| `{f}.rs` | {a} | {b} | {c} | {d} |')

@@ -1243,6 +1243,9 @@ struct UnusedAttributeSweep<'w> {
     stopped: bool,
     /// An error raised by the sweep (`Location.raise_errorf`).
     error: Option<PpxError>,
+    /// The location of the last resolved FFI external the sweep skipped. The
+    /// signature of the include that wraps a relative one has it too.
+    ffi_loc: Option<LocIdx>,
 }
 
 impl UnusedAttributeSweep<'_> {
@@ -1300,6 +1303,19 @@ macro_rules! validation_methods {
             }
             if sweep_state!(self, $state).stopped {
                 return;
+            }
+            // bs_ast_invariant.ml `emit_external_warnings`: the type checker
+            // checks a resolved FFI external in its resolved form
+            // (`resolved_external_warnings`), within its warning scope; so
+            // the signature of the include that wraps a relative one, which
+            // has its location, is not checked again.
+            match &vd.pval_prim {
+                Some(PrimitiveRepr::PrimFfi { .. }) => {
+                    sweep_state!(self, $state).ffi_loc = Some(vd.pval_loc);
+                    return;
+                }
+                None if sweep_state!(self, $state).ffi_loc == Some(vd.pval_loc) => return,
+                _ => {}
             }
             // bs_ast_invariant.ml:119-142.
             if let Some(PrimitiveRepr::PrimName(byte_name)) = &vd.pval_prim {
@@ -1572,6 +1588,22 @@ fn mark_first_config_attribute<'a>(
     }
 }
 
+/// OCaml `Bs_ast_invariant.emit_external_warnings_on_resolved_external`: the
+/// warnings for a resolved FFI external, which the type checker reports when
+/// it types the declaration, within its warning scope
+/// (`Ast_external.resolve`). The structure and signature sweeps skip it.
+pub fn resolved_external_warnings(vd: &ValueDescription, arena: &ParseArena) -> Vec<PpxWarning> {
+    let mut warnings = Vec::new();
+    let mut sweep = UnusedAttributeSweep {
+        warnings: &mut warnings,
+        stopped: false,
+        error: None,
+        ffi_loc: None,
+    };
+    super::ast_iter::walk_value_description(&mut sweep, arena, vd);
+    warnings
+}
+
 /// OCaml `Bs_ast_invariant.emit_external_warnings_on_structure`: the warnings
 /// in traversal order, and the error the sweep raised (if any).
 /// O(visited syntax occurrences); counting shares this validation traversal.
@@ -1590,6 +1622,7 @@ pub fn collect_unused_attribute_warnings_structure(
             warnings: &mut warnings,
             stopped: false,
             error: None,
+            ffi_loc: None,
         };
         super::ast_iter::walk_structure(&mut sweep, arena, items);
         let error = sweep.error.take();
@@ -1609,6 +1642,7 @@ pub fn collect_unused_attribute_warnings_structure(
             warnings: &mut warnings,
             stopped: false,
             error: None,
+            ffi_loc: None,
         };
         let mut counts = super::derive::census::SyntaxCounts::default();
         super::ast_iter::walk_structure(
@@ -1699,6 +1733,7 @@ pub fn collect_unused_attribute_warnings_signature(
             warnings: &mut warnings,
             stopped: false,
             error: None,
+            ffi_loc: None,
         };
         super::ast_iter::walk_signature(&mut sweep, arena, items);
         let error = sweep.error.take();
@@ -1718,6 +1753,7 @@ pub fn collect_unused_attribute_warnings_signature(
             warnings: &mut warnings,
             stopped: false,
             error: None,
+            ffi_loc: None,
         };
         let mut counts = super::derive::census::SyntaxCounts::default();
         super::ast_iter::walk_signature(
@@ -1881,14 +1917,29 @@ fn build_arg_type_specs(typ: &CoreType, arena: &ParseArena) -> (Vec<Param>, usiz
     (param_specs, arity)
 }
 
-fn params_is_single_extern_unit(params: &[Param]) -> bool {
-    matches!(
-        params,
-        [Param {
-            arg_type: Attr::ExternUnit,
-            ..
-        }]
-    )
+/// A `unit` argument is left out of the JS code, so property and index
+/// accesses would be missing their object, index or value
+/// (ast_external_process.ml, `reject_unit_arg`). The check is about the
+/// declared arguments, not the `unit` parameter `build_arg_type_specs`
+/// appends when every argument is a constant.
+fn reject_unit_arg(params: &[Param], attr: &str, loc: LocIdx) -> PpxResult<()> {
+    let declared = match params.split_last() {
+        Some((
+            Param {
+                arg_type: Attr::ExternUnit,
+                ..
+            },
+            rest,
+        )) if !rest.is_empty() && rest.iter().all(|p| matches!(p.arg_type, Attr::ArgCst(_))) => rest,
+        _ => params,
+    };
+    if declared.iter().any(|p| matches!(p.arg_type, Attr::ExternUnit)) {
+        return Err(PpxError::at_loc(
+            loc,
+            format!("Ill defined attribute @{attr} (unit argument is not allowed)"),
+        ));
+    }
+    Ok(())
 }
 
 fn params_first_arg_is_const(params: &[Param]) -> bool {
@@ -2450,18 +2501,24 @@ fn validate_external_attribute_errors(
         ));
     }
 
-    if external_desc_is_plain_set_index(&desc) && arity != 3 {
-        return Err(PpxError::at_loc(
-            vd.pval_loc,
-            "Ill defined attribute @set_index (arity of 3)",
-        ));
+    if external_desc_is_plain_set_index(&desc) {
+        if arity != 3 {
+            return Err(PpxError::at_loc(
+                vd.pval_loc,
+                "Ill defined attribute @set_index (arity of 3)",
+            ));
+        }
+        reject_unit_arg(&params, "set_index", vd.pval_loc)?;
     }
 
-    if external_desc_is_plain_get_index(&desc) && arity != 2 {
-        return Err(PpxError::at_loc(
-            vd.pval_loc,
-            format!("Ill defined attribute @get_index (arity expected 2 : while {arity})"),
-        ));
+    if external_desc_is_plain_get_index(&desc) {
+        if arity != 2 {
+            return Err(PpxError::at_loc(
+                vd.pval_loc,
+                format!("Ill defined attribute @get_index (arity expected 2 : while {arity})"),
+            ));
+        }
+        reject_unit_arg(&params, "get_index", vd.pval_loc)?;
     }
 
     if !desc.mk_obj {
@@ -2528,6 +2585,7 @@ fn validate_external_attribute_errors(
                     "Ill defined attribute @set (two args required)",
                 ));
             }
+            reject_unit_arg(&params, "set", vd.pval_loc)?;
         } else if desc.set_name.is_some() {
             return Err(PpxError::at_loc(
                 vd.pval_loc,
@@ -2543,14 +2601,7 @@ fn validate_external_attribute_errors(
                 ));
             }
 
-            // OCaml Ast_external_process.external_desc_of_non_obj rejects `@get`
-            // externals with a single unit argument before emitting FFI metadata.
-            if params_is_single_extern_unit(&params) {
-                return Err(PpxError::at_loc(
-                    vd.pval_loc,
-                    "Ill defined attribute @get (unit argument is not allowed)",
-                ));
-            }
+            reject_unit_arg(&params, "get", vd.pval_loc)?;
         } else if desc.get_name.is_some() {
             return Err(PpxError::at_loc(
                 vd.pval_loc,
@@ -4389,10 +4440,7 @@ fn build_external_decl(desc: &ExternalDesc, prim_name: &str, arity: usize) -> Ex
     }
 }
 
-/// Check if a path string is a package-relative path (starts with "./" or "../").
-fn is_package_relative_path(s: &str) -> bool {
-    s.starts_with("./") || s.starts_with("../")
-}
+use crate::types::external_ffi_types::is_package_relative_path;
 
 fn valid_js_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '$'
@@ -4728,6 +4776,20 @@ pub fn inline_bigint_primitive(s: &str) -> PrimitiveRepr {
 
 // ========== @inline Handling ==========
 
+/// `Ast_external_mk.inline_int_of_literal`: an inlined int constant is
+/// emitted as a 32-bit JS integer, so a literal outside that range cannot be
+/// inlined; the built-in PPX reports it.
+fn inline_int_of_literal(arena: &mut ParseArena, digits: StrIdx, loc: LocIdx) -> Option<i32> {
+    let value = crate::types::typecore::int32_of_string_ocaml(arena.get_string(digits));
+    if value.is_none() {
+        arena.defer_ppx_error(PpxError::at_loc(
+            loc,
+            "This @inline integer constant is outside the int range (-2147483648 to 2147483647).",
+        ));
+    }
+    value
+}
+
 /// Check if attributes contain @inline
 fn has_inline_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
     attrs.iter().any(|(attr_name, _)| {
@@ -4789,7 +4851,7 @@ fn transform_inline_sig_value(
             // @inline(42) let x: t
             Constant::Integer(_, None | Some('l')) => {
                 let digits = c.integer_digits().expect("machine integer");
-                let i = arena.get_string(digits).parse::<i32>().ok()?;
+                let i = inline_int_of_literal(arena, digits, expr.pexp_loc)?;
                 let prim = inline_int_primitive(i);
                 Some(ValueDescription {
                     pval_jsx_component: None,
@@ -4905,7 +4967,7 @@ fn transform_inline_binding(
             // @inline let x = 42
             Constant::Integer(_, None | Some('l')) => {
                 let digits = c.integer_digits().expect("machine integer");
-                let i = arena.get_string(digits).parse::<i32>().ok()?;
+                let i = inline_int_of_literal(arena, digits, expr.pexp_loc)?;
                 let prim = inline_int_primitive(i);
                 Some(StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
@@ -4915,6 +4977,37 @@ fn transform_inline_binding(
                             loc: pval_name.loc,
                         },
                         pval_type: arena.ast_literal_type_int(),
+                        pval_prim: Some(prim),
+                        pval_attributes: Attributes::new(),
+                        pval_loc: pvb_loc,
+                    })),
+                    pstr_loc,
+                })
+            }
+            // @inline let x = 10n (ast_external_mk.ml
+            // `inline_const_of_expression`, shared with signatures)
+            Constant::Integer(s, Some('n')) => {
+                let prim = inline_bigint_primitive(arena.get_string(*s));
+                let bigint = arena.push_lident_static("bigint");
+                let pval_type = arena.push_core_type(CoreType {
+                    ptyp_desc: CoreTypeDesc::Ptyp_constr((
+                        Located {
+                            txt: bigint,
+                            loc: LocIdx::none(),
+                        },
+                        crate::parse_arena::ArenaList::EMPTY,
+                    )),
+                    ptyp_loc: LocIdx::none(),
+                    ptyp_attributes: Attributes::new(),
+                });
+                Some(StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
+                        pval_jsx_component: None,
+                        pval_name: Located {
+                            txt: pval_name.txt,
+                            loc: pval_name.loc,
+                        },
+                        pval_type,
                         pval_prim: Some(prim),
                         pval_attributes: Attributes::new(),
                         pval_loc: pvb_loc,
@@ -7064,6 +7157,12 @@ fn rewrite_method_callback_expression(
     arena: &mut ParseArena,
 ) -> Expression {
     let loc = expr.pexp_loc;
+    // `@directive` belongs to the JS function, which is the inner function
+    // passed to `unsafe_to_method`, where translcore reads it
+    // (bs_builtin_ppx.ml, the `Meth_callback` case).
+    let (fun_attrs, filtered_attrs): (Vec<Attribute>, Vec<Attribute>) = filtered_attrs
+        .into_iter()
+        .partition(|attr| arena.get_string(attr.0.txt) == "directive");
     let source_params = arena.nary_fun_params(fun).into_owned();
     let source_newtypes = arena.nary_fun_newtypes(fun).to_vec();
     let body = arena.nary_fun_body(fun);
@@ -7113,7 +7212,7 @@ fn rewrite_method_callback_expression(
             is_async,
         })),
         pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
+        pexp_attributes: fun_attrs.into(),
     };
 
     let js_oo = arena.ppx_js_oo_lident();
@@ -10450,6 +10549,50 @@ fn try_rewrite_structure_item(
         result.extend(rewrite_structure_item_no_spice(&expanded, arena));
     }
     Ok(result)
+}
+
+/// Without the built-in PPX, the type checker still resolves an FFI external
+/// (ast_external.ml `resolve`, which `Ppx_entry` registers for every
+/// driver): the externals of the structure's top level are resolved as the
+/// built-in PPX resolves them, and nothing else is rewritten. Externals in
+/// nested modules are left as written.
+pub fn resolve_top_level_externals_structure(
+    structure: Vec<StructureItem>,
+    arena: &mut ParseArena,
+) -> PpxResult<Vec<StructureItem>> {
+    let mut resolved = Vec::with_capacity(structure.len());
+    for item in structure {
+        match &item.pstr_desc {
+            StructureItemDesc::Pstr_primitive(vd)
+                if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) =>
+            {
+                validate_external_attribute_errors(vd, arena, &mut Vec::new())?;
+                resolved.extend(rewrite_structure_item_body(&item, arena));
+            }
+            _ => resolved.push(item),
+        }
+    }
+    Ok(resolved)
+}
+
+/// [`resolve_top_level_externals_structure`] for a signature.
+pub fn resolve_top_level_externals_signature(
+    signature: Vec<SignatureItem>,
+    arena: &mut ParseArena,
+) -> PpxResult<Vec<SignatureItem>> {
+    let mut resolved = Vec::with_capacity(signature.len());
+    for item in signature {
+        match &item.psig_desc {
+            SignatureItemDesc::Psig_value(vd)
+                if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) =>
+            {
+                validate_external_attribute_errors(vd, arena, &mut Vec::new())?;
+                resolved.push(rewrite_signature_item_no_spice(&item, arena));
+            }
+            _ => resolved.push(item),
+        }
+    }
+    Ok(resolved)
 }
 
 /// Rewrite a structure item, potentially returning multiple items for @deriving.

@@ -1,0 +1,19 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/gadt_instance_row_object_ignored.res[0m:[2m5:27[0m
+
+  3 [2m┆[0m switch x {
+  4 [2m┆[0m | Int => {
+  [1;31m5[0m [2m┆[0m     ignore({"f": y} === [1;31mo[0m)
+  6 [2m┆[0m     1
+  7 [2m┆[0m   }
+
+  This has type: [1;31m{.."f": int}[0m
+  But it's being compared to something of type: [1;33m{"f": a}[0m
+  
+  The incompatible parts:
+    [1;31mint[0m vs [1;33ma[0m [2m(defined as[0m [1;33mint[0m[2m)[0m
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.

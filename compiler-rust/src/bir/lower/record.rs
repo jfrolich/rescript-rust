@@ -10,11 +10,18 @@ pub(super) struct Record {
     loc: LamLoc,
 }
 
-#[derive(Default)]
-pub(super) struct Scratch {
+/// The reused storage of a record and of an object made by a primitive:
+/// source operands, keys, and the values in flight (`E`).
+pub(super) struct Scratch<E> {
     operands: Vec<NodeId>,
     pub(super) keys: Vec<PropertyKey>,
-    pub(super) values: Vec<NodeId>,
+    pub(super) values: Vec<E>,
+}
+impl<E> Default for Scratch<E> {
+    /// Empty storage. O(1); allocates nothing.
+    fn default() -> Self {
+        Self { operands: Vec::new(), keys: Vec::new(), values: Vec::new() }
+    }
 }
 
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
@@ -111,8 +118,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         &mut self,
         cx: Cx,
         record: Record,
-        children: impl Iterator<Item = Probed>,
-    ) -> Probed {
+        children: impl Iterator<Item = Probed<B>>,
+    ) -> Probed<B> {
         let mut start = None;
         let mut values = std::mem::take(&mut self.object_scratch.values);
         debug_assert!(values.is_empty());
@@ -127,14 +134,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         // The spread, then the overrides in the order of their keys
         // (`record_copy` reversed the keys of the spine).
         let mark = self.js.mark();
-        if let Some((&spread, overrides)) = values.split_first() {
-            self.js.push(B::from_node(spread));
-            for &value in overrides.iter().rev() {
-                self.js.push(B::from_node(value));
+        {
+            let mut operands = values.drain(..);
+            if let Some(spread) = operands.next() {
+                self.js.push(spread);
+                for value in operands.rev() {
+                    self.js.push(value);
+                }
             }
         }
         let mut value = self.js.object(&mut self.arena, mark, record.info);
-        values.clear();
         self.object_scratch.values = values;
         if self
             .locations
@@ -149,23 +158,23 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 start: start.expect("record initializer"),
                 len: 0,
             }),
-            B::node(value),
+            value,
         )
     }
 
     /// P: compile_primitive_js Pduprecord. O(1), one spread object.
-    pub(super) fn duplicate_record(&mut self, source: NodeId) -> NodeId {
+    pub(super) fn duplicate_record(&mut self, source: B::E) -> B::E {
         let info = self
             .arena
             .object_info(&[PropertyKey::RecordSpread]);
         let mark = self.js.mark();
-        self.js.push(B::from_node(source));
-        B::node(self.js.object(&mut self.arena, mark, info))
+        self.js.push(source);
+        self.js.object(&mut self.arena, mark, info)
     }
 
     /// P: compile_primitive_js PrecordRest. O(k + label bytes) for k excluded
     /// fields; store labels once in the arena's cold rest descriptor.
-    pub(super) fn record_rest(&mut self, source: NodeId, excluded: &[String]) -> NodeId {
+    pub(super) fn record_rest(&mut self, source: B::E, excluded: &[String]) -> B::E {
         let start = self.arena.pools.rest_fields.len() as u32;
         for name in excluded {
             self.primitive_steps += 1;
@@ -175,7 +184,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let info = self.arena.js_info(JsPayload::Rest(crate::bir::RestSpan {
             start, len: excluded.len() as u32,
         }));
-        B::node(self.js.record_rest(&mut self.arena, B::from_node(source), info))
+        self.js.record_rest(&mut self.arena, source, info)
     }
 }
 
@@ -297,7 +306,7 @@ mod tests {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

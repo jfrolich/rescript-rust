@@ -42,6 +42,32 @@ fn compile_type_for_source_event(kind: EventKind, initialization_failed: bool) -
     }
 }
 
+/// The contents of the source files the watcher rebuilt for, as each content
+/// event found them. A platform can report one write more than once (macOS
+/// FSEvents may repeat it after the drain window); an event that finds a
+/// file exactly as the previous one did, same modification time and same
+/// bytes, needs no build, and rebuilding would report its errors again.
+#[derive(Default)]
+struct ReportedContents(ahash::AHashMap<PathBuf, (std::time::SystemTime, blake3::Hash)>);
+
+impl ReportedContents {
+    /// Whether `path` is as the previous content event for it found it;
+    /// records it as it is now otherwise. A file that cannot be read is
+    /// never a repeat, so the build reports the problem.
+    fn repeated(&mut self, path: &Path) -> bool {
+        let current = std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .and_then(|modified| Ok((modified, blake3::hash(&std::fs::read(path)?))));
+        match current {
+            Ok(current) => self.0.insert(path.to_path_buf(), current) == Some(current),
+            Err(_) => {
+                self.0.remove(path);
+                false
+            }
+        }
+    }
+}
+
 type WatchPaths = Vec<(PathBuf, RecursiveMode)>;
 type StartupBuildResult = (
     BuildCommandState,
@@ -470,6 +496,7 @@ fn watch_loop(
     let snapshot_sources = build::snapshot::WatchSources::new(&build_state);
     let mut needs_compile_type = CompileType::None;
     let mut initialization_failed = false;
+    let mut reported_contents = ReportedContents::default();
     loop {
         serve_tooling_requests(&build_state, tooling_requests.as_ref());
         if let Some(status) = stop_requested(&stop_status) {
@@ -564,6 +591,10 @@ fn watch_loop(
                             .canonicalize()
                             .map(StrippedVerbatimPath::to_stripped_verbatim_path)
                         {
+                            if reported_contents.repeated(&canonicalized_path_buf) {
+                                log::debug!("{path:?} is unchanged since its previous event");
+                                continue;
+                            }
                             let build::build_types::BuildState {
                                 modules, packages, ..
                             } = &mut build_state.build_state;
@@ -1045,6 +1076,28 @@ mod tests {
             deps_dirty: false,
             is_type_dev: false,
         }
+    }
+
+    #[test]
+    fn repeated_content_events_are_recognized() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let file = temp.path().join("A.res");
+        std::fs::write(&file, "let a = 1\n").unwrap();
+        let mut reported = ReportedContents::default();
+        assert!(!reported.repeated(&file), "a file's first event is a change");
+        assert!(reported.repeated(&file), "the same write reported again");
+        std::fs::write(&file, "let a = 2\n").unwrap();
+        assert!(!reported.repeated(&file), "new contents");
+        // Same bytes with another modification time: a save to rebuild.
+        let file_handle = std::fs::File::options().write(true).open(&file).unwrap();
+        file_handle
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+        assert!(!reported.repeated(&file), "touched");
+        std::fs::remove_file(&file).unwrap();
+        assert!(!reported.repeated(&file), "an unreadable file is never a repeat");
+        std::fs::write(&file, "let a = 2\n").unwrap();
+        assert!(!reported.repeated(&file), "recreated");
     }
 
     #[test]

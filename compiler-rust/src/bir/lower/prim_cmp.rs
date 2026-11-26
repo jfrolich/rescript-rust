@@ -23,8 +23,8 @@ pub(super) fn comparison_op(cmp: Comparison, float: bool) -> BinOp {
 }
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(1): read a boolean leaf tag, for the two readers in `prim.rs`.
-    pub(super) fn primitive_bool(&self, node: NodeId) -> Option<bool> {
-        self.bool_of(B::at(node))
+    pub(super) fn primitive_bool(&self, value: &B::E) -> Option<bool> {
+        self.bool_of(B::of(value))
     }
     /// O(1): the value of a boolean literal: its kind and its `aux`.
     fn bool_of(&self, r: B::Ref<'_>) -> Option<bool> {
@@ -217,11 +217,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Gt => "greaterthan",
             Ge => "greaterequal",
         };
-        B::from_node(self.primitive_runtime(
-            "Primitive_object",
-            member,
-            &[B::node(left), B::node(right)],
-        ))
+        let mark = self.js.mark();
+        self.js.push(left);
+        self.js.push(right);
+        self.runtime_call("Primitive_object", member, mark)
     }
     /// O(1): copy a literal leaf using existing payload handles, preserving cold
     /// decoration. No generic subtree copier, hash table or variable-use repair.
@@ -265,7 +264,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let test = self.js.bin(&mut self.arena, op, l, r);
             self.js.cond(&mut self.arena, test, left, right)
         } else {
-            B::from_node(self.primitive_runtime(
+            let mark = self.js.mark();
+            self.js.push(left);
+            self.js.push(right);
+            self.runtime_call(
                 match kind {
                     "bool" => "Primitive_bool",
                     "int" => "Primitive_int",
@@ -276,8 +278,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     _ => unreachable!("comparison type"),
                 },
                 if max { "max" } else { "min" },
-                &[B::node(left), B::node(right)],
-            ))
+                mark,
+            )
         }
     }
 }

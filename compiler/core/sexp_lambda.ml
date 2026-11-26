@@ -96,7 +96,15 @@ let variant_instance = function
   | Variant_runtime.Instance.Array -> Sexp.atom "Array"
   | Class {name; ancestors} ->
     Sexp.list
-      [Sexp.atom "Class"; string name; Sexp.list (List.map string ancestors)]
+      [
+        Sexp.atom "Class";
+        string (Variant_runtime.Instance.class_name_to_string name);
+        Sexp.list
+          (List.map
+             (fun ancestor ->
+               string (Variant_runtime.Instance.class_name_to_string ancestor))
+             ancestors);
+      ]
 
 let variant_block_type = function
   | Variant_runtime.NumberType -> Sexp.atom "NumberType"

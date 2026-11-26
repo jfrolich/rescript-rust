@@ -32,8 +32,9 @@ pub(super) struct Groups {
     pub bodies: Span,
 }
 
-/// Cold per-switch data, not copied down the source walk.
-pub(super) struct Plan {
+/// Cold per-switch data, not copied down the source walk. `E` is the
+/// interface's expression: the lowered scrutinee is held as a handle.
+pub(super) struct Plan<E> {
     pub(super) scrutinee: NodeId,
     operands: crate::bir::ListId,
     pub(super) header: SwitchId,
@@ -41,7 +42,7 @@ pub(super) struct Plan {
     pub(super) default: Option<NodeId>,
     output: Span,
     pub(super) start: Span,
-    pub(super) value: Option<NodeId>,
+    pub(super) value: Option<E>,
     target: Option<VarId>,
     runs: [Span; 2],
     declaration: Option<u32>,
@@ -597,7 +598,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// Read a live cold switch plan by its dense handle. O(1).
-    pub(super) fn switch_plan(&self, frame: Switch) -> &Plan {
+    pub(super) fn switch_plan(&self, frame: Switch) -> &Plan<B::E> {
         self.switches[frame.0 as usize].as_ref().unwrap()
     }
 
@@ -647,8 +648,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         cx: Cx,
         frame: Switch,
         index: usize,
-        child: Probed,
-    ) -> Probed {
+        child: Probed<B>,
+    ) -> Probed<B> {
         let mut out = self.realize(cx, child);
         let plan = self.switches[frame.0 as usize].as_mut().unwrap();
         if index == 0 {
@@ -737,8 +738,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// C: compile_switch_assignment/effect/return_block_inner. O(case count).
     /// Direct integers retain switch syntax, including zero/one/two cases.
-    pub(super) fn finish_switch(&mut self, cx: Cx, frame: Switch) -> Probed {
-        let plan = self.switches[frame.0 as usize]
+    pub(super) fn finish_switch(&mut self, cx: Cx, frame: Switch) -> Probed<B> {
+        let mut plan = self.switches[frame.0 as usize]
             .take()
             .expect("live switch frame");
         // switch_child writes stable case slots even for default-first traversal.
@@ -746,9 +747,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.switches.pop();
         }
         if plan.form != Form::General {
-            return self.finish_small_switch(cx, &plan);
+            return self.finish_small_switch(cx, &mut plan);
         }
-        let scrutinee = B::from_node(plan.value.expect("lowered scrutinee"));
+        let scrutinee = plan.value.take().expect("lowered scrutinee");
         let body_cont = plan.target.map_or(cx.cont, Cont::Assign);
         let empty = self.switch_output_nodes[plan.output.start as usize..(plan.output.start + plan.output.len) as usize].iter().all(|body| self.js.is_empty_block(&self.arena, body.as_ref().expect("lowered switch body")));
         if empty && plan.kind != Kind::Named && matches!(cx.cont, Cont::Effect(Tail::No)) {
@@ -845,7 +846,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// C: prepend_declaration_or_fold_final_assignment; V: compile_string_switch_inner.
     /// O(trailing holes), amortized linear: trim pops each hole once.
-    fn switch_result(&mut self, cx: Cx, plan: &Plan) -> Probed {
+    fn switch_result(&mut self, cx: Cx, plan: &Plan<B::E>) -> Probed<B> {
         if let Some(slot) = plan.declaration {
             let target = plan.target.unwrap();
             let kind = match cx.cont {
@@ -893,8 +894,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.unnest(plan.start.start);
         }
         let value = match cx.cont {
-            Cont::Value(_) => Some(B::node(self.js.var(&mut self.arena, plan.target.unwrap()))),
-            Cont::Effect(Tail::No) => Some(B::node(self.js.undefined(&mut self.arena, false))),
+            Cont::Value(_) => Some(self.js.var(&mut self.arena, plan.target.unwrap())),
+            Cont::Effect(Tail::No) => Some(self.js.undefined(&mut self.arena, false)),
             _ => None,
         };
         Probed::Out(Out {
@@ -1074,8 +1075,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// V: compile_small_string_switch_assignment/return/effect, one Cx path.
     /// O(statements consumed by J-S3); the direct-body form copies no run.
-    fn finish_small_switch(&mut self, cx: Cx, plan: &Plan) -> Probed {
-        let scrutinee = B::from_node(plan.value.unwrap());
+    fn finish_small_switch(&mut self, cx: Cx, plan: &mut Plan<B::E>) -> Probed<B> {
+        let scrutinee = plan.value.take().unwrap();
         if plan.form == Form::Body {
             self.js.release(&mut self.arena, scrutinee);
         } else {
@@ -1083,8 +1084,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let keys = std::mem::take(&mut self.arena.pools.switch_keys);
             let key = self.switch_key_expression(&keys[index]);
             self.arena.pools.switch_keys = keys;
-            let key = B::from_node(key);
-            let test = B::node(self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, scrutinee, key));
+            let test = self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, scrutinee, key);
             let yes = plan.runs[0];
             let no = if plan.groups.bodies.len as usize + usize::from(plan.default.is_some()) == 2 {
                 plan.runs[1]
@@ -1279,7 +1279,7 @@ mod tests {
     fn frames_and_facts_are_small() {
         assert_eq!(std::mem::size_of::<Switch>(), 4);
         assert_eq!(std::mem::size_of::<Facts>(), 16);
-        assert_eq!(std::mem::size_of::<Plan>(), 108);
+        assert_eq!(std::mem::size_of::<Plan<<crate::bir::j::rows::Rows as crate::bir::lower::js::Js>::E>>(), 108);
     }
     #[test]
     fn ten_thousand_switch_cases_lower_without_allocations() {
@@ -1308,7 +1308,7 @@ mod tests {
                 state.arena.release(node);
             }
             if let Some(value) = out.value {
-                state.arena.release(value);
+                state.arena.release(crate::bir::lower::out::row(value));
             }
             state.statements.kill(out.stmts);
         };

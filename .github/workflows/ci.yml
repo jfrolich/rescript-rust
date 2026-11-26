@@ -121,6 +121,7 @@ jobs:
             node-target: linux-x64
             rust-target: x86_64-unknown-linux-musl
             dune-profile: static
+            skip_rewatch_integration_tests: true
 
     runs-on: ${{matrix.os}}
 
@@ -166,18 +167,17 @@ jobs:
         id: compiler-build-state-key
         shell: bash
         run: |
-          echo "value=compiler-build-state-v1-${{ matrix.os }}-${{ steps.setup_ocaml.outputs.setup_version }}-${{ matrix.ocaml_compiler }}-${{ hashFiles('*.opam') }}" \
+          echo "value=compiler-build-state-v2-${{ matrix.os }}-${{ steps.setup_ocaml.outputs.setup_version }}-${{ matrix.ocaml_compiler }}-${{ hashFiles('*.opam') }}" \
             | sed 's/,/-/g' >> "$GITHUB_OUTPUT"
 
+      # Only _build: dune's shared cache under ~/.cache/dune would grow with
+      # every master push that restores, extends and saves it again.
       - name: Restore compiler build state
         if: github.base_ref == 'master' || github.ref == 'refs/heads/master'
         id: compiler-build-state
         uses: actions/cache/restore@v6
         with:
-          path: |
-            C:\.cache\dune
-            ~/.cache/dune
-            _build
+          path: _build
           key: ${{ steps.compiler-build-state-key.outputs.value }}
 
       - name: Build compiler
@@ -205,10 +205,7 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         uses: actions/cache/save@v6
         with:
-          path: |
-            C:\.cache\dune
-            ~/.cache/dune
-            _build
+          path: _build
           key: ${{ steps.compiler-build-state-key.outputs.value }}
 
       - name: Verify promoted compiler exes
@@ -253,8 +250,10 @@ jobs:
         if: matrix.test_commit_records
         run: yarn test-upsert-comment
 
+      # The format check gives the same result everywhere; it runs on Linux
+      # only, where it is fastest.
       - name: Run tests
-        run: node scripts/test.js -all
+        run: node scripts/test.js ${{ runner.os == 'Linux' && '-all' || '-ounit -mocha -build -docstrings' }}
 
       - name: Check for diffs in tests folder
         run: git diff --ignore-cr-at-eol --exit-code tests
@@ -290,7 +289,7 @@ jobs:
         shell: bash
 
       - name: Run OCaml rewatch parity tests
-        if: ${{ !contains(matrix.ocaml_compiler, '5.0.0') }}
+        if: ${{ !matrix.skip_rewatch_integration_tests }}
         timeout-minutes: 20
         run: |
           . rewatch-ocaml/tests/process_watchdog.sh
@@ -317,7 +316,7 @@ jobs:
         shell: bash
 
       - name: Run OCaml rewatch verbose output tests
-        if: ${{ !contains(matrix.ocaml_compiler, '5.0.0') }}
+        if: ${{ !matrix.skip_rewatch_integration_tests }}
         timeout-minutes: 10
         run: |
           bash rewatch-ocaml/tests/check_verbose_output.sh \
@@ -335,17 +334,20 @@ jobs:
         shell: bash
 
       - name: Run OCaml rewatch focused integration tests
+        if: ${{ !matrix.skip_rewatch_integration_tests }}
         timeout-minutes: 30
         run: |
           sh rewatch-ocaml/tests/run.sh packages/@rescript/${{ matrix.node-target }}/bin/rescript-ocaml.exe
         shell: bash
 
       - name: Run OCaml rewatch canonical tests
+        if: ${{ !matrix.skip_rewatch_integration_tests }}
         run: ./rewatch/tests/suite.sh packages/@rescript/${{ matrix.node-target }}/bin/rescript-ocaml.exe
         shell: bash
 
       # The Rust build system is the default `rescript`.
       - name: Run Rust rewatch tests
+        if: ${{ !matrix.skip_rewatch_integration_tests }}
         run: ./rewatch/tests/suite.sh packages/@rescript/${{ matrix.node-target }}/bin/rescript.exe
         shell: bash
 
@@ -455,38 +457,52 @@ jobs:
 
       # Checks that the website builds with the generated API docs. These
       # steps stay in this job rather than in one that needs build-compiler,
-      # which would wait for the slowest platform before starting.
-      - name: Checkout rescript-lang.org
+      # which would wait for the slowest platform before starting. The build
+      # depends only on the docs and the website commit, so an empty cache
+      # entry keyed on both records each pair that built, and a pull request
+      # whose docs match an earlier build skips it.
+      - name: Website build key
+        id: website-build-key
         if: ${{ matrix.generate_api_docs }}
+        env:
+          WEBSITE_BRANCH: ${{ steps.api-docs-plan.outputs.website-branch }}
+        run: |
+          sha=$(git ls-remote https://github.com/rescript-lang/rescript-lang.org.git "refs/heads/$WEBSITE_BRANCH" | cut -f1)
+          if [ -z "$sha" ]; then
+            echo "::error::The website has no branch $WEBSITE_BRANCH"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "value=website-build-v1-$sha-${{ hashFiles('scripts/res/apiDocs/**') }}" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Look up website build
+        id: website-build
+        if: ${{ matrix.generate_api_docs }}
+        uses: actions/cache/restore@v6
+        with:
+          path: tmp/website-build
+          key: ${{ steps.website-build-key.outputs.value }}
+          lookup-only: true
+
+      - name: Checkout rescript-lang.org
+        if: ${{ matrix.generate_api_docs && steps.website-build.outputs.cache-hit != 'true' }}
         uses: actions/checkout@v7
         with:
           repository: rescript-lang/rescript-lang.org
-          ref: ${{ steps.api-docs-plan.outputs.website-branch }}
+          ref: ${{ steps.website-build-key.outputs.sha }}
           path: rescript-lang.org
-
-      - name: Check for API docs changes
-        id: api-docs-diff
-        if: ${{ matrix.generate_api_docs }}
-        run: |
-          cp -R scripts/res/apiDocs/. rescript-lang.org/data/api/
-          git -C rescript-lang.org status
-          if [[ -z "$(git -C rescript-lang.org status --porcelain)" ]]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-        shell: bash
 
       # The website is checked out inside this repository, so its Yarn also
       # reads this repository's .yarnrc.yml and rejects the settings it does
       # not know yet. The steps that need this config are done.
       - name: Hide the compiler's Yarn config from the website
-        if: ${{ matrix.generate_api_docs && steps.api-docs-diff.outputs.changed == 'true' }}
+        if: ${{ matrix.generate_api_docs && steps.website-build.outputs.cache-hit != 'true' }}
         run: mv .yarnrc.yml "$RUNNER_TEMP/rescript.yarnrc.yml"
         shell: bash
 
       - name: Use Node.js for website
-        if: ${{ matrix.generate_api_docs && steps.api-docs-diff.outputs.changed == 'true' }}
+        if: ${{ matrix.generate_api_docs && steps.website-build.outputs.cache-hit != 'true' }}
         uses: actions/setup-node@v7
         with:
           cache: yarn
@@ -494,11 +510,27 @@ jobs:
           node-version-file: rescript-lang.org/.node-version
 
       - name: Build website with the API docs
-        if: ${{ matrix.generate_api_docs && steps.api-docs-diff.outputs.changed == 'true' }}
+        if: ${{ matrix.generate_api_docs && steps.website-build.outputs.cache-hit != 'true' }}
         run: |
+          cp -R ../scripts/res/apiDocs/. data/api/
           yarn
           yarn build
         working-directory: rescript-lang.org
+        shell: bash
+
+      - name: Record website build
+        if: ${{ matrix.generate_api_docs && steps.website-build.outputs.cache-hit != 'true' }}
+        run: mkdir -p tmp/website-build && echo "$KEY" > tmp/website-build/key
+        env:
+          KEY: ${{ steps.website-build-key.outputs.value }}
+        shell: bash
+
+      - name: Save website build record
+        if: ${{ matrix.generate_api_docs && steps.website-build.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: tmp/website-build
+          key: ${{ steps.website-build-key.outputs.value }}
 
   # Compares the words the compiler allocates on fixed inputs, and the
   # instructions it executes on some of them, with the base branch
@@ -516,7 +548,7 @@ jobs:
       pull-requests: write
     env:
       # The same build as the first linux-x64 build-compiler job, so that the
-      # OPAM environment and the dune cache are shared.
+      # OPAM environment and the build state are shared.
       DUNE_PROFILE: static
       OCAML_COMPILER: ocaml-variants.5.5.2+options,ocaml-option-static
     steps:
@@ -552,7 +584,7 @@ jobs:
       - name: Compiler build state key
         id: compiler-build-state-key
         run: |
-          echo "value=compiler-build-state-v1-ubuntu-26.04-${{ steps.setup_ocaml.outputs.setup_version }}-$OCAML_COMPILER-${{ hashFiles('*.opam') }}" \
+          echo "value=compiler-build-state-v2-ubuntu-26.04-${{ steps.setup_ocaml.outputs.setup_version }}-$OCAML_COMPILER-${{ hashFiles('*.opam') }}" \
             | sed 's/,/-/g' >> "$GITHUB_OUTPUT"
 
       - name: Restore compiler build state
@@ -560,10 +592,7 @@ jobs:
         with:
           # The paths are part of the cache's version, so they must be the
           # ones build-compiler saves.
-          path: |
-            C:\.cache\dune
-            ~/.cache/dune
-            _build
+          path: _build
           key: ${{ steps.compiler-build-state-key.outputs.value }}
 
       - name: Build the compiler
@@ -730,11 +759,31 @@ jobs:
   test-devcontainer:
     runs-on: ubuntu-26.04-arm
     steps:
+      # Building the dev container takes about 10 minutes. On pull requests it
+      # runs only when the container's inputs change: its definition, the opam
+      # and yarn dependencies its setup installs, the Makefile, or this
+      # workflow. If the changed files can't be listed, it runs.
+      - name: Check whether the dev container is affected
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          affected=true
+          if [ "$EVENT" = pull_request ] &&
+            files=$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --name-only) &&
+            ! grep -qE '^(\.devcontainer/|Makefile$|dune-project$|[^/]*\.opam(\.template)?$|\.yarnrc\.yml$|yarn\.lock$|\.yarn/|\.github/workflows/ci\.yml$)|(^|/)package\.json$' <<< "$files"; then
+            affected=false
+          fi
+          echo "affected=$affected" | tee -a "$GITHUB_OUTPUT"
       - name: Checkout
+        if: steps.changes.outputs.affected == 'true'
         uses: actions/checkout@v7
       - name: Run make in dev container
+        if: steps.changes.outputs.affected == 'true'
         uses: devcontainers/ci@v0.3
-        with:    
+        with:
           push: never
           runCmd: make
 

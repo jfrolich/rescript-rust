@@ -37,17 +37,24 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// the callee, create copies in parameter order, then emit assignments in
     /// reverse order. Table growth and names are paid once per variable/copy.
     /// Arguments read iteration bindings, not the copies being assigned.
-    pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: &[NodeId]) -> Probed {
+    /// The values are taken from `values` once each, in order, and every
+    /// one is consumed (released or assigned).
+    pub(super) fn finish_self_call(
+        &mut self,
+        frame: LoopRef,
+        statements: Span,
+        values: impl Iterator<Item = B::E>,
+    ) -> Probed<B> {
         let params = self.tail_frames[frame.0 as usize].params;
         self.tail_frames[frame.0 as usize].triggered = true;
         self.tail_copies.resize(self.arena.vars.len(), None);
         let mut assignments = std::mem::take(&mut self.tail_assignments);
-        for (i, &value) in values.iter().enumerate() {
+        for (i, value) in values.enumerate() {
             self.tail_arguments += 1;
-            if i == 0 || i > params.len() { self.js.release(&mut self.arena, B::from_node(value)); continue; }
+            if i == 0 || i > params.len() { self.js.release(&mut self.arena, value); continue; }
             let param = VarId(params.start + i as u32 - 1);
-            if self.js.var_of(&self.arena, B::at(value)) == Some(param) {
-                self.js.release(&mut self.arena, B::from_node(value));
+            if self.js.var_of(&self.arena, B::of(&value)) == Some(param) {
+                self.js.release(&mut self.arena, value);
                 continue;
             }
             let copy = if let Some(copy) = self.tail_copies[param.index()] { copy } else {
@@ -61,7 +68,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.tail_copies[param.index()] = Some(copy);
                 copy
             };
-            let assignment = self.js.assign(&mut self.arena, copy, B::from_node(value));
+            let assignment = self.js.assign(&mut self.arena, copy, value);
             assignments.push(assignment);
         }
         for statement in assignments.drain(..).rev() { self.statements.push(statement); }
@@ -204,11 +211,11 @@ mod tests {
 
     /// `f(x) = let a1 = x; ...; f(1)`: a loop body of `width` declarations
     /// in a unit whose source has four list operands, so the operand stack
-    /// is reserved for 64. `loop_function_body` gives the body's block back
-    /// to the statement stack through `unblock`, which buffers nothing: the
-    /// stack does not grow.
+    /// is reserved for 64. `loop_function_body` moves the statements of
+    /// the body's list onto the statement stack one by one (`take_at`),
+    /// which buffers nothing: the operand stack does not grow.
     #[test]
-    fn a_block_wider_than_the_operand_stack_is_unblocked_without_growing_it() {
+    fn a_body_wider_than_the_operand_stack_is_moved_without_growing_it() {
         for width in [1_000usize, 10_000] {
             let mut a = crate::lambda::arena::LamArena::new();
             let (f, x) = (ident("f", 1), ident("x", 2));
@@ -227,9 +234,22 @@ mod tests {
             let output = state.probe(Cx::value(), root).unwrap();
             let out = state.realize(Cx::value(), output);
             assert!(out.value.is_some());
-            assert!(state.tail_body_statements >= width, "the body went through unblock");
+            assert!(state.tail_body_statements >= width, "the body was moved statement by statement");
             assert_eq!(state.js.operand_capacity(), reserved, "width {width}");
         }
+    }
+
+    /// The `if`s whose else-block has a statement: the merged guards of
+    /// `guard_chain`, where no other `if` has one. One step per row.
+    fn merged_guards(b: &crate::bir::Bir) -> usize {
+        use crate::bir::{NodeId, Op, View};
+        (0..b.nodes.len())
+            .filter(|&index| b.nodes[index].op() == Op::SIf)
+            .filter(|&index| {
+                let View::SIf { else_: Some(block), .. } = b.view(NodeId(index as u32)) else { return false };
+                matches!(b.view(block), View::SBlock { statements } if !statements.is_empty())
+            })
+            .count()
     }
 
     #[test]
@@ -262,6 +282,10 @@ mod tests {
             let output = state.probe(Cx::value(), root).unwrap();
             let out = state.realize(Cx::value(), output);
             assert!(out.value.is_some());
+            // The merge is taken at every level, at every size: the steps
+            // below are those of a chain that merged, not of one that
+            // stopped merging above some depth.
+            assert_eq!(merged_guards(&state.arena), depth, "depth {depth}");
             (crate::bir::lower::js::Js::steps(&state.js), state.statements.scanned as u64, state.tail_body_statements as u64)
         };
         let (one, two, ten) = (steps(1_000), steps(2_000), steps(10_000));
@@ -574,7 +598,7 @@ mod tests {
             let output = s.probe(cx, body).unwrap();
             let output = s.realize(cx, output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
-            if let Some(value) = output.value { s.arena.release(value); }
+            if let Some(value) = output.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(output.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;

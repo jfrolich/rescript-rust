@@ -880,7 +880,7 @@ mod tests {
             Test::Typeof(block_type) => {
                 format!("typeof x === {}", block_type.typeof_name().unwrap_or("?"))
             }
-            Test::Instance(instance) => format!("x instanceof {}", instance.as_str()),
+            Test::Instance(instance) => format!("x instanceof {}", instance.to_ocaml_string()),
             Test::NotNull => "x !== null".to_string(),
             Test::Not(test) => format!("!({})", test_to_string(p, *test)),
             Test::And(t1, t2) => {
@@ -940,8 +940,8 @@ mod tests {
 
     fn class(name: &str, ancestors: &[&str]) -> BlockType {
         BlockType::Instance(Instance::Class {
-            name: name.to_string(),
-            ancestors: ancestors.iter().map(|a| a.to_string()).collect(),
+            name: name.into(),
+            ancestors: ancestors.iter().map(|a| (*a).into()).collect(),
             blocks: crate::types::ClassBlocks::fresh(ancestors.len()),
         })
     }

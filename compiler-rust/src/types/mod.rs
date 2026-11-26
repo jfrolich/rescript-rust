@@ -92,7 +92,8 @@ pub use variant_runtime::{
     ConstructorCase as VariantConstructorCase, ConstructorReference, Instance as VariantInstance,
     Layout as VariantLayout, LayoutRef as VariantLayoutRef, LiteralTag as VariantLiteralTag,
     MatchingFacts as VariantMatchingFacts, Tag as VariantTag, TagType as VariantTagType,
-    ClassBlocks, RecognizedShape, ShapeAllocation, ShapeBlocks, ShapeString, TaggedBlock, ValueShape,
+    ClassBlocks, ClassName, RecognizedShape, ShapeAllocation, ShapeBlocks, ShapeString, TaggedBlock,
+    ValueShape,
 };
 
 // btype exports

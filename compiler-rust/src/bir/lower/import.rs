@@ -44,40 +44,33 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
     }
 
-    /// X: static_index. O(name bytes), one plain member node.
-    pub(super) fn static_member(&mut self, object: NodeId, name: &str) -> NodeId {
-        B::node(self.member(B::from_node(object), name))
-    }
-
-    /// X: static_index, on a handle. O(name bytes): the name is interned;
+    /// X: static_index. O(name bytes): the name is interned;
     /// one plain member node.
-    fn member(&mut self, object: B::E, name: &str) -> B::E {
+    pub(super) fn member(&mut self, object: B::E, name: &str) -> B::E {
         let property = self.arena.intern_text(name);
         self.js.dot(&mut self.arena, object, property, crate::js_ir::arena::FieldPos::new(None), false)
     }
 
     /// X: import_of_path. O(path bytes), one global and one call.
-    fn import_of_path(&mut self, text: crate::bir::StrId) -> NodeId {
+    fn import_of_path(&mut self, text: crate::bir::StrId) -> B::E {
         let var = self.fresh_variable("import");
         self.arena.mark_js_global(var);
         self.idents[var.index()] = Ident::create_persistent("import");
-        let mut callee = self.js.var(&mut self.arena, var);
-        self.js.assume_strict(&mut self.arena, &mut callee);
+        let callee = self.js.var(&mut self.arena, var);
         let path = self.js.str(&mut self.arena, text);
         let info = self.arena.js_info(crate::bir::JsPayload::Call(Default::default()));
         let mark = self.js.mark();
         self.js.push(path);
-        B::node(self.js.call(&mut self.arena, callee, mark, info))
+        self.js.call(&mut self.arena, callee, mark, info)
     }
 
     /// X: wrap_then_path. O(path segments + spelling bytes). The callback
     /// owns one parameter and a linear member chain, with no subtree copy.
-    fn wrap_then_path<'a>(&mut self, import: NodeId, path: impl IntoIterator<Item = &'a str>) -> NodeId {
+    fn wrap_then_path<'a>(&mut self, import: B::E, path: impl IntoIterator<Item = &'a str>) -> B::E {
         // `import` stays outside the callback: nothing is adopted.
         super::names::open(&mut self.arena);
         let param = self.fresh_variable("m");
         let mut value = self.js.var(&mut self.arena, param);
-        self.js.assume_strict(&mut self.arena, &mut value);
         for segment in path {
             self.primitive_steps += 1;
             value = self.member(value, segment);
@@ -94,11 +87,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         );
         let callback = self.js.function(&mut self.arena, header, body);
         super::names::close(&mut self.arena, &self.idents, header);
-        let then = self.member(B::from_node(import), "then");
+        let then = self.member(import, "then");
         let info = self.arena.js_info(crate::bir::JsPayload::Call(Default::default()));
         let mark = self.js.mark();
         self.js.push(callback);
-        B::node(self.js.call(&mut self.arena, then, mark, info))
+        self.js.call(&mut self.arena, then, mark, info)
     }
 
     /// X:581 external_module_id. O(bundle/hint bytes) on first encounter,
@@ -187,7 +180,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// X: compile_import. O(module inventory + path segments + spelling bytes).
     /// Invalid paths yield undefined as in the legacy emitter; diagnostics are
     /// still emitted by the legacy side of the shared check-mode pipeline.
-    pub(super) fn compile_import(&mut self, source: &ImportSource) -> NodeId {
+    pub(super) fn compile_import(&mut self, source: &ImportSource) -> B::E {
         match source {
             ImportSource::ImportModule { module_, path } => {
                 let (module, resolved) = if let Some(&cached) = self.import_storage.resolved.get(module_) { cached } else {
@@ -199,7 +192,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     (module, resolved)
                 };
                 self.dynamic_imports.push(module);
-                let Some(resolved) = resolved else { return B::node(self.js.undefined(&mut self.arena, false)) };
+                let Some(resolved) = resolved else { return self.js.undefined(&mut self.arena, false) };
                 let import = self.import_of_path(resolved);
                 if path.is_empty() { return import; }
                 let mut flat = std::mem::take(&mut self.import_storage.flat);
@@ -217,8 +210,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     else { crate::js_ir::printer::convert_ident_into(name, &mut export); }
                     self.wrap_then_path(import, std::iter::once(export.as_str()))
                 } else {
-                    self.js.release(&mut self.arena, B::from_node(import));
-                    B::node(self.js.undefined(&mut self.arena, false))
+                    self.js.release(&mut self.arena, import);
+                    self.js.undefined(&mut self.arena, false)
                 };
                 flat.clear(); export.clear(); self.import_storage.flat = flat; self.import_storage.export = export;
                 result
@@ -357,7 +350,7 @@ mod tests {
             let run = |s: &mut State<'_>| {
                 let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
                 for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-                if let Some(value) = out.value { s.arena.release(value); }
+                if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
                 s.statements.kill(out.stmts);
             };
             let lists = state.arena.lists.storage_shape().0; let funcs = state.arena.vars.funcs.len();

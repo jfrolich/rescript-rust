@@ -1799,8 +1799,8 @@ mod tests {
 
     fn class(name: &str, ancestors: &[&str]) -> BlockType {
         BlockType::Instance(Instance::Class {
-            name: name.to_string(),
-            ancestors: ancestors.iter().map(|a| a.to_string()).collect(),
+            name: name.into(),
+            ancestors: ancestors.iter().map(|a| (*a).into()).collect(),
             blocks: crate::types::ClassBlocks::fresh(ancestors.len()),
         })
     }

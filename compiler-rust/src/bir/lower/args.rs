@@ -3,18 +3,18 @@ use super::*;
 use crate::bir::PropertyKey;
 use crate::emit::row::{Kind, flag};
 
-enum Work {
-    Enter(NodeId),
-    Rebuild(NodeId, usize),
+enum Work<E> {
+    Enter(E),
+    Rebuild(E, usize),
 }
-/// The work, values and statements in flight (`S`) of `evaluate_now`,
-/// reused across calls.
-pub(super) struct Evaluation<S> {
-    work: Vec<Work>,
-    values: Vec<NodeId>,
+/// The work, values (`E`) and statements in flight (`S`) of
+/// `evaluate_now`, reused across calls.
+pub(super) struct Evaluation<E, S> {
+    work: Vec<Work<E>>,
+    values: Vec<E>,
     statements: Vec<S>,
 }
-impl<S> Default for Evaluation<S> {
+impl<E, S> Default for Evaluation<E, S> {
     /// Empty storage. O(1); allocates nothing.
     fn default() -> Self {
         Self { work: Vec::new(), values: Vec::new(), statements: Vec::new() }
@@ -23,14 +23,14 @@ impl<S> Default for Evaluation<S> {
 
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// A:28 delay_safe: a cached fact, never a subtree walk. O(1).
-    fn delay_safe(&self, value: NodeId) -> bool {
-        self.js.has(&self.arena, B::at(value), flag::DELAY_SAFE)
+    fn delay_safe(&self, value: &B::E) -> bool {
+        self.js.has(&self.arena, B::of(value), flag::DELAY_SAFE)
     }
 
     /// A:90 runs_no_code: inspect each owned member spine without recursion.
     /// Cost: one step per member of the chain of field reads, to its base.
-    fn runs_no_code(&self, value: NodeId) -> bool {
-        self.js.runs_no_code(&self.arena, B::at(value))
+    fn runs_no_code(&self, value: &B::E) -> bool {
+        self.js.runs_no_code(&self.arena, B::of(value))
     }
 
     /// Whether `statement` declares a variable whose value, if it has one,
@@ -69,7 +69,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Cost: O(V + E + B + J): walks V held literal/sequence occurrences and E child/property
     /// slots, appends B bindings/statements, plus J JS-normalizer and released-node visits.
     /// Uses enter/rebuild frames rather than copying whole literal trees.
-    fn evaluate_now(&mut self, root: NodeId) -> (Span, NodeId) {
+    fn evaluate_now(&mut self, root: B::E) -> (Span, B::E) {
         let mut evaluation = std::mem::take(&mut self.evaluation);
         let Evaluation { work, values, statements } = &mut evaluation;
         assert!(work.is_empty() && values.is_empty() && statements.is_empty(), "argument evaluation scratch must be empty");
@@ -79,13 +79,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.sequence_steps += 1;
             match task {
                 Work::Enter(value) => {
-                    if self.delay_safe(value) {
+                    if self.delay_safe(&value) {
                         values.push(value);
                         continue;
                     }
-                    let kind = self.js.kind(&self.arena, B::at(value));
+                    let kind = self.js.kind(&self.arena, B::of(&value));
                     if kind == Kind::Seq {
-                        self.js.unpack_rev(&mut self.arena, B::from_node(value));
+                        self.js.unpack_rev(&mut self.arena, value);
                         let first = self.js.pop();
                         let second = self.js.pop();
                         if self.js.has(&self.arena, B::of(&first), flag::STRICT) {
@@ -94,13 +94,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             let statement = self.js.exp_rule(&mut self.arena, first);
                             statements.push(statement);
                         }
-                        work.push(Work::Enter(B::node(second)));
+                        work.push(Work::Enter(second));
                         continue;
                     }
                     let literal = match kind {
                         Kind::Optional | Kind::Array | Kind::BlockLit => true,
                         Kind::Object => {
-                            let info = self.js.info_of(&self.arena, B::at(value)).expect("object information");
+                            let info = self.js.info_of(&self.arena, B::of(&value)).expect("object information");
                             let crate::bir::JsPayload::Object(keys) = self.arena.javascript(info) else {
                                 unreachable!("object payload")
                             };
@@ -111,12 +111,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         _ => false,
                     };
                     if literal {
-                        let mut shell = B::from_node(value);
+                        let mut shell = value;
                         let count = self.js.take_operands(&mut self.arena, &mut shell);
-                        work.push(Work::Rebuild(B::node(shell), count as usize));
+                        work.push(Work::Rebuild(shell, count as usize));
                         let at = work.len();
                         for _ in 0..count {
-                            work.push(Work::Enter(B::node(self.js.pop())));
+                            work.push(Work::Enter(self.js.pop()));
                         }
                         // The first operand is entered first.
                         work[at..].reverse();
@@ -126,24 +126,22 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             &mut self.arena,
                             LetKind::Strict,
                             var,
-                            Some(B::from_node(value)),
+                            Some(value),
                         );
                         statements.push(statement);
-                        let mut held = self.js.var(&mut self.arena, var);
-                        self.js.assume_strict(&mut self.arena, &mut held);
-                        values.push(B::node(held));
+                        let held = self.js.var(&mut self.arena, var);
+                        values.push(held);
                     }
                 }
                 Work::Rebuild(old, count) => {
                     let begin = values.len() - count;
                     let mark = self.js.mark();
-                    for &child in &values[begin..] {
-                        self.js.push(B::from_node(child));
+                    for child in values.drain(begin..) {
+                        self.js.push(child);
                     }
-                    values.truncate(begin);
-                    let mut value = self.js.refill(&mut self.arena, B::from_node(old), mark);
+                    let mut value = self.js.refill(&mut self.arena, old, mark);
                     self.js.assume_strict(&mut self.arena, &mut value);
-                    values.push(B::node(value));
+                    values.push(value);
                 }
             }
         }
@@ -164,8 +162,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn sequence_arguments(
         &mut self,
         method_callee: bool,
-        args: &[Out],
-        values: &mut Vec<NodeId>,
+        args: &mut [Out<B>],
+        values: &mut Vec<B::E>,
     ) -> Span {
         let start = args.first().map_or_else(
             || self.statements.mark(),
@@ -181,24 +179,24 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mut has_code = false;
         let mut later_defines_pure = true;
         assert!(values.is_empty(), "argument value scratch must be empty");
-        for (i, arg) in args.iter().enumerate().rev() {
+        for (i, arg) in args.iter_mut().enumerate().rev() {
             self.sequence_steps += 1;
-            let value = arg.value.expect("argument value");
+            let value = arg.value.take().expect("argument value");
             let (held, value) =
-                if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(value)) {
+                if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(&value)) {
                     (Span::default(), value)
                 } else if method_callee
                     && i == 0
-                    && self.js.kind(&self.arena, B::at(value)) == Kind::Dot
+                    && self.js.kind(&self.arena, B::of(&value)) == Kind::Dot
                 {
-                    let mut shell = B::from_node(value);
+                    let mut shell = value;
                     self.js.take_operands(&mut self.arena, &mut shell);
                     let object = self.js.pop();
-                    let (held, object) = self.evaluate_now(B::node(object));
+                    let (held, object) = self.evaluate_now(object);
                     let mark = self.js.mark();
-                    self.js.push(B::from_node(object));
+                    self.js.push(object);
                     let value = self.js.refill(&mut self.arena, shell, mark);
-                    (held, B::node(value))
+                    (held, value)
                 } else {
                     self.evaluate_now(value)
                 };
@@ -241,8 +239,8 @@ mod tests {
         let mut state = State::new(bridge::import_lambda(&a, root).unwrap());
         let value = state.arena.new_node(View::JNull, 0);
         let statement = state.arena.new_node(View::SDebugger, 0);
-        state.evaluation.statements.push(<crate::bir::j::rows::Rows as js_stmt::JsStmt>::stmt_from_node(statement));
-        state.evaluate_now(value);
+        state.evaluation.statements.push(crate::bir::j::rows::Rows::stmt_from_node(statement));
+        state.evaluate_now(crate::bir::lower::out::of_row(value));
     }
 
     #[test]
@@ -266,7 +264,7 @@ mod tests {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
-            if let Some(value) = out.value { s.arena.release(value); }
+            if let Some(value) = out.value { s.arena.release(crate::bir::lower::out::row(value)); }
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;
@@ -316,7 +314,7 @@ mod tests {
         assert_eq!(state.free.capacities(), free_before);
         assert!(state.evaluation.work.is_empty() && state.evaluation.values.is_empty() && state.evaluation.statements.is_empty());
         assert_eq!(std::mem::size_of::<Span>(), 8);
-        assert_eq!(std::mem::size_of::<Work>(), 16);
+        assert_eq!(std::mem::size_of::<Work<<crate::bir::j::rows::Rows as super::super::js::Js>::E>>(), 16);
     }
 
     #[test]
@@ -426,7 +424,7 @@ mod tests {
                 state.statements.reserve();
                 args.push(Out {
                     stmts: state.statements.since(start),
-                    value: Some(value),
+                    value: Some(crate::bir::lower::out::of_row(value)),
                     finished: Finished::False,
                 });
                 expected_args.push((vec![], old_value));
@@ -447,13 +445,13 @@ mod tests {
             );
             let statement = state.arena.new_node(View::SExp { value }, 0);
             let start = state.statements.mark();
-            state.statements.push(<crate::bir::j::rows::Rows as crate::bir::lower::js_stmt::JsStmt>::stmt_from_node(statement));
+            state.statements.push(crate::bir::j::rows::Rows::stmt_from_node(statement));
             state.statements.reserve();
             let text = state.arena.intern_text("v");
             let value = state.pure_expression(View::JStr { text }, 0);
             args.push(Out {
                 stmts: state.statements.since(start),
-                value: Some(value),
+                value: Some(crate::bir::lower::out::of_row(value)),
                 finished: Finished::False,
             });
             let callee = exp::var(effect_id, &mut legacy.j);
@@ -462,7 +460,8 @@ mod tests {
             let value = exp::string("v", &mut legacy.j);
             expected_args.push((vec![statement], value));
             let mut values = Vec::new();
-            let span = state.sequence_arguments(method, &args, &mut values);
+            let span = state.sequence_arguments(method, &mut args, &mut values);
+            let values: Vec<NodeId> = values.into_iter().map(crate::bir::lower::out::row).collect();
             if method || shape != 0 {
                 assert!(state.arena.node(values[0]).flags().contains(NodeFlags::JS_LOC_PRESENT));
             }
@@ -488,7 +487,7 @@ mod tests {
                 Cx::value(),
                 Probed::Out(Out {
                     stmts: span,
-                    value: Some(value),
+                    value: Some(crate::bir::lower::out::of_row(value)),
                     finished: Finished::False,
                 }),
             );

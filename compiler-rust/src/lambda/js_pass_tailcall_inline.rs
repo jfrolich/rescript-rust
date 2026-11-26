@@ -20,6 +20,7 @@ use crate::js_ir::walk::{
 use crate::lambda::lam_compat::LetKind;
 
 use super::js_exp_make::js_expr_no_side_effects;
+use super::js_pass_external_shadow::var_may_change;
 
 fn is_lexical_binding_kind(property: LetKind) -> bool {
     matches!(
@@ -28,8 +29,15 @@ fn is_lexical_binding_kind(property: LetKind) -> bool {
     )
 }
 
-pub(crate) fn apply_js_tailcall_inline_pass(mut deps: DepsProgram) -> DepsProgram {
-    tailcall_inline_program(&mut deps.program);
+/// `assignable` are the variables some `Lassign` assigns: an argument that
+/// is one of them or a JS global is bound to the parameter instead of
+/// replacing it in the inlined body (js_pass_tailcall_inline.ml,
+/// `tailcall_inline ~assignable`).
+pub(crate) fn apply_js_tailcall_inline_pass(
+    mut deps: DepsProgram,
+    assignable: &HashSet<Ident>,
+) -> DepsProgram {
+    tailcall_inline_program(&mut deps.program, assignable);
     deps
 }
 
@@ -43,7 +51,8 @@ pub(crate) fn apply_js_tailcall_inline_pass(mut deps: DepsProgram) -> DepsProgra
 pub(crate) fn decisions(program: &Program) -> HashMap<Ident, (UsedStats, usize, bool)> {
     let mut counter = UseCounts::default();
     walk_block(&mut counter, &program.arena, &program.block);
-    let state = TailcallInlineState::new(program);
+    let no_assignable = HashSet::default();
+    let state = TailcallInlineState::new(program, &no_assignable);
     state
         .statuses
         .iter()
@@ -54,8 +63,8 @@ pub(crate) fn decisions(program: &Program) -> HashMap<Ident, (UsedStats, usize, 
         .collect()
 }
 
-fn tailcall_inline_program(program: &mut Program) {
-    let mut inliner = TailcallInlineState::new(program);
+fn tailcall_inline_program(program: &mut Program, assignable: &HashSet<Ident>) {
+    let mut inliner = TailcallInlineState::new(program, assignable);
     let block = std::mem::take(&mut program.block);
     program.block = inliner.block_items(&mut program.arena, &block);
     let block = program.block.clone();
@@ -169,7 +178,9 @@ fn collect_outer_fun_bodies(a: &JsArena, e: Expr, out: &mut Vec<StmtList>) {
 }
 
 #[derive(Debug)]
-struct TailcallInlineState {
+struct TailcallInlineState<'a> {
+    /// The variables some `Lassign` assigns (`Lam_stats.assignable`).
+    assignable: &'a HashSet<Ident>,
     inline_decls: HashMap<Ident, InlineFunctionDecl>,
     /// Functions called by the final `return f(...)` of some block: the only
     /// calls `try_inline_single_return_statement` can inline, so the only
@@ -187,8 +198,8 @@ struct InlineFunctionDecl {
     body: StmtList,
 }
 
-impl TailcallInlineState {
-    fn new(program: &Program) -> Self {
+impl<'a> TailcallInlineState<'a> {
+    fn new(program: &Program, assignable: &'a HashSet<Ident>) -> Self {
         let a = &program.arena;
         let mut counter = UseCounts::default();
         walk_block(&mut counter, a, &program.block);
@@ -228,6 +239,7 @@ impl TailcallInlineState {
         let inline_decls = collector.inline_decls;
 
         Self {
+            assignable,
             inline_decls,
             tail_callees,
             statuses,
@@ -346,11 +358,11 @@ impl TailcallInlineState {
             .into_iter()
             .map(|arg| self.expression(j, arg))
             .collect();
-        inline_tailcall_call(j, &immutable_mask, &params, args, processed_body)
+        inline_tailcall_call(j, self.assignable, &immutable_mask, &params, args, processed_body)
     }
 }
 
-impl Mapper for TailcallInlineState {
+impl Mapper for TailcallInlineState<'_> {
     fn block(&mut self, j: &mut JsArena, block: StmtList) -> StmtList {
         crate::js_ir::walk::map_block_with_items(self, j, block)
     }
@@ -468,6 +480,7 @@ fn block_assigns_ident(a: &JsArena, block: &[Stmt], ident: &Ident) -> bool {
 
 fn inline_tailcall_call(
     j: &mut JsArena,
+    assignable: &HashSet<Ident>,
     immutable_mask: &[bool],
     params: &[Ident],
     args: Vec<Expr>,
@@ -483,7 +496,12 @@ fn inline_tailcall_call(
         .zip(immutable_mask.iter().copied())
     {
         if immutable {
-            if let ExprKind::Var(id) = j.ek(arg) {
+            // An argument that may change before the inlined body reads the
+            // parameter is bound like other expressions
+            // (js_pass_tailcall_inline.ml, `inline_call`).
+            if let ExprKind::Var(id) = j.ek(arg)
+                && !var_may_change(assignable, &j.ident(id))
+            {
                 substitution.vars.insert(param, j.ident(id));
                 continue;
             }
@@ -762,7 +780,7 @@ mod source_loc_tests {
             name_reservations: vec![],
         };
 
-        tailcall_inline_program(&mut program);
+        tailcall_inline_program(&mut program, &HashSet::default());
 
         let a = &program.arena;
         let StmtKind::IntSwitch(_, info) = a.sk(program.block[0]) else {

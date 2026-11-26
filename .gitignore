@@ -124,3 +124,4 @@ tests/tests/src/**/*.js
 
 # Amp orb portal registrations
 .amp/portals/*
+.claude/worktrees/

@@ -8989,6 +8989,492 @@ locally abstract type, `box<b>` and `list<b>`. Six of them are refused
 by both compilers, four with the ambiguity lines, and twelve accepted
 with the same JavaScript.
 
+#### Third part: a field's type and a variant row are lowered under tracing
+
+Programs (each starts with `type rec t<_> = Int: t<int>`, the function is
+`(type a, x: t<a>, y: a, ...) => switch x { | Int => ... }`): OCaml refuses
+`{"f": y} === o` with `o: {.."f": int}` and `#A(y) === v` with
+`v: [> #A(int)]`; trunk `45c4f78a5` accepted both and emitted JavaScript.
+
+```text
+  We've found a bug for you!
+  /.../fixtures/gadt_instance_row_object_open_left.res:4:25
+
+  2 │ let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  3 │   switch x {
+  4 │   | Int => {"f": y} === o
+  5 │   }
+  6 │ 
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+```
+
+```text
+  We've found a bug for you!
+  /.../fixtures/gadt_instance_row_variant_open_left.res:4:22
+
+  2 │ let f = (type a, x: t<a>, y: a, v: [> #A(int)]) =>
+  3 │   switch x {
+  4 │   | Int => #A(y) === v
+  5 │   }
+  6 │ 
+
+  This has type: [> #A(int)]
+  But it's being compared to something of type: [> #A(a)]
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+```
+
+Rust on trunk, exit 0, for the first (the second is the same with
+`{NAME: "A", VAL: y}` and `v`):
+
+```js
+function f(x, y, o) {
+  return ({
+    f: y
+  }) === o;
+}
+```
+
+The upper-bounded row (`let p = #A(if true { y } else { 0 }); p === v`
+with `v: [< #A(int)]`) was refused by both, with another text in Rust:
+"This has type: [< #A(int)]" and an "incompatible parts" paragraph
+(`int vs a (defined as int)`) where OCaml prints:
+
+```text
+  We've found a bug for you!
+  /.../fixtures/gadt_instance_row_variant_upper_bound_left.res:6:13
+
+  4 ┆ | Int => {
+  5 ┆     let p = #A(if true { y } else { 0 })
+  6 ┆     p === v
+  7 ┆   }
+  8 ┆ }
+
+  This has type: [#A(int)]
+  But it's being compared to something of type: [> #A(a)]
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+```
+
+Commands are the ones of "Scope, calibration and reproducibility": each
+program is `Main.res` alone, run with `bsc -w +A -bs-jsx 4 -color never
+Main.res` through both compilers; "agree" is the same exit status and the
+same stdout and stderr byte for byte, after removing colour escapes. Rust
+before is trunk `45c4f78a5`, after is the third commit below; the column
+"fixed by" names the OCaml line whose port made the program agree (each
+commit was built and run on its own). A location after "accepted" is a
+warning's. Each program is in the PR's fixtures or recorded here only.
+
+| # | program | OCaml | Rust before | after | fixed by |
+| --- | --- | --- | --- | --- | --- |
+| p01 | (1) `{"f": y} === o`, `o: {.."f": int}` | refused at 4:25 | DIFFER (accepted) | agree | 2490 |
+| p02 | (2) `#A(y) === v`, `v: [> #A(int)]` | refused at 4:22 | DIFFER (accepted) | agree | 2611 |
+| p03 | (3) `o === {"f": y}` | refused at 4:18-25 | DIFFER (accepted) | agree | 2490 |
+| p04 | (3) `{"f": y, "g": "s"} === o`, two fields, instance in the first | refused at 4:35 | DIFFER (accepted) | agree | 2490 |
+| p05 | `{"f": "s", "g": y} === o`, instance in the last field | refused at 4:35 | DIFFER (accepted) | agree | 2490 |
+| p06 | (4) `v === #A(y)` | accepted | agree | agree |  |
+| p07 | (4) `{"f": y} === o`, `o: {"f": int}` closed | accepted | agree | agree |  |
+| p08 | (5) `[{"f": y}, o]` | refused at 4:23 | agree | agree |  |
+| p09 | (5) `[#A(y), v]` | refused at 4:20 | agree | agree |  |
+| p10 | (5) `if true { {"f": y} } else { o }` | refused at 4:40 | agree | agree |  |
+| p11 | (6) `let p = #A(if true { y } else { 0 }); p === v`, `v: [< #A(int)]` | refused at 6:13 | DIFFER (refused) | agree | 2714 |
+| p12 | `{"f": y} == o` | refused at 4:24 | DIFFER (accepted) | agree | 2490 |
+| p13 | `#A(y) == v` | refused at 4:21 | DIFFER (accepted) | agree | 2611 |
+| p14 | `same({"f": y}, o)`, `same: ('x, 'x) => bool` | refused at 5:27 | DIFFER (accepted) | agree | 2490 |
+| p15 | `same(#A(y), v)` | refused at 5:24 | DIFFER (accepted) | agree | 2611 |
+| p16 | `({"f": y}, 1) === (o, 1)` (tuple) | refused at 4:31 | DIFFER (accepted) | agree | 2490 |
+| p17 | `r := Some({"f": y})`, `r: ref<option<{.."f": int}>>` a parameter | refused at 4:22-29 | DIFFER (accepted) | agree | 2490 |
+| p18 | `{l: {"f": y}, m: o}`, record `box<'x> = {l: 'x, m: 'x}` | refused at 5:29 | DIFFER (refused) | agree | 2490 |
+| p19 | result annotation `: {.."f": int}`, `{"f": y}` returned | refused at 4:12-19 | DIFFER (accepted) | agree | 2490 |
+| p20 | `eq<a, int>` witness, `{"f": y} === o` | refused at 4:26 | DIFFER (accepted) | agree | 2490 |
+| p21 | `type u = int`, `U: t<u>`, `{"f": y} === o` | refused at 5:23 | DIFFER (accepted) | agree | 2490 |
+| p22 | `type r<'a> = 'a constraint 'a = [> #A(int)]`, `v: r<_>`, `#A(y) === v` | refused at 5:22 | DIFFER (accepted) | agree | 2611 |
+| p23 | `v: [< #A(int) \| #B]`, `#A(y) === v` | refused at 4:22 | agree | agree |  |
+| p24 | `v: [> #B]`, `#A(y) === v` (tag on one side) | accepted | agree | agree |  |
+| p25 | `o: {.."f": {.."g": int}}`, `{"f": {"g": y}} === o` (nested object) | refused at 4:32 | DIFFER (accepted) | agree | 2490 |
+| p26 | `o: {.."f": [> #A(int)]}`, `{"f": #A(y)} === o` (variant in a field) | refused at 4:29 | DIFFER (accepted) | agree | 2490 |
+| p27 | `{"f": y + 1} === o` | accepted | agree | agree |  |
+| p28 | `{"f": (y: int)} === o` | accepted | agree | agree |  |
+| p29 | `v: [#A(int)]` closed, `#A(y) === v` | accepted | agree | agree |  |
+| p30 | `o2: {.."f": a}` against `o: {.."f": int}`, open against open | refused at 4:19 | DIFFER (accepted) | agree | 2490 |
+| p31 | `(#A(y): [#A(a)]) === v`, closed against open | refused at 4:33 | DIFFER (accepted) | agree | 2611 |
+| p32 | `(if true { #A(y) } else { #B("s") }) === v`, `v: [> #A(int) \| #B(string)]` | refused at 4:53 | DIFFER (accepted) | agree | 2611 |
+| p33 | the same with the instance in the last tag, `#B(y)` | refused at 4:53 | DIFFER (accepted) | agree | 2611 |
+| p34 | result annotation `: [> #A(int)]`, `#A(y)` returned | accepted, a warning at 2:33 | agree | agree |  |
+| p35 | `#A(y + 1) === v` | accepted | agree | agree |  |
+| p36 | `v2: [> #A(a)]` against `v: [> #A(int)]`, open against open | refused at 4:19 | DIFFER (accepted) | agree | 2611 |
+| p37 | `o == {"f": y}` | refused at 4:17-24 | DIFFER (accepted) | agree | 2490 |
+| p38 | `v == #A(y)` (warning 102 in both) | accepted, a warning at 4:12-21 | agree | agree |  |
+| p39 | `o === {"f": y, "g": "s"}` | refused at 4:18-35 | DIFFER (accepted) | agree | 2490 |
+| p40 | `#A((y: int)) === v` | accepted | agree | agree |  |
+| p41 | `let r = ref(o); r := {"f": y}; r` | refused at 6:12-19 | DIFFER (accepted) | agree | 2490 |
+| p42 | `v: [> #A({.."g": int})]`, `#A({"g": y}) === v` | refused at 4:29 | DIFFER (accepted) | agree | 2490 |
+| p43 | (6) reversed: `v === p`, `v: [< #A(int)]` | refused at 6:13 | DIFFER (refused) | agree | 2721 |
+| p44 | `let p = #A(if ...); p === v`, `v: [> #B]` | refused at 6:13 | DIFFER (accepted) | agree | 2618 |
+| p45 | the same reversed, `v === p` | refused at 6:13 | DIFFER (accepted) | agree | 2618 |
+| p46 | `(w: [< #A(a) \| #B]) => w === v`, `v: [< #A(int) \| #B]` | accepted, a warning at 2:27 | agree | agree |  |
+| p47 | p46 with `w === p` first, `p` holding the instance | refused at 7:13 | agree | agree |  |
+| p48 | `let p = {"f": if true { y } else { 0 }}; p === o` | refused at 6:13 | DIFFER (accepted) | agree | 2490 |
+| p49 | (6) with `v: [< #A(int) \| #B]` | refused at 6:13 | DIFFER (refused) | agree | 2714 |
+| p50 | (6) with `v: [> #A(int)]` | refused at 6:13 | DIFFER (accepted) | agree | 2611 |
+| p51 | `eq<a, int>` witness, `#A(y) === v` | refused at 4:23 | DIFFER (accepted) | agree | 2611 |
+| p52 | `type u = int`, `U: t<u>`, `#A(y) === v` | refused at 5:20 | DIFFER (accepted) | agree | 2611 |
+| p53 | `ignore({"f": y} === o); 1` | refused at 5:27 | DIFFER (accepted) | agree | 2490 |
+| p54 | `({"f": y}: {.."f": int}) === o` | accepted | agree | agree |  |
+| p55 | `{"f": y} === (o :> {"f": int})` | refused at 4:26-40 | DIFFER (accepted) | DIFFER (refused) | open |
+| p56 | `{"f": 1, "g": y} === o`, `o: {.."f": int, "g": int}` | refused at 4:33 | DIFFER (accepted) | agree | 2490 |
+| p57 | `(#A(y): [> #A(int)]) === v` | accepted | agree | agree |  |
+
+Eighty-five programs of an unmerged search of the same mechanism (objects
+against open objects, rows against open rows, their reductions) were run
+too: on trunk 65 agree and 20 differ (17 accepted by Rust and refused by
+OCaml, 3 refused with another text); after the third commit all 85 agree.
+
+##### The trace
+
+A scratch copy of `compiler/ml/ctype.ml` (never committed) printed, at each
+call of `update_level` in `unify_fields`, `unify_row` and `unify_row_field`,
+the level and the place, and, at the two refusals (`update_level`,
+`ctype.ml:588`, and `expand_abbrev_gen`, `ctype.ml:1226`), the type, its
+level and the set's level; "ADD" is `ctype.ml:1227`. `row==row1` says which
+side `set_more` lowers. Each `update_level:588` refusal prints twice: the
+first pass and its retry with expansion (`ctype.ml:631-638`).
+
+```text
+== p01
+TRACE unify_fields:2490 field=f f1.level=2007 va.level=1004 desc=other
+TRACE expand_abbrev_gen:1226 REFUSE path=a ty.level=1004 setlevel=1007
+== p02
+TRACE set_more:2611 row==row1:false rm.level=2007 fields=A
+TRACE set_more:2611 row==row1:true rm.level=1004 fields=A
+TRACE expand_abbrev_gen:1227 ADD path=a level=2007 setlevel=1007
+TRACE update_level:588 REFUSE ty.id=361 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE update_level:588 REFUSE ty.id=361 ty.level=2007 level=1004 setlevel=1007 desc=a
+== p06
+TRACE expand_abbrev_gen:1227 ADD path=a level=2008 setlevel=1007
+== p11
+TRACE expand_abbrev_gen:1227 ADD path=a level=2008 setlevel=1007
+TRACE set_more:2611 row==row1:false rm.level=2007 fields=A
+TRACE set_more:2611 row==row1:true rm.level=1004 fields=A
+TRACE update_level:588 REFUSE ty.id=375 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE update_level:588 REFUSE ty.id=375 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE   raised at unify_row_field:2714
+== p43
+TRACE expand_abbrev_gen:1227 ADD path=a level=2008 setlevel=1007
+TRACE set_more:2611 row==row1:false rm.level=1004 fields=A
+TRACE set_more:2611 row==row1:true rm.level=2007 fields=A
+TRACE update_level:588 REFUSE ty.id=378 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE update_level:588 REFUSE ty.id=378 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE   raised at unify_row_field:2721
+== p44
+TRACE expand_abbrev_gen:1227 ADD path=a level=2008 setlevel=1007
+TRACE set_more:2611 row==row1:false rm.level=2007 fields=A
+TRACE set_more:2611 row==row1:true rm.level=1004 fields=B
+TRACE update_level:588 REFUSE ty.id=369 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE update_level:588 REFUSE ty.id=369 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE   raised at set_more:2618 row==row1:true
+== p45
+TRACE expand_abbrev_gen:1227 ADD path=a level=2008 setlevel=1007
+TRACE set_more:2611 row==row1:false rm.level=1004 fields=B
+TRACE update_level:588 REFUSE ty.id=371 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE update_level:588 REFUSE ty.id=371 ty.level=2007 level=1004 setlevel=1007 desc=a
+TRACE   raised at set_more:2618 row==row1:false
+```
+
+For the object (p01) nothing is refused at `ctype.ml:2490` itself: the left
+field's type (level 2007) is lowered to the row variable's level 1004 with
+`a` in it, not yet a member of any set; the unification of the two fields
+then expands `a` at level 1004, below the equation's expansion level 1007,
+and `expand_abbrev_gen` refuses (`ctype.ml:1220-1226`). A Rust trace of the
+same program (temporary `eprintln!`, never committed) showed the field loop
+reached with tracing on and the row variable at 1004, the field types at
+2007, and `a` then expanded at 2007 and added to the set: nothing lowered
+it. For the open row (p02) the lowering of `v`'s row at `ctype.ml:2611`
+(`row==row1:true`, level 1004) takes its payload `int` to 1004; the
+unification of the tag's payloads expands `a` at 2007 (ADD) and `unify2`
+then lowers `a` to the smaller level 1004 (`ctype.ml:2284-2285`), which refuses
+the member. In Rust the payload `int` stayed at 2007. With the operands the
+other way round (p06) no row of `v` is unified with the literal's row (the
+literal is typed against `v`'s type), and both accept. The upper-bounded
+row (p11, p43, p49) is refused at `ctype.ml:2714` or `2721`, after the
+conjunction is linked to the present tag and before its payloads are
+unified: the refusal leaves the link, so the type prints as `[#A(int)]`,
+and the trace is the refusal's one pair, with no "incompatible parts".
+A tag on one side only (p44, p45) is refused at `ctype.ml:2618`, where the
+row built from the other side's unmatched tag is lowered to `v`'s level.
+No program raised at `ctype.ml:2703`.
+
+| OCaml line | only while tracing | what is lowered, to which level | Rust on trunk | after | programs |
+| --- | --- | --- | --- | --- | --- |
+| `ctype.ml:2490` (`unify_fields`) | yes | the left object's common field type `f1.f_typ`, to the shared row variable's level `va.level` | none (`unify_object_field_pairs`, `ctype.rs:10311`) | ported | p01, p03-p05, p12, p14, p16-p21, p25, p26, p30, p37, p39, p41, p42, p48, p53, p56 |
+| `ctype.ml:2611` (`set_more`) | yes | the whole row, a fresh `Tvariant row`, to its own row variable's level `rm.level` | none (`unify_rows`'s `set_more`) | ported | p02, p13, p15, p22, p31-p33, p36, p50-p52 |
+| `ctype.ml:2618` (`set_more`) | no | the row of the other side's unmatched tags, to `rm.level` | plain `update_level` without the environment (`ctype.rs:9823`) | `update_level !env` once a type has joined a set | p44, p45 |
+| `ctype.ml:2703` (`unify_row_field`, two conjunctions) | no | the payloads of both conjunctions, to `more`'s level | plain `update_level` (`ctype.rs:10028`) | not ported | none (p46, p47 agree) |
+| `ctype.ml:2714` (conjunction, present tag) | no | the present tag's payload `t2`, to `more`'s level | plain `update_level` (`ctype.rs:10083`) | `update_level !env` once a type has joined a set | p11, p49 |
+| `ctype.ml:2721` (present tag, conjunction) | no | the present tag's payload `t1`, to `more`'s level | plain `update_level` (`ctype.rs:10103`) | `update_level !env` once a type has joined a set | p43 |
+
+##### Fixed
+
+- `7366a5f93`: `unify_object_field_pairs` lowers the left field's type to
+  the level of the shared row variable while tracing
+  (`ctype.ml:2489-2490`), with the environment (`update_level_checked`),
+  before it unifies the pair; a refusal is wrapped in the pair of fields as
+  a failed unification is.
+- `d870093f8`: `set_more` in `unify_rows` lowers the whole row to its row
+  variable's level while tracing (`ctype.ml:2609-2611`), through a fresh
+  node as OCaml's `newgenty (Tvariant row)`, so no node of the program
+  changes level but the row's contents.
+- `c156c2de6`: the row of the unmatched tags (`ctype.ml:2618`) and a present
+  tag's payload matched with a conjunction (`ctype.ml:2714`, `2721`) are
+  lowered with the environment (`update_level_with_gadt_instances`) once a
+  type has joined an instance set; before that, the plain update as on
+  trunk. Its message cites these lines as 2617, 2706 and 2712; the code's
+  comments were corrected to 2618, 2714 and 2721 in the next commit.
+- Fixtures: super_errors `gadt_instance_row_*` (38 refused programs,
+  expected files from the OCaml compiler) and
+  `tests/tests/src/gadt_instance_row_accepted.res` (12 accepted programs,
+  compared by the JavaScript parity suite).
+
+The two tracing sites test OCaml's own condition, the tracing bit of the
+context's byte, and not the member bit: in p01 no type has joined a set
+when the field is lowered, and the refusal comes from the equation's
+expansion level. The three others test the member bit (with the scope
+handle), since only a member can be refused there that trunk's plain update
+lowers; the escape of a constructor at those three lines stays as on trunk
+(the plain update, see "Open" above).
+
+##### Cost
+
+A unit that is not tracing pays one load and one branch per common object
+field and per side of a row unification for the two tracing sites; a unit
+where no type has joined a set pays one load and one branch at each of the
+three others, then the plain update as before. While tracing, the whole-row
+update allocates one node and one row descriptor per side. The CI
+`Instruction count` check on a clean `tests/tests` build, five runs a side
+(millions): base 4,175.4, 4,178.7, 4,175.5, 4,176.5, 4,175.2; head
+4,175.2, 4,175.3, 4,176.3, 4,176.0, 4,175.8; the smallest of each,
+4,175,171,603 and 4,175,247,858, +76,255 (+0.002%). Of the functions that
+changed most, the only checker function is `unify_rows`'s `set_more`
+closure (+14,496); the rest is the allocator and `IdTbl::find_by_ident`
+(-274,740), which move by as much between runs. On a 3,735-module
+application, trunk and the third commit (thin-LTO release builds) give the
+same 3,735 signatures, the same 32 diagnostics in 18 files and the same
+3,980 generated files (`scripts/compare_checker_builds.py`).
+
+##### Open
+
+- `ctype.ml:2703` (two conjunctions) keeps the plain update: p46 and p47,
+  written for it, agree, and no program raised there.
+- p55, `{"f": y} === (o :> {"f": int})`: both refuse at the coercion with
+  the ambiguity lines, OCaml with "But it's being compared to something of
+  type: {"f": a}" and "You can only compare things of the same type.", Rust
+  with "But it's expected to have type: {"f": a}" and the coercion advice
+  ("Possible solutions: ... :>"). It is not this mechanism: without a GADT,
+  `let f = (o: int) => "s" === (o :> int)` gives the same two texts (OCaml
+  "But it's being compared to something of type: string", Rust "But it's
+  expected to have type: string"), so the comparison context is lost for a
+  coercion operand. Fixed by K1 below: p55 (with `o: {.."f": int}`) agrees
+  after `a9e7e97f7`.
+
+### K1 - a coercion keeps the context of the expression it stands in
+
+Found while fixing: both compilers refuse a coercion `(e :> t)` whose target
+type clashes with the expression the coercion stands in, but the Rust compiler
+printed the generic "But it's expected to have type:" where OCaml prints the
+message of the context (comparison, array item, if branch, function argument,
+string concatenation, math operator, record field, ...). Witness, verified on
+trunk `b3ae311eb`:
+
+```rescript
+let f = (o: int) => "s" === (o :> int)
+```
+
+OCaml refuses at 1:30-37: "This has type: int / But it's being compared to
+something of type: string / You can only compare things of the same type. /
+You can convert int to string with Int.toString." Rust refused at the same
+location with "This has type: int / But it's expected to have type: string /
+You can convert int to string with Int.toString."
+
+Commands are the ones in "Scope, calibration and reproducibility": each
+program is `Main.res` alone, run with `bsc -w +A -bs-jsx 4 -color never
+Main.res` through both compilers; "agree" is the same exit status and the
+same output byte for byte (the whole diagnostic, its location, the
+JavaScript and every warning). Rust before is trunk `b3ae311eb`, after is the
+second commit below. w01-w08 are the witnesses, a01-a02 agreed before and
+must stay so, c01-c22 put a coercion in each context of
+`Error_message_utils.type_clash_context`, t01-t03 are the two-type form and
+coercions whose own subtyping fails, s01-s07 are coercions that succeed,
+p01-p06 coerce a polymorphic variant, an object and a private type, n01-n08
+are functions with locally abstract types (the second cause below), u01-u02
+probe the coercion's `unify_var`.
+
+| # | program | OCaml | Rust before | Rust after |
+| --- | --- | --- | --- | --- |
+| w01 | `let f = (o: int) => "s" === (o :> int)` | refused at 1:30-37: "This has type: int / But it's being compared to something of type: string" | DIFFER | agree |
+| w02 | `let f = (o: int) => "s" == (o :> int)` | refused at 1:29-36: "This has type: int / But it's being compared to something of type: string" | DIFFER | agree |
+| w03 | `let f = (o: int) => "s" > (o :> int)` | refused at 1:28-35: "This has type: int / But it's being compared to something of type: string" | DIFFER | agree |
+| w04 | `let f = (o: int) => ["s", (o :> int)]` | refused at 1:28-35: "This array item has type: int / But this array is expected to have items of type: string" | DIFFER | agree |
+| w05 | `let f = (o: int) => "s" ++ (o :> int)` | refused at 1:29-36: "This has type: int / But string concatenation is expecting: string" | DIFFER | agree |
+| w06 | `let f = (o: int) => 1.5 +. (o :> int)` | refused at 1:29-36: "This has type: int / But it's being used with the +. operator, which works on: float" | DIFFER | agree |
+| w07 | `let f = (o: int) => if true { "s" } else { (o :> int) }` | refused at 1:45-52: "This has type: int / But this if statement is expected to return: string" | DIFFER | agree |
+| w08 | `let g = (_: string, _: string) => true let f = (o: int) => g("s", (o :> int))` | refused at 2:29-36: "This has type: int / But this function argument is expecting: string" | DIFFER | agree |
+| a01 | `let f = (o: int) => (o :> int) === "s"` | refused at 1:36-38: "This has type: string / But it's being compared to something of type: int" | agree | agree |
+| a02 | `let f = (o: int) => "s" === (o: int)` | refused at 1:30-35: "This has type: int / But it's being compared to something of type: string" | agree | agree |
+| c01 | `let f = (s: string) => 1 + (s :> string)` | refused at 1:29-39: "This has type: string / But it's expected to have type: int" | agree | agree |
+| c02 | `let f = (o: int) => if (o :> int) { 1 } else { 2 }` | refused at 1:25-32: "This has type: int / But if conditions must always be of type: bool" | DIFFER | agree |
+| c03 | `let f = (o: int) => true ? "s" : (o :> int)` | refused at 1:35-42: "This has type: int / But this ternary is expected to return: string" | DIFFER | agree |
+| c04 | `let f = (o: int) => switch o { \| 1 => "s" \| _ => (o :> int) }` | refused at 1:51-58: "This has type: int / But this switch is expected to return: string" | DIFFER | agree |
+| c05 | `let f = (o: int) => try "s" catch { \| _ => (o :> int) }` | refused at 1:45-52: "This has type: int / But this try/catch is expected to return: string" | DIFFER | agree |
+| c06 | `let tag = TaggedTemplate.make((_: array<string>, _: array<string>) => "") let f = (o: int) => tag`a${(o :> int)}`` | refused at 2:29-36: "This interpolated value has type: int / But this tag expects interpolations of type: string" | DIFFER | agree |
+| c07 | `let f = (o: int): string => (o :> int)` | refused at 1:30-37: "This has type: int / But it's expected to have type: string" | agree | agree |
+| c08 | `type r = {a: string} let f = (o: int) => {a: (o :> int)}` | refused at 2:26-33: "This has type: int / But the record field a is expected to have type: string" | DIFFER | agree |
+| c09 | `type r = {mutable a: string} let f = (r: r, o: int) => r.a = (o :> int)` | refused at 2:34-41: "But the record field is of type: string" | DIFFER | agree |
+| c10 | `let f = (o: int) => assert((o :> int))` | refused at 1:29-36: "This has type: int / But assertions must always be of type: bool" | DIFFER | agree |
+| c11 | `let f = (o: int) => while (o :> int) { () }` | refused at 1:28-35: "This has type: int / But a while loop condition must always be of type: bool" | DIFFER | agree |
+| c12 | `let f = (s: string) => for _ in 0 to (s :> string) { () }` | refused at 1:39-49: "This has type: string / But a for loop bounds must always be of type: int" | DIFFER | agree |
+| c13 | `let f = async (o: int) => await (o :> int)` | refused at 1:34-41: "This has type: int / But you're using await on this expression, so it is expected to be of type:" | DIFFER | agree |
+| c14 | `type r = {a?: string} let f = (o: int): r => {a: (o :> int)}` | refused at 2:29-36: "This has type: int / But the record field a is expected to have type: string" | DIFFER | agree |
+| c15 | `let g = (~x: string) => x let f = (o: int) => g(~x=(o :> int))` | refused at 2:27-34: "This has type: int / But this function argument ~x is expecting: string" | DIFFER | agree |
+| c16 | `let f = (s: string) => 1.5 -. (s :> string)` | refused at 1:32-42: "This has type: string / But it's being used with the -. operator, which works on: float" | DIFFER | agree |
+| c17 | `let f = (o: int) => "s" !== (o :> int)` | refused at 1:30-37: "This has type: int / But it's being compared to something of type: string" | DIFFER | agree |
+| c18 | `let f = (o: int) => (1, "s") == (2, (o :> int))` | refused at 1:38-45: "This has type: int / But it's expected to have type: string" | agree | agree |
+| c19 | `let f = (o: int) => { let x: string = (o :> int); x }` | refused at 1:40-47: "This has type: int / But it's expected to have type: string" | agree | agree |
+| c20 | `let f = (o: int) => list{"s", (o :> int)}` | refused at 1:32-39: "This has type: int / But it's expected to have type: string" | agree | agree |
+| c21 | `let f = (o: int) => Some("s") == Some((o :> int))` | refused at 1:40-47: "This has type: int / But it's expected to have type: string" | agree | agree |
+| c22 | `let f = (o: int) => 2.0 *. (o :> int)` | refused at 1:29-36: "This has type: int / But it's being used with the *. operator, which works on: float" | DIFFER | agree |
+| t01 | `let f = (o: int) => "s" === (o: int :> int)` | refused at 1:30-42: "This has type: int / But it's being compared to something of type: string" | DIFFER | agree |
+| t02 | `let f = (o: int) => "s" === (o :> string)` | refused at 1:30-40: "Type int is not a subtype of string" | agree | agree |
+| t03 | `let f = (o: int) => [(o :> string)]` | refused at 1:23-33: "Type int is not a subtype of string" | agree | agree |
+| s01 | `let f = (o: int) => 1 === (o :> int)` | accepted | agree | agree |
+| s02 | `let f = (o: int) => [1, (o :> int)]` | accepted | agree | agree |
+| s03 | `let f = (o: int) => if true { 1 } else { (o :> int) }` | accepted | agree | agree |
+| s04 | `let g = (_: int, _: int) => true let f = (o: int) => g(1, (o :> int))` | accepted | agree | agree |
+| s05 | `type r = {a: int} let f = (o: int) => {a: (o :> int)}` | accepted | agree | agree |
+| s06 | `let f = (v: [#A]) => [#B, (v :> [#A \| #B])]` | accepted | agree | agree |
+| s07 | `type t = private int let f = (x: t) => 1 + (x :> int)` | accepted | agree | agree |
+| p01 | `let f = (v: [#A]) => "s" === (v :> [#A \| #B])` | refused at 1:31-44: "This has type: [#A | #B] / But it's being compared to something of type: string" | DIFFER | agree |
+| p02 | `let f = (x: {"a": int, "b": int}) => "s" === (x :> {"a": int})` | refused at 1:47-61: "This has type: {"a": int} / But it's being compared to something of type: string" | DIFFER | agree |
+| p03 | `module M: { type t = private int let v: t } = { type t = int let v = 1 } let f = () => "s" === (M.v :> int)` | refused at 8:24-33: "This has type: int / But it's being compared to something of type: string" | DIFFER | agree |
+| p04 | `let f = (v: [#A]) => ["s", (v :> [#A \| #B])]` | refused at 1:29-42: "This array item has type: [#A | #B] / But this array is expected to have items of type: string" | DIFFER | agree |
+| p05 | `let f = (x: {"a": int, "b": int}) => if true { "s" } else { (x :> {"a": int}) }` | refused at 1:62-76: "This has type: {"a": int} / But this if statement is expected to return: string" | DIFFER | agree |
+| p06 | `type t = private int let f = (x: t) => 1.5 +. (x :> int)` | refused at 2:27-34: "This has type: int / But it's being used with the +. operator, which works on: float" | DIFFER | agree |
+| n01 | `let f = () => "s" === ((type a, x: a) => x)` | refused at 1:24-42: "This has type: 'a => 'a / But it's being compared to something of type: string" | DIFFER | agree |
+| n02 | `let f = () => ["s", (type a, x: a) => x]` | refused at 1:21-39: "This array item has type: 'a => 'a / But this array is expected to have items of type: string" | DIFFER | agree |
+| n03 | `let f = () => if true { "s" } else { (type a, x: a) => x }` | refused at 1:38-56: "This has type: 'a => 'a / But this if statement is expected to return: string" | DIFFER | agree |
+| n04 | `let g = (_: string) => true let f = () => g((type a, x: a) => x)` | refused at 2:17-35: "This has type: 'a => 'a / But this function argument is expecting: string" | DIFFER | agree |
+| n05 | `let f = () => { let g: int = (type a, x: a) => x; g }` | refused at 1:30-48: "This has type: 'a => 'a / But it's expected to have type: int" | agree | agree |
+| n06 | `let f = () => "s" === ((type a, (x: a, _y: a)) => x)` | refused at 1:24-51: "This has type: (('a, 'a)) => 'a / But it's being compared to something of type: string" | DIFFER | agree |
+| n07 | `let f = () => [(type a, x: a) => x, (type b, y: b) => y]` | accepted | agree | agree |
+| n08 | `type r = {a: string} let f = () => {a: (type a, x: a) => x}` | refused at 2:19-37: "This has type: 'a => 'a / But the record field a is expected to have type: string" | DIFFER | agree |
+| u01 | `let f = () => ({ module M = { type t = A }; M.A } :> int)` | refused at 1:45-47: "This has type: M.t / But it's expected to have type: 'a" | agree | agree |
+| u02 | `type rec t = Ex('a): t let f = (x: t) => switch x { \| Ex(v) => (v :> int) }` | refused at 2:42-49: "Type $a is not a subtype of int" | agree | agree |
+
+The OCaml arms of `type_expect_` that end in `rue` or call `unify_exp
+~context` (`grep -n "\brue\b\|unify_exp ~context" compiler/ml/typecore.ml`),
+with the Rust function that does the final unification (lines after the
+fixes):
+
+| OCaml line | construct | Rust | passes the context |
+| --- | --- | --- | --- |
+| 2655 | `Pexp_ident` | `type_identifier` (`finish_expected_at`, typecore.rs:9378) | yes |
+| 2666 | `Pexp_constant` | `type_expect_with_recarg_unscoped` (`rue_unify`, 8367) | yes |
+| 2740 | `Pexp_fun` with newtypes | `type_function_nary_with_newtypes` (`rue_unify`, 13521) | no, fixed |
+| 2764 | `Pexp_template` | `rue_unify`, 8917 | yes |
+| 2794 | `Pexp_tagged_template` | `rue_unify`, 8973 | yes |
+| 2845, 2862 | `Pexp_apply` (`rue` captures the outer `~context`, not the shadowing one at 2832) | `type_application_parts` (`finish_expected_at`, 10739); unified ops `translate_unified_ops` (9760, 9816) | yes |
+| 2999 | `Pexp_variant` | `type_variant` (`rue_unify`, 14805, 14831) | yes |
+| 3196-3197 | `Pexp_field` (the record: `~context:None`) | `type_field` (16558, None) then `finish_expected` (8399) | yes (None in both for the record) |
+| 3213, 3219 | `Pexp_setfield` (the record: `~context:None`) | `type_setfield` (16992, None; `rue_unify`, 17025) | yes |
+| 3309 | `Pexp_ifthenelse` without else | `type_conditional` (`rue_unify`, 11881) | yes |
+| 3322 | if/else, `~context:return_context` | `type_conditional` (11848) | yes |
+| 3360, 3378 | `Pexp_break`, `Pexp_continue` | `rue_unify`, 8460, 8479 | yes |
+| 3395 | `Pexp_while` | `rue_unify`, 8709 | yes |
+| 3431 | `Pexp_for` | `type_for` (`rue_unify`, 14170) | yes |
+| 3492, 3532 | `Pexp_for_of`, `Pexp_for_await_of` | `type_for_of` (`rue_unify`, 14387) | yes |
+| 3555 | `Pexp_constraint` | `type_constraint` (`rue_unify`, 17088) | yes |
+| 3616 | `Pexp_coerce` | `type_coerce` (17200) | no, fixed |
+| 3667 | `Pexp_object_literal` | `type_object_literal` (`rue_unify`, 17803) | yes |
+| 3683 | `Pexp_object_get` | `type_object_get` (`rue_unify`, 17617) | yes |
+| 3720 | `Pexp_object_set` | `type_object_set` (`rue_unify`, 17685) | yes |
+| 3783 | `Pexp_assert` | `rue_unify`, 8749 | yes |
+| 3800 | `Pexp_pack` | `type_pack` (`rue_unify`, 19028) | yes |
+| 4173 | `type_function`, the body, `~context:None` | `type_function_nary` (13921, None) | yes (None in both) |
+| 4352 | `type_label_exp` retry, `~context:field_context` | `check_label_univars` (19578) | yes |
+| 4363 | `type_argument` | function arguments (10634); record fields (15998); `r.f = v` (16967) | yes, except `r.f = v`: no, not reached (below) |
+| 4738, 4750 | `type_construct` (the context is `None` except for the `Some` an optional field injects) | `type_construct` (14640, 14659) | no, not reached (below) |
+| 4789 | `type_statement` | `type_statement_with` (7890) | yes |
+| 4912 | `type_cases`, `~context:None` | `type_match` (12116, 12148) | yes (None in both) |
+| 5092 | `type_let` with a constraint | binding typing | yes (every caller passes `~context:None`: 2703, 4091, typemod.ml:1438) |
+
+There is no Rust counterpart of a separate `Pexp_newtype` arm in OCaml's
+checker; the Rust `type_newtype` (typecore.rs:17479, unifies with no context)
+types a `Pexp_newtype` node that the ReScript parser does not produce (it
+puts locally abstract types on `Pexp_fun`), so no program reaches it.
+
+#### Fixed
+
+- `a9e7e97f7`: OCaml's `Pexp_coerce` ends in `rue`
+  (`compiler/ml/typecore.ml:3616`), which is `unify_exp ~context env (re
+  exp) (instance env ty_expected)` (typecore.ml:2606-2608), so the final
+  unification of the target type with the expected type carries the clash
+  context the caller gave. The Rust `type_coerce`
+  (`compiler-rust/src/types/typecore.rs:17118`, called at 9178) took no
+  context and unified with `None` (17191 before the fix). It now takes the
+  caller's context by reference and passes it to that unification
+  (typecore.rs:17200). The `ExprTypeClash` built with `context: None` for
+  the coercion argument's `unify_var` is OCaml's
+  `Expr_type_clash {trace; context = None}` (typecore.ml:3577-3580) and is
+  unchanged. w01-w08, c02-c15, c17, c22, t01 and p01-p06 now agree;
+  a01-a02, c01, c16, c18-c21, t02-t03 and s01-s07 agreed before and after.
+  Fixtures: the super_errors `coercion_context_*` (one per context, plus
+  `coercion_context_left_operand` and `coercion_context_not_subtype`, which
+  agreed before), and `tests/tests/src/coercion_context_accepted` for
+  coercions that succeed in five contexts. A1's open p55, `{"f": y} === (o
+  :> {"f": int})` with `o: {.."f": int}` under a GADT equation, differed on
+  trunk and agrees after this commit (refused at 4:26-40 with the
+  comparison text and the ambiguity lines).
+- `aafe6982e`: OCaml types a function with locally abstract types by
+  `rue (peel env newtypes)` (typecore.ml:2740), under the caller's context.
+  The Rust `type_function_nary_with_newtypes` (typecore.rs:13367) unified
+  with `None` (13516 before the fix); it now passes the caller's context.
+  n01-n04, n06 and n08 now agree. Fixtures: the super_errors
+  `coercion_context_newtype_function_*`.
+
+#### Open
+
+- `r.f = v` (`type_setfield`, typecore.rs:16967) unifies the value with an
+  instance of the field type under no context where OCaml's `type_argument`
+  passes `SetRecordField` (typecore.ml:4363). The value was typed against the
+  same field type under that context the line before, and `instance_label`
+  returns a field type that is not generic, so the instance is the type itself
+  and this unification cannot fail: no program shows it. Not changed.
+- `type_construct` (typecore.rs:14640, 14659) unifies the constructor's
+  result with the expected type under no context. OCaml's context there is
+  `None` except for a `Some` an optional record field injects
+  (typecore.ml:4722-4733), whose expected type is always `option<_>` of the
+  field, so that unification cannot fail: no program shows it. Not changed.
+- The coercion argument's `unify_var` error is reported at the coercion's
+  location in Rust and at the argument's (`arg.exp_loc`, typecore.ml:3580)
+  in OCaml. u01 (a local module's type escaping through the argument) is
+  refused earlier by the `let module` check in both, and u02 (an existential)
+  by the subtype check; no program reached it. Not changed.
+
 ## Fourth round: modules, aliases and usage marks
 
 ### Scope, commands and calibration
@@ -21423,3 +21909,7337 @@ release executable also matched: 3,735 signatures, 32 diagnostics in 18 files,
 and 3,980 generated files. This verifies repeatability, not a Rust-versus-OCaml
 comparison or a performance improvement; the pattern evidence above comes
 from separate Rust and OCaml invocations.
+
+## Sixth round: instances of a type under an equation
+
+### Summary
+
+Rows I1–I8 and "Found on the way" are counted from their parts as written.
+"Reached the condition" is the part's own condition. For I1–I8, "differs"
+means the OCaml compiler and Rust differ. For the I9 rows it means the two
+Rust builds of part two differ (normal and empty `record_trace_expansions`);
+there the OCaml compiler agrees with the normal build on every candidate.
+The I2 and "Found on the way" differences are fixed on trunk by pull
+request 385 (their "State" paragraphs).
+
+| place | verdict | candidates | of them added a member | of them reached the condition | program that differs |
+|---|---|---|---|---|---|
+| I1 — common object fields | CONDITION NOT REACHED | 12 | 8 | 0 | i1-09, i1-10, i1-11 (under "Found on the way") |
+| Found on the way — comparison with an open object | WITNESS, fixed on trunk | 11 reductions | not recorded | not attributed to a condition | reduce-i1-01, 04, 06, 07, 08, 09, 10 |
+| I2 — polymorphic variant rows | WITNESS, fixed on trunk | 8 (+6 reductions) | 8 | 6 | i2-01, 02, 05, 06, 07, 08; reduce-i2-01, 04, 05, 06 |
+| I3 — unequal instance-set levels after expansion | CONDITION NOT REACHED | 8 | 8 | 0 | none |
+| I4 — variable unification tracing | CONDITION NOT REACHED | 8 | 8 | 0 | none |
+| I5 — special head expansion | CONDITION NOT REACHED | 8 | 8 | 0 | none |
+| I6 — the non-recursive equation walk | CONDITION NOT REACHED | 8 | 8 | 0 | none |
+| I7 — partial copies for polymorphic variant patterns | CONDITION NOT REACHED | 8 | 8 | 0 | none |
+| I8 — a variable representative in an instance set | CONDITION NOT REACHED | 8 | 8 | 0 | none |
+| I9, `typecore.ml:2500` `is_ignore` | NOT REACHED: no trace is expanded on the routes that ran | 3 | 2 | 0 | none |
+| I9, `typecore.ml:2511` `lower_args` | NOT REACHED: the failure cannot happen | 3 | 3 | 0 | la-03 (reported error text only) |
+| I9, `typecore.ml:2784` tagged template | CONDITION NOT REACHED | 3 | 2 | 0 | none |
+| I9, `typecore.ml:3602` coercion trial | CONDITION NOT REACHED | 20 | 6 | 0 | co-04, co-09, dbg-01 (reported error text only) |
+| I9, `typecore.ml:3692` object get | NOT REACHED: no trace is expanded on the routes that ran | 4 | 0 | 0 | none |
+| I9, `typecore.ml:3706` object set | NOT REACHED: no trace is expanded on the routes that ran | 5 | 0 | 0 | none |
+| I9, `typecore.ml:3751` `let module` | CONDITION NOT REACHED | 3 | 1 | 0 | none |
+| I9, `typecore.ml:4002` optional parameter | NOT REACHED: the failure cannot happen | 3 | 3 | 0 | op-01, op-02 (reported error text only) |
+| I9, `typecore.ml:5190` top-level unit | CONDITION NOT REACHED | 3 | 0 | 0 | none |
+
+For I9, the condition is that the caught failure's trace holds an
+abbreviation without arguments whose expansion is a member of an instance
+set, or is reused or lowered afterwards. The print fired at the site, and
+expanded such an abbreviation, in: tagged template 3 and 3, coercion trial
+6 and 6, `let module` 3 and 0, top-level unit 3 and 3. It fired at no other
+site.
+
+### Scope and calibration
+
+All places, I1–I9, have been investigated. For I1–I8 the reference and
+baseline Rust compiler are from `45c4f78a54`; I9 used trunk `bb47dc1317`
+(its part gives its builds). Temporary prints are confined to a
+scratch Rust build; the comparisons below use the unmodified baseline.
+
+Builds, serially:
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+CARGO_PROFILE_RELEASE_LTO=thin cargo build --release --manifest-path rewatch/Cargo.toml
+eval $(opam env)
+dune build --root .
+scripts/rust_compiler_shims.sh release
+export ROOT="$PWD"
+export RESCRIPT_RUNTIME="$ROOT/packages/@rescript/runtime"
+rewatch/target/release/rescript build-reference --bsc "$ROOT/_build/install/default/bin/bsc" packages/@rescript/runtime
+```
+
+Rust build output (final lines; the existing unused import warning is unchanged):
+
+```text
+warning: `rescript` (lib) generated 1 warning (1 duplicate)
+    Finished `release` profile [optimized] target(s) in 1m 49s
+```
+
+Dune exits 0, stdout and stderr:
+
+```text
+```
+
+Runtime preparation exits 0:
+
+```text
+OCaml reference build: 113 of 113 modules built
+```
+
+Every program is `Main.res` in its own temporary directory, with an empty
+`src` directory and `rescript.json` containing
+`{"name":"equation-search","sources":["."]}`. Each source has a final newline.
+The saved baseline executable is wrapped by `BASE_BSC`, which executes
+`base-rescript bsc "$@"`; the runtime environment above is required when
+moving that executable outside the build directory. An initial attempt
+without it printed `bsc: pass -runtime-path or set RESCRIPT_RUNTIME`; those
+attempts are setup failures, not compiler witnesses, and all were rerun.
+Commands, from each program's directory:
+
+```sh
+timeout 10 "$ROOT/_build/install/default/bin/bsc" -w +A -bs-jsx 4 -color never Main.res >ocaml.stdout 2>ocaml.stderr
+timeout 10 "$BASE_BSC" -w +A -bs-jsx 4 -color never Main.res >rust.stdout 2>rust.stderr
+```
+
+The flags are those of `scripts/test_error_output_parity.sh`. Status and
+complete diagnostics, including warnings, are compared after stripping SGR
+escapes. JavaScript is stdout and is compared after removing blank lines.
+Empty fences mean empty streams. The calibration cases below agree with
+their `super_errors/expected` files after stripping colours, replacing the
+fixture path by `Main.res`, and ignoring the expected file's trailing blank
+line convention. They are not counted as new search candidates.
+
+#### calibration-if
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => if true { y } else { 0 }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:33
+
+  2 │ let f = (type a, x: t<a>, y: a) =>
+  3 │   switch x {
+  4 │   | Int => if true { y } else { 0 }
+  5 │   }
+  6 │ 
+
+  This has type: int
+  But this if statement is expected to return: a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### calibration-array
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => [y, 0]
+  | Str => []
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:16
+
+  2 │ let f = (type a, x: t<a>, y: a) =>
+  3 │   switch x {
+  4 │   | Int => [y, 0]
+  5 │   | Str => []
+  6 │   }
+
+  This array item has type: int
+  But this array is expected to have items of type: a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  Arrays can only contain items of the same type.
+
+  Possible solutions:
+  - Convert all values in the array to the same type.
+  - Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, "hello", 15.5, true)
+
+```
+
+### I1 — common object fields
+
+Verdict: **CONDITION NOT REACHED**. Twelve candidates parsed; eight added
+members (03–06 and 09–12), and four entered `unify_object_fields` after a
+member had been added (06, 09–11). Zero established the full differing
+condition: each printed common left field had `member=None`, even where
+`rowlevel=1004` and `tracing=true`; 03–05 and 12 failed before the field loop.
+The membership prerequisite at `compiler/ml/ctype.ml:2490`, before
+unifying the common fields, was not satisfied in the Rust trace.
+
+A program must bring an already-member left field to `unify_fields` while
+tracing and give the shared row a level below that member's scope.
+Afterwards the attempted lowering must fail in OCaml while the omitted
+field-level update in Rust permits a distinct result, rather than both
+failing earlier during an enclosing level update.
+
+The Rust sites inspected are `unify_object_fields` and
+`unify_object_field_pairs` (`compiler-rust/src/types/ctype.rs:10229,10288`).
+Temporary prints at `push_gadt_instance` record every ADD, and the field
+loop records the actual field representative, set level, shared row level,
+and tracing flag before field unification. The entry print's `members`
+flag alone is not a claim that this field belongs to the set. Representative
+output from i1-09:
+
+```text
+EQPROBE SITE unify_object_fields members=true tracing=true
+EQPROBE I1 field="f" left=TypeExprRef(120) member=None rowlevel=1004 tracing=true
+```
+
+Candidates 09–11 differ, but are retained as **Found on the way**, not
+attributed to the unestablished I1 condition. There were no syntax failures
+in these twelve candidates and no OCaml internal errors.
+
+#### i1-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let g = (z: a) => {"f": z}
+    if true { g(y) } else { o }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:29
+
+  4 ┆ | Int => {
+  5 ┆   let g = (z: a) => {"f": z}
+  6 ┆   if true { g(y) } else { o }
+  7 ┆ }
+  8 ┆ }
+
+  This has type: {.."f": int}
+  But this if statement is expected to return: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let g = (z: a) => {"f": z}
+    if true { o } else { g(y) }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:26-29
+
+  4 ┆ | Int => {
+  5 ┆   let g = (z: a) => {"f": z}
+  6 ┆   if true { o } else { g(y) }
+  7 ┆ }
+  8 ┆ }
+
+  This has type: {"f": a}
+  But this if statement is expected to return: {.."f": int}
+  
+  The incompatible parts:
+    a (defined as int) vs int
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": if true { y } else { 0 }}
+    if true { p } else { o }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:15
+
+  4 ┆ | Int => {
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   if true { p } else { o }
+  7 ┆ }
+  8 ┆ }
+
+  This has type: {"f": a}
+  But this if statement is expected to return: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let g = (z: a) => z
+    let p = {"f": g(y)}
+    if true { p } else { o }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:15
+
+  5 ┆   let g = (z: a) => z
+  6 ┆   let p = {"f": g(y)}
+  7 ┆   if true { p } else { o }
+  8 ┆ }
+  9 ┆ }
+
+  This has type: {"f": a}
+  But this if statement is expected to return: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-05
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let g = (z: a) => z
+    if true { o } else { {"f": g(y)} }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:26-36
+
+  4 ┆ | Int => {
+  5 ┆   let g = (z: a) => z
+  6 ┆   if true { o } else { {"f": g(y)} }
+  7 ┆ }
+  8 ┆ }
+
+  This has type: {"f": a}
+  But this if statement is expected to return: {.."f": int}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-06
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": y}
+    ignore(p["f"] == 0)
+    if true { p } else { o }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:26
+
+  5 ┆   let p = {"f": y}
+  6 ┆   ignore(p["f"] == 0)
+  7 ┆   if true { p } else { o }
+  8 ┆ }
+  9 ┆ }
+
+  This has type: {.."f": int}
+  But this if statement is expected to return: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-07
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": y}
+    ignore(p["f"] + 1)
+    if true { o } else { p }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:26
+
+  5 ┆   let p = {"f": y}
+  6 ┆   ignore(p["f"] + 1)
+  7 ┆   if true { o } else { p }
+  8 ┆ }
+  9 ┆ }
+
+  This has type: {"f": a}
+  But this if statement is expected to return: {.."f": int}
+  
+  The incompatible parts:
+    a (defined as int) vs int
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-08
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let g = (z: a) => {"f": z, "g": 1}
+    if true { g(y) } else { o }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:29
+
+  4 ┆ | Int => {
+  5 ┆   let g = (z: a) => {"f": z, "g": 1}
+  6 ┆   if true { g(y) } else { o }
+  7 ┆ }
+  8 ┆ }
+
+  This has type: {.."f": int}
+  But this if statement is expected to return: {"f": a, "g": int}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i1-09
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": if true { y } else { 0 }}
+    ignore(p == o)
+    ()
+  }
+  }
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:17
+
+  4 ┆ | Int => {
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   ignore(p == o)
+  7 ┆   ()
+  8 ┆ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  Primitive_object.equal(p, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:6:12-17
+
+  4 ┆ | Int => {
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   ignore(p == o)
+  7 ┆   ()
+  8 ┆ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### i1-10
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": if true { y } else { 0 }}
+    ignore(o == p)
+    ()
+  }
+  }
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:17
+
+  4 ┆ | Int => {
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   ignore(o == p)
+  7 ┆   ()
+  8 ┆ }
+
+  This has type: {"f": a}
+  But it's being compared to something of type: {.."f": int}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  Primitive_object.equal(o, p);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:6:12-17
+
+  4 ┆ | Int => {
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   ignore(o == p)
+  7 ┆   ()
+  8 ┆ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### i1-11
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": if true { y } else { 0 }}
+    let h = (q: {.."f": a}) => q
+    ignore(h(p) == o)
+    ()
+  }
+  }
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:20
+
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   let h = (q: {.."f": a}) => q
+  7 ┆   ignore(h(p) == o)
+  8 ┆   ()
+  9 ┆ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  Primitive_object.equal(p, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:7:12-20
+
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   let h = (q: {.."f": a}) => q
+  7 ┆   ignore(h(p) == o)
+  8 ┆   ()
+  9 ┆ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### i1-12
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) =>
+  switch x {
+  | Int => {
+    let p = {"f": if true { y } else { 0 }}
+    ignore(p["f"] == y)
+    if true { o } else { p }
+  }
+  }
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:26
+
+  5 ┆   let p = {"f": if true { y } else { 0 }}
+  6 ┆   ignore(p["f"] == y)
+  7 ┆   if true { o } else { p }
+  8 ┆ }
+  9 ┆ }
+
+  This has type: {"f": a}
+  But this if statement is expected to return: {.."f": int}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+### Found on the way — comparison with an open object
+
+Candidates i1-09–11 expose an acceptance mismatch. Reducing 09 removes the
+final unit, the `ignore`, the `if` in the field, and the binding of the
+object: the difference remains. Replacing the open object annotation by a
+closed object makes both accept; deleting the annotation makes both
+reject; replacing the object by its scalar payload makes both accept.
+The equality variant `===` retains the mismatch without warning 102.
+All reduction runs are pasted below, including successful and unsuccessful
+simplifications; reduce-i1-09 is the smallest retained source in this search.
+
+Rust is at fault under the reference contract: it accepts an open-object
+comparison that OCaml refuses because an instance of `int` would escape
+its equation. Attribution to a particular omitted tracing/level-update
+site is not established by the Rust field trace, whose left member is
+`None`; this is not evidence that the specified I1 condition was reached.
+
+#### reduce-i1-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  let p = {"f": if true { y } else { 0 }}
+  p == o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  return Primitive_object.equal(p, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:5:3-8
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### reduce-i1-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {"f": int}) => switch x {
+| Int => {
+  let p = {"f": if true { y } else { 0 }}
+  p == o
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  return Primitive_object.equal(p, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:5:3-8
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### reduce-i1-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o) => switch x {
+| Int => {
+  let p = {"f": if true { y } else { 0 }}
+  p == o
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  This has type: 'a
+  But it's being compared to something of type: {"f": a}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+#### reduce-i1-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  let p = {"f": y}
+  p == o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = {"f": y}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  return Primitive_object.equal(p, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:5:3-8
+
+  3 │ | Int => {
+  4 │   let p = {"f": y}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### reduce-i1-05
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: int) => switch x {
+| Int => {
+  let p = if true { y } else { 0 }
+  p == o
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, o) {
+  return y === o;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### reduce-i1-06
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  let p = {"f": if true { y } else { 0 }}
+  p === o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:9
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p === o
+  6 │ }
+  7 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  return p === o;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### reduce-i1-07
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  let p = {"f": if true { y } else { 0 }}
+  p == o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  return Primitive_object.equal(p, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:5:3-8
+
+  3 │ | Int => {
+  4 │   let p = {"f": if true { y } else { 0 }}
+  5 │   p == o
+  6 │ }
+  7 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### reduce-i1-08
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  {"f": y} == o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:15
+
+  2 │ let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+  3 │ | Int => {
+  4 │   {"f": y} == o
+  5 │ }
+  6 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  return Primitive_object.equal({
+    f: y
+  }, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:4:3-15
+
+  2 │ let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+  3 │ | Int => {
+  4 │   {"f": y} == o
+  5 │ }
+  6 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### reduce-i1-09
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  {"f": y} === o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:16
+
+  2 │ let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+  3 │ | Int => {
+  4 │   {"f": y} === o
+  5 │ }
+  6 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, o) {
+  return ({
+    f: y
+  }) === o;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### reduce-i1-10
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": int}) => switch x {
+| Int => {
+  let p = {"f": y}
+  p === o
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:9
+
+  3 │ | Int => {
+  4 │   let p = {"f": y}
+  5 │   p === o
+  6 │ }
+  7 │ }
+
+  This has type: {.."f": int}
+  But it's being compared to something of type: {"f": a}
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, o) {
+  let p = {
+    f: y
+  };
+  return p === o;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### reduce-i1-11
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o: {.."f": a}) => switch x {
+| Int => {
+  {"f": y} == o
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, o) {
+  return Primitive_object.equal({
+    f: y
+  }, o);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:4:3-15
+
+  2 │ let f = (type a, x: t<a>, y: a, o: {.."f": a}) => switch x {
+  3 │ | Int => {
+  4 │   {"f": y} == o
+  5 │ }
+  6 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+**State.** The difference is fixed on trunk by pull request 385 (place A1, "Third part", earlier in this document). The reduced programs of this part were rerun with the same commands as above and the Rust build of trunk at `bb47dc1317` (this branch's compiler sources are trunk's). "agree" means equal exit status, equal diagnostics after stripping colour escapes, and equal JavaScript after removing blank lines:
+
+```text
+reduce-i1-01  ocaml exit 2  rust exit 2  agree
+reduce-i1-02  ocaml exit 0  rust exit 0  agree
+reduce-i1-03  ocaml exit 2  rust exit 2  agree
+reduce-i1-04  ocaml exit 2  rust exit 2  agree
+reduce-i1-05  ocaml exit 0  rust exit 0  agree
+reduce-i1-06  ocaml exit 2  rust exit 2  agree
+reduce-i1-07  ocaml exit 2  rust exit 2  agree
+reduce-i1-08  ocaml exit 2  rust exit 2  agree
+reduce-i1-09  ocaml exit 2  rust exit 2  agree
+reduce-i1-10  ocaml exit 2  rust exit 2  agree
+reduce-i1-11  ocaml exit 0  rust exit 0  agree
+```
+
+### I2 — polymorphic variant rows
+
+Verdict: **WITNESS** (i2-01, 02, 05–08). All eight candidates parsed and
+added a member. Six (01, 02, 05–08) reached `unify_rows` with a member in a
+variant payload and an opposing open row at the outer level. This is the
+specified two-row condition, not proof that adding the single missing call
+would repair the result: neither compiler was changed to test a repair.
+
+A program must unify a variant carrying an instance-set member inside the
+case with an open variant whose row variable belongs to the outer level.
+The subsequent row reconciliation or lowering must expose either an
+acceptance difference or a diagnostic difference, not merely a different
+internal type graph.
+
+The inspected OCaml `set_more` inside `unify_row` lowers the whole row at
+`compiler/ml/ctype.ml:2609–2611`; Rust's closure in `unify_rows` lowers only
+the row built from unmatched fields. A temporary print immediately after
+`row_more` in that closure records every tag's representative membership
+and that row's level. i2-01 prints:
+
+```text
+EQPROBE I2 tag="A" member=Some(1007) rowlevel=2007 tracing=true
+EQPROBE I2 tag="A" member=None rowlevel=1004 tracing=true
+```
+
+The member row's own level remains 2007 at that moment; the opposing row
+is at 1004, below the member's set level 1007. The print does **not** show
+a member already on the low row. i2-03 and 04 fail before `unify_rows`.
+01, 02, 05, 06 and 08 are rejected by OCaml but accepted by Rust; 07 is
+rejected by both with different error text. The `==` acceptance witnesses
+also emit Rust warning 102, absent from OCaml's error result.
+
+#### i2-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [> #A(int)]) => switch x {
+| Int => {
+  let p = #A(if true { y } else { 0 })
+  p == v
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   p == v
+  6 │ }
+  7 │ }
+
+  This has type: [> #A(int)]
+  But it's being compared to something of type: [> #A(a)]
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, v) {
+  let p = {
+    NAME: "A",
+    VAL: y
+  };
+  return Primitive_object.equal(p, v);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:5:3-8
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   p == v
+  6 │ }
+  7 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### i2-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [> #A(int)]) => switch x {
+| Int => {
+  let p = #A(if true { y } else { 0 })
+  v == p
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   v == p
+  6 │ }
+  7 │ }
+
+  This has type: [> #A(a)]
+  But it's being compared to something of type: [> #A(int)]
+  
+  The incompatible parts:
+    a (defined as int) vs int
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, v) {
+  let p = {
+    NAME: "A",
+    VAL: y
+  };
+  return Primitive_object.equal(v, p);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:5:3-8
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   v == p
+  6 │ }
+  7 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### i2-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [> #A(int)]) => switch x {
+| Int => {
+  let p = #A(if true { y } else { 0 })
+  if true { p } else { v }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:13
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   if true { p } else { v }
+  6 │ }
+  7 │ }
+
+  This has type: [> #A(a)]
+  But this if statement is expected to return: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i2-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [> #A(int)]) => switch x {
+| Int => {
+  let p = #A(if true { y } else { 0 })
+  if true { v } else { p }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:24
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   if true { v } else { p }
+  6 │ }
+  7 │ }
+
+  This has type: [> #A(a)]
+  But this if statement is expected to return: [> #A(int)]
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i2-05
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [> #A(int)]) => switch x {
+| Int => {
+  let g = (z: a) => z
+  let p = #A(g(y))
+  p === v
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:9
+
+  4 │   let g = (z: a) => z
+  5 │   let p = #A(g(y))
+  6 │   p === v
+  7 │ }
+  8 │ }
+
+  This has type: [> #A(int)]
+  But it's being compared to something of type: [> #A(a)]
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, v) {
+  let p = {
+    NAME: "A",
+    VAL: y
+  };
+  return p === v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i2-06
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [> #A(int) | #B]) => switch x {
+| Int => {
+  let p = #A(if true { y } else { 0 })
+  p == v
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   p == v
+  6 │ }
+  7 │ }
+
+  This has type: [> #A(int) | #B]
+  But it's being compared to something of type: [> #A(a)]
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, v) {
+  let p = {
+    NAME: "A",
+    VAL: y
+  };
+  return Primitive_object.equal(p, v);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:5:3-8
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   p == v
+  6 │ }
+  7 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### i2-07
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [< #A(int) | #B]) => switch x {
+| Int => {
+  let p = #A(if true { y } else { 0 })
+  p == v
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   p == v
+  6 │ }
+  7 │ }
+
+  This has type: [< #A(int) | #B]
+  But it's being compared to something of type: [> #A(a)]
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:8
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   p == v
+  6 │ }
+  7 │ }
+
+  This has type: [< #A(int) | #B]
+  But it's being compared to something of type: [> #A(a)]
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+#### i2-08
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [> #A(int)]) => switch x {
+| Int => {
+  let p = #A(if true { y } else { 0 })
+  let h = q => q
+  h(p) == v
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:11
+
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   let h = q => q
+  6 │   h(p) == v
+  7 │ }
+  8 │ }
+
+  This has type: [> #A(int)]
+  But it's being compared to something of type: [> #A(a)]
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_object = require("@rescript/runtime/lib/js/Primitive_object.cjs");
+
+function f(x, y, v) {
+  let p = {
+    NAME: "A",
+    VAL: y
+  };
+  return Primitive_object.equal(p, v);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 102
+  Main.res:6:3-11
+
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   let h = q => q
+  6 │   h(p) == v
+  7 │ }
+  8 │ }
+
+  Polymorphic comparison introduced (maybe unsafe)
+
+```
+
+#### Reductions and fault assessment
+
+Removing the payload `if` and the binding retains the acceptance difference
+(reduce-i2-01). Making the row closed makes both accept (03), whereas the
+upper-bounded variant without the `if` is rejected identically (02).
+Removing the extra `#B` from the diagnostic witness retains its difference
+(06); removing the payload `if` from that shape loses the diagnostic
+mismatch (02). `===` removes the polymorphic-comparison warning without
+removing either mismatch. Reduced acceptance witness: reduce-i2-01;
+reduced diagnostic witness: reduce-i2-06.
+
+Rust is at fault: it accepts the open-row comparison OCaml rejects, and on
+the upper-bounded row it adds an incompatible-parts paragraph absent from
+the reference diagnostic. These are observed behaviours; attribution of
+both to only the missing whole-row lowering is not established.
+
+#### reduce-i2-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [> #A(int)]) => switch x {
+| Int => {
+  #A(y) === v
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:13
+
+  2 │ let f = (type a, x: t<a>, y: a, v: [> #A(int)]) => switch x {
+  3 │ | Int => {
+  4 │   #A(y) === v
+  5 │ }
+  6 │ }
+
+  This has type: [> #A(int)]
+  But it's being compared to something of type: [> #A(a)]
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, v) {
+  return ({
+    NAME: "A",
+    VAL: y
+  }) === v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### reduce-i2-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [< #A(int) | #B]) => switch x {
+| Int => {
+  #A(y) === v
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:13
+
+  2 │ let f = (type a, x: t<a>, y: a, v: [< #A(int) | #B]) => switch x {
+  3 │ | Int => {
+  4 │   #A(y) === v
+  5 │ }
+  6 │ }
+
+  This has type: [< #A(int) | #B]
+  But it's being compared to something of type: [> #A(a)]
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+#### reduce-i2-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [#A(int)]) => switch x {
+| Int => {
+  #A(y) === v
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, v) {
+  return ({
+    NAME: "A",
+    VAL: y
+  }) === v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### reduce-i2-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [> #A(int)]) => switch x {
+| Int => {
+  let p = #A(y)
+  p === v
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:9
+
+  3 │ | Int => {
+  4 │   let p = #A(y)
+  5 │   p === v
+  6 │ }
+  7 │ }
+
+  This has type: [> #A(int)]
+  But it's being compared to something of type: [> #A(a)]
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, v) {
+  let p = {
+    NAME: "A",
+    VAL: y
+  };
+  return p === v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### reduce-i2-05
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [< #A(int) | #B]) => switch x {
+| Int => {
+  let p = #A(if true { y } else { 0 })
+  p === v
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:9
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   p === v
+  6 │ }
+  7 │ }
+
+  This has type: [< #A(int) | #B]
+  But it's being compared to something of type: [> #A(a)]
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:9
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   p === v
+  6 │ }
+  7 │ }
+
+  This has type: [< #A(int) | #B]
+  But it's being compared to something of type: [> #A(a)]
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+#### reduce-i2-06
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, v: [< #A(int)]) => switch x {
+| Int => {
+  let p = #A(if true { y } else { 0 })
+  p === v
+}
+}
+```
+
+OCAML: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:9
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   p === v
+  6 │ }
+  7 │ }
+
+  This has type: [#A(int)]
+  But it's being compared to something of type: [> #A(a)]
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+RUST: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:9
+
+  3 │ | Int => {
+  4 │   let p = #A(if true { y } else { 0 })
+  5 │   p === v
+  6 │ }
+  7 │ }
+
+  This has type: [< #A(int)]
+  But it's being compared to something of type: [> #A(a)]
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+**State.** The difference is fixed on trunk by pull request 385 (place A1, "Third part", earlier in this document). The reduced programs of this part were rerun with the same commands as above and the Rust build of trunk at `bb47dc1317` (this branch's compiler sources are trunk's). "agree" means equal exit status, equal diagnostics after stripping colour escapes, and equal JavaScript after removing blank lines:
+
+```text
+reduce-i2-01  ocaml exit 2  rust exit 2  agree
+reduce-i2-02  ocaml exit 2  rust exit 2  agree
+reduce-i2-03  ocaml exit 0  rust exit 0  agree
+reduce-i2-04  ocaml exit 2  rust exit 2  agree
+reduce-i2-05  ocaml exit 2  rust exit 2  agree
+reduce-i2-06  ocaml exit 2  rust exit 2  agree
+```
+
+### I3 — unequal instance-set levels after expansion
+
+Verdict: **CONDITION NOT REACHED**. Eight parsed candidates, eight adding
+members and eight entering the traced expansion helper with members;
+zero show both heads changing through expansion at the unequal-set
+comparison. All eight agree, including complete JavaScript for 01, 02 and
+08 and complete errors for 03–07.
+
+A program must bring two expandable heads to an inner unification, one
+belonging only to the outer instance set and one to the inner set.
+It must then lower the lower-set chain below the inner set's level so that
+the missing promotion in Rust becomes observable.
+
+OCaml compares set levels after expansion in `ctype.ml:2289–2298`.
+Rust's `expand_heads_traced` expands the heads but does not perform that
+cross-set chain promotion; `add_gadt_instance_chain` has one production
+caller in `expand_head_traced`. A temporary print in `expand_heads_traced`
+records input and output handles and both original representatives' set
+levels. In 01, 02, 05, 06 and 08 the sets differ, but one head is already
+its expansion; this does not establish the stipulated two-expansion
+condition. The remaining candidates fail at lowering before a pair with
+two set levels appears. The unmet path requirement is the two expanded
+heads at `compiler/ml/ctype.ml:2280–2283` before its set-level comparison.
+For example, 01 prints:
+
+```text
+EQPROBE I3 members=true tracing=true left=TypeExprRef(136)->TypeExprRef(136) set=Some(2010) right=TypeExprRef(133)->TypeExprRef(138) set=Some(1009)
+```
+
+The accepted comparisons produce a boolean and do not lower the compared
+types afterwards; the application candidates do attempt an escaping result
+and both compilers reject them. No witness or internal error was found.
+
+#### i3-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a b, x: t<a>, z: t<b>, y: a, w: b) => switch x {
+| Int => {
+  let u = if true { y } else { 0 }
+  switch z {
+  | Int => {
+    let v = if true { w } else { 0 }
+    u == v
+  }
+  }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, z, y, w) {
+  return y === w;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i3-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a b, x: t<a>, z: t<b>, y: a, w: b) => switch x {
+| Int => {
+  let u = if true { y } else { 0 }
+  switch z {
+  | Int => {
+    let v = if true { w } else { 0 }
+    v == u
+  }
+  }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, z, y, w) {
+  return w === y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i3-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a b, x: t<a>, z: t<b>, y: a, w: b) => switch x {
+| Int => {
+  let u = if true { y } else { 0 }
+  switch z {
+  | Int => {
+    let v = if true { w } else { 0 }
+    if true { u } else { v }
+  }
+  }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:8:26
+
+   6 ┆ | Int => {
+   7 ┆   let v = if true { w } else { 0 }
+   8 ┆   if true { u } else { v }
+   9 ┆ }
+  10 ┆ }
+
+  This has type: b (defined as int)
+  But this if statement is expected to return: a (defined as int)
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i3-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a b, x: t<a>, z: t<b>, y: a, w: b) => switch x {
+| Int => {
+  let u = if true { y } else { 0 }
+  switch z {
+  | Int => {
+    let v = if true { w } else { 0 }
+    [u, v]
+  }
+  }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:8:9
+
+   6 ┆ | Int => {
+   7 ┆   let v = if true { w } else { 0 }
+   8 ┆   [u, v]
+   9 ┆ }
+  10 ┆ }
+
+  This array item has type: b (defined as int)
+  But this array is expected to have items of type: a (defined as int)
+  
+  The incompatible parts:
+    int vs a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  Arrays can only contain items of the same type.
+
+  Possible solutions:
+  - Convert all values in the array to the same type.
+  - Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, "hello", 15.5, true)
+
+```
+
+#### i3-05
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a b, x: t<a>, z: t<b>, y: a, w: b) => switch x {
+| Int => {
+  let u = if true { y } else { 0 }
+  switch z {
+  | Int => {
+    let v = if true { w } else { 0 }
+    let g = (n: a) => n
+    g(v)
+  }
+  }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:9:5-8
+
+   7 ┆   let v = if true { w } else { 0 }
+   8 ┆   let g = (n: a) => n
+   9 ┆   g(v)
+  10 ┆ }
+  11 ┆ }
+
+  This has type: a (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (g(v) :> int)
+
+  
+
+```
+
+#### i3-06
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a b, x: t<a>, z: t<b>, y: a, w: b) => switch x {
+| Int => {
+  let u = if true { y } else { 0 }
+  switch z {
+  | Int => {
+    let v = if true { w } else { 0 }
+    let g = (n: b) => n
+    g(u)
+  }
+  }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:9:5-8
+
+   7 ┆   let v = if true { w } else { 0 }
+   8 ┆   let g = (n: b) => n
+   9 ┆   g(u)
+  10 ┆ }
+  11 ┆ }
+
+  This has type: b (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (g(u) :> int)
+
+  
+
+```
+
+#### i3-07
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a b, x: t<a>, z: t<b>, y: a, w: b) => switch x {
+| Int => {
+  let u = if true { y } else { 0 }
+  switch z {
+  | Int => {
+    let v = if true { w } else { 0 }
+    let p = (u, v)
+    p
+  }
+  }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:9:5
+
+   7 ┆   let v = if true { w } else { 0 }
+   8 ┆   let p = (u, v)
+   9 ┆   p
+  10 ┆ }
+  11 ┆ }
+
+  This has type: (a, b)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (p :> (a, b))
+
+  
+
+```
+
+#### i3-08
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a b, x: t<a>, z: t<b>, y: a, w: b) => switch x {
+| Int => {
+  let u = if true { y } else { 0 }
+  switch z {
+  | Int => {
+    let v = if true { w } else { 0 }
+    let p = {"f": u}
+    let q = {"f": v}
+    p === q
+  }
+  }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, z, y, w) {
+  let p = {
+    f: y
+  };
+  let q = {
+    f: w
+  };
+  return p === q;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+### I4 — variable unification tracing
+
+Verdict: **CONDITION NOT REACHED**. All eight candidates parsed, added a
+member, entered `unify_var` with members present, and agreed. Zero
+establish the missing-wrapper condition: fresh-left-variable calls on the
+locally abstract type have equal levels, while the `id`/`M.u` abbreviation
+calls observed with tracing off have the abbreviation on the left, not a
+fresh variable. Application lowering calls are already traced.
+
+A program must send a fresh left variable and an abbreviation of the local
+type through `unify_var` so its level update expands the abbreviation while
+the missing wrapper matters. A later lowering must then depend on that
+expansion's membership, rather than on membership created by another call.
+
+OCaml enables tracing around occurrence and level checks at
+`compiler/ml/ctype.ml:2759–2766`; Rust's `unify_var` calls the checks without
+that wrapper. `lower_args` at `compiler/ml/typecore.ml:2503–2512` invokes it
+for fresh variables, but application lowering is already wrapped in Rust.
+Temporary prints record both descriptors, levels and the tracing flag:
+
+```text
+EQPROBE I4 left=Tvar(None) level=2010 right=Tconstr { path: Pident(a/1005), args: TypeRefList(0x0, 0), abbrev: AbbrevMemoRef(37) } level=2010 tracing=false
+EQPROBE I4 left=Tconstr { path: Pident(id/1001), args: TypeRefList(0xe, 1), abbrev: AbbrevMemoRef(40) } level=2008 right=Tvar(None) level=2009 tracing=false
+```
+
+These are i4-01. Neither proves an expansion by the level update: the first
+has no lowering; the second takes full unification instead of the variable
+fast path. That unmet fast-path/expanding-update conjunction is at Rust
+`unify_var`'s `(true, _)` branch and OCaml's cited wrapper. Accepted cases
+05–07 and rejected cases 01–04, 08 are all retained below.
+
+#### i4-01
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>) => z
+  g(v)
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:3-6
+
+  5 │   let v = if true { y } else { 0 }
+  6 │   let g = (z: id<a>) => z
+  7 │   g(v)
+  8 │ }
+  9 │ }
+
+  This has type: id<a> (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (g(v) :> int)
+
+  
+
+```
+
+#### i4-02
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>) => z
+  if true { g(v) } else { 0 }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:13-16
+
+  5 │   let v = if true { y } else { 0 }
+  6 │   let g = (z: id<a>) => z
+  7 │   if true { g(v) } else { 0 }
+  8 │ }
+  9 │ }
+
+  This has type: id<a> (defined as int)
+  But this if statement is expected to return: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i4-03
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>) => z
+  [g(v)]
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:4-7
+
+  5 │   let v = if true { y } else { 0 }
+  6 │   let g = (z: id<a>) => z
+  7 │   [g(v)]
+  8 │ }
+  9 │ }
+
+  This array item has type: id<a> (defined as int)
+  But this array is expected to have items of type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  Arrays can only contain items of the same type.
+
+  Possible solutions:
+  - Convert all values in the array to the same type.
+  - Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, "hello", 15.5, true)
+
+```
+
+#### i4-04
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  module M = { type u = a }
+  let g = (z: M.u) => z
+  g(v)
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:8:3-6
+
+   6 │   module M = { type u = a }
+   7 │   let g = (z: M.u) => z
+   8 │   g(v)
+   9 │ }
+  10 │ }
+
+  This has type: M.u (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (g(v) :> int)
+
+  
+
+```
+
+#### i4-05
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  module M = { type u = a }
+  let p: M.u = v
+  [p]
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return [y];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i4-06
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>, n: int) => (z, n)
+  g(v, ...)
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return extra => [
+    y,
+    extra
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i4-07
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>) => z
+  let h = g
+  h(v) == 0
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y === 0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i4-08
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  module M = { type u<'x> = 'x }
+  let g = (z: M.u<a>) => z
+  g(v)
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:8:3-6
+
+   6 │   module M = { type u<'x> = 'x }
+   7 │   let g = (z: M.u<a>) => z
+   8 │   g(v)
+   9 │ }
+  10 │ }
+
+  This has type: M.u<a> (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (g(v) :> int)
+
+  
+
+```
+
+### I5 — special head expansion
+
+Verdict: **CONDITION NOT REACHED**. Eight parsed candidates and eight member
+additions; four (05–08) demonstrably enter `filter_method` with members.
+Zero isolate the missing tracing wrapper as the expansion that first
+creates the relevant member: the preceding identity application has
+already expanded the equation. All eight compilers' results agree.
+
+A program must first expose an arrow or object by expanding an abbreviation
+through the case equation at a special unification/filtering site.
+The resulting type must then escape so that membership created by that
+particular expansion, not an earlier ordinary unification, controls refusal.
+
+OCaml's `expand_head_trace` at `compiler/ml/ctype.ml:2781–2784` wraps
+`filter_arrow_n`, `filter_method` and field filtering. Rust's `filter_method`
+uses `expand_head` directly; the inspected
+`typecore::filter_arrow_for_lowered_apply` likewise uses `expand_head`.
+The latter helper's print was not reached by 01–04, so no arrow-helper
+coverage is claimed. The object cases enter the intended function with a
+constructor head for `a`, as this print for 05 shows:
+
+```text
+EQPROBE DETAIL filter_method members=true ty=Tconstr { path: Pident(a/1004), args: TypeRefList(0x0, 0), abbrev: AbbrevMemoRef(37) } level=2007
+```
+
+`push_gadt_instance` already recorded that equation's instance during
+`id(y)`. Thus the unmet condition is a first membership-producing expansion
+inside the special wrapper (`ctype.ml:2782`), not entry into `filter_method`.
+01, 03, 05, 07 return a concrete result or closure and are accepted;
+02, 04, 06, 08 attempt to return the equation-typed value and are rejected.
+
+#### i5-01
+
+```rescript
+type rec t<_> = K: t<int => int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| K => {
+  let id = (z: a) => z
+  let v = id(y)
+  let z = v(1)
+  z
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y(1);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i5-02
+
+```rescript
+type rec t<_> = K: t<int => int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| K => {
+  let id = (z: a) => z
+  let v = id(y)
+  let z = v(1)
+  [v, _ => z]
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:4
+
+  5 │   let v = id(y)
+  6 │   let z = v(1)
+  7 │   [v, _ => z]
+  8 │ }
+  9 │ }
+
+  This call is missing an argument of type int
+
+```
+
+#### i5-03
+
+```rescript
+type rec t<_> = K: t<int => int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| K => {
+  let id = (z: a) => z
+  let v = id(y)
+  let h = n => v(n)
+  h
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return n => y(n);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i5-04
+
+```rescript
+type rec t<_> = K: t<int => int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| K => {
+  let id = (z: a) => z
+  let v = id(y)
+  let z = v(1)
+  (v, z)
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:4
+
+  5 │   let v = id(y)
+  6 │   let z = v(1)
+  7 │   (v, z)
+  8 │ }
+  9 │ }
+
+  This call is missing an argument of type int
+
+```
+
+#### i5-05
+
+```rescript
+type rec t<_> = K: t<{"m": int}>
+let f = (type a, x: t<a>, y: a) => switch x {
+| K => {
+  let id = (z: a) => z
+  let v = id(y)
+  let z = v["m"]
+  z
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y.m;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i5-06
+
+```rescript
+type rec t<_> = K: t<{"m": int}>
+let f = (type a, x: t<a>, y: a) => switch x {
+| K => {
+  let id = (z: a) => z
+  let v = id(y)
+  let z = v["m"]
+  if true { v } else { {"m": z} }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:13
+
+  5 │   let v = id(y)
+  6 │   let z = v["m"]
+  7 │   if true { v } else { {"m": z} }
+  8 │ }
+  9 │ }
+
+  This has type: a
+  But this if statement is expected to return: 'a
+  This instance of {"m": int} is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i5-07
+
+```rescript
+type rec t<_> = K: t<{"m": int}>
+let f = (type a, x: t<a>, y: a) => switch x {
+| K => {
+  let id = (z: a) => z
+  let v = id(y)
+  let h = () => v["m"]
+  h
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return () => y.m;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i5-08
+
+```rescript
+type rec t<_> = K: t<{"m": int}>
+let f = (type a, x: t<a>, y: a) => switch x {
+| K => {
+  let id = (z: a) => z
+  let v = id(y)
+  let z = v["m"]
+  (v, z)
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:4
+
+  5 │   let v = id(y)
+  6 │   let z = v["m"]
+  7 │   (v, z)
+  8 │ }
+  9 │ }
+
+  This has type: a
+  But it's expected to have type: 'a
+  This instance of {"m": int} is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (v :> {"m": int})
+
+  
+
+```
+
+### I6 — the non-recursive equation walk
+
+Verdict: **CONDITION NOT REACHED**. Eight parsed candidates, eight member
+additions and eight entries into `local_non_recursive_abbrev` with members.
+Zero reach it with the requested still-unexpanded abbreviation through the
+outer equation: its input is already `int` (01–04), `list` (05–06), or a
+tuple (07–08). All eight outputs agree, including unused-variable warnings.
+
+A program must add an inner equation whose right-hand abbreviation still
+needs expansion through the outer equation during the non-recursive walk.
+A later escaping use must depend on the member created by that walk,
+rather than on expansion that happened before the equation was added.
+
+Read sites: `compiler/ml/ctype.ml:1503–1536` and `2093–2100`, and Rust
+`local_non_recursive_abbrev` with its `go` recursion and `try_expand_head`.
+OCaml wraps the walk in tracing; Rust does not. The measured inputs explain
+why merely nesting `eq<b, id<a>>` was insufficient here:
+
+```text
+EQPROBE DETAIL local_non_recursive_abbrev members=true ty=Tconstr { path: Pident(int/1), args: TypeRefList(0x0, 0), abbrev: AbbrevMemoRef(86) } level=3016
+```
+
+That is i6-01. The head has already expanded before the `add_gadt_equation`
+call reaches its non-recursive check (`ctype.ml:2094`); the walk does not
+perform the stipulated outer-equation expansion. 02–03 attempt to combine
+and return the two instance types and both compilers reject them. The other
+six are accepted with the same JavaScript and warnings.
+
+#### i6-01
+
+```rescript
+type id<'x> = 'x
+type box<'x> = list<'x>
+type pair<'x> = ('x, string)
+type rec t<_> = Int: t<int>
+type rec eq<_, _> = Refl: eq<'x, 'x>
+let f = (type a b, x: t<a>, e: eq<b, id<a>>, y: a, w: b) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch e {
+  | Refl => w
+  }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, e, y, w) {
+  return w;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 26
+  Main.res:8:7
+
+   6 │ let f = (type a b, x: t<a>, e: eq<b, id<a>>, y: a, w: b) => switch x {
+   7 │ | Int => {
+   8 │   let v = if true { y } else { 0 }
+   9 │   switch e {
+  10 │   | Refl => w
+
+  unused variable v.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_v`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+#### i6-02
+
+```rescript
+type id<'x> = 'x
+type box<'x> = list<'x>
+type pair<'x> = ('x, string)
+type rec t<_> = Int: t<int>
+type rec eq<_, _> = Refl: eq<'x, 'x>
+let f = (type a b, x: t<a>, e: eq<b, id<a>>, y: a, w: b) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch e {
+  | Refl => if true { w } else { v }
+  }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:10:34
+
+   8 │   let v = if true { y } else { 0 }
+   9 │   switch e {
+  10 │   | Refl => if true { w } else { v }
+  11 │   }
+  12 │ }
+
+  This has type: a (defined as int)
+  But this if statement is expected to return: b (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+#### i6-03
+
+```rescript
+type id<'x> = 'x
+type box<'x> = list<'x>
+type pair<'x> = ('x, string)
+type rec t<_> = Int: t<int>
+type rec eq<_, _> = Refl: eq<'x, 'x>
+let f = (type a b, x: t<a>, e: eq<b, id<a>>, y: a, w: b) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch e {
+  | Refl => [w, v]
+  }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:10:17
+
+   8 │   let v = if true { y } else { 0 }
+   9 │   switch e {
+  10 │   | Refl => [w, v]
+  11 │   }
+  12 │ }
+
+  This array item has type: a (defined as int)
+  But this array is expected to have items of type: b (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  Arrays can only contain items of the same type.
+
+  Possible solutions:
+  - Convert all values in the array to the same type.
+  - Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, "hello", 15.5, true)
+
+```
+
+#### i6-04
+
+```rescript
+type id<'x> = 'x
+type box<'x> = list<'x>
+type pair<'x> = ('x, string)
+type rec t<_> = Int: t<int>
+type rec eq<_, _> = Refl: eq<'x, 'x>
+let f = (type a b, x: t<a>, e: eq<b, id<a>>, y: a, w: b) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch e {
+  | Refl => w == v
+  }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, e, y, w) {
+  return w === y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i6-05
+
+```rescript
+type id<'x> = 'x
+type box<'x> = list<'x>
+type pair<'x> = ('x, string)
+type rec t<_> = Int: t<int>
+type rec eq<_, _> = Refl: eq<'x, 'x>
+let f = (type a b, x: t<a>, e: eq<b, box<a>>, y: a, w: b) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch e {
+  | Refl => w
+  }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, e, y, w) {
+  return w;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 26
+  Main.res:8:7
+
+   6 │ let f = (type a b, x: t<a>, e: eq<b, box<a>>, y: a, w: b) => switch x {
+   7 │ | Int => {
+   8 │   let v = if true { y } else { 0 }
+   9 │   switch e {
+  10 │   | Refl => w
+
+  unused variable v.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_v`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+#### i6-06
+
+```rescript
+type id<'x> = 'x
+type box<'x> = list<'x>
+type pair<'x> = ('x, string)
+type rec t<_> = Int: t<int>
+type rec eq<_, _> = Refl: eq<'x, 'x>
+let f = (type a b, x: t<a>, e: eq<b, box<a>>, y: a, w: b) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch e {
+  | Refl => [w]
+  }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, e, y, w) {
+  return [w];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 26
+  Main.res:8:7
+
+   6 │ let f = (type a b, x: t<a>, e: eq<b, box<a>>, y: a, w: b) => switch x {
+   7 │ | Int => {
+   8 │   let v = if true { y } else { 0 }
+   9 │   switch e {
+  10 │   | Refl => [w]
+
+  unused variable v.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_v`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+#### i6-07
+
+```rescript
+type id<'x> = 'x
+type box<'x> = list<'x>
+type pair<'x> = ('x, string)
+type rec t<_> = Int: t<int>
+type rec eq<_, _> = Refl: eq<'x, 'x>
+let f = (type a b, x: t<a>, e: eq<b, pair<a>>, y: a, w: b) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch e {
+  | Refl => w
+  }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, e, y, w) {
+  return w;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 26
+  Main.res:8:7
+
+   6 │ let f = (type a b, x: t<a>, e: eq<b, pair<a>>, y: a, w: b) => switch x 
+     │ {
+   7 │ | Int => {
+   8 │   let v = if true { y } else { 0 }
+   9 │   switch e {
+  10 │   | Refl => w
+
+  unused variable v.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_v`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+#### i6-08
+
+```rescript
+type id<'x> = 'x
+type box<'x> = list<'x>
+type pair<'x> = ('x, string)
+type rec t<_> = Int: t<int>
+type rec eq<_, _> = Refl: eq<'x, 'x>
+let f = (type a b, x: t<a>, e: eq<b, pair<a>>, y: a, w: b) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch e {
+  | Refl => let (n, _) = w
+n == v
+  }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, e, y, w) {
+  return w[0] === y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+### I7 — partial copies for polymorphic variant patterns
+
+Verdict: **CONDITION NOT REACHED**. Eight parsed candidates, all adding a
+member and entering `instance_partial` afterwards. None has a member in
+the graph actually passed to that partial copy: a graph walk of every
+input reports `sets=[]` for all reachable nodes. All outputs agree.
+
+A program must present a scrutinee graph that still contains an actual
+member together with a not-yet-fixed variant row when `erase_either`
+selects the partial copy. The copied pattern variable must then escape,
+so copying without the environment loses a membership that affects refusal.
+
+Read sites: OCaml `copy` at `ctype.ml:750–774`, `erase_either` and
+`instance ?partial env` at `typecore.ml:4052–4065,4799,4847`; Rust
+`instance_partial` and `CopyCache::new_partial`. Rust takes no environment.
+The probes pair the previously expanded instance value with upper-bounded
+variant parameters, both with and without an instance-typed payload.
+Returning the pattern variable, an array, a closure, and an object all
+exercise the copied type's use rather than only a discarded match.
+
+A second print walks the partial-copy input and compares every
+representative against all currently recorded instance sets. i7-01:
+
+```text
+EQPROBE I7 node=TypeExprRef(95) sets=[] desc=Ttuple(TypeRefList(0x19, 2))
+EQPROBE I7 node=TypeExprRef(97) sets=[] desc=Tvariant(RowDescRef(0x5))
+EQPROBE I7 node=TypeExprRef(53) sets=[] desc=Tvar(None)
+EQPROBE I7 node=TypeExprRef(96) sets=[] desc=Tconstr { path: Pident(a/1004), args: TypeRefList(0x0, 0), abbrev: AbbrevMemoRef(37) }
+```
+
+Thus the unmet condition is member identity at the `copy ?env` membership
+test (`ctype.ml:770–774`), not the presence of an `a`-spelled type or entry
+into partial instantiation. The partial-copy root is generic, but the
+member from the preceding `if` has not survived into this graph. 07 is
+rejected identically; the other seven are accepted identically.
+
+#### i7-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, tag: [< #A | #B]) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch (v, tag) { | (n, #A) => n | (n, #B) => n }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, tag) {
+  return y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i7-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, tag: [< #A | #B]) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch (v, tag) { | (n, #A) => [n] | (_, #B) => [] }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, tag) {
+  if (tag === "B") {
+    return [];
+  } else {
+    return [y];
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i7-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, tag: [< #A | #B]) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch (v, tag) { | (n, #A) => n == 0 | (_, #B) => false }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, tag) {
+  if (tag === "B") {
+    return false;
+  } else {
+    return y === 0;
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i7-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, tag: [< #A | #B]) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch (v, tag) { | (n, #A) => () => n | (n, #B) => () => n }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, tag) {
+  if (tag === "B") {
+    return () => y;
+  } else {
+    return () => y;
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i7-05
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, tag: [< #A(a) | #B]) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch (v, tag) { | (_, #A(n)) => n | (n, #B) => n }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, tag) {
+  if (typeof tag === "object") {
+    return tag.VAL;
+  } else {
+    return y;
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i7-06
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, tag: [< #A(a) | #B]) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch (v, tag) { | (_, #A(n)) => [n] | (n, #B) => [n] }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, tag) {
+  if (typeof tag === "object") {
+    return [tag.VAL];
+  } else {
+    return [y];
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i7-07
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, tag: [< #A(a) | #B]) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch (v, tag) { | (_, #A(n)) => n == v | (_, #B) => false }
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:42
+
+  3 │ | Int => {
+  4 │   let v = if true { y } else { 0 }
+  5 │   switch (v, tag) { | (_, #A(n)) => n == v | (_, #B) => false }
+  6 │ }
+  7 │ }
+
+  This has type: a (defined as int)
+  But it's being compared to something of type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  You can only compare things of the same type.
+
+```
+
+#### i7-08
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, tag: [< #A(a) | #B]) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  switch (v, tag) { | (_, #A(n)) => {"f": n} | (n, #B) => {"f": n} }
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, tag) {
+  if (typeof tag === "object") {
+    return {
+      f: tag.VAL
+    };
+  } else {
+    return {
+      f: y
+    };
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+### I8 — a variable representative in an instance set
+
+Verdict: **CONDITION NOT REACHED**. Eight parsed candidates, eight member
+additions and eight entries into `update_level_checked_above` with members.
+Zero record a `Tvar` representative at member insertion. All eight outputs
+agree, including the three escaping-result errors (01, 06, 07).
+
+A program must expand an abbreviation under an equation into a type
+variable that itself joins the instance set, not merely use a variable
+as an abbreviation argument. A later lowering or generalization must act
+on that variable member and reveal a difference in the scope check.
+
+Read sites: OCaml `ctype.ml:587–589,1227,2297–2298`; Rust
+`push_gadt_instance`, `update_level_checked_above` and `update_level_pass`.
+The Rust insertion has no descriptor exclusion, and the instance-level
+test in `update_level_pass` precedes its descriptor match: it also applies
+to variables when reached. Thus source inspection alone does not establish
+a variable exemption in Rust. These candidates test parameterized identity
+abbreviations, local identity abbreviations and inferred placeholder
+arguments, after a confirmed equation-member-producing `if`.
+
+The insertion print logs the representative descriptor. All recorded
+additions have constructor descriptors; no `desc=Tvar` insertion appears.
+The unsatisfied condition is the variable expansion result at
+`compiler/ml/ctype.ml:1227`, before the proposed variable-member lowering.
+Entry into level checking with some member is not counted as reaching it.
+
+#### i8-01
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>) => z
+  let q = g(v)
+  q
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:8:3
+
+   6 │   let g = (z: id<a>) => z
+   7 │   let q = g(v)
+   8 │   q
+   9 │ }
+  10 │ }
+
+  This has type: id<a> (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (q :> int)
+
+  
+
+```
+
+#### i8-02
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>) => z
+  let q = g(v)
+  q == 0
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y === 0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i8-03
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>) => [z]
+  g(v)
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return [y];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### i8-04
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<a>) => z
+  g
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return z => z;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 26
+  Main.res:5:7
+
+  3 │ let f = (type a, x: t<a>, y: a) => switch x {
+  4 │ | Int => {
+  5 │   let v = if true { y } else { 0 }
+  6 │   let g = (z: id<a>) => z
+  7 │   g
+
+  unused variable v.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_v`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+#### i8-05
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  module M = { type u<'x> = 'x }
+  let g = (z: M.u<a>) => z
+  g
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return z => z;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 26
+  Main.res:5:7
+
+  3 │ let f = (type a, x: t<a>, y: a) => switch x {
+  4 │ | Int => {
+  5 │   let v = if true { y } else { 0 }
+  6 │   module M = { type u<'x> = 'x }
+  7 │   let g = (z: M.u<a>) => z
+
+  unused variable v.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_v`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+#### i8-06
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  module M = { type u<'x> = 'x }
+  let g = (z: M.u<a>) => z
+  let q = g(v)
+  q
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:9:3
+
+   7 │   let g = (z: M.u<a>) => z
+   8 │   let q = g(v)
+   9 │   q
+  10 │ }
+  11 │ }
+
+  This has type: M.u<a> (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (q :> int)
+
+  
+
+```
+
+#### i8-07
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<_>) => z
+  let q = g(v)
+  q
+}
+}
+```
+
+Both compilers: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:8:3
+
+   6 │   let g = (z: id<_>) => z
+   7 │   let q = g(v)
+   8 │   q
+   9 │ }
+  10 │ }
+
+  This has type: a (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (q :> int)
+
+  
+
+```
+
+#### i8-08
+
+```rescript
+type id<'x> = 'x
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) => switch x {
+| Int => {
+  let v = if true { y } else { 0 }
+  let g = (z: id<_>) => z
+  let q = g(v)
+  q == 0
+}
+}
+```
+
+Both compilers: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y === 0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+### I9 — the expansion of a failed trace
+
+Verdict: **CONDITION NOT REACHED**. Forty-seven candidates over the nine
+catching sites of `typecore.ml`. The print in `record_trace_expansions`
+fired for the caught failure itself in 15 of them (tagged template 3,
+coercion 6, `let module` 3, top-level unit 3). In 12 of these 15 the trace
+held an abbreviation without arguments that was expanded (`a` under an
+equation, or `myint`). In none was that expansion a member of an instance
+set, or reused or lowered after the failure. The two Rust binaries agree
+on every candidate apart from the text of reported unification errors.
+There the build with the empty body loses the printer's
+`(defined as int)` and its ambiguity line, because the printer reads the
+recorded expansions (calibration-if below).
+
+The question: after a caught unification failure, `expand_trace`
+(`compiler/ml/ctype.ml:1697-1701`, called at 2737 and 2767) expands every
+type of the trace with tracing off. The expansion of an abbreviation without
+arguments goes into the shared memo `simple_abbrevs`
+(`ctype.ml:194-204`), so a later node of the same abbreviation in the same
+environment would link to the same expansion node. That would be visible if
+that node were a member of an instance set (`update_level` refuses to lower
+it, `ctype.ml:587-589`) or were lowered by a later memo hit
+(`ctype.ml:1193-1202`). Rust does the same in `record_trace_expansions`
+(`compiler-rust/src/types/ctype.rs`, callers: `unify` at depth 0,
+`unify_var`, `force_subtype`, `subtype_error`). That function also feeds
+the error printer: `printtyp::expand_trace` reads the recorded expansion of
+each trace type.
+
+Three things keep the memo unseen, and the prints confirm each of them:
+
+1. When the failing unification starts in an environment with local
+   constraints, `check_trace_gadt_instances` turns tracing on and calls
+   `cleanup_abbrev` (`ctype.ml:178-184`). With tracing on, `proper_abbrevs`
+   uses each node's own memo, not `simple_abbrevs` (`ctype.ml:200-202`). So
+   `expand_trace` finds `simple_abbrevs` empty and makes a fresh expansion.
+   With tracing off it adds no member (`ctype.ml:1215-1227`), and
+   `try_expand_head` adds a chain only when the expansion is already a
+   member (`ctype.ml:1271-1276`). In every call whose print is pasted
+   below (34 `I9PROBE CALL` lines; this sentence first said 51, a count
+   with no pasted output behind it) the print showed
+   `tracing=false`, and every expanded abbreviation without arguments had
+   `exp_member=None`, including those whose own node was a member
+   (`member=Some(1007)` in co-14).
+2. At the one site that continues inside a function, the coercion trial
+   (`typecore.ml:3594-3604`), the failure is followed by `backtrack snap`.
+   That calls `cleanup_abbrev` (`compiler/ml/btype.ml:773-783`) and undoes
+   the logged level and instance-set changes. Rust's `restore_type_state`
+   also forgets memorized expansions. In co-13–18 the next memo hit on `a`
+   returns a new node (co-14: trace expansion `#99`, later hits `#101`).
+   Added in review: the cleanup runs only when a change was logged since
+   the snapshot (the `Change` arm; the `Unchanged` arm, `btype.ml:776`,
+   cleans nothing). A link or a level change is logged only for a node
+   made before the snapshot (`btype.ml:710-712`, `735-737`), and
+   `memorize_abbrev` is never logged. So a trial that fails without a
+   logged change leaves the trace's expansion in the shared memo, and a
+   later node of the same abbreviation reuses it. Rust has the same
+   condition (the `has_changes` test of `restore_type_state`), so by
+   reading the two compilers do the same there. No candidate of this part
+   is such a trial; one is owed.
+3. At the top-level unit check (`typecore.ml:5188-5203`), the warning is
+   followed by `end_def` and `generalize`, which sets `simple_abbrevs := Mnil`
+   (`ctype.ml:518-520`). A top-level environment has no instance set:
+   instance sets come only from the `init_env` of a function or match with
+   GADT patterns (`typecore.ml:4034-4040, 4819-4825`). In tl-02 and tl-03
+   the second expression's `myint` gets a new expansion (`#35`, `#53`), not
+   the first trace's (`#25`).
+
+The other catching sites raise an error at once (2784, 3751), cannot fail
+(2511, 4002), or catch a failure that does not pass through `expand_trace`
+(2500, 3692, 3706). The per-site parts below give the path condition.
+Added in review: for those five sites the statement rests on reading the
+source, not on a run, and for 2500, 3692 and 3706 it holds only while the
+condition of I8 (a variable that is a member of an instance set) is not
+reached; the list below says why.
+
+#### Builds and the print
+
+Reference: OCaml `bsc` from `dune build --root .` and the Rust release build,
+both of trunk `bb47dc1317` (this branch's compiler sources; the earlier
+parts used `45c4f78a54`). Two scratch Rust builds, never committed, built one
+after the other with
+`CARGO_PROFILE_RELEASE_LTO=thin cargo build --release --manifest-path rewatch/Cargo.toml`
+and saved outside the tree:
+
+- the **normal** build: trunk plus temporary prints. It prints each call of
+  `record_trace_expansions` (`I9PROBE CALL`), and for each trace type its
+  descriptor, level and membership, whether it expanded, whether it is an
+  abbreviation without arguments that expanded (`abbrev0`), and the
+  expansion's node, level and membership (`I9PROBE TY`). It also prints
+  every hit of the `simple_abbrevs` memo (`I9PROBE MEMOHIT`, with the
+  requesting level and the cached node's level before lowering), every
+  instance-set insertion (`I9PROBE ADD`), whether the coercion trial runs
+  and fails (`I9PROBE SITE coerce`), and the caught top-level unit failure
+  (`I9PROBE SITE toplevel-unit`). With the probe lines removed, its output
+  equals the unmodified trunk build on every candidate.
+- the **empty** build: trunk with the body of `record_trace_expansions`
+  removed (signature kept), plus the `MEMOHIT` and `ADD` prints:
+
+```diff
+@@ pub(crate) fn record_trace_expansions(
+     env: &Env,
+     trace: &[(TypeExprRef, TypeExprRef)],
+ ) {
+-    for &(t1, t2) in trace {
+-        for ty in [t1, t2] {
+-            let ty = ctx.repr(ty);
+-            let expansion = full_expand(ctx, env, ty);
+-            ctx.record_trace_expansion(ty, expansion);
+-        }
+-    }
+ }
+```
+
+Commands, per candidate, from its directory (layout as in "Scope and
+calibration"), with `RESCRIPT_RUNTIME` set as there; `B` is the OCaml `bsc`
+or a wrapper executing `<build>/rescript bsc "$@"`:
+
+```sh
+timeout 10 "$B" -w +A -bs-jsx 4 -color never Main.res >B.stdout 2>B.stderr
+```
+
+Diagnostics are compared after stripping SGR escapes and removing the
+`I9PROBE` lines, and JavaScript after removing blank lines. A unit whose
+typing fails is typed twice by Rust: a fast pass, then a pass that explains
+the failure with the same node numbers. The prints below are those of the
+first pass. "Fired at the site" counts only calls made for the caught
+failure: for the coercion, those between `SITE coerce gen=false` and
+`SITE coerce-trial failed=true`.
+
+#### Per catching site
+
+| OCaml site | construct | candidates | print fired at the site | abbreviation without arguments expanded | expansion a member, reused or lowered afterwards | the two Rust builds |
+|---|---|---|---|---|---|---|
+| `typecore.ml:2500` `is_ignore` | one-argument call of a `%ignore` external | 3 | 0 | 0 | 0 | agree |
+| `typecore.ml:2511` `lower_args` | any application | 3 | 0 | 0 | 0 | agree except la-03 (reported error text) |
+| `typecore.ml:2784` tagged template | ``tag`...` `` | 3 | 3 | 3 | 0 | agree |
+| `typecore.ml:3602` coercion trial | `(e :> t)`, `e` not generalizable | 20 | 6 | 6 | 0 | agree except co-04, co-09, dbg-01 (reported error text) |
+| `typecore.ml:3692` object get | `o["f"]` | 4 | 0 | 0 | 0 | agree |
+| `typecore.ml:3706` object set | `o["f"] = v` | 5 | 0 | 0 | 0 | agree |
+| `typecore.ml:3751` `let module` | `module M = {...}` in an expression | 3 | 3 | 0 | 0 | agree |
+| `typecore.ml:4002` optional parameter | `(~k=?) => ...` | 3 | 0 | 0 | 0 | agree except op-01, op-02 (reported error text) |
+| `typecore.ml:5190` top-level unit | an expression as a structure item | 3 | 3 | 3 | 0 | agree |
+
+Sites where the print cannot fire for the caught failure:
+
+- `typecore.ml:2500`: `filter_arrow_n` (`ctype.ml:2789-2805`) raises
+  `Unify []` itself on a wrong arity or label (2804), or from
+  `expand_head_trace`. The one `unify` on that path is `subst`'s `unify'`
+  (`ctype.ml:1129-1130`). It links a fresh stub to a fresh copy and fresh
+  parameters to the type's own arguments, whose levels do not exceed the
+  type's, so it does not fail.
+- `typecore.ml:2511` (added in review: the two other raises of
+  `update_level`, an escaping constructor at `ctype.ml:600` and a package
+  at `611`, were not followed; OCaml asserts that the call does not fail):
+  `unify_var env (newvar ()) typ` fails only if
+  `update_level` refuses a member (`ctype.ml:587-589`), which needs a target
+  level below the instance set's level. A set's level is the level at
+  `init_env`, and the levels inside jump by 1000 (`typecore.ml:4034-4040`).
+  `lower_args` lowers to the current level, which is above every set of its
+  environment. A fresh variable cannot fail the occurrence check.
+- `typecore.ml:3692` and `3706`: `filter_method` and
+  `filter_object_field_for_write` (`ctype.ml:2841-2900`) raise `Unify []`
+  themselves (2899) or return `Error Owrite_missing` without raising
+  (2873, 2884). The remaining raises come from `expand_head_trace` (the
+  ambiguity at `ctype.ml:1225`) and from `update_level` on a fresh object.
+  Those raises do not pass through `expand_trace`. Corrected in review:
+  one route does, here and at 2500. `expand_head_trace` reaches `subst`,
+  whose `unify'` is `unify_var` (`ctype.ml:1129-1130`, `2771`), and a
+  failed `unify_var` expands its trace (`ctype.ml:2765-2768`). The body
+  `subst` unifies is a new copy of the declaration's generic nodes; the
+  only older nodes in it are the variables that the right side of an
+  equation kept (`duplicate_type` at `ctype.ml:2095` copies every node
+  but a variable, `subst.ml:135-143`). So by reading the route fails only
+  when such a variable is a member of an instance set: the condition of
+  I8, which no candidate reached. These rows rest on that.
+- `typecore.ml:4002`: `typetexp.ml:328-329` wraps every optional parameter
+  type in `option`, and an inferred one is a fresh variable. The fresh `tv`
+  is created after `begin_def` when the environment has local constraints,
+  so linking it lowers nothing.
+- `typecore.ml:3751`: here the print fires, but the trace never holds an
+  abbreviation that can expand. Before raising, `update_level` replaces an
+  escaping abbreviation by its expansion (`ctype.ml:590-597`), so the trace
+  holds the escaping constructor `M.u` (lm-01–03). A refused member would
+  need the letmodule variable to sit below an instance set's level, and it
+  is created at the current level.
+- `typecore.ml:2784`: the print fires and the trace holds `a` or `myint`,
+  but the site raises `Tagged_template_non_tag` at once. That message prints
+  only the tag's type, so nothing follows that could see the memo.
+
+#### The two Rust builds differ on reported errors
+
+The empty build removes the recorded expansion that the printer uses. Any
+reported unification error whose trace holds an expandable type then prints
+differently. calibration-if (program and OCaml output in "Scope and
+calibration"): the OCaml compiler and the normal build print the
+calibration's expected output; the empty build prints:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:33
+
+  2 │ let f = (type a, x: t<a>, y: a) =>
+  3 │   switch x {
+  4 │   | Int => if true { y } else { 0 }
+  5 │   }
+  6 │ 
+
+  This has type: int
+  But this if statement is expected to return: a
+  This instance of a is ambiguous: it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+Exit status: OCaml 2, normal 2, empty 2. The same kind of change appears in co-04, co-09, dbg-01, la-03, op-01, op-02 below. None of these errors is a caught failure: each is the program's reported error.
+
+#### Site typecore.ml:2500 — `is_ignore`
+
+Candidates 3; print fired at the site 0; abbreviation without arguments expanded 0. A one-argument call of a `%ignore` external whose type is not a one-parameter unlabelled arrow makes `filter_arrow_n` raise, and `is_ignore` answers `false`; the ordinary application then reports the arity or label error.
+
+#### ig-01
+
+Two-parameter `%ignore` external applied to `y: a` in the case.
+
+```rescript
+type rec t<_> = Int: t<int>
+external ig2: (int, int) => unit = "%ignore"
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => ig2(y)
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:12-14
+
+  3 │ let f = (type a, x: t<a>, y: a) =>
+  4 │   switch x {
+  5 │   | Int => ig2(y)
+  6 │   }
+  7 │ 
+
+  This function call is incorrect.
+  The function has type:
+  (a, int) => unit
+  
+  - The function takes 2 unlabelled arguments, but is called with just 1
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE ADD ty=TypeExprRef(82) level=2007
+I9PROBE ADD ty=TypeExprRef(84) level=2007
+I9PROBE ADD ty=TypeExprRef(82) level=2007
+I9PROBE ADD ty=TypeExprRef(84) level=2007
+```
+
+#### ig-02
+
+The external's type is the abbreviation without arguments `ff`. It is expanded through `simple_abbrevs` with tracing off (the `MEMOHIT` lines), and the arity check raises. The `ADD` lines are the case's `a`.
+
+```rescript
+type ff = (int, int) => unit
+external ig3: ff = "%ignore"
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => ig3(y)
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:12-14
+
+  4 │ let f = (type a, x: t<a>, y: a) =>
+  5 │   switch x {
+  6 │   | Int => ig3(y)
+  7 │   }
+  8 │ 
+
+  This function call is incorrect.
+  The function has type:
+  ff
+  
+  - The function takes no unlabelled arguments, but is called with 1
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(102) path=ff level=2009 cached=TypeExprRef(109) cached_level=2009 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(102) path=ff level=2009 cached=TypeExprRef(109) cached_level=2009 cached_member=None tracing=false
+I9PROBE ADD ty=TypeExprRef(113) level=2009
+I9PROBE ADD ty=TypeExprRef(115) level=2009
+I9PROBE MEMOHIT ty=TypeExprRef(102) path=ff level=2009 cached=TypeExprRef(109) cached_level=2009 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(102) path=ff level=2009 cached=TypeExprRef(109) cached_level=2009 cached_member=None tracing=false
+I9PROBE ADD ty=TypeExprRef(113) level=2009
+I9PROBE ADD ty=TypeExprRef(115) level=2009
+```
+
+#### ig-03
+
+A labelled parameter: `filter_arrow_n` fails on the label.
+
+```rescript
+type rec t<_> = Int: t<int>
+external ig4: (~x: int) => unit = "%ignore"
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => ig4(y)
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:16
+
+  3 │ let f = (type a, x: t<a>, y: a) =>
+  4 │   switch x {
+  5 │   | Int => ig4(y)
+  6 │   }
+  7 │ 
+
+  The argument at this position should be labelled.
+  This function has type: (~x: int) => unit
+
+```
+
+Print (normal build): no line.
+
+#### Site typecore.ml:2511 — `lower_args`
+
+Candidates 3; print fired at the site 0; abbreviation without arguments expanded 0. Each applies a function whose parameter type is `a`, a member or its copy, so `lower_args` lowers it inside the case. la-01 and la-02 are accepted and the print does not fire. In la-03 the print fires for the program's reported error (the `if` result escaping its equation), not for `lower_args`. That reported error is where the two Rust builds differ.
+
+#### la-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let g = (z: a) => z
+      g(y) + 1
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y + 1 | 0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE ADD ty=TypeExprRef(85) level=2008
+I9PROBE ADD ty=TypeExprRef(88) level=2008
+```
+
+#### la-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, g: a => a) =>
+  switch x {
+  | Int => g(y) + 1
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, g) {
+  return g(y) + 1 | 0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE ADD ty=TypeExprRef(88) level=2009
+I9PROBE ADD ty=TypeExprRef(91) level=2009
+```
+
+#### la-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let g = (z: a) => if true { z } else { 0 }
+      g(y)
+    }
+  }
+```
+
+OCaml and Rust: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:7-10
+
+  4 ┆ | Int => {
+  5 ┆     let g = (z: a) => if true { z } else { 0 }
+  6 ┆     g(y)
+  7 ┆   }
+  8 ┆ }
+
+  This has type: a (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (g(y) :> int)
+
+  
+
+```
+
+Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:7-10
+
+  4 ┆ | Int => {
+  5 ┆     let g = (z: a) => if true { z } else { 0 }
+  6 ┆     g(y)
+  7 ┆   }
+  8 ┆ }
+
+  This has type: a
+  But it's expected to have type: 'a
+  This instance of a is ambiguous: it would escape the scope of its equation
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE ADD ty=TypeExprRef(81) level=2007
+I9PROBE ADD ty=TypeExprRef(85) level=2007
+I9PROBE ADD ty=TypeExprRef(91) level=2007
+I9PROBE ADD ty=TypeExprRef(91) level=2007
+I9PROBE ADD ty=TypeExprRef(94) level=2007
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(91) desc=Tconstr(a) level=2006 member=Some(1006) expanded=true abbrev0=true exp=TypeExprRef(99) exp_desc=Tconstr(int) exp_level=2006 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE MEMOHIT ty=TypeExprRef(91) path=a level=2006 cached=TypeExprRef(99) cached_level=2006 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(91) desc=Tconstr(a) level=2006 member=Some(1006) expanded=true abbrev0=true exp=TypeExprRef(99) exp_desc=Tconstr(int) exp_level=2006 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(97) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(97) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE ADD ty=TypeExprRef(81) level=2007
+I9PROBE ADD ty=TypeExprRef(85) level=2007
+I9PROBE ADD ty=TypeExprRef(91) level=2007
+I9PROBE ADD ty=TypeExprRef(91) level=2007
+I9PROBE ADD ty=TypeExprRef(94) level=2007
+```
+
+#### Site typecore.ml:2784 — tagged template
+
+Candidates 3; print fired at the site 3; abbreviation without arguments expanded 3; expansion a member, reused or lowered afterwards 0. The trace's `a` is itself a member (tt-01, tt-03), but its expansion is a fresh node, and the error is raised at once.
+
+#### tt-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => y`hello`
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:12
+
+  2 │ let f = (type a, x: t<a>, y: a) =>
+  3 │   switch x {
+  4 │   | Int => y`hello`
+  5 │   }
+  6 │ 
+
+  This value is used with tagged template (backtick) syntax, but it has type
+  a
+  which is not a taggedTemplate.
+  
+  Tagged template syntax now requires a value of type taggedTemplate<'param, 'output>:
+  
+    - To bind a JavaScript tag function, annotate the external with taggedTemplate<...> instead of using the removed @taggedTemplate decorator.
+    - To use a ReScript function as a tag, lift it with TaggedTemplate.make.
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE ADD ty=TypeExprRef(65) level=2007
+I9PROBE ADD ty=TypeExprRef(70) level=2007
+I9PROBE CALL 0 pairs=1 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(65) desc=Tconstr(a) level=2007 member=Some(1006) expanded=true abbrev0=true exp=TypeExprRef(72) exp_desc=Tconstr(int) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(68) desc=Tconstr(taggedTemplate) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(68) exp_desc=Tconstr(taggedTemplate) exp_level=2007 exp_member=None
+I9PROBE ADD ty=TypeExprRef(65) level=2007
+I9PROBE ADD ty=TypeExprRef(70) level=2007
+```
+
+#### tt-02
+
+Without an equation: `myint` is expanded through `simple_abbrevs` already during the failing unification (the `MEMOHIT` before the `TY` line).
+
+```rescript
+type myint = int
+let tg: myint = 1
+let s = tg`hello`
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:9-10
+
+  1 │ type myint = int
+  2 │ let tg: myint = 1
+  3 │ let s = tg`hello`
+  4 │ 
+
+  This value is used with tagged template (backtick) syntax, but it has type
+  myint
+  which is not a taggedTemplate.
+  
+  Tagged template syntax now requires a value of type taggedTemplate<'param, 'output>:
+  
+    - To bind a JavaScript tag function, annotate the external with taggedTemplate<...> instead of using the removed @taggedTemplate decorator.
+    - To use a ReScript function as a tag, lift it with TaggedTemplate.make.
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE CALL 0 pairs=1 tracing=false local=false
+I9PROBE MEMOHIT ty=TypeExprRef(22) path=myint level=1004 cached=TypeExprRef(27) cached_level=1004 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(22) desc=Tconstr(myint) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(27) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(25) desc=Tconstr(taggedTemplate) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(25) exp_desc=Tconstr(taggedTemplate) exp_level=1004 exp_member=None
+```
+
+#### tt-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let tg: a = y
+      tg`hello`
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:7-8
+
+  4 ┆ | Int => {
+  5 ┆     let tg: a = y
+  6 ┆     tg`hello`
+  7 ┆   }
+  8 ┆ }
+
+  This value is used with tagged template (backtick) syntax, but it has type
+  a
+  which is not a taggedTemplate.
+  
+  Tagged template syntax now requires a value of type taggedTemplate<'param, 'output>:
+  
+    - To bind a JavaScript tag function, annotate the external with taggedTemplate<...> instead of using the removed @taggedTemplate decorator.
+    - To use a ReScript function as a tag, lift it with TaggedTemplate.make.
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE ADD ty=TypeExprRef(72) level=2007
+I9PROBE ADD ty=TypeExprRef(77) level=2007
+I9PROBE CALL 0 pairs=1 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(72) desc=Tconstr(a) level=2007 member=Some(1006) expanded=true abbrev0=true exp=TypeExprRef(79) exp_desc=Tconstr(int) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(75) desc=Tconstr(taggedTemplate) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(75) exp_desc=Tconstr(taggedTemplate) exp_level=2007 exp_member=None
+I9PROBE ADD ty=TypeExprRef(72) level=2007
+I9PROBE ADD ty=TypeExprRef(77) level=2007
+```
+
+#### Site typecore.ml:3602 — the coercion trial
+
+Candidates 20; print fired at the site 6 (co-13–18); abbreviation without arguments expanded 6; expansion a member, reused or lowered afterwards 0. The trial runs only when the source is not generalizable. In a function with GADT patterns the parameters' types are generalized structurally, so a use of `y: a` or of `r: ref<a>` is a fresh copy, and co-01–12 and dbg-01–02 skip the trial (`SITE coerce gen=true`). A source that holds a parameter without annotation keeps a non-generic variable and runs the trial (co-13–18). After the failure, `backtrack` forgets the memo. Each later `MEMOHIT` on `a` returns a node other than the trace's expansion, and in co-14 that later node is lowered (`level=1004 cached_level=2007`). co-04, co-09 and dbg-01 are rejected for reasons outside the trial; their reported errors are where the two Rust builds differ.
+
+#### co-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => (y :> float)
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(67) path=a level=2006 cached=TypeExprRef(70) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(67) path=a level=2006 cached=TypeExprRef(70) cached_level=2006 cached_member=None tracing=false
+```
+
+#### co-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let z: a = y
+      let w = (z :> float)
+      w +. 1.0
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y + 1.0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(82) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(82) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let w = (y :> float)
+      let v = (y :> float)
+      (w, v, y + 1)
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return [
+    y,
+    y,
+    y + 1 | 0
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(69) path=a level=2007 cached=TypeExprRef(72) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(69) path=a level=2007 cached=TypeExprRef(72) cached_level=2007 cached_member=None tracing=false
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2007 cached=TypeExprRef(80) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2007 cached=TypeExprRef(80) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let w = (y :> float)
+      if true { y } else { 0 }
+    }
+  }
+```
+
+OCaml and Rust: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:28
+
+  4 ┆ | Int => {
+  5 ┆     let w = (y :> float)
+  6 ┆     if true { y } else { 0 }
+  7 ┆   }
+  8 ┆ }
+
+  This has type: int
+  But this if statement is expected to return: a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:28
+
+  4 ┆ | Int => {
+  5 ┆     let w = (y :> float)
+  6 ┆     if true { y } else { 0 }
+  7 ┆   }
+  8 ┆ }
+
+  This has type: int
+  But this if statement is expected to return: a
+  This instance of a is ambiguous: it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(68) path=a level=2007 cached=TypeExprRef(71) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(68) path=a level=2007 cached=TypeExprRef(71) cached_level=2007 cached_member=None tracing=false
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(79) desc=Tconstr(int) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(79) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(77) desc=Tconstr(a) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(82) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=1004 cached=TypeExprRef(82) cached_level=1004 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(77) desc=Tconstr(a) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(82) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(80) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(80) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(68) path=a level=2007 cached=TypeExprRef(71) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(68) path=a level=2007 cached=TypeExprRef(71) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-05
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => ({"f": y} :> {"f": float})
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return {
+    f: y
+  };
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(72) path=a level=2006 cached=TypeExprRef(79) cached_level=2006 cached_member=None tracing=false
+```
+
+#### co-06
+
+```rescript
+type v = A | B
+type rec t<_> = V: t<v>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | V => (y :> string)
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(69) path=a level=2009 cached=TypeExprRef(72) cached_level=2009 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(69) path=a level=2009 cached=TypeExprRef(72) cached_level=2009 cached_member=None tracing=false
+```
+
+#### co-07
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let r = ref(y)
+      (r.contents :> float)
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2006 cached=TypeExprRef(82) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2006 cached=TypeExprRef(82) cached_level=2006 cached_member=None tracing=false
+```
+
+#### co-08
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let r = ref(y)
+      let w = (r.contents :> float)
+      (w, r.contents + 1)
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  let r = y;
+  let w = r;
+  return [
+    w,
+    r + 1 | 0
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(84) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(84) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-09
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let r = ref(y)
+      let w = (r.contents :> float)
+      if true { r.contents } else { 0 }
+    }
+  }
+```
+
+OCaml and Rust: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:37
+
+  5 ┆     let r = ref(y)
+  6 ┆     let w = (r.contents :> float)
+  7 ┆     if true { r.contents } else { 0 }
+  8 ┆   }
+  9 ┆ }
+
+  This has type: int
+  But this if statement is expected to return: a (defined as int)
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:37
+
+  5 ┆     let r = ref(y)
+  6 ┆     let w = (r.contents :> float)
+  7 ┆     if true { r.contents } else { 0 }
+  8 ┆   }
+  9 ┆ }
+
+  This has type: int
+  But this if statement is expected to return: a
+  This instance of a is ambiguous: it would escape the scope of its equation
+
+  if expressions must return the same type in all branches (if, else if, else).
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(95) desc=Tconstr(int) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(95) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(91) desc=Tconstr(a) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(98) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE MEMOHIT ty=TypeExprRef(91) path=a level=1004 cached=TypeExprRef(98) cached_level=1004 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(91) desc=Tconstr(a) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(98) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(96) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(96) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-10
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let r = ref(y)
+      ({"f": r.contents} :> {"f": float})
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return {
+    f: y
+  };
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(82) path=a level=2006 cached=TypeExprRef(91) cached_level=2006 cached_member=None tracing=false
+```
+
+#### co-11
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, r: ref<a>) =>
+  switch x {
+  | Int => (r.contents :> float)
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, r) {
+  return r.contents;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2006 cached=TypeExprRef(82) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2006 cached=TypeExprRef(82) cached_level=2006 cached_member=None tracing=false
+```
+
+#### co-12
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, r: ref<a>) =>
+  switch x {
+  | Int => {
+      let w = (r.contents :> float)
+      r.contents = 3
+      w
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, r) {
+  let w = r.contents;
+  r.contents = 3;
+  return w;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+I9PROBE ADD ty=TypeExprRef(89) level=2007
+I9PROBE ADD ty=TypeExprRef(96) level=2007
+```
+
+#### dbg-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, r: ref<a>) =>
+  switch x {
+  | Int => (r.contents :> string)
+  }
+```
+
+OCaml and Rust: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:13-32
+
+  2 │ let f = (type a, x: t<a>, r: ref<a>) =>
+  3 │   switch x {
+  4 │   | Int => (r.contents :> string)
+  5 │   }
+  6 │ 
+
+  Type a = int is not a subtype of string 
+
+```
+
+Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:13-32
+
+  2 │ let f = (type a, x: t<a>, r: ref<a>) =>
+  3 │   switch x {
+  4 │   | Int => (r.contents :> string)
+  5 │   }
+  6 │ 
+
+  Type a is not a subtype of string 
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2006 cached=TypeExprRef(82) cached_level=2006 cached_member=None tracing=false
+I9PROBE CALL 0 pairs=1 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(82) desc=Tconstr(int) level=2006 member=None expanded=false abbrev0=false exp=TypeExprRef(82) exp_desc=Tconstr(int) exp_level=2006 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(72) desc=Tconstr(string) level=2006 member=None expanded=false abbrev0=false exp=TypeExprRef(72) exp_desc=Tconstr(string) exp_level=2006 exp_member=None
+I9PROBE CALL 1 pairs=1 tracing=false local=true
+I9PROBE TY call=1 ty=TypeExprRef(77) desc=Tconstr(a) level=2006 member=None expanded=true abbrev0=true exp=TypeExprRef(84) exp_desc=Tconstr(int) exp_level=2006 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(72) desc=Tconstr(string) level=2006 member=None expanded=false abbrev0=false exp=TypeExprRef(72) exp_desc=Tconstr(string) exp_level=2006 exp_member=None
+I9PROBE SITE coerce gen=true
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2006 cached=TypeExprRef(82) cached_level=2006 cached_member=None tracing=false
+```
+
+#### dbg-02
+
+```rescript
+let f = (r: ref<int>) => (r.contents :> float)
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(r) {
+  return r.contents;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=true
+```
+
+#### co-13
+
+The trial unifies `(a, 'z)` with `(float, float)` and fails on `a`.
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, z) =>
+  switch x {
+  | Int => ((y, z) :> (float, float))
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, z) {
+  return [
+    y,
+    z
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=false
+I9PROBE ADD ty=TypeExprRef(77) level=2007
+I9PROBE ADD ty=TypeExprRef(81) level=2007
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(78) desc=Ttuple(TypeRefList(0xf, 2)) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(78) exp_desc=Ttuple(TypeRefList(0xf, 2)) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(72) desc=Ttuple(TypeRefList(0xb, 2)) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(72) exp_desc=Ttuple(TypeRefList(0xb, 2)) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(77) desc=Tconstr(a) level=2007 member=Some(1007) expanded=true abbrev0=true exp=TypeExprRef(83) exp_desc=Tconstr(int) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(66) desc=Tconstr(float) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(66) exp_desc=Tconstr(float) exp_level=2007 exp_member=None
+I9PROBE SITE coerce-trial failed=true
+I9PROBE MEMOHIT ty=TypeExprRef(77) path=a level=2007 cached=TypeExprRef(85) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-14
+
+`z` is first linked to `a`. The trace's `a` (`#93`) is a member, and its expansion `#99` is a fresh node. After the backtrack, subtyping expands `a` to `#101`.
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, z) =>
+  switch x {
+  | Int => {
+      ignore(z == y)
+      ((y, z) :> (float, float))
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, z) {
+  return [
+    y,
+    z
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=false
+I9PROBE ADD ty=TypeExprRef(93) level=2007
+I9PROBE ADD ty=TypeExprRef(97) level=2007
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(94) desc=Ttuple(TypeRefList(0xf, 2)) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(94) exp_desc=Ttuple(TypeRefList(0xf, 2)) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(88) desc=Ttuple(TypeRefList(0xb, 2)) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(88) exp_desc=Ttuple(TypeRefList(0xb, 2)) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(93) desc=Tconstr(a) level=2007 member=Some(1007) expanded=true abbrev0=true exp=TypeExprRef(99) exp_desc=Tconstr(int) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(82) desc=Tconstr(float) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(82) exp_desc=Tconstr(float) exp_level=2007 exp_member=None
+I9PROBE SITE coerce-trial failed=true
+I9PROBE MEMOHIT ty=TypeExprRef(93) path=a level=2007 cached=TypeExprRef(101) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(76) path=a level=1004 cached=TypeExprRef(101) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(76) path=a level=1004 cached=TypeExprRef(101) cached_level=2007 cached_member=None tracing=false
+```
+
+#### co-15
+
+The failing pair is `z` (linked to the outer `a`, level 1004). Its expansion `#98` is reused once inside the same `expand_trace` call (the trace lists `a` twice), then never: the later hits return `#100`.
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, z) =>
+  switch x {
+  | Int => {
+      ignore(z == y)
+      ((z, y) :> (float, float))
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, z) {
+  return [
+    z,
+    y
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=false
+I9PROBE CALL 0 pairs=3 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(94) desc=Ttuple(TypeRefList(0xf, 2)) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(94) exp_desc=Ttuple(TypeRefList(0xf, 2)) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(88) desc=Ttuple(TypeRefList(0xb, 2)) level=2007 member=None expanded=false abbrev0=false exp=TypeExprRef(88) exp_desc=Ttuple(TypeRefList(0xb, 2)) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(76) desc=Tconstr(a) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(98) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(82) desc=Tconstr(float) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(82) exp_desc=Tconstr(float) exp_level=1004 exp_member=None
+I9PROBE MEMOHIT ty=TypeExprRef(76) path=a level=1004 cached=TypeExprRef(98) cached_level=1004 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(76) desc=Tconstr(a) level=1004 member=None expanded=true abbrev0=true exp=TypeExprRef(98) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(96) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(96) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE SITE coerce-trial failed=true
+I9PROBE MEMOHIT ty=TypeExprRef(76) path=a level=1004 cached=TypeExprRef(100) cached_level=1004 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(93) path=a level=2007 cached=TypeExprRef(100) cached_level=1004 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(93) path=a level=2007 cached=TypeExprRef(100) cached_level=1004 cached_member=None tracing=false
+```
+
+#### co-16
+
+After the trial fails, subtyping accepts the coercion and makes `z` a `float`. The `if` then rejects the program on `int` against `float`, a trace with no expandable type, which both builds print the same.
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, z) =>
+  switch x {
+  | Int => {
+      let p = ((y, z) :> (float, float))
+      if true { z } else { 0 }
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:28
+
+  4 ┆ | Int => {
+  5 ┆     let p = ((y, z) :> (float, float))
+  6 ┆     if true { z } else { 0 }
+  7 ┆   }
+  8 ┆ }
+
+  This has type: int
+  But this if statement is expected to return: float
+
+  if expressions must return the same type in all branches (if, else if, else).
+  
+  You can convert int to float with Int.toFloat.
+  If this is a literal, try a number with a trailing dot (e.g. 20.).
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE SITE coerce gen=false
+I9PROBE ADD ty=TypeExprRef(78) level=2008
+I9PROBE ADD ty=TypeExprRef(82) level=2008
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(79) desc=Ttuple(TypeRefList(0xf, 2)) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(79) exp_desc=Ttuple(TypeRefList(0xf, 2)) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(73) desc=Ttuple(TypeRefList(0xb, 2)) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(73) exp_desc=Ttuple(TypeRefList(0xb, 2)) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(78) desc=Tconstr(a) level=2008 member=Some(1007) expanded=true abbrev0=true exp=TypeExprRef(84) exp_desc=Tconstr(int) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(67) desc=Tconstr(float) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(67) exp_desc=Tconstr(float) exp_level=2008 exp_member=None
+I9PROBE SITE coerce-trial failed=true
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2008 cached=TypeExprRef(86) cached_level=2008 cached_member=None tracing=false
+I9PROBE CALL 1 pairs=1 tracing=false local=true
+I9PROBE TY call=1 ty=TypeExprRef(93) desc=Tconstr(int) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(93) exp_desc=Tconstr(int) exp_level=1004 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(70) desc=Tconstr(float) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(70) exp_desc=Tconstr(float) exp_level=1004 exp_member=None
+I9PROBE SITE coerce gen=false
+I9PROBE ADD ty=TypeExprRef(78) level=2008
+I9PROBE ADD ty=TypeExprRef(82) level=2008
+```
+
+#### co-17
+
+The equation's right side is the abbreviation without arguments `myint`.
+
+```rescript
+type myint = int
+type rec t<_> = Int: t<myint>
+let f = (type a, x: t<a>, y: a, z) =>
+  switch x {
+  | Int => ((y, z) :> (float, float))
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, z) {
+  return [
+    y,
+    z
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=false
+I9PROBE ADD ty=TypeExprRef(89) level=2008
+I9PROBE ADD ty=TypeExprRef(93) level=2008
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(90) desc=Ttuple(TypeRefList(0xf, 2)) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(90) exp_desc=Ttuple(TypeRefList(0xf, 2)) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(84) desc=Ttuple(TypeRefList(0xb, 2)) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(84) exp_desc=Ttuple(TypeRefList(0xb, 2)) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(89) desc=Tconstr(a) level=2008 member=Some(1008) expanded=true abbrev0=true exp=TypeExprRef(95) exp_desc=Tconstr(int) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(78) desc=Tconstr(float) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(78) exp_desc=Tconstr(float) exp_level=2008 exp_member=None
+I9PROBE SITE coerce-trial failed=true
+I9PROBE MEMOHIT ty=TypeExprRef(89) path=a level=2008 cached=TypeExprRef(97) cached_level=2008 cached_member=None tracing=false
+```
+
+#### co-18
+
+The coerced value is used afterwards outside the coercion.
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, z) =>
+  switch x {
+  | Int => {
+      let p = ((y, z) :> (float, float))
+      let (u, _) = p
+      (u, y)
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y, z) {
+  return [
+    y,
+    y
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE SITE coerce gen=false
+I9PROBE ADD ty=TypeExprRef(78) level=2008
+I9PROBE ADD ty=TypeExprRef(82) level=2008
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(79) desc=Ttuple(TypeRefList(0xf, 2)) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(79) exp_desc=Ttuple(TypeRefList(0xf, 2)) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(73) desc=Ttuple(TypeRefList(0xb, 2)) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(73) exp_desc=Ttuple(TypeRefList(0xb, 2)) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(78) desc=Tconstr(a) level=2008 member=Some(1007) expanded=true abbrev0=true exp=TypeExprRef(84) exp_desc=Tconstr(int) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(67) desc=Tconstr(float) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(67) exp_desc=Tconstr(float) exp_level=2008 exp_member=None
+I9PROBE SITE coerce-trial failed=true
+I9PROBE MEMOHIT ty=TypeExprRef(78) path=a level=2008 cached=TypeExprRef(86) cached_level=2008 cached_member=None tracing=false
+```
+
+#### Site typecore.ml:3692 — object get
+
+Candidates 4; print fired at the site 0; abbreviation without arguments expanded 0. `filter_method` raises `Unify []` on the non-object expansion (og-01–03). In og-04 the object is a parameter without annotation, linked to `a` before the switch. That tries the other raising route, the ambiguity of a traced expansion (`ctype.ml:1225`); the outputs do not show which route ran. Neither of these two routes calls `expand_trace`; the route through `subst` that does is described in the list of sites above (added in review).
+
+#### og-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => y["f"]
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:12
+
+  2 │ let f = (type a, x: t<a>, y: a) =>
+  3 │   switch x {
+  4 │   | Int => y["f"]
+  5 │   }
+  6 │ 
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(65) path=a level=2006 cached=TypeExprRef(67) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(65) path=a level=2006 cached=TypeExprRef(67) cached_level=2006 cached_member=None tracing=false
+```
+
+#### og-02
+
+```rescript
+type myint = int
+let f = (y: myint) => y["f"]
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:23
+
+  1 │ type myint = int
+  2 │ let f = (y: myint) => y["f"]
+  3 │ 
+
+  This expression has type myint
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(23) path=myint level=1002 cached=TypeExprRef(25) cached_level=1002 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(23) path=myint level=1002 cached=TypeExprRef(25) cached_level=1002 cached_member=None tracing=false
+```
+
+#### og-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let z: a = y
+      z["f"]
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:7
+
+  4 ┆ | Int => {
+  5 ┆     let z: a = y
+  6 ┆     z["f"]
+  7 ┆   }
+  8 ┆ }
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(72) path=a level=2006 cached=TypeExprRef(74) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(72) path=a level=2006 cached=TypeExprRef(74) cached_level=2006 cached_member=None tracing=false
+```
+
+#### og-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o) => {
+  ignore(o == y)
+  switch x {
+  | Int => o["f"]
+  }
+}
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:12
+
+  3 │   ignore(o == y)
+  4 │   switch x {
+  5 │   | Int => o["f"]
+  6 │   }
+  7 │ }
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(81) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(81) cached_level=2007 cached_member=None tracing=false
+```
+
+#### Site typecore.ml:3706 — object set
+
+Candidates 5; print fired at the site 0; abbreviation without arguments expanded 0. os-01–03 take the branch of `filter_object_field_for_write` that returns `Error Owrite_missing` without raising. os-04–05 try the raising route of og-04. The outputs cannot show which route the OCaml compiler took; in both, the Rust print does not fire.
+
+#### os-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => y["f"] = 1
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:12
+
+  2 │ let f = (type a, x: t<a>, y: a) =>
+  3 │   switch x {
+  4 │   | Int => y["f"] = 1
+  5 │   }
+  6 │ 
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(65) path=a level=2006 cached=TypeExprRef(67) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(65) path=a level=2006 cached=TypeExprRef(67) cached_level=2006 cached_member=None tracing=false
+```
+
+#### os-02
+
+```rescript
+type myint = int
+let f = (y: myint) => y["f"] = 1
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:23
+
+  1 │ type myint = int
+  2 │ let f = (y: myint) => y["f"] = 1
+  3 │ 
+
+  This expression has type myint
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(23) path=myint level=1002 cached=TypeExprRef(25) cached_level=1002 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(23) path=myint level=1002 cached=TypeExprRef(25) cached_level=1002 cached_member=None tracing=false
+```
+
+#### os-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let z: a = y
+      z["f"] = 1
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:7
+
+  4 ┆ | Int => {
+  5 ┆     let z: a = y
+  6 ┆     z["f"] = 1
+  7 ┆   }
+  8 ┆ }
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(72) path=a level=2006 cached=TypeExprRef(74) cached_level=2006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(72) path=a level=2006 cached=TypeExprRef(74) cached_level=2006 cached_member=None tracing=false
+```
+
+#### os-04
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o) => {
+  ignore(o == y)
+  switch x {
+  | Int => o["f"] = 1
+  }
+}
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:12
+
+  3 │   ignore(o == y)
+  4 │   switch x {
+  5 │   | Int => o["f"] = 1
+  6 │   }
+  7 │ }
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(81) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(79) path=a level=2007 cached=TypeExprRef(81) cached_level=2007 cached_member=None tracing=false
+```
+
+#### os-05
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, o) => {
+  ignore(o == y)
+  switch x {
+  | Int => {
+      let p = o
+      p["f"] = 1
+    }
+  }
+}
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:7
+
+  5 ┆ | Int => {
+  6 ┆     let p = o
+  7 ┆     p["f"] = 1
+  8 ┆   }
+  9 ┆ }
+
+  This expression has type a
+  It has no field f
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE MEMOHIT ty=TypeExprRef(81) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(81) path=a level=2007 cached=TypeExprRef(83) cached_level=2007 cached_member=None tracing=false
+```
+
+#### Site typecore.ml:3751 — `let module`
+
+Candidates 3; print fired at the site 3; abbreviation without arguments expanded 0. `update_level` has already replaced `M.t` by `M.u` before raising, so the trace holds `M.u` and a variable.
+
+#### lm-01
+
+```rescript
+let f = () => {
+  module M = {
+    type u = A
+    type t = u
+    let v: t = A
+  }
+  M.v
+}
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:3-5
+
+  5 │     let v: t = A
+  6 │   }
+  7 │   M.v
+  8 │ }
+  9 │ 
+
+  This has type: M.u
+  But it's expected to have type: 'a
+  The type constructor M.u would escape its scope
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE CALL 0 pairs=2 tracing=false local=false
+I9PROBE TY call=0 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(2) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(2) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(36) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(36) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+I9PROBE CALL 1 pairs=2 tracing=false local=false
+I9PROBE TY call=1 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(2) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(2) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(36) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(36) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+I9PROBE CALL 2 pairs=2 tracing=false local=false
+I9PROBE TY call=2 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(2) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(2) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(37) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(37) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+I9PROBE CALL 3 pairs=1 tracing=false local=false
+I9PROBE TY call=3 ty=TypeExprRef(35) desc=Tconstr(M.u) level=1006 member=None expanded=false abbrev0=false exp=TypeExprRef(35) exp_desc=Tconstr(M.u) exp_level=1006 exp_member=None
+I9PROBE TY call=3 ty=TypeExprRef(2) desc=Tvar(None) level=1001 member=None expanded=false abbrev0=false exp=TypeExprRef(2) exp_desc=Tvar(None) exp_level=1001 exp_member=None
+```
+
+#### lm-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      module M = {
+        type u = A
+        type t = u
+        let v: t = A
+      }
+      ignore(y)
+      M.v
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:11:7-9
+
+   9 ┆     }
+  10 ┆     ignore(y)
+  11 ┆     M.v
+  12 ┆   }
+  13 ┆ }
+
+  This has type: M.u
+  But it's expected to have type: 'a
+  The type constructor M.u would escape its scope
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(105) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(105) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE CALL 1 pairs=2 tracing=false local=true
+I9PROBE TY call=1 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(105) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(105) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE CALL 2 pairs=2 tracing=false local=true
+I9PROBE TY call=2 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(106) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(106) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE CALL 3 pairs=1 tracing=false local=true
+I9PROBE TY call=3 ty=TypeExprRef(104) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(104) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=3 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+```
+
+#### lm-03
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      module M = {
+        type u = A(int)
+        type t = u
+        let v: t = A(y)
+      }
+      M.v
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:10:7-9
+
+   8 ┆       let v: t = A(y)
+   9 ┆     }
+  10 ┆     M.v
+  11 ┆   }
+  12 ┆ }
+
+  This has type: M.u
+  But it's expected to have type: 'a
+  The type constructor M.u would escape its scope
+
+```
+
+Print (normal build):
+
+```text
+I9PROBE ADD ty=TypeExprRef(96) level=2010
+I9PROBE ADD ty=TypeExprRef(99) level=2010
+I9PROBE ADD ty=TypeExprRef(96) level=2010
+I9PROBE ADD ty=TypeExprRef(101) level=2010
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(111) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(111) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE ADD ty=TypeExprRef(96) level=2010
+I9PROBE ADD ty=TypeExprRef(99) level=2010
+I9PROBE ADD ty=TypeExprRef(96) level=2010
+I9PROBE ADD ty=TypeExprRef(101) level=2010
+I9PROBE CALL 1 pairs=2 tracing=false local=true
+I9PROBE TY call=1 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(111) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(111) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE CALL 2 pairs=2 tracing=false local=true
+I9PROBE TY call=2 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=2 ty=TypeExprRef(112) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(112) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE CALL 3 pairs=1 tracing=false local=true
+I9PROBE TY call=3 ty=TypeExprRef(110) desc=Tconstr(M.u) level=2011 member=None expanded=false abbrev0=false exp=TypeExprRef(110) exp_desc=Tconstr(M.u) exp_level=2011 exp_member=None
+I9PROBE TY call=3 ty=TypeExprRef(27) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(27) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+```
+
+#### Site typecore.ml:4002 — optional parameters
+
+Candidates 3; print fired at the site 0; abbreviation without arguments expanded 0. Optional parameters of type `a` inside the case, with an annotation, an abbreviation without arguments (`ff`) and an inferred type. In op-01 and op-02 the print fires for the program's reported error (a pattern on the option, an escaping instance), not for the site. Those reported errors are where the two Rust builds differ.
+
+#### op-01
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let g = (~k: a=?) => switch k { | Some(v) => v | None => y }
+      g() + 1
+    }
+  }
+```
+
+OCaml and Rust: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:16-20
+
+  3 ┆ switch x {
+  4 ┆ | Int => {
+  5 ┆     let g = (~k: a=?) => switch k { | Some(v) => v | None => y }
+  6 ┆     g() + 1
+  7 ┆   }
+
+  This pattern matches values of type a (defined as int)
+  but a pattern was expected which matches values of type option<'a>
+  
+  The value you're pattern matching on here is wrapped in an option, but you're trying to match on the actual value.
+  Wrap the highlighted pattern in Some() to make it work.
+
+```
+
+Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:16-20
+
+  3 ┆ switch x {
+  4 ┆ | Int => {
+  5 ┆     let g = (~k: a=?) => switch k { | Some(v) => v | None => y }
+  6 ┆     g() + 1
+  7 ┆   }
+
+  This pattern matches values of type a
+  but a pattern was expected which matches values of type option<'a>
+  
+  The value you're pattern matching on here is wrapped in an option, but you're trying to match on the actual value.
+  Wrap the highlighted pattern in Some() to make it work.
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE ADD ty=TypeExprRef(76) level=2008
+I9PROBE ADD ty=TypeExprRef(79) level=2008
+I9PROBE CALL 0 pairs=1 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(76) desc=Tconstr(a) level=2008 member=Some(1006) expanded=true abbrev0=true exp=TypeExprRef(81) exp_desc=Tconstr(int) exp_level=2008 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(72) desc=Tconstr(option) level=2008 member=None expanded=false abbrev0=false exp=TypeExprRef(72) exp_desc=Tconstr(option) exp_level=2008 exp_member=None
+I9PROBE ADD ty=TypeExprRef(76) level=2008
+I9PROBE ADD ty=TypeExprRef(79) level=2008
+```
+
+#### op-02
+
+```rescript
+type rec t<_> = Int: t<int>
+let f = (type a, x: t<a>, y: a, g: (~k: a=?) => a) =>
+  switch x {
+  | Int => {
+      let h: (~k: a=?) => a = (~k=?) => switch k { | Some(v) => v | None => y }
+      (h(), g())
+    }
+  }
+```
+
+OCaml and Rust: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:8-10
+
+  4 ┆ | Int => {
+  5 ┆     let h: (~k: a=?) => a = (~k=?) => switch k { | Some(v) => v | None =
+    ┆ > y }
+  6 ┆     (h(), g())
+  7 ┆   }
+  8 ┆ }
+
+  This has type: a (defined as int)
+  But it's expected to have type: 'a
+  This instance of int is ambiguous:
+  it would escape the scope of its equation
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: (h() :> int)
+
+  
+
+```
+
+Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:8-10
+
+  4 ┆ | Int => {
+  5 ┆     let h: (~k: a=?) => a = (~k=?) => switch k { | Some(v) => v | None =
+    ┆ > y }
+  6 ┆     (h(), g())
+  7 ┆   }
+  8 ┆ }
+
+  This has type: a
+  But it's expected to have type: 'a
+  This instance of a is ambiguous: it would escape the scope of its equation
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE ADD ty=TypeExprRef(139) level=2008
+I9PROBE ADD ty=TypeExprRef(143) level=2008
+I9PROBE CALL 0 pairs=2 tracing=false local=true
+I9PROBE TY call=0 ty=TypeExprRef(139) desc=Tconstr(a) level=2007 member=Some(1007) expanded=true abbrev0=true exp=TypeExprRef(149) exp_desc=Tconstr(int) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(135) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(135) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE MEMOHIT ty=TypeExprRef(139) path=a level=2007 cached=TypeExprRef(149) cached_level=2007 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(139) desc=Tconstr(a) level=2007 member=Some(1007) expanded=true abbrev0=true exp=TypeExprRef(149) exp_desc=Tconstr(int) exp_level=2007 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(147) desc=Tvar(None) level=1004 member=None expanded=false abbrev0=false exp=TypeExprRef(147) exp_desc=Tvar(None) exp_level=1004 exp_member=None
+I9PROBE ADD ty=TypeExprRef(139) level=2008
+I9PROBE ADD ty=TypeExprRef(143) level=2008
+```
+
+#### op-03
+
+```rescript
+type rec t<_> = Int: t<int>
+type ff = (~k: int=?) => int
+let f = (type a, x: t<a>, y: a) =>
+  switch x {
+  | Int => {
+      let h: ff = (~k=?) => switch k { | Some(v) => v | None => y }
+      h()
+    }
+  }
+```
+
+OCaml, Rust and Rust with the empty body: exit 0. stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  return y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Print (normal build):
+
+```text
+I9PROBE ADD ty=TypeExprRef(137) level=2008
+I9PROBE ADD ty=TypeExprRef(139) level=2008
+I9PROBE MEMOHIT ty=TypeExprRef(146) path=ff level=2008 cached=TypeExprRef(153) cached_level=2008 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(146) path=ff level=2008 cached=TypeExprRef(153) cached_level=2008 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(137) path=a level=2008 cached=TypeExprRef(206) cached_level=100000000 cached_member=None tracing=false
+```
+
+#### Site typecore.ml:5190 — the top-level unit check
+
+Candidates 3; print fired at the site 3; abbreviation without arguments expanded 3; expansion a member, reused or lowered afterwards 0. The warning (an error by default) does not stop typing: tl-02 and tl-03 report both expressions. The second expression's `myint` gets a new expansion (`#35`, `#53`) because `generalize` emptied `simple_abbrevs` after the first. The lowering in tl-03 (`level=1005 cached_level=1006`) happens during the second expression's own unification, before its trace.
+
+#### tl-01
+
+```rescript
+type myint = int
+let v: myint = 1
+v
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Warning number 109 (configured as error) 
+  Main.res:3:1
+
+  1 │ type myint = int
+  2 │ let v: myint = 1
+  3 │ v
+  4 │ 
+
+  This is at the top level and is expected to return `unit`. But it's returning `myint`.
+
+  In ReScript, anything at the top level must evaluate to `unit`. You can fix this by assigning the expression to a value, or piping it into the `ignore` function.
+
+  Possible solutions:
+  - Assigning to a value that is then ignored: `let _ = yourExpression`
+  - Piping into the built-in ignore function to ignore the result: `yourExpression->ignore`
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE CALL 0 pairs=1 tracing=false local=false
+I9PROBE MEMOHIT ty=TypeExprRef(21) path=myint level=1003 cached=TypeExprRef(25) cached_level=1003 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(21) desc=Tconstr(myint) level=1003 member=None expanded=true abbrev0=true exp=TypeExprRef(25) exp_desc=Tconstr(int) exp_level=1003 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(23) desc=Tconstr(unit) level=1003 member=None expanded=false abbrev0=false exp=TypeExprRef(23) exp_desc=Tconstr(unit) exp_level=1003 exp_member=None
+I9PROBE SITE toplevel-unit caught
+```
+
+#### tl-02
+
+```rescript
+type myint = int
+{
+  let v: myint = 1
+  v
+}
+(2: myint)
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Warning number 109 (configured as error) 
+  Main.res:3:3-4:3
+
+  1 │ type myint = int
+  2 │ {
+  3 │   let v: myint = 1
+  4 │   v
+  5 │ }
+  6 │ (2: myint)
+
+  This is at the top level and is expected to return `unit`. But it's returning `myint`.
+
+  In ReScript, anything at the top level must evaluate to `unit`. You can fix this by assigning the expression to a value, or piping it into the `ignore` function.
+
+  Possible solutions:
+  - Assigning to a value that is then ignored: `let _ = yourExpression`
+  - Piping into the built-in ignore function to ignore the result: `yourExpression->ignore`
+
+
+  Warning number 109 (configured as error) 
+  Main.res:6:2-9
+
+  4 │   v
+  5 │ }
+  6 │ (2: myint)
+  7 │ 
+
+  This is at the top level and is expected to return `unit`. But it's returning `myint`.
+
+  In ReScript, anything at the top level must evaluate to `unit`. You can fix this by assigning the expression to a value, or piping it into the `ignore` function.
+
+  Possible solutions:
+  - Assigning to a value that is then ignored: `let _ = yourExpression`
+  - Piping into the built-in ignore function to ignore the result: `yourExpression->ignore`
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE CALL 0 pairs=1 tracing=false local=false
+I9PROBE MEMOHIT ty=TypeExprRef(21) path=myint level=1002 cached=TypeExprRef(25) cached_level=1002 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(21) desc=Tconstr(myint) level=1002 member=None expanded=true abbrev0=true exp=TypeExprRef(25) exp_desc=Tconstr(int) exp_level=1002 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(23) desc=Tconstr(unit) level=1002 member=None expanded=false abbrev0=false exp=TypeExprRef(23) exp_desc=Tconstr(unit) exp_level=1002 exp_member=None
+I9PROBE SITE toplevel-unit caught
+I9PROBE MEMOHIT ty=TypeExprRef(30) path=myint level=1003 cached=TypeExprRef(35) cached_level=1003 cached_member=None tracing=false
+I9PROBE CALL 1 pairs=1 tracing=false local=false
+I9PROBE MEMOHIT ty=TypeExprRef(30) path=myint level=1003 cached=TypeExprRef(35) cached_level=1003 cached_member=None tracing=false
+I9PROBE TY call=1 ty=TypeExprRef(30) desc=Tconstr(myint) level=1003 member=None expanded=true abbrev0=true exp=TypeExprRef(35) exp_desc=Tconstr(int) exp_level=1003 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(36) desc=Tconstr(unit) level=1003 member=None expanded=false abbrev0=false exp=TypeExprRef(36) exp_desc=Tconstr(unit) exp_level=1003 exp_member=None
+I9PROBE SITE toplevel-unit caught
+```
+
+#### tl-03
+
+```rescript
+type myint = int
+{
+  let v: myint = 1
+  v
+}
+let g = (w: myint) => w
+(g(3): myint)
+```
+
+OCaml, Rust and Rust with the empty body: exit 2. stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Warning number 109 (configured as error) 
+  Main.res:3:3-4:3
+
+  1 │ type myint = int
+  2 │ {
+  3 │   let v: myint = 1
+  4 │   v
+  5 │ }
+  6 │ let g = (w: myint) => w
+
+  This is at the top level and is expected to return `unit`. But it's returning `myint`.
+
+  In ReScript, anything at the top level must evaluate to `unit`. You can fix this by assigning the expression to a value, or piping it into the `ignore` function.
+
+  Possible solutions:
+  - Assigning to a value that is then ignored: `let _ = yourExpression`
+  - Piping into the built-in ignore function to ignore the result: `yourExpression->ignore`
+
+
+  Warning number 109 (configured as error) 
+  Main.res:7:2-12
+
+  5 │ }
+  6 │ let g = (w: myint) => w
+  7 │ (g(3): myint)
+  8 │ 
+
+  This is at the top level and is expected to return `unit`. But it's returning `myint`.
+
+  In ReScript, anything at the top level must evaluate to `unit`. You can fix this by assigning the expression to a value, or piping it into the `ignore` function.
+
+  Possible solutions:
+  - Assigning to a value that is then ignored: `let _ = yourExpression`
+  - Piping into the built-in ignore function to ignore the result: `yourExpression->ignore`
+
+```
+
+Print (normal build, first of its two passes):
+
+```text
+I9PROBE CALL 0 pairs=1 tracing=false local=false
+I9PROBE MEMOHIT ty=TypeExprRef(21) path=myint level=1002 cached=TypeExprRef(25) cached_level=1002 cached_member=None tracing=false
+I9PROBE TY call=0 ty=TypeExprRef(21) desc=Tconstr(myint) level=1002 member=None expanded=true abbrev0=true exp=TypeExprRef(25) exp_desc=Tconstr(int) exp_level=1002 exp_member=None
+I9PROBE TY call=0 ty=TypeExprRef(23) desc=Tconstr(unit) level=1002 member=None expanded=false abbrev0=false exp=TypeExprRef(23) exp_desc=Tconstr(unit) exp_level=1002 exp_member=None
+I9PROBE SITE toplevel-unit caught
+I9PROBE MEMOHIT ty=TypeExprRef(51) path=myint level=1005 cached=TypeExprRef(53) cached_level=1006 cached_member=None tracing=false
+I9PROBE MEMOHIT ty=TypeExprRef(47) path=myint level=1005 cached=TypeExprRef(53) cached_level=1006 cached_member=None tracing=false
+I9PROBE CALL 1 pairs=1 tracing=false local=false
+I9PROBE MEMOHIT ty=TypeExprRef(47) path=myint level=1005 cached=TypeExprRef(53) cached_level=1006 cached_member=None tracing=false
+I9PROBE TY call=1 ty=TypeExprRef(47) desc=Tconstr(myint) level=1005 member=None expanded=true abbrev0=true exp=TypeExprRef(53) exp_desc=Tconstr(int) exp_level=1005 exp_member=None
+I9PROBE TY call=1 ty=TypeExprRef(58) desc=Tconstr(unit) level=1005 member=None expanded=false abbrev0=false exp=TypeExprRef(58) exp_desc=Tconstr(unit) exp_level=1005 exp_member=None
+I9PROBE SITE toplevel-unit caught
+```

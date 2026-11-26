@@ -7,9 +7,11 @@
 //! copy (`copy_fresh`, `copy_stmt`) and nothing else: the nodes are the
 //! pools' (`Pools` is the lowering's `Bir`).
 //!
-//! The transition functions, `of`, `reserve`, `steps`, `mark`, `push`,
-//! `pop` and `kind_of` are the representation; every other body is the row
-//! of the table below.
+//! `of`, `reserve`, `steps`, `mark`, `push`, `pop` and `kind_of` are the
+//! representation, as are the functions kept for the tests of rows
+//! (`from_node`, `node`, `at`, `push_list`: the interface has no
+//! transition function since T6x-f); every other body is the row of the
+//! table below.
 //!
 //! # What each body is
 //!
@@ -18,7 +20,7 @@
 //! | a leaf | `plain::node` with the leaf's view (`int_literal`: `plain::int`; `string`: `plain::string`; `boolean`: `plain::boolean`); `aux` is the unit bit of `undefined` and the statement bit of `raw`, 0 otherwise |
 //! | `bin_plain`, `seq` | `plain::bin`, `plain::seq` |
 //! | the other plain functions | `plain::node` with the view of the same name; `aux` is the tag bit of `dot`, the identity bit of `optional`, 0 otherwise |
-//! | a list constructor | `plain::node` with `&self.operands[mark..]` as the list (the callee or tag is not on the stack), then the stack is cut back to the mark; `aux` is the mutability of `array` and `block`, the children bit of `jsx`, and 1 for `new_` (its argument list is present, as `Bir::call_from_list` without call information writes it) |
+//! | a list constructor | `plain::node` with `&self.operands[mark..]` as the list (the callee or tag is not on the stack), then the stack is cut back to the mark; `aux` is the mutability of `array` and `block`, and 1 for `new_` (its argument list is present, as `Bir::call_from_list` without call information writes it) |
 //! | a rule function | the function of `norm.rs` named in THREE_TREES 11.4, "T6: the interface" (c); `template` gives `jm12_interpolated_template` the operands since the mark and cuts the stack back; `project` returns `Err(value)` when `jm11_projection` returns `None` (it has consumed nothing then) |
 //! | `id` | the row's id (`NodeId::0`) |
 //! | `kind` | `kind_of` of the node's operation |
@@ -37,7 +39,6 @@
 //! | `id_bound` | the length of `Bir::nodes` |
 //! | `equal` | `bir::j::equal::equal` |
 //! | `is_callee` | the owner is a `JCall`, `JFlatCall` or `JNew` whose `callee` is the node, or a `JTagged` whose `tag` is |
-//! | `push_list` | `Rows::operands` extended by `Lists::get(list)` |
 //! | `keep_operand` | `child_at`, `Bir::detach` of the operand, `Bir::release` of the node |
 //! | `unpack_rev` | for the operands from the last to the first: `detach`, push; then `release` of the node |
 //! | `copy` | as `copy_fresh`, with a vector of its own for the binders, which it drops (the copies of the lowering that use it have none) |
@@ -50,6 +51,8 @@
 //! | `take_operands` | each child `Bir::detach`ed and pushed on `Rows::operands`, last first; the node stays |
 //! | `refill` | `plain::node` of the view of `e`'s operation (`JOptional`, `JArray`, `JBlockLit`, `JObject`, `JDot`) over the operands since the mark with `e`'s `aux`, information, property and position; `plain::copy_cold` from `e`; `Bir::release` of `e` |
 //! | `copy_cold` | `plain::copy_cold`, then the character of `from` (`Node::js_char`) set on `to` when `from` has one |
+//! | `copy_members` | the `JDot`s from `r` down pushed on `Rows::work`, then `copy_leaf` and `copy_cold` of the first node that is not one, then for each read from the innermost out `dot` with its `property`, `position` and `aux != 0`, and `copy_cold`; `made` after each node; one step per node made |
+//! | `jsx_element` | `callee` pushed and rotated to the mark (`slice::rotate_right(1)` of the operands since it), then `plain::node` with the operands since the mark as the list and the children bit as `aux`: one step and one per operand, the callee one of them |
 //!
 //! Steps (`Js::steps`): one for every function that builds a node or takes
 //! one apart (`without_pure` and `project` too, whatever they return); a
@@ -64,7 +67,7 @@
 use crate::bir::j::{facts, norm, plain};
 use crate::bir::lower::js::{Js, Mark, Pools};
 use crate::bir::{
-    Cold, ConstId, Constant, FuncId, ImportId, JsId, JsPayload, ListId, NodeFlags, NodeId, Op, StrId,
+    Cold, ConstId, Constant, FuncId, ImportId, JsId, JsPayload, NodeFlags, NodeId, Op, StrId,
     VarId, View,
 };
 use crate::emit::row::{Kind, flag};
@@ -93,10 +96,11 @@ pub struct Rows {
     /// is cleared after each copy and exists so that a copy with labels
     /// allocates nothing in a warm unit.
     labels: Vec<(u32, u32)>,
-    /// The statements and expressions `effect_free` has still to read. A
-    /// work stack of that one walk, empty between calls and kept so that
-    /// the walk allocates only when a statement is wider and deeper than
-    /// any before it in the unit.
+    /// The statements and expressions `effect_free` and `substitute` have
+    /// still to read, and the member reads `copy_members` has still to
+    /// copy. A work stack of those walks, empty between calls and kept so
+    /// that a walk allocates only when a tree is wider or deeper than any
+    /// before it in the unit.
     pub(super) work: Vec<NodeId>,
 }
 
@@ -190,19 +194,6 @@ pub(crate) fn kind_of(op: Op) -> Kind {
 impl Js for Rows {
     type E = E;
     type Ref<'r> = NodeId;
-
-    #[inline]
-    fn from_node(node: NodeId) -> E {
-        E(node)
-    }
-    #[inline]
-    fn node(e: E) -> NodeId {
-        e.0
-    }
-    #[inline]
-    fn at<'r>(node: NodeId) -> Self::Ref<'r> {
-        node
-    }
 
     fn reserve(&mut self, operands: usize) {
         self.operands.reserve(operands);
@@ -506,10 +497,6 @@ impl Js for Rows {
     fn pop(&mut self) -> E {
         E(self.operands.pop().expect("an operand"))
     }
-    #[inline]
-    fn push_list(&mut self, a: &Pools, list: ListId) {
-        self.operands.extend_from_slice(a.lists.get(list));
-    }
     fn call(&mut self, a: &mut Pools, callee: E, mark: Mark, info: JsId) -> E {
         let start = self.since(mark);
         let id = plain::node(
@@ -586,8 +573,10 @@ impl Js for Rows {
         );
         self.cut(start, id)
     }
-    fn jsx(&mut self, a: &mut Pools, mark: Mark, info: JsId, has_children: bool) -> E {
+    fn jsx_element(&mut self, a: &mut Pools, callee: E, mark: Mark, info: JsId, has_children: bool) -> E {
         let start = self.since(mark);
+        self.operands.push(callee.0);
+        self.operands[start..].rotate_right(1);
         let JsPayload::Jsx(header) = a.javascript(info) else { panic!("a JSX header") };
         // The callee and the tag, then what the header counts.
         let expected = 2 + usize::from(header.spread) + header.props.len as usize + header.children as usize + usize::from(header.key);
@@ -675,6 +664,30 @@ impl Js for Rows {
             other => panic!("copy_leaf of a node with operands: {other:?}"),
         };
         self.leaf(a, view, aux)
+    }
+    fn copy_members(&mut self, a: &mut Pools, r: NodeId, mut made: impl FnMut(u32)) -> E {
+        // The stack may hold the pending nodes of a walk that asked for
+        // this copy (`JsStmt::substitute`): the reads go above them.
+        let mut spine = std::mem::take(&mut self.work);
+        let base = spine.len();
+        let mut at = r;
+        while let View::JDot { object, .. } = a.view(at) {
+            spine.push(at);
+            at = object;
+        }
+        let mut copy = self.copy_leaf(a, at);
+        self.copy_cold(a, at, &mut copy);
+        made(copy.0.0);
+        while spine.len() > base {
+            let read = spine.pop().expect("a member read");
+            let View::JDot { property, position, .. } = a.view(read) else { unreachable!("a member read") };
+            let tag = a.node(read).aux() as u8 != 0;
+            copy = self.dot(a, copy, property, position, tag);
+            self.copy_cold(a, read, &mut copy);
+            made(copy.0.0);
+        }
+        self.work = spine;
+        copy
     }
     fn release(&mut self, a: &mut Pools, e: E) {
         self.steps += u64::from(a.release(e.0));
@@ -846,6 +859,31 @@ impl Js for Rows {
     }
 }
 
+/// For the tests of rows, which build rows on the arena and wrap them
+/// (`out.rs`, `js_tests.rs`, `js_stmt_tests.rs`): a handle is its row. No
+/// generic code can name these: they are not of the interface (THREE_TREES
+/// 11.4, "T6x-e and T6x-f: the fold reads where its rows are", decision 9).
+#[cfg(test)]
+impl Rows {
+    /// The handle of a J row built on the arena. O(1).
+    pub(crate) fn from_node(node: NodeId) -> E {
+        E(node)
+    }
+    /// The J row of a handle. O(1).
+    pub(crate) fn node(e: E) -> NodeId {
+        e.0
+    }
+    /// The reference of a J row built on the arena. O(1).
+    pub(crate) fn at(node: NodeId) -> NodeId {
+        node
+    }
+    /// The nodes of a pool list of detached J expressions, pushed as
+    /// operands in order. One move per node; counts no step.
+    pub(crate) fn push_list(&mut self, a: &Pools, list: crate::bir::ListId) {
+        self.operands.extend_from_slice(a.lists.get(list));
+    }
+}
+
 impl Rows {
     /// `plain::node` of `view` with `aux`, and its step. O(1).
     #[inline]
@@ -872,3 +910,7 @@ impl Rows {
         E(id)
     }
 }
+
+#[cfg(test)]
+#[path = "rows_tests.rs"]
+pub(super) mod tests;

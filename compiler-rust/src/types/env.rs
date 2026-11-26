@@ -3115,7 +3115,7 @@ pub(crate) fn predef_declarations(ctx: &TypeContext) -> Vec<crate::types::world:
                 // A constant: its blocks and its name string are static.
                 type_shape: ValueShape::recognized_as(
                     BlockType::Instance(crate::types::VariantInstance::Class {
-                        name: "Promise".to_string(),
+                        name: crate::types::ClassName::global("Promise"),
                         ancestors: Vec::new(),
                         blocks: crate::types::ClassBlocks {
                             block: crate::types::ShapeAllocation::predef(10),

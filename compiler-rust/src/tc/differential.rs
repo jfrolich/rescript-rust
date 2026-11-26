@@ -40,9 +40,9 @@
 //! - [`BUILD`]: operations that make a variable, a tuple of two operands and
 //!   an operand's child, so that a type can hold a node above its own level
 //!   and a unification can meet a type inside itself.
-//! - [`OBJECTS`], [`VARIANTS`], [`UNIVARS`], [`PACKAGES`], [`PATTERN`],
-//!   [`RELATIONS`], [`SUBTYPE`]: the types and operations of slices R3e to
-//!   R3j; [`Plan::slices`] names the slices each reaches.
+//! - [`OBJECTS`], [`VARIANTS`], [`UNIVARS`], [`PATTERN`], [`INSTANCES`],
+//!   [`RELATIONS`]: the types and operations of slices R3e to R3i and
+//!   R3s.
 //!
 //! Nothing here is on a compile path; the harness allocates freely.
 
@@ -193,6 +193,24 @@ pub(crate) const UNIVARS: u16 = 1 << 8;
 /// sides end their form with the equations in force, one line a type
 /// that has one, sorted by name: `= name := body`.
 pub(crate) const PATTERN: u16 = 1 << 9;
+/// GADT instances (slice R3s; section 8.6, decisions 103 and 110), on
+/// top of [`PATTERN`]. A case gets [`Op::Scope`] before a pattern
+/// unification; [`Op::Copy`] and [`Op::Lower`] run WITH the environment
+/// of the case on both sides (`instance env`, compiler/ml/ctype.ml:
+/// 846-851; `update_level env`, 633-640), and a pattern unification that
+/// fails drops the whole environment it made (`Checker::leave_case`).
+/// Without the bit no case has a scope, and the old checker, which adds
+/// a member only to a set that exists, judges nothing of the slice.
+pub(crate) const INSTANCES: u16 = 1 << 10;
+
+/// The relations (slice R3i; section 8.12, decision 116). The operations
+/// get [`Op::Moregeneral`], [`Op::Equal`] and [`Op::Matches`], and a
+/// sequence that makes two generalized instances of one value, the
+/// second unified with an operand first, so that a scheme is compared
+/// with an instance of itself. A relation makes no operand and cannot
+/// fail: its answer is a line of the form (`3: equal = true`), ahead of
+/// the operands, and what it left in the graph is in the operands' form.
+pub(crate) const RELATIONS: u16 = 1 << 11;
 
 /// A tier and what a case adds to it. 4 bytes, passed by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,6 +305,27 @@ pub(crate) enum Op {
     /// constructor, ctype.ml:2352, 2368). The equations it adds stay in
     /// force for the rest of the case. [`PATTERN`].
     Gadt(u16, u16, u8),
+    /// A scope of GADT instances at the current level
+    /// (`Env.add_gadt_instance_level lev env`, compiler/ml/env.ml:
+    /// 1307-1308; `Checker::enter_instance_scope`), for the rest of the
+    /// case: a pattern unification at this level then adds its
+    /// equations at the level of a set that exists. [`INSTANCES`].
+    Scope,
+    /// `moregeneral env inst_nongen pattern subject`
+    /// (compiler/ml/ctype.ml:3104-3124; `Checker::moregeneral`): the
+    /// first operand as the pattern scheme, the second as the subject,
+    /// the flag `inst_nongen`. What it links stays. [`RELATIONS`].
+    Moregeneral(u16, u16, bool),
+    /// `equal env rename [left] [right]` (compiler/ml/ctype.ml:
+    /// 3372-3376; `Checker::equal`), the flag `rename`. Both sides then
+    /// forget every memorized expansion, as [`Op::Cleanup`] does
+    /// (decision 115: what the memos hold after it is not compared).
+    /// [`RELATIONS`].
+    Equal(u16, u16, bool),
+    /// `matches env ty pattern` (compiler/ml/ctype.ml:3167-3179;
+    /// `Checker::matches`); then the cleanup of [`Op::Equal`].
+    /// [`RELATIONS`].
+    Matches(u16, u16),
 }
 
 /// A deliberately wrong new side, for the tests that prove the harness sees
@@ -325,6 +364,8 @@ pub(crate) enum Fault {
     /// [`Op::Gadt`] unifies in expression mode: no equation, no
     /// reification, a link where pattern mode assumes. [`PATTERN`].
     ExpressionMode,
+    /// A relation answers the opposite. [`RELATIONS`].
+    WrongAnswer,
 }
 
 /// What one side reports for one case.
@@ -733,11 +774,60 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
                         Op::Child(instance, rng.below(4) as u8),
                         Op::Child(instance, rng.below(4) as u8),
                     ];
+                    // [`INSTANCES`]: two in three get a scope at the
+                    // level of the pattern, popped just before it. The
+                    // generator is asked only under the bit: the cases
+                    // of every other plan are what they were.
+                    if plan.has(INSTANCES) && rng.below(3) != 0 {
+                        follow.insert(1, Op::Scope);
+                    }
                     Op::Instance(value as u16)
+                }
+                3 | 4 if plan.has(INSTANCES) && rng.below(2) == 0 => {
+                    follow = vec![Op::Gadt(operand(rng), operand(rng), 3)];
+                    Op::Scope
                 }
                 3 => Op::Gadt(operand(rng), operand(rng), 3),
                 4 => Op::Gadt(operand(rng), operand(rng), rng.below(3) as u8),
                 _ => Op::Child(operand(rng), rng.below(4) as u8),
+            }
+        } else if plan.has(RELATIONS) && rng.below(3) == 0 {
+            // [`RELATIONS`]: a relation of two operands; or of an operand
+            // and a copy of it; or, `follow` being last first, two
+            // instances of one value made inside a definition, the
+            // second unified with an operand, both generalized, and the
+            // first asked whether it is more general than the second
+            // (and the other way round).
+            let (a, b) = (operand(rng), operand(rng));
+            let flag = rng.below(2) == 0;
+            let next = operands as u16;
+            match rng.below(10) {
+                0 | 1 if depth < 4 => {
+                    let value = rng.below(values) as u16;
+                    let (general, special) = if rng.below(3) == 0 { (next + 1, next) } else { (next, next + 1) };
+                    follow = vec![
+                        Op::Equal(next, next + 1, true),
+                        Op::Moregeneral(general, special, flag),
+                        Op::Generalize(next + 1),
+                        Op::Generalize(next),
+                        Op::EndDef,
+                        Op::Unify(next + 1, a),
+                        Op::Instance(value),
+                        Op::Instance(value),
+                    ];
+                    Op::BeginDef
+                }
+                2 => {
+                    follow = vec![match rng.below(3) {
+                        0 => Op::Equal(a, next, flag),
+                        1 => Op::Matches(a, next),
+                        _ => Op::Moregeneral(next, a, flag),
+                    }];
+                    Op::Copy(a)
+                }
+                3 | 4 => Op::Moregeneral(a, b, flag),
+                5 | 6 => Op::Equal(a, b, flag),
+                _ => Op::Matches(a, b),
             }
         } else if plan.has(BUILD) && rng.below(4) == 0 {
             match rng.below(4) {
@@ -776,7 +866,11 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
             Op::BeginDef => depth += 1,
             Op::EndDef => {
                 depth -= 1;
-                if plan.has(BUILD) && rng.below(2) == 0 {
+                if !follow.is_empty() {
+                    // The `EndDef` of a [`RELATIONS`] sequence: what
+                    // follows it is drawn already. No other plan has an
+                    // `EndDef` in `follow`.
+                } else if plan.has(BUILD) && rng.below(2) == 0 {
                     let (tuple, var) = (operands as u16, operands as u16 + 1);
                     let unify = if rng.below(2) == 0 {
                         Op::Unify(var, tuple)
@@ -1095,6 +1189,8 @@ fn run_old_until(program: &Program, plan: Plan, ops: &[Op], cut: &mut Option<usi
         changed: 0,
     };
     let mut operands: Vec<TypeExprRef> = Vec::new();
+    // [`RELATIONS`]: the answers, one line each, ahead of the form.
+    let mut relations = String::new();
     for (index, op) in ops.iter().enumerate() {
         let before = match op {
             Op::Unify(..) | Op::Lower(..) | Op::Gadt(..) if explain => {
@@ -1105,9 +1201,34 @@ fn run_old_until(program: &Program, plan: Plan, ops: &[Op], cut: &mut Option<usi
         let mut failure = None;
         let env = &current;
         let mut refined = None;
+        let mut answer = None;
         match *op {
+            Op::Moregeneral(pattern, subject, inst_nongen) => {
+                let (pattern, subject) = (operands[pattern as usize], operands[subject as usize]);
+                answer = Some(("moregeneral", ctype::moregeneral(ctx, env, inst_nongen, pattern, subject)));
+            }
+            Op::Equal(left, right, rename) => {
+                let (left, right) = (operands[left as usize], operands[right as usize]);
+                answer = Some(("equal", ctype::equal(ctx, env, rename, &[left], &[right])));
+                ctx.clear_abbrev_memos();
+            }
+            Op::Matches(ty, pattern) => {
+                let (ty, pattern) = (operands[ty as usize], operands[pattern as usize]);
+                answer = Some(("matches", ctype::matches(ctx, env, ty, pattern)));
+                ctx.clear_abbrev_memos();
+            }
             Op::Instance(value) => operands.push(ctype::instance(ctx, old.values[value as usize])),
+            // `instance env` (ctype.ml:846-851): the copy of a member
+            // joins the member's set.
+            Op::Copy(operand) if plan.has(INSTANCES) => {
+                operands.push(ctype::instance_in(ctx, env, operands[operand as usize]))
+            }
             Op::Copy(operand) => operands.push(ctype::instance(ctx, operands[operand as usize])),
+            Op::Scope => {
+                let mut scoped = env.clone();
+                scoped.add_gadt_instance_level(ctx, ctx.current_level());
+                refined = Some(scoped);
+            }
             Op::BeginDef => ctx.begin_def(),
             Op::EndDef => ctx.end_def(),
             Op::Generalize(operand) => ctype::generalize(ctx, operands[operand as usize]),
@@ -1116,7 +1237,7 @@ fn run_old_until(program: &Program, plan: Plan, ops: &[Op], cut: &mut Option<usi
             }
             Op::Lower(operand, level) => {
                 let (level, ty) = (base + i32::from(level), operands[operand as usize]);
-                if plan.has(SCOPED) {
+                if plan.has(SCOPED) || plan.has(INSTANCES) {
                     // `update_level` with the environment
                     // (compiler/ml/ctype.ml:633-640). Its trace pair is the
                     // escaping node and a fresh variable; see `Fault` and
@@ -1205,6 +1326,9 @@ fn run_old_until(program: &Program, plan: Plan, ops: &[Op], cut: &mut Option<usi
                 }
             }
         }
+        if let Some(answer) = answer {
+            let _ = writeln!(relations, "{index}: {} = {}", answer.0, answer.1);
+        }
         if let Some(env) = refined {
             current = env;
         }
@@ -1216,6 +1340,7 @@ fn run_old_until(program: &Program, plan: Plan, ops: &[Op], cut: &mut Option<usi
             record_failure(&mut outcome, index, &before, after);
         }
     }
+    outcome.form.push_str(&relations);
     outcome.form.push_str(&old_forms(&old, plan, &operands, &[]).0);
     if plan.has(PATTERN) {
         outcome.form.push_str(&old_equations(&old, &current));
@@ -1488,6 +1613,10 @@ pub(crate) struct New {
     /// Set while the bodies of equations are printed: a `nil` prints as
     /// `nil`, as on the old side (`OldSeen::bare_nil`).
     bare_nil: bool,
+    /// [`RELATIONS`]: the answers so far, one line each.
+    relations: String,
+    /// The index of the operation being applied.
+    applied: usize,
 }
 
 /// The supplier of a [`PATTERN`] case (`rows::LocalDecls`): a fresh
@@ -1590,6 +1719,8 @@ impl New {
             refs: Vec::new(),
             fresh: Default::default(),
             bare_nil: false,
+            relations: String::new(),
+            applied: 0,
             open,
             segment,
             checker,
@@ -1863,9 +1994,20 @@ impl New {
                 }
                 self.operands.push(ty);
             }
+            Op::Scope => {
+                let level = self.checker.g.level;
+                self.checker.enter_instance_scope(level);
+                // A scope is a new environment, and the next expansion
+                // in a new environment forgets the memorized ones
+                // (`check_abbrev_env`, compiler/ml/ctype.ml:1163-1167);
+                // the walk says so with `Checker::set_env`.
+                self.checker.cleanup_abbrev();
+            }
             Op::Copy(operand) => {
                 let source = self.operands[operand as usize];
-                let ty = if self.tier.memo_aware() {
+                let ty = if self.plan.has(INSTANCES) {
+                    self.checker.copy_in(source)
+                } else if self.tier.memo_aware() {
                     self.checker.copy(source)
                 } else {
                     self.checker.g.copy(source)
@@ -1905,6 +2047,10 @@ impl New {
                     if node.level > level {
                         self.checker.g.nodes[ty.0 as usize].level = level;
                     }
+                } else if self.plan.has(INSTANCES) {
+                    // With the environment, as the old side lowers
+                    // under this bit.
+                    return self.checker.lower(ty, level).map_err(|_| ());
                 } else if !self.tier.scoped_lower() || !self.plan.has(SCOPED) {
                     // Without late types the old side lowers without an
                     // environment (`ctype::update_level`): no scope
@@ -2028,6 +2174,23 @@ impl New {
                 }
                 self.operands.push(ty);
             }
+            Op::Moregeneral(pattern, subject, inst_nongen) => {
+                let (pattern, subject) = (self.operands[pattern as usize], self.operands[subject as usize]);
+                let answer = self.checker.moregeneral(inst_nongen, pattern, subject);
+                self.answer("moregeneral", answer != (fault == Fault::WrongAnswer));
+            }
+            Op::Equal(left, right, rename) => {
+                let (left, right) = (self.operands[left as usize], self.operands[right as usize]);
+                let answer = self.checker.equal(rename, &[left], &[right]);
+                self.checker.cleanup_abbrev();
+                self.answer("equal", answer != (fault == Fault::WrongAnswer));
+            }
+            Op::Matches(ty, pattern) => {
+                let (ty, pattern) = (self.operands[ty as usize], self.operands[pattern as usize]);
+                let answer = self.checker.matches(ty, pattern);
+                self.checker.cleanup_abbrev();
+                self.answer("matches", answer != (fault == Fault::WrongAnswer));
+            }
             Op::Gadt(left, right, flags) => {
                 let (left, right) = (self.operands[left as usize], self.operands[right as usize]);
                 if fault == Fault::ExpressionMode {
@@ -2039,16 +2202,29 @@ impl New {
                 // compiler/ml/typecore.ml:1299-1305), as the old side of
                 // the harness does: the equations it added are cut.
                 let equations = self.checker.equations.len();
+                let mark = self.checker.case_mark();
                 let result =
                     self.checker
                         .unify_pattern(level, flags & 1 != 0, flags & 2 != 0, left, right);
                 if result.is_err() {
-                    self.checker.cut_equations(equations);
+                    if self.plan.has(INSTANCES) {
+                        // The whole environment: the reified types it
+                        // made are local constraints too (decision 85).
+                        self.checker.leave_case(mark);
+                    } else {
+                        self.checker.cut_equations(equations);
+                    }
                 }
                 return result.map_err(|_| ());
             }
         }
         Ok(())
+    }
+
+    /// O(1) amortized: one answer line of a relation, numbered by the
+    /// operation's index.
+    fn answer(&mut self, relation: &str, answer: bool) {
+        let _ = writeln!(self.relations, "{}: {relation} = {answer}", self.applied);
     }
 
     /// O(printed nodes): the form of every operand; see the module text.
@@ -2371,6 +2547,7 @@ pub(crate) fn run_new(program: &Program, plan: impl Into<Plan>, ops: &[Op], faul
             Op::Unify(..) | Op::Lower(..) | Op::Gadt(..) if explain => new.form(),
             _ => String::new(),
         };
+        new.applied = index;
         if new.apply(op, fault).is_err() {
             if !explain {
                 return Outcome::ended(index);
@@ -2391,6 +2568,7 @@ pub(crate) fn run_new(program: &Program, plan: impl Into<Plan>, ops: &[Op], faul
             record_failure(&mut outcome, index, &before, after);
         }
     }
+    outcome.form.push_str(&new.relations);
     outcome.form.push_str(&new.form());
     if plan.has(PATTERN) {
         outcome.form.push_str(&new.equations());
@@ -3608,8 +3786,9 @@ mod tests {
     /// R3x.
     #[test]
     fn ignored_tests_name_the_slices_they_reach() {
-        let before: [(&str, &[&str]); 12] = [
-            ("R3q", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
+        let before: [(&str, &[&str]); 13] = [
+            ("R3s", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3h", "R3r", "R3q"]),
+            ("R3q", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3h", "R3r"]),
             ("R3r", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3h"]),
             ("R3p", &["R3m", "R3e"]),
             ("R3k", &[]),
@@ -3619,8 +3798,8 @@ mod tests {
             ("R3n", &["R3m", "R3e", "R3f"]),
             ("R3g", &["R3m", "R3e", "R3f", "R3n"]),
             ("R3h", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
-            ("R3i", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
-            ("R3j", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
+            ("R3i", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3p", "R3h", "R3r", "R3q", "R3s"]),
+            ("R3j", &["R3m", "R3e", "R3f", "R3n", "R3g", "R3p", "R3h", "R3r", "R3q", "R3s", "R3i"]),
         ];
         // Method name -> slice, from the bodies that are still `todo!`.
         fn scan(source: &str, methods: &mut Vec<(String, String)>) {
@@ -3867,24 +4046,68 @@ mod tests {
         );
     }
 
-    /// O(text): whether a form prints a fixed row with a `Reither` field
-    /// that is not matched (`#A?^`, `#A?c^`, `#A?(`, `#A?c(` inside
-    /// `[fixed ...]` or `[closed fixed ...]`).
+    /// O(text): whether a form prints a row that a copy reads as fixed
+    /// with a `Reither` field that is not matched (`#A?^`, `#A?c^`,
+    /// `#A?(`, `#A?c(`): a row printed `[fixed ...]` or `[closed fixed
+    /// ...]`, or a row over a constructor, which a copy makes fixed
+    /// (PR#6163, compiler/ml/ctype.ml:826-830: `| {desc = Tconstr _} when
+    /// not row.row_fixed -> {row with row_fixed = true}`). The tail of a
+    /// row is what follows `| `: a node printed in full (`&7[1]` and its
+    /// form) or a reference to one printed before (`@7`). A tail is a
+    /// constructor when its form is none of the three others a row can
+    /// end in (`'` a variable, `!` a universal variable, `nil`:
+    /// `row_fixed`, btype.ml:153-160).
     fn fixed_row_with_an_unmatched_field(form: &str) -> bool {
         let bytes = form.as_bytes();
-        let mut fixed: Vec<bool> = Vec::new();
+        // Per printed node, whether its form is a constructor's.
+        let mut constructors: Vec<bool> = Vec::new();
+        let is_constructor = |rest: &str| !(rest.starts_with('\'') || rest.starts_with('!') || rest.starts_with("nil"));
+        // Per open bracket: (a fixed row, a row with an unmatched field).
+        let mut open: Vec<(bool, bool)> = Vec::new();
         for (at, &byte) in bytes.iter().enumerate() {
             match byte {
+                b'&' => {
+                    let digits = form[at + 1..].bytes().take_while(u8::is_ascii_digit).count();
+                    let number: usize = form[at + 1..at + 1 + digits].parse().unwrap();
+                    let rest = &form[at + 1 + digits..];
+                    let rest = &rest[rest.find(']').map_or(0, |close| close + 1)..];
+                    if constructors.len() <= number {
+                        constructors.resize(number + 1, false);
+                    }
+                    constructors[number] = is_constructor(rest);
+                }
                 b'[' => {
                     let rest = &form[at + 1..];
-                    fixed.push(rest.starts_with("fixed ") || rest.starts_with("closed fixed "));
+                    open.push((rest.starts_with("fixed ") || rest.starts_with("closed fixed "), false));
                 }
                 b']' => {
-                    fixed.pop();
+                    open.pop();
                 }
-                b'?' if fixed.last() == Some(&true) => {
+                b'?' => {
                     let rest = form[at + 1..].trim_start_matches('c');
                     if rest.starts_with('^') || rest.starts_with('(') {
+                        match open.last_mut() {
+                            Some((true, _)) => return true,
+                            Some((false, unmatched)) => *unmatched = true,
+                            None => {}
+                        }
+                    }
+                }
+                b'|' if open.last() == Some(&(false, true)) && form[at..].starts_with("| ") => {
+                    let rest = &form[at + 2..];
+                    let over_constructor = match rest.as_bytes().first() {
+                        Some(b'@') => {
+                            let digits = rest[1..].bytes().take_while(u8::is_ascii_digit).count();
+                            let number: usize = rest[1..1 + digits].parse().unwrap();
+                            constructors.get(number) == Some(&true)
+                        }
+                        Some(b'&') => {
+                            let rest = &rest[rest.find(']').map_or(0, |close| close + 1)..];
+                            is_constructor(rest)
+                        }
+                        _ => false,
+                    };
+                    if over_constructor {
                         return true;
                     }
                 }
@@ -3904,11 +4127,29 @@ mod tests {
     /// ~fixed:false` copies it (ctype.ml:1061-1069). The scanner is
     /// checked on the hand-built row of the test above. Observed: 546 of
     /// the 4,000 cases print a fixed row.
+    ///
+    /// A row over a constructor is watched too (eighth skeleton turn;
+    /// the first of "Corrections after the review of the seventh turn",
+    /// item 5): `copy_refs` reads it as fixed (PR#6163, ctype.ml:826-830)
+    /// whatever its flag, so such a row with an unmatched field would
+    /// reach `match_unmatched` from a plan without patterns. The scanner
+    /// is checked on four hand-written forms: a row over a constructor
+    /// printed in full and one printed as a reference, each with an
+    /// unmatched field (found), and the same rows over a variable and
+    /// with matched fields (not found).
     #[test]
     fn no_generated_case_has_a_fixed_row_with_an_unmatched_field() {
         assert!(fixed_row_with_an_unmatched_field(
             "0 = &0[G][closed fixed #A?^0(&1[G]' ) #B?c^1() | &2[G]']\n"
         ));
+        assert!(fixed_row_with_an_unmatched_field("0 = &0[1][#A?^0(&1[1]' ) | &2[1]n0]\n"));
+        assert!(fixed_row_with_an_unmatched_field(
+            "0 = &0[1]n0\n1 = &1[1][closed #A?c^0() | @0]\n"
+        ));
+        assert!(!fixed_row_with_an_unmatched_field(
+            "0 = &0[1]'\n1 = &1[1][closed #A?c^0() | @0] &2[1][#A?^1() | &3[1]nil] &4[1][#A?^2() | &5[G]!a]\n"
+        ));
+        assert!(!fixed_row_with_an_unmatched_field("0 = &0[1][#A?m^0(&1[1]' ) #B | &2[1]n0]\n"));
         assert!(!fixed_row_with_an_unmatched_field(
             "1 = &3[0][closed fixed #A?m^2(&4[0]' ) #B?cm^3() | &5[0]'] &6[0][closed #A?^4() | &7[0]']\n"
         ));
@@ -4532,7 +4773,7 @@ mod tests {
     /// that is no longer the name of the innermost row (section 8.6,
     /// decision 60; observed). `[> #B]` is unified with `[> #A] as p<y>`:
     /// the named row gains `#B` through a new variant node its row
-    /// variable is linked to (`set_more`, compiler/ml/ctype.ml:2596-2616)
+    /// variable is linked to (`set_more`, compiler/ml/ctype.ml:2597-2619)
     /// and the merged row has no name (ctype.ml:2574-2586), so `p<y>` is
     /// the name of a row whose `more` is a variant. `iter_row` visits a
     /// name's arguments only for the row a chain ends in
@@ -5060,6 +5301,21 @@ mod tests {
         );
     }
 
+    /// AFTER R3s (run against its prototype; CHECKER_REWRITE 8.6,
+    /// decision 110 as corrected in its review): `EXPLAINED_UNTIL_R3S`
+    /// is empty, `EXPLAINED_OLD_DIFFERS` stays as it is, and
+    /// `EXPLAINED_NEW_DIFFERS` is `[4_000_045, 20_000_132]`. On those
+    /// two seeds it is the NEW side that differs from OCaml. After a
+    /// unification that failed, OCaml's `unify` expands the types of
+    /// the trace with tracing off (`raise (Unify (expand_trace !env
+    /// trace))`, compiler/ml/ctype.ml:2732-2737; `expand_trace`,
+    /// 1697-1701), so the expansion of `n1` is in the memo all `n1`
+    /// nodes share (200-202) and a later instance links to the node.
+    /// The old side does the same (`ctype::record_trace_expansions`).
+    /// The new side expands no trace yet: once it traces, its expansion
+    /// is in the node's own memo only and the instance is a new node.
+    /// Owed by the design turn after R3s.
+    ///
     /// The seeds of the explained pattern plan (20 programs of 100 cases)
     /// that differ. The first five wait for R3s as [`UNTIL_R3S`] does (a
     /// nullary constructor's memo while instances are traced; in
@@ -5079,13 +5335,17 @@ mod tests {
     ///   and in the explaining mode what it wrote stays (decision 14):
     ///   `po<int>` is its expansion afterwards. The old side leaves
     ///   `po<int>`.
-    const EXPLAINED_UNTIL_R3S: [u64; 5] =
-        [10_000_129, 11_000_054, 17_000_100, 18_000_066, 20_000_132];
+    const EXPLAINED_UNTIL_R3S: [u64; 0] = [];
     const EXPLAINED_OLD_DIFFERS: [u64; 2] = [8_000_098, 11_000_046];
+    /// The seeds of the explained pattern plan on which the NEW side
+    /// differs from OCaml and the old checker is right (see above):
+    /// none until R3s is built.
+    const EXPLAINED_NEW_DIFFERS: [u64; 2] = [4_000_045, 20_000_132];
 
     /// The seeds of the pattern plan on which the new side differs from
     /// OCaml (and from the old checker, which is right here) until slice
-    /// R3s. In each, an instance is taken after a pattern case has added
+    /// R3s (all seven agree against the prototype of R3s; its build
+    /// makes this list empty). In each, an instance is taken after a pattern case has added
     /// an equation and expanded a locally abstract type inside a later
     /// case: the copy of a nullary constructor of that type links to the
     /// node that was expanded, where OCaml makes a node. While GADT
@@ -5102,9 +5362,7 @@ mod tests {
     /// (compiler/ml/ctype.ml:200-202), so `find_repr` of a later copy
     /// finds nothing (ctype.ml:720). Tracing is R3s (section 8.11); its
     /// build empties this list and changes nothing else of this test.
-    const UNTIL_R3S: [u64; 7] = [
-        37_000_127, 59_000_216, 70_000_293, 76_000_291, 83_000_307, 87_000_306, 88_000_320,
-    ];
+    const UNTIL_R3S: [u64; 0] = [];
 
     /// The acceptance test of pattern mode on generated cases (section
     /// 8.9): 10,000 cases of the pattern plan, each run on the
@@ -5120,7 +5378,6 @@ mod tests {
     ///
     /// Reaches: R3m, R3e, R3f, R3n, R3h, R3r.
     #[test]
-    #[ignore = "R3r build"]
     fn pattern_plan_agrees_on_generated_cases() {
         let program = compile(PATTERN_PROGRAM.to_string());
         let plan = Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN);
@@ -5175,7 +5432,8 @@ mod tests {
         assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
         let (explained, differing) =
             run_plan(Plan::new(Tier::Full, PATTERN_PLAN | EXPLAIN), 1, 20, 100);
-        let mut known = [&EXPLAINED_UNTIL_R3S[..], &EXPLAINED_OLD_DIFFERS[..]].concat();
+        let mut known =
+            [&EXPLAINED_UNTIL_R3S[..], &EXPLAINED_OLD_DIFFERS[..], &EXPLAINED_NEW_DIFFERS[..]].concat();
         known.sort_unstable();
         let seeds: Vec<u64> = differing.iter().map(|(seed, _)| *seed).collect();
         let unknown = differing.iter().find(|(seed, _)| !known.contains(seed));
@@ -5198,5 +5456,255 @@ mod tests {
         assert_eq!(coverage.cases, 10_000);
         assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
         run_cases(Plan::new(Tier::Full, UNIVAR_PLAN | BUILD), 1, 100, 100);
+    }
+
+    /// The plans of the relations: on plain programs, on objects and
+    /// variants, and with universal variables.
+    const RELATION_PLANS: [u16; 3] = [RELATIONS, RELATIONS | OBJECTS | VARIANTS, RELATIONS | UNIVAR_PLAN];
+
+    /// How often each relation answered `true` and `false` in a form:
+    /// `[moregeneral, equal, matches]`, each `[true, false]`.
+    fn answers(form: &str, counts: &mut [[usize; 2]; 3]) {
+        for line in form.lines() {
+            for (at, name) in ["moregeneral", "equal", "matches"].iter().enumerate() {
+                if let Some(rest) = line.split(": ").nth(1).and_then(|rest| rest.strip_prefix(name)) {
+                    counts[at][usize::from(rest == " = false")] += 1;
+                }
+            }
+        }
+    }
+
+    /// The old side of the relation plans runs today and is not vacuous:
+    /// each relation answers `true` and `false` on each plan (observed;
+    /// the counts are printed, and each is asserted at a quarter of what
+    /// was seen or less). Today's checker has all three relations
+    /// (types/ctype.rs `moregeneral`, `equal`, `matches`).
+    #[test]
+    fn old_side_of_the_relation_plans_is_not_vacuous() {
+        for with in RELATION_PLANS {
+            let plan = Plan::new(Tier::Full, with);
+            let mut counts = [[0usize; 2]; 3];
+            let mut cases = 0;
+            for seed in 1..=12u64 {
+                for sequence in 0..100u64 {
+                    let (program, ops) = case(plan, seed * 1_000_003 + sequence);
+                    let outcome = run_old(&program, plan, &ops);
+                    if outcome.failed.is_none() {
+                        cases += 1;
+                        answers(&outcome.form, &mut counts);
+                    }
+                }
+            }
+            println!("relation plan {with:#x}, old side: {cases} cases, {counts:?}");
+            assert!(cases >= 600, "{cases}");
+            for (at, [yes, no]) in counts.iter().enumerate() {
+                assert!(*yes >= 20 && *no >= 20, "relation {at} of plan {with:#x}: {counts:?}");
+            }
+        }
+    }
+
+    /// A relation that answers the opposite is reported: the harness
+    /// compares the answers.
+    ///
+    /// Reaches: R3i.
+    #[test]
+    #[ignore = "R3i build"]
+    fn a_wrong_answer_of_a_relation_is_reported() {
+        let program = compile(FIXED.to_string());
+        let plan = Plan::new(Tier::Full, RELATIONS);
+        let ops = [Op::Instance(0), Op::Instance(0), Op::Equal(0, 1, true), Op::Matches(0, 1)];
+        let outcome = compare(0, &program, plan, &ops, Fault::None).unwrap();
+        assert!(outcome.form.starts_with("2: equal = true\n3: matches = true\n"), "{}", outcome.form);
+        assert!(compare(0, &program, plan, &ops, Fault::WrongAnswer).is_err());
+    }
+
+    /// The acceptance test of R3i against today's checker: 10,000 cases
+    /// of every operation and the three relations on plain programs,
+    /// 10,000 on programs with objects and variants and 5,000 with
+    /// universal variables. Each case compares the answer of every
+    /// relation and the form of every operand after it: what
+    /// `moregeneral` linked, and that `equal` and `matches` left
+    /// nothing. Today's checker is the judge of the answers; it is NOT
+    /// the judge of what the memos hold after `equal` and `matches`
+    /// (it takes no snapshot in `equal`; decision 115), so both sides
+    /// forget the memos after those two. A case that differs is read
+    /// against the OCaml arm before either side is followed (decision
+    /// 18); a seed where today's checker departs from ctype.ml is pinned
+    /// with its cause by the reviewer, not by the builder.
+    ///
+    /// Reaches: R3m, R3e, R3f, R3n, R3g, R3i.
+    #[test]
+    #[ignore = "R3i build"]
+    fn relation_plan_agrees_on_generated_cases() {
+        for (at, programs) in [(0, 100), (1, 100), (2, 50)] {
+            let with = RELATION_PLANS[at];
+            let (coverage, differing) = run_plan(Plan::new(Tier::Full, with), 1, programs, 100);
+            let seeds: Vec<u64> = differing.iter().map(|(seed, _)| *seed).collect();
+            let mut known: Vec<u64> = match at {
+                0 => Vec::new(),
+                1 => [&ROWS_OLD_EQUAL_DIFFERS[..], &ROWS_OLD_NIL_DIFFERS[..]].concat(),
+                _ => [&UNIVARS_OLD_EQUAL_DIFFERS[..], &UNIVARS_OLD_NIL_DIFFERS[..], &UNIVARS_OLD_FREE_UNIVAR_DIFFERS[..]].concat(),
+            };
+            known.sort_unstable();
+            let unknown = differing.iter().find(|(seed, _)| !known.contains(seed));
+            assert!(seeds == known, "plan {with:#x}: {seeds:?}\n{}", unknown.map_or("", |(_, report)| report.as_str()));
+            assert_eq!(coverage.cases + known.len(), programs as usize * 100);
+        }
+    }
+
+    /// Seeds of the relation plan with objects and variants on which
+    /// TODAY'S CHECKER differs from OCaml in `equal`: it answers `false`
+    /// for two rows of which the right one was extended by a
+    /// unification (its `row_more` is a variant node). OCaml's
+    /// `eqtype_row` expands `row_more row2`, the FUNCTION, which follows
+    /// the chain to the row variable (compiler/ml/ctype.ml:3327,
+    /// btype.ml `row_more`); types/ctype.rs `equal_rows_without_renaming`
+    /// expands the FIELD `right.row_more`, finds the inner row and
+    /// compares the left row with that row alone. On each of these seeds
+    /// the two sides agree on everything but `equal = false` (old)
+    /// against `equal = true` (new), seen in the tenth skeleton turn.
+    const ROWS_OLD_EQUAL_DIFFERS: [u64; 52] = [
+        1000013, 3000021, 4000062, 9000070, 11000114, 12000122, 14000076, 17000141, 20000083, 20000109,
+        21000071, 22000117, 23000165, 30000145, 30000180, 32000124, 32000163, 33000101, 35000150, 40000189,
+        40000190, 40000200, 41000213, 42000196, 46000232, 49000208, 49000234, 55000260, 58000191, 58000235,
+        58000270, 65000224, 65000236, 68000208, 68000273, 69000302, 72000300, 75000246, 75000308, 76000293,
+        78000236, 78000242, 78000305, 81000299, 82000304, 84000339, 86000341, 90000348, 91000338, 92000279,
+        95000330, 100000301,
+    ];
+    /// Seeds on which TODAY'S CHECKER differs from OCaml in the copy of
+    /// `moregeneral`: its `subst_identity_copy` keeps a `Tnil` node as
+    /// it keeps a variable (types/ctype.rs, the arm `Tvar | Tunivar |
+    /// Tnil`), where `Subst.typexp` copies it (compiler/ml/subst.ml:
+    /// 135-143 keeps `Tvar` and `Tunivar` only), and a `Tnil` of the
+    /// pattern is then one node with a `Tnil` of the subject. The
+    /// answers agree; the old form has fewer `nil` nodes of their own.
+    const ROWS_OLD_NIL_DIFFERS: [u64; 4] = [32000157, 54000224, 69000217, 84000296];
+    /// As [`ROWS_OLD_EQUAL_DIFFERS`], on the plan with universal
+    /// variables.
+    const UNIVARS_OLD_EQUAL_DIFFERS: [u64; 16] = [
+        2000018, 6000024, 8000033, 9000110, 11000112, 12000074, 14000060, 22000109, 23000147, 23000165,
+        28000123, 33000167, 37000116, 37000194, 48000215, 49000216,
+    ];
+    /// As [`ROWS_OLD_NIL_DIFFERS`], on the plan with universal variables.
+    const UNIVARS_OLD_NIL_DIFFERS: [u64; 3] = [5000060, 12000099, 14000052];
+    /// Seeds on which TODAY'S CHECKER differs from OCaml in
+    /// `moregen_occur`: `moregeneral` with `inst_nongen` of a weak
+    /// variable against a FREE universal variable. OCaml refuses it
+    /// (`occur_univar env ty`, compiler/ml/ctype.ml:2917-2918, called
+    /// unconditionally; with no binder entered a `Tunivar` raises,
+    /// 1584-1585: `if not (Type_set.mem ty bound) then raise (Unify
+    /// [(ty, newgenvar ())])`); types/ctype.rs `moregen_occur` runs
+    /// `occur_univar` only `if !univars.pairs.is_empty()`, so with no
+    /// scope open it accepts and links the weak variable. Both read in
+    /// full in the tenth skeleton turn: old `moregeneral = true`, new
+    /// `false`.
+    const UNIVARS_OLD_FREE_UNIVAR_DIFFERS: [u64; 2] = [5000086, 13000118];
+
+    /// The plan of the cases of GADT instances.
+    const INSTANCE_PLAN: u16 = PATTERN_PLAN | INSTANCES;
+
+    /// `n0 := int` at the level of a scope when `scope`, then `n0`
+    /// against `int` in expression mode, which expands the node `n0`
+    /// under tracing, then `last`. Operand 1 is the node `n0`, operand 2
+    /// the node `int`.
+    fn instance_case(scope: bool, last: &[Op]) -> Vec<Op> {
+        let mut ops = vec![Op::BeginDef, Op::Instance(0), Op::Child(0, 0), Op::Child(0, 2)];
+        if scope {
+            ops.push(Op::Scope);
+        }
+        ops.extend([Op::Gadt(1, 2, 3), Op::Unify(1, 2)]);
+        ops.extend_from_slice(last);
+        ops
+    }
+
+    /// What today's checker does with GADT instances when the case has
+    /// a scope ([`INSTANCES`]; pull requests 350 and 352), observed: it
+    /// is the judge of the generated cases of R3s. `n0 := int` at the
+    /// level of a scope, then `n0` used at `int`, which expands the node
+    /// under tracing (compiler/ml/ctype.ml:1218-1227): the node and the
+    /// node of `int` it was unified with are members of the set, and
+    ///
+    /// - lowering either below the scope is refused
+    ///   (`| Some lv -> if level < lv then raise (Unify [(ty, newvar2
+    ///   level)])`, ctype.ml:587-589);
+    /// - without [`Op::Scope`] the same lowering succeeds: no set exists
+    ///   and nothing joined one (8.11, (v));
+    /// - a copy of the generalized member made with the environment is
+    ///   a member (`Env.add_gadt_instances env lv [t]`, ctype.ml:
+    ///   770-774): lowering the copy is refused.
+    #[test]
+    fn old_checker_refuses_a_member_below_its_scope() {
+        let program = compile(PATTERN_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, INSTANCE_PLAN);
+        let failed = |scope: bool, last: &[Op]| run_old(&program, plan, &instance_case(scope, last)).failed;
+        assert_eq!(failed(true, &[Op::Lower(1, 0)]), Some(7));
+        assert_eq!(failed(true, &[Op::Lower(2, 0)]), Some(7));
+        assert_eq!(failed(false, &[Op::Lower(1, 0)]), None);
+        let copied = [Op::Generalize(1), Op::EndDef, Op::Copy(1), Op::Lower(3, 0)];
+        assert_eq!(failed(true, &copied), Some(10));
+        assert_eq!(failed(false, &copied), None);
+    }
+
+    /// The seeds of the explained plan of GADT instances (20 programs of
+    /// 100 cases) on which the two sides differ, with the side that
+    /// differs from OCaml for each class, read against the lines:
+    ///
+    /// - 8,000,098 and 11,000,046: `EXPLAINED_OLD_DIFFERS` (decisions
+    ///   77 and 78);
+    /// - 17,000,064 and 20,000,132: the NEW side differs. After a
+    ///   unification that failed, OCaml's `unify` expands the types of
+    ///   the trace with tracing off (compiler/ml/ctype.ml:2732-2737,
+    ///   1697-1701), so the expansion of `n1` is in the memo all `n1`
+    ///   nodes share (200-202) and a later instance links to the node,
+    ///   as on the old side (`ctype::record_trace_expansions`,
+    ///   types/ctype.rs). The new side expands no trace yet; owed by
+    ///   the design turn after R3s;
+    /// - 4,000,069: `a3` (a nullary abbreviation whose head, through
+    ///   `t0 := k<int>`, is a member) against a function type at a lower
+    ///   level. unify2 expands `a3` first, and `try_expand_head` adds
+    ///   the chain of `a3` to the set of the head (ctype.ml:1271-1276);
+    ///   `update_level` then refuses `a3` itself (587-589): the pair is
+    ///   `a3` and a variable, and `a3` keeps its level, as on the new
+    ///   side. The old side lowers `a3` and reports a node below it.
+    const EXPLAINED_INSTANCES_DIFFER: [u64; 5] =
+        [4_000_069, 8_000_098, 11_000_046, 17_000_064, 20_000_132];
+
+    /// The acceptance test of R3s on generated cases (section 8.11;
+    /// decisions 103 and 110): the fixed cases of
+    /// `old_checker_refuses_a_member_below_its_scope` agree, 10,000
+    /// cases of the pattern plan with scopes agree in the success mode,
+    /// and of 2,000 in the explaining mode all but the listed seeds.
+    /// More than a quarter of the cases fail somewhere, a refused
+    /// member among them. A seed that differs is read against the OCaml
+    /// lines of 8.11 before anything is pinned; the builder pins none.
+    ///
+    /// Reaches: R3m, R3e, R3f, R3n, R3h, R3r, R3s.
+    #[test]
+    fn instance_plan_agrees_on_generated_cases() {
+        let program = compile(PATTERN_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, INSTANCE_PLAN);
+        let copied = [Op::Generalize(1), Op::EndDef, Op::Copy(1), Op::Lower(3, 0)];
+        let cases = [
+            instance_case(true, &[Op::Lower(1, 0)]),
+            instance_case(true, &[Op::Lower(2, 0)]),
+            instance_case(false, &[Op::Lower(1, 0)]),
+            instance_case(true, &copied),
+            instance_case(false, &copied),
+        ];
+        for (index, ops) in cases.iter().enumerate() {
+            compare(index as u64, &program, plan, ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let coverage = run_cases(plan, 1, 100, 100);
+        assert_eq!(coverage.cases, 10_000);
+        assert!(coverage.failures * 4 > coverage.cases, "{coverage:?}");
+        let (explained, differing) = run_plan(Plan::new(Tier::Full, INSTANCE_PLAN | EXPLAIN), 1, 20, 100);
+        let seeds: Vec<u64> = differing.iter().map(|(seed, _)| *seed).collect();
+        let unknown = differing.iter().find(|(seed, _)| !EXPLAINED_INSTANCES_DIFFER.contains(seed));
+        assert!(
+            seeds == EXPLAINED_INSTANCES_DIFFER,
+            "{seeds:?}\n{}",
+            unknown.map_or("", |(_, report)| report.as_str())
+        );
+        assert_eq!(explained.cases + seeds.len(), 2_000);
     }
 }

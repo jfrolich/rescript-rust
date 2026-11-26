@@ -3192,9 +3192,9 @@ read. None needs a walk, because each is one of these:
 | --- | --- | --- |
 | A flag of a node the lowering holds (`flags().contains(STRICT)`, `delay_safe`, `strictly_pure`, `PURE` of an argument; `args.rs`, `cond.rs`, `expr.rs`, `ffi_args.rs`, `mod.rs::seq`, `loops.rs`) | `has(a, r, flag)` on the handle's reference | The flag was computed where the node was built (Rows: the node's flags; the builder: the row in the handle) |
 | The kind of a node it holds, and a literal's value (`View::JUndefined`, `JOptional`, `JStr`, `primitive_int`, `primitive_bool`, `primitive_string`, `primitive_bigint`) | `kind(a, r)`, `aux(a, r)`, `int(a, r)`, `text(a, r)`, `bigint(a, r)`, `var_of(a, r)`, `qualified_of(a, r)` | O(1) each: the row, or one pool entry |
-| A child, or a child of a child (`JCall` of a `JQualified` in `primitive_int_comparison`; the elements of an array of pairs in `Pmakedict`; `JDot` chains in `jsx_tag`, `copy_replacement`; `JSeq` ends in `complete_unit`, `extract_exports`) | `operand(a, r, i)` gives the reference of operand `i`; `arity(a, r)` | Each step is one read chosen by the caller; the depth is the pattern's, which is fixed (two for the runtime `compare` call, three for a dictionary entry) or counted where it is a chain (`descent` steps of the JSX tag and of `copy_replacement`, as today) |
+| A child, or a child of a child (`JCall` of a `JQualified` in `primitive_int_comparison`; the elements of an array of pairs in `Pmakedict`; `JDot` chains in `jsx_tag`, `copy_replacement`; `JSeq` ends in `extract_exports`) | `operand(a, r, i)` gives the reference of operand `i`; `arity(a, r)` | Each step is one read chosen by the caller; the depth is the pattern's, which is fixed (two for the runtime `compare` call, three for a dictionary entry) or counted where it is a chain (`descent` steps of the JSX tag and of `copy_replacement`, as today) |
 | Taking a node apart to keep a part (`detach` then `release`: `positive`, `PvalFromOption`, `evaluate_now`, `fold_return_tail`, `hold_external_arg`, `primitive_int_comparison`) | `keep_operand(a, e, i)` for one part of a node with a fixed number of operands (the rest is released); `unpack(a, e) -> Mark` for a list (its operands go onto the operand stack, in order; `take(a, mark, i)` moves one out, `drop_operands(a, mark)` releases what is left) | The parts are operands of the node in hand; releasing the rest is `release`'s cost, one step per node released |
-| A statement of a run or of a list (`single_return`, `terminal`, `merge_tail_guard`, `returns_after_effects`, empty blocks; `tail.rs`; `switch.rs`) | `JsStmt` (T6l): `stmt_kind(a, &S)`, `stmt_has`, `value_of(a, &S) -> Ref` and, for a list in flight, `len(l)`, `kind_at(a, l, i)`, `take_at(a, l, i)` (a read by reference of a list's statement is open: the design turn of T6x-b) | The statement stack owns the handles of a run; a list in flight is read by position |
+| A statement of a run or of a list (`single_return`, `terminal`, `merge_tail_guard`, `returns_after_effects`, empty blocks; `tail.rs`; `switch.rs`) | `JsStmt` (T6l): `stmt_kind(a, &S)`, `stmt_has`, `value_of(a, &S) -> Ref` and, for a list in flight, `len(l)`, `kind_at(a, l, i)`, `take_at(a, l, i)` and `with_stmt_at(a, l, i, read)`, which lends statement `i` to a reader where it is ("T6x-b: an output's value, as built" (b)) | The statement stack owns the handles of a run; a list in flight is read by position |
 | Equality of two expressions (`same_reusable_value` in `export.rs`; inside the rules) | `equal(a, r1, r2)`, with the cost of `bir/j/equal.rs` (stops at the first difference; pairs on an explicit stack) | It is a rule's read, already counted |
 | The parent of a node (`export::row_of`, `declared`; `globals::shadowed`, `binding_scope`; the prelude of `names::replay`) | `owner(a, id)`: (f). `globals.rs` and the prelude stop needing it: (d) | - |
 | Cold data: a location, a comment, a character (`set_cold`, `JS_LOC_PRESENT`, `js_char`) | `locate(a, &mut E, LamLoc)`, `located(a, r)`, `comment(a, &mut E, StrId)`, `copy_cold(a, from: Ref, &mut E)` | O(1). The builder sets the span and drops the comment (decoration comments stay dropped; the pure annotation is the `pure` bit of the call's `JsId`) |
@@ -4282,16 +4282,20 @@ is not a call: `Out` is passed by value in 37 constructions and read at
 | T6x-a2 | The statement-holding fields of one file (`Evaluation::statements`, the `blocks` of the two plans, `rec::Member`, `tail_assignments`), `primitive_statement`, a hold filled by a sink; `loop_function_body` takes and returns a list, and `function_of_block` is deleted | `args.rs`, `loops.rs`, `try_.rs`, `rec.rs`, `tail.rs`, `prim.rs`, `expr.rs`, `mod.rs`, `out.rs`; the interface for the deletion | 154 measured, about 200 with the deletion | T6x-a1 | none |
 | T6x-a3 | The stack's reads give references, `take(slot)`, the stack implements `Runs` and `if_in_place` calls `JsStmt::if_head`; `place`, `if_statement`, `unnest`, `single_assignment`, `assignment_statement` change with all their callers | `out.rs`, `cond.rs`, `location.rs`, `export.rs`, `mod.rs`, `exit.rs`, `loops.rs`, `switch.rs`, `untagged.rs`, `variant.rs` | about 475 measured | T6x-a2 | none |
 | T6x-a4 | The reserved pool list of a switch's actions becomes a run of the stack taken with `take_actions`; `switch_output_nodes` and `ActionState::cached` hold handles | `exit.rs`, `switch.rs`, `ffi_args.rs`, `untagged.rs`, `mod.rs`, `out.rs` | about 210 measured | T6x-a3 | none |
-| T6x-b | `Out<B>`, `Probed`, `Free`, `RealizeWork`: an output's value is a `B::E`. `Out` stops being a value that is copied; the 37 constructions and 54 reads move their transition call or lose it. `mod.rs`'s probe and realisation (78 raw sites, and the 4 `stmt_from_node` and 2 `list_id` T6x-a1 puts around them) go through the interface. `close.rs` takes the interface from `out.rs` (the `list_id` of `take_list`) | `out.rs`, `mod.rs`, `unit.rs`, `close.rs`, every file of the 91 sites | to be re-cut by its own design turn (probe: pull request 345): 838 changed lines measured against about 450 estimated, and its first step, the types, is 658 alone, because the type of an output's value changes 26 files at once | T6x-a4 | none |
-| T6x-c1 | Bodies and private functions: the primitives. `values` becomes a vector of handles from `sequence_arguments` on; `constant_children` goes; the functions of the cluster that only the cluster calls take and return handles | `prim.rs`, `prim_cmp.rs`, `prim_block.rs`, `konst.rs`, `record.rs`, `import.rs`, `args.rs`, `call.rs` | 139 + 7 + 15 + 7 + 8 + 22 + 10 calls: about 300 | T6x-b | c2, c3, c4 |
-| T6x-c2 | The same for the externals; the operand lists in the pool become operands pushed as they are converted, and `push_list` loses its five calls; the three chain walks read `var_of` first | `external.rs`, `ffi_args.rs`, `jsx.rs` (not `printed_form`, `jsx_tag`) | 40 + 64 + 19 calls and the list assembly: about 300 | T6x-b | c1, c3, c4 |
-| T6x-c3 | The same for conditionals and switches | `cond.rs`, `expr.rs`, `switch.rs`, `variant.rs`, `untagged.rs`, `location.rs` | after T6x-a the files have 55 + 11 + 6 + 18 + 22 + 0 transition calls, none of a statement outside two test helpers: about 200 (estimate) | T6x-b | c1, c2, c4 |
-| T6x-c4 | The same for loops, exits and recursion; `recursive_dummy` gives a handle to its two callers in `rec.rs` | `loops.rs`, `try_.rs`, `exit.rs`, `rec.rs`, `tail.rs`, `assign.rs`, `label.rs` | after T6x-a the files have 5 + 2 + 4 + 7 + 4 + 2 transition calls: about 60 (estimate) | T6x-b | c1, c2, c3 |
-| T6x-d | The functions that cross clusters, each with all its callers in one slice: the 31 rows of the callers' table that are left after T6x-a (`drop_pure_effect`, `primitive_runtime`, `static_member`, `number`, `string`, `constant`, `add_external_effect`, `compile_js_call`, `compile_jsx`, `sequence_arguments`, ..., and `if_statement`, `assignment_statement` and `merge_assignments` for the expression each still takes or returns). `place`, `unnest`, `single_assignment`, `loop_function_body` and `locate_switch_run` are no longer rows: T6x-a changed the first four, and the last names a source node only. No turn-back is left between two files | every file of a row | 31 signatures and 95 calls in other files: about 260 (estimate) | c1 to c4 | none |
-| T6x-e | `export.rs`: its tables hold handles or ids the interface gives (`Js::id`), and its three edits are interface calls (the replacement in place, a row taken out of its block, the final list) | `export.rs` | to be counted after T6q | T6x-d, T6q | none |
-| T6x-f | The transition functions leave the two traits and `Rows`: `from_node`, `node`, `at`, `stmt_from_node`, `stmt_node`, `list_from`, `list_id`, `push_list` (`function_of_block` left in T6x-a2); `rg 'B::(from_node\|node\|at\|stmt_)' src/bir/lower` is empty. `norm::jm14_push_effect_expression`, which only tests call since T6q, gets `#[cfg(test)]` | `js.rs`, `js_stmt.rs`, `rows.rs`, `rows_stmt.rs`, `norm.rs`, the interface tests | about 150 (estimate) | T6x-e, T6r | none |
+| T6x-b | `Out<B>`, `Probed`, `Free`, `RealizeWork` and the five types that change with them: an output's value is a `B::E`. Built in four parts ("T6x-b: an output's value, as built"). On trunk: **b1** (pull request 355) `Free`, `RealizeWork`, `FreePool`, `ProbeInput` and `Realizer` hold `B::E`; **b2** (357) `Out::value` is `Option<B::E>`, one whole in 27 files; **b3a** (358) the turn-backs b1 and b2 left are removed in ten files. **b3b** (363), the close of a list and the unit's finish. `close::decide` takes the implementation and a list in flight and reads each statement where it is (`JsStmt::with_stmt_at`); `StatementStack::close` takes `B::L` and `take_list` loses the last `B::list_id`; the `return` arm names the returned value by its id for `scope::return_sites` (T6r). `extract_exports` takes the value as a handle and copies the export identifiers out of the block's shared payload, so `complete_unit` no longer walks the comma spine, copies the payload or writes it (`Node::set_block_info` is deleted). `finish` takes `B::L`, makes the root with `block_of` and reads it by its id until T6s. `FreePool::probe`, `ProbeInput` and the counter `probes` are deleted (`FreePool<Rows>` 88 to 80 bytes) and their two tests become tests of `FreePool::realize` | b3b: `close.rs`, `out.rs`, `mod.rs`, `export.rs` (`extract_exports` only), `bir/node.rs` (the deletion) | b3b: 118 lines added and 189 removed as built (the design turn's check measured 117 and 188); transition calls 437 to 433 | T6x-a4; b3b after this design turn | none |
+| T6x-c1 | Bodies and private functions: the primitives. `values` becomes a vector of handles from `sequence_arguments` on; `constant_children` goes; the functions of the cluster that only the cluster calls take and return handles | `prim.rs`, `prim_cmp.rs`, `prim_block.rs`, `konst.rs`, `record.rs`, `import.rs`, `args.rs`, `call.rs` | On trunk, taken from the commits of its probe (draft pull request 365, which met no gap in the interface and measured 716 changed lines): **c1a** (pull request 366) the storage and `prim.rs`, transition calls 433 to 314; **c1b** the rest, 314 to 246. As built it differs from this row in five places. `values` is a `Vec<B::E>` drained once in order: no arm needs an element after a later one was moved. The row edits `mod.rs` for the types of five fields of `State`, and one test line of `ffi_args.rs`. `primitive_runtime` and `static_member` keep their signatures for T6x-d: the cluster calls their handle forms (`runtime_call`, `import::member`). `call_reversed` holds source ids and does not change; `number` and `string` of `konst.rs` are private (their rows in the callers' table are name matches). A self call turns its values back into `State::scratch` for `finish_self_call` (T6x-d), and `names::adopt` is given an id until T6r. Left in the row's files: 11 transition calls the script counts and 4 it does not (a transition function passed by path, `.map(B::node)`), each at a function of T6x-d or of another cluster | T6x-b | c2, c3, c4 |
+| T6x-c2 | The same for the externals; the operand lists in the pool become operands pushed as they are converted, and `push_list` loses its five calls; the three chain walks read `var_of` first | `external.rs`, `ffi_args.rs`, `jsx.rs` (not `printed_form`, `jsx_tag`) | On trunk, taken from the commits of its probe (draft pull request 369; 706 changed lines, so cut in two by its commits): **c2a** the conversion and assembly of the arguments in `ffi_args.rs`, transition calls 199 to 159; **c2b** `external.rs`, `jsx.rs` and the three functions `prim.rs` calls, to 82. As built it differs from this row and from the row of T6x-d in these places. `compile_js_call`, `compile_js_object_create` and `compile_jsx` take handles already (a drain and an iterator), with their one caller each in `prim.rs`: they are no longer rows of T6x-d, and neither are `add_external_effect` and the functions of `ffi_args.rs` the callers' table lists, whose callers are all in `external.rs`. The row forms left by T6x-c1 lost their last callers: `call_node` is a test's helper, `primitive_runtime` and `static_member` are deleted. `push_list` has no call left in the lowering. One pool list fewer is made per assembled call. Two places of `jsx.rs` keep a form the interface cannot yet replace, each under a comment, and are owed by a design turn before T6x-f: `Js::jsx` reads the callee as its first operand while the lowering builds it last, so the operands wait in `State::external_values` (a `jsx` that takes the callee apart, as `call` does); `duplicate_jsx_key` reads the member chain of the key again by id, four `B::at` (a copy of a member chain by the interface). Owed as a test: a spliced array of 10,000 elements through `assemble_external_args_with_splice`, whose loop pair is one step an element | T6x-b | c1, c3, c4 |
+| T6x-c3 | The same for conditionals and switches | `cond.rs`, `expr.rs`, `switch.rs`, `variant.rs`, `untagged.rs`, `location.rs` | On trunk, taken from the commits of the probe of c3 and c4 (draft pull request 368, which met no gap in the interface): 287 changed lines; the transition calls of the row's files go from 75 to 28. The plans hold the scrutinee as a handle (`switch::Plan<E>`, `variant::Plan<E>`, `untagged::Plan<S, E>`, and `Storage<S, E>` for the tests in flight); the functions of 3.6, `merge_assignments`, `assignment_statement` and `switch_key_expression` take and give handles. `expr.rs` and `location.rs` had nothing to convert, and the three fields of `Conditional` are ids of the source tree. What is left is wraps at `if_statement` and `drop_pure_effect`, rows of T6x-d: without the one turn-back of `finish_if`, each of the twelve calls of `if_statement` in `cond.rs` turns its test back. Every caller of `if_statement` is in a file of c3 or c4, so its row of T6x-d can follow these two directly and edits no other file | T6x-b | c1, c2, c4 |
+| T6x-c4 | The same for loops, exits and recursion; `recursive_dummy` gives a handle to its two callers in `rec.rs` | `loops.rs`, `try_.rs`, `exit.rs`, `rec.rs`, `tail.rs`, `assign.rs`, `label.rs` | Built from the last two commits of the same probe, in a pull request of its own (it does not need c3): 52 changed lines; the transition calls of the row's files go from 17 to 8. `loops::Plan<L, E>` holds its two values as handles, `recursive_dummy` gives one, `recursive_block` calls `runtime_call`, and `finish_self_call` wraps each row it is given once. `try_.rs`, `exit.rs`, `assign.rs` and `label.rs` had nothing of their own to convert: their transition calls are wraps at `drop_pure_effect` and `if_statement` | T6x-b | c1, c2, c3 |
+| T6x-d | The functions that cross clusters, each with all its callers in one slice: the 31 rows of the callers' table that are left after T6x-a (`drop_pure_effect`, `primitive_runtime`, `static_member`, `number`, `string`, `constant`, `add_external_effect`, `compile_js_call`, `compile_jsx`, `sequence_arguments`, ..., and `if_statement`, `assignment_statement` and `merge_assignments` for the expression each still takes or returns). `place`, `unnest`, `single_assignment`, `loop_function_body` and `locate_switch_run` are no longer rows: T6x-a changed the first four, and the last names a source node only. No turn-back is left between two files | every file of a row | On trunk, taken from the first three commits of the probe of T6x-d and T6x-e (draft pull request 376), which met no gap in the interface for this row: 106 changed lines, transition calls 82 to 49. As built the row is four functions, because T6x-c1 to c4 changed the others with their clusters (see the rows above): `if_statement` takes its test as a handle (callers in `cond.rs`, `exit.rs`, `loops.rs`, `switch.rs`, `untagged.rs`, `variant.rs`); `drop_pure_effect` takes its value as a handle (callers in `cond.rs`, `exit.rs`, `expr.rs`, `loops.rs`, `rec.rs`, `switch.rs`, `try_.rs`, `untagged.rs`, `unit.rs`); `finish_self_call` takes an iterator of handles and `call.rs` gives it the drain of its argument values, so a self call no longer moves them through `State::scratch`; `constant` gives a handle to its one caller in `mod.rs`. Neither path-form use the count script misses is left in these files. What is left outside `export.rs`: the four `B::at` of `jsx.rs` `duplicate_jsx_key`, and the test helpers `call_node`, `empty_block` and `raw_if` | c1 to c4 | none |
+| T6x-e1 | `export.rs`: the export values, the fold's own declarations and the final list are handles of the interface (pull request 379) | `export.rs`, and the field `State::coercion` in `mod.rs` | On trunk as far as the interface allows, taken from the last four commits of the probe of T6x-d and T6x-e (draft pull request 376): about 335 changed lines, `export.rs` 36 transition calls to 18. Built: `Tables<E, S>` holds the export values as handles (`extract_exports` fills, `coerce_exports` drains, every arm moves the value once); `define` gives the declaration to its caller, which keeps it in `inserted` or the new table `tail` until `coerced_list` moves it into the list; `coerced_list` gives `B::L` in two passes without a buffer, and `mod.rs` no longer wraps it. The four kinds of place that still reach a node through its id are T6x-e3 and e4; the interface they need is in "T6x-e and T6x-f: the fold reads where its rows are" | T6x-d, T6q | none |
+| T6x-e2 | `jsx.rs`: `compile_jsx` pushes the operands as they come and gives the callee to `Js::jsx_element`; `duplicate_jsx_key` copies with `Js::copy_members`; `Js::jsx` is deleted; `State::external_values` stays for `ffi_args.rs` | `jsx.rs`, `js.rs`, `rows.rs`, `js_tests.rs` | 54 lines added and 100 removed in the design turn's throw-away build; transition calls 30 to 26. Prompt in 11.9 | the design turn of T6x-e and f | none |
+| T6x-e3 | `export.rs`, kinds 1 and 4: a row says where its statement is (a place of the stack, an index in its block, an index in `inserted` or `tail`) and every read of it goes from there (`with_block_stmt`, `lend_block_stmt`, `StatementStack::at_place`); a removed row is given up by its holder and released at once (`take_placed`, `take_block_stmt`; decision 13 of "T6x-e and T6x-f"), and `coerced_list` stages the statements of a dissolved block (decision 14); `build_rows` recurses, and two allocation counts of `unit.rs` move (103 to 102, 156 to 155); `JsStmt::block_ids` is compiled for tests | `export.rs`, `out.rs` (three attributes), `unit.rs` (two numbers), `js_stmt.rs` and `rows_stmt.rs` (one attribute each) | built once by the ninth design turn (the comment `// T6X-THROWAWAY e3` on pull request 390): two commits, 331 lines added and 195 removed; `export.rs` 18 transition calls to 13, the self-test 26 to 21. Its prompt is in 11.9 | T6x-e2 | none |
+| T6x-e4 | `export.rs`, kinds 2 and 3 and the binder: an expression the fold names is a position (a row's initialiser, or the export value in hand); `mentions` records the later rows that hold a use and how many each holds, and `substitute_after` calls `JsStmt::substitute` once a row, with the number replaced asserted, from one first copy of the replacement that becomes the value of the tail declaration (decision 16 of "T6x-e and T6x-f"); `alias_of` reads `JsStmt::alias_at` | `export.rs` | built once by the ninth design turn (the comment `// T6X-THROWAWAY e4` on pull request 390): one commit, 365 lines added and 206 removed; `export.rs` 13 transition calls to 0, the self-test 21 to 8. Its prompt is in 11.9 | T6x-e3 | none |
+| T6x-f | The transition functions leave the two traits: `from_node`, `node`, `at`, `stmt_from_node`, `stmt_node`, `list_from`, `list_id`, `push_list` (`function_of_block` left in T6x-a2). `Rows` keeps the eight as functions of its own in impls compiled for tests, which the tests of `out.rs`, `js_stmt_tests.rs` and `js_tests.rs` call; the three generic test helpers go (`call_node`, `empty_block`, `raw_if`) and eight test lines that named one through a trait name it on `Rows`; `norm::jm14_push_effect_expression`, which only tests call since T6q, gets `#[cfg(test)]`; `count_lowering_ids.py --self-test` then requires zero calls, no transition function declared by a trait, and the eight on `Rows` under `#[cfg(test)]` (decision 18 of "T6x-e and T6x-f") | `js.rs`, `js_stmt.rs`, `rows.rs`, `rows_stmt.rs`, `norm.rs`, `call.rs`, `cond.rs`, four test lines' files, the script | built once by the ninth design turn (the comment `// T6X-THROWAWAY f` on pull request 390): one commit, 96 lines added and 118 removed in eleven files; the self-test 8 to 0. Its prompt is in 11.9. It does not wait for T6r | T6x-e4 | none |
 
-Order: a1, a2, a3, a4, b, then c1 to c4 at once, then d, e, f. The
+Order: a1, a2, a3, a4, b, then c1 to c4 at once, then d, e1, e2, e3,
+e4, f. The
 four c slices share no file and edit no function of another cluster: a
 function of the callers' table that takes or returns an expression
 keeps its signature until d, and a c slice wraps at those calls as the
@@ -4392,16 +4396,16 @@ The functions of `StatementStack<B>` after T6x-a4 (`js: &mut B`, `a:
 | `statement_refs(run) -> impl Iterator<Item = &B::S>` | one step per slot of the run and per held statement |
 | `first(run) -> Option<&B::S>`, `first_slot(run) -> Option<u32>`, `first_single_slot(run) -> Option<(u32, &B::S)>` | the holes and dead ranges before the first statement, counted in `scanned` |
 | `only(run) -> Option<(u32, &B::S)>` | as `first`, twice |
-| `last(run) -> Option<&B::S>`, `last_slot(run) -> Option<u32>` | O(1) on a trimmed run, else one step per trailing hole or dead slot, counted |
+| `last(run) -> Option<&B::S>`, `last_slot(run) -> Option<u32>` | O(1) on a trimmed run, else one step per trailing hole or dead range, counted ("T6x-b: an output's value, as built" (h)) |
 | `at(slot) -> &B::S`, `head(slot) -> &B::S`, `head_mut(slot) -> &mut B::S` | O(1) |
 | `take(slot) -> B::S` | O(1): one write, the slot is dead |
-| `take_run(run)`, `take_run_rev(run) -> impl Iterator<Item = B::S>` | one step per slot of the run and per held statement; the caller kills the run |
+| `take_run(run)`, `take_run_rev(run) -> impl Iterator<Item = B::S>` | one step per slot of the run and per held statement, a dead range crossed in one; the caller kills the run |
 | `trim(floor)`, `kill(run)`, `has_statements(run)`, `remove_empty(run)`, `append(first, second, value)` | as today |
 | `note_empty_block(slot, id: u32)` | a binary search and an insertion among the unit's empty blocks; `id` is the block's `stmt_id` |
 | `drop_empty_blocks(js, a, run)` | two binary searches, then one step per empty block of the run |
 | `take_list(js, a, run) -> B::L` | one step per slot and per statement of the run, each moved once, and the close of the list |
 | `take_actions(js, a, run) -> B::L` | `take_list` without the close: (c) |
-| `close(a, ListId)` | as today, until T6x-b |
+| `close(a, ListId)` | as today, until T6x-b3b, which makes it `close(js: &B, a, B::L)` |
 | `impl Runs<B>` | the six functions above under the names of `Runs` |
 | `statements(run) -> impl Iterator<Item = NodeId>`, `#[cfg(test)]`, on `StatementStack<Rows>` only | the rows of a run, for the tests that release a run row by row |
 
@@ -4602,6 +4606,1272 @@ functions above, every function a slice changes gets its cost note
 (the probe has none, which is why its `script-tests` job is red:
 `scripts/check_lowering_cost_docs.py`), and nothing is merged or
 cherry-picked from that branch.
+
+#### T6x-b: an output's value, as built
+
+Status: the row is on trunk. b1, b2 and b3a were taken from the second
+probe; b3b is designed here, was checked as said below, and was built
+from its prompt in 11.9 as pull request 363 (four commits, no deviation
+from the task; transition calls 437 to 433). Row T6x-b was probed twice
+(pull requests 345 and 353, neither merged). The second probe was made
+on trunk after T6x-a4 and its body is the report this section starts
+from.
+
+**(a) What was built, and where it differs from the row.**
+
+| Part | Pull request | What it changed | Transition calls |
+| --- | --- | --- | --- |
+| b1 | 355 | `Free`, `RealizeWork`, `FreePool`, `ProbeInput` and `Realizer` hold `B::E`; `Out::value` unchanged. About 120 lines | 498 to 507 |
+| b2 | 357 | `Out`, `Probed` and `ProbePlan` take the implementation as a type parameter and `Out::value` is `Option<B::E>`; `ProbeRules` has the associated type `Js`. About 540 lines in 27 files, one whole | 507 to 493 |
+| b3a | 358 | The turn-backs b1 and b2 left are removed in ten files; `State::pure_expression` is `#[cfg(test)]`. About 120 lines | 493 to 437 |
+
+The row said one slice of 600 lines; it is three and a fourth to come.
+It listed four types; nine change (`ProbeInput`, `Realizer`,
+`ProbePlan`, `SourceProbe` and `ProbeRules` with them). It said "`Out`
+stops being a value that is copied": `Out` never derived `Copy`; what
+was copied was the `Option<NodeId>` read out of `.value`, at the 15
+sites of the report's section 3, each of which is now a move
+(`Option::take`) or a read in place. Its "37 constructions and 54
+reads" were columns of the script, not sites: 24 and 28 production
+lines changed.
+
+On trunk after b3a: `--lib bir::lower` 568 passed, `--lib bir::j` 58,
+`--lib emit::builder` 26, none ignored; the four allocation counts of
+`unit.rs` are 86, 103, 86, 156; `size_of::<Rows>()` is 416; `Out`,
+`Probed`, `Free`, `FreePool` and `StatementStack` on rows are 20, 20,
+16, 88 and 96 bytes, as before the row. `Instruction count` read
++0.014%, −0.039% and +0.023% on the three pull requests (the default
+build does not reach the lowering).
+
+*Steps.* b3a builds a value through the interface where the lowering
+called `bir::j` directly: `Js::var`, `Js::qualified`, `JsStmt::declare`,
+`assign`, `return_`, `Js::release`, `Js::seq_rule` and `JsStmt::effect`
+count a step on rows (`Rows::steps`) where `pure_expression`,
+`j::declare`, `Bir::release` and `jm1_js_seq` counted none. No node
+differs. One test of the lowering reads that count across these calls,
+and it reads a relation, not a number: `tail.rs`,
+`a_chain_of_merged_guards_moves_each_statement_once`, requires the
+interface's steps to grow linearly from 1,000 to 2,000 to 10,000
+levels, which holds with a constant more per level as it did without.
+Found with `rg -n 'steps\(&|\.steps\(\)' src/bir/lower src/bir/shadow.rs
+src/lambda`: beside it the search matches `js_tests.rs` and
+`js_stmt_tests.rs` (the interface's own tests, which build through the
+interface on both sides of every comparison), `names.rs`
+(`Replayed::steps`) and `globals.rs` (a local counter of its tests).
+The counters the other tests read (`SwitchStats`, `close_steps`,
+`StatementStack::copied` and `scanned`, `Coerced::steps`) are not
+`Rows::steps`. The row of the table said "no lowering test reads the
+count across them"; it is corrected by this paragraph.
+
+**(b) What b3b lacked, and what this turn added.** Two places of the
+probe could not be written through the interface. One gets a function;
+the other needs none.
+
+| | Decision | On rows | On the builder | Probe site that uses it | Tests |
+| --- | --- | --- | --- | --- | --- |
+| A statement of a list in flight, read by reference | `JsStmt::with_stmt_at<R>(&self, a, list, index, read: impl FnOnce(&Self::S) -> R) -> R`. O(1) and what `read` costs; counts no step; allocates nothing | `read(&S(a.lists.get(list)[index]))`: the row of the pool entry is named for the length of the call; no row is read to find it | `Builder::statement_at(list, index)`, which exists since T6b; the reads a declaration and a `return` then need are in the handle's row (`kind`, `payload`, `aux`) and in `S::value`, added here: the expression a statement evaluates first, in place, O(1) | `close::decide`, both arms: the three `PROBE-GAP 1` comments of `git show e1e5175130` | `js_stmt_tests.rs`, `a_statement_of_a_list_in_flight_is_read_where_it_is`; `builder_tests.rs`, `the_statements_of_a_list_in_flight_are_read_where_they_are` and `a_statement_reads_the_expression_it_evaluates_first` |
+| The payload of the unit's export block | No function. `export.rs::extract_exports` holds the block literal by reference when it reads the exports (it walked to the end of the comma spine to find it): it reads the tag through `Bir::block_tag` and copies the identifiers, where it took them out of the payload. `complete_unit` loses its walk, its copy of the payload and `Node::set_block_info`, which has no other caller | the same code | the same code: the payload is in the pools on both sides, and nothing is written into the owned node | `complete_unit`, the `PROBE-GAP 2` comment of `git show 6b6be5b6e2` | exist: `unit.rs`, `export_consumption_does_not_empty_shared_block_metadata`, `supported_unit_exercises_both_texts_and_shared_export_coercion` and the four allocation counts |
+| The root block in `finish` | No function. `finish` takes `B::L`, makes the root with `JsStmt::block_of` and reads its id with `JsStmt::stmt_id` | the row | T6s rewrites `finish` (the program is the list) | `finish`, `complete`, `complete_unit` | the lowering's tests |
+
+*The read by reference: why a closure.* `decide` reads, of a statement
+of the list: its kind (`kind_at`, which exists); of a declaration the
+variable (`declared`), the declaration kind (`stmt_aux`) and of its
+value the `STRICT` flag and whether it is a function literal that may
+be inlined (`value_of`, then `Js::has` and `Js::function_of`); of a
+`return` its value. Every one of these is a reader of a statement in
+hand that takes `&S`. Three forms give them without detaching:
+
+- a function that returns `&Self::S`. Not possible on rows without
+  `unsafe`: the pool stores row ids, not statements, so there is
+  nothing for the reference to point at;
+- position twins of each reader (`declared_at`, `aux_at`, `value_at`).
+  Three functions now and one more for every later reader of a list,
+  each a second name for a reader that exists;
+- one function that lends the statement to a closure. Chosen: one
+  function, every reader of `&S` works under it, and the statement
+  cannot leave the list because the closure is given a reference.
+
+What the closure cannot do is return a reference into the statement
+(`value_of` gives a `Ref` that lives as long as the `&S`). `decide`
+does not need to: it returns a `Decision` (8 bytes) from the
+declaration arm and the id of the returned value from the `return`
+arm.
+
+`Rows::take_at` does not detach, and that is a fact, not a fault: a
+list in flight is a pool list no node holds, its statements have no
+parent, and `take_at` gives the entry (the header table of
+`rows_stmt.rs` says so). The report's item reads as a fault only
+because the probe used a transition call to read without taking;
+`with_stmt_at` makes the question irrelevant to `decide`, and `take_at`
+is unchanged.
+
+*The step test.* A reader counts no step, so the relation is on the
+rows read (`Bir`'s test counter of row reads): reading the first, a
+middle and the last statement of a list with the readers `decide` uses
+reads the same number of rows at each position, and the same at 1,000
+and at 10,000 statements. Seen to fail with a body that walks to the
+statement (6 rows read against 505). What it cannot see is a walk that
+reads no row (a scan of the pool's ids): the body is one indexed read
+of a slice, and on the builder one indexed read of a vector, which has
+no counter; the builder's test pins that the reads count no step and
+leave the list whole at both sizes.
+
+*The payload: why the fold and not a function of `Js`.* The copy
+exists because the fold took the identifier vector out of the block's
+payload, and the payload is the shape's: `Bir::block_info` interns one
+per distinct tag, so another block of the same shape, and the source,
+share it. `complete_unit` therefore gave the unit's block a payload of
+its own before the fold emptied it. The fold already holds what it
+needs: it finds the block literal at the end of the comma spine by
+reference and reads its `JsId`. Copying the identifiers there (one
+`Vec` clone, the allocation `complete_unit` made) leaves the shared
+payload untouched, so no payload is written into a node and no node is
+found a second time. Per unit: one `JsPayload` fewer in the pool, the
+same number of allocations. The fold reads the tag through
+`Bir::block_tag`, which also reads a block whose shape is a constant's
+(`JsPayload::ConstantBlock`); `complete_unit`'s copy turned that into a
+`JsPayload::Block` on the way, which is why the fold matched `Block`
+only.
+
+Not chosen: `Js::set_info_at_seq_end(a, &mut E, JsId) -> bool`, the
+probe's proposal. It is a second walk of the spine the fold walks, it
+is O(spine) on the builder through `&mut` operands, and it exists for
+one call that the fold makes unnecessary.
+
+What changes on rows: the `JsId`s of payloads made after the fold are
+one lower, and the pool has no emptied copy. No decision reads a
+`JsId`'s value. Checked by the lowering's tests (the constant-block
+unit runs `check_lower`); `Backend bridge coverage` in the pull request
+of b3b is the gate.
+
+`extract_exports` takes the value as `Option<B::E>` in the same commit
+(it has one production caller, `complete_unit`, and one test): the body
+changes there anyway, and `complete_unit` then makes no node id of the
+unit's value at all.
+
+*The root.* The rest of `finish` reads the root as a row three times:
+`Bir::finish_bulk(root)`, `replay_names(root, ..)` (`names.rs`, T6r)
+and `bridge_j::Imported::from_lowering(arena, root, ..)` (T6s). So the
+root stays a row until T6s. It is made through the interface
+(`block_of`, which is `Bir::block_from_list` on rows and counts one
+step and one per statement) and read by its id (`NodeId(js.stmt_id(a,
+&root))`), not turned back with `B::stmt_node`: T6x-f can then delete
+the transition functions while `finish` still has its row. An id
+made into a row this way is the form `export.rs` and `jsx.rs` already
+use where a row is still needed (`rg -n 'NodeId\(self\.js\.(id|stmt_id)\('
+src/bir/lower` shows ten lines there, and this one after b3b); the
+slice that removes the last reader of the row removes the line. T6r
+changes `replay_names` to take the statement; T6s deletes
+`finish_bulk`, the importer and this line.
+
+**How it was checked.** A test of a function nothing calls shows the
+two sides alike, not that the lowering needs it. In a copy of this
+turn's tree that was not pushed, b3b was built as the four commits of
+its prompt, from the probe's `close.rs` and its hunks of `mod.rs`
+(`complete_unit`, `complete`, `finish`) with the gaps closed as above.
+After each of the four commits: `--lib bir::lower` 569 passed (trunk's
+568 and this turn's interface test), `--lib bir::j` 58, `--lib
+emit::builder` 28 (trunk's 26 and this turn's two), none ignored, no
+compiler warning. The four were then put on this turn's final head,
+which has three more tests of the lowering: 572, 58 and 28. On the
+last: `cargo clippy --all-targets -- -D
+warnings` clean; `cargo doc` with warnings denied clean;
+`check_lowering_cost_docs.py --base` prints `changed/new=8;
+missing/generic=0; removed=0`; the four allocation counts hold at 86,
+103, 86, 156; the close test of `close.rs` reads the same 10,004 steps
+and no allocation; transition calls 437 to 433; 117 lines added and
+188 removed in five files (`close.rs`, `out.rs`, `mod.rs`, `export.rs`,
+`bir/node.rs`). One size moves, by a deletion: `FreePool<Rows>` 88 to
+80 ((f)). The shortcut was run too: the copy deleted from
+`complete_unit` and the fold left taking the identifiers out fails six
+tests (the two export tests of `unit.rs` and the four allocation
+counts). Not run on the copy: `Backend bridge coverage`, the parity
+suites, `Instruction count`, check mode on the application. The
+builder's pull request runs them.
+
+**(c) The `Return` arm of `close::decide`.** It stays on a row until
+T6r, as one named turn-back: the arm reads the id of the returned
+value under `with_stmt_at` and calls `scope::return_sites(bir,
+NodeId(id), last)`. `return_sites` is not given a signature on the
+interface now, for two reasons read off the code. It keeps its pending
+operands in `Scope::spine`, a vector of rows that lives across calls;
+a `Ref` of the builder is a borrow and cannot be kept there, so the
+generic form is a descent the implementation owns, of the kind T6r adds
+for function literals and globals (`JsStmt::functions`, `globals`), not
+a change of parameter type. And it has a second caller on rows,
+`norm.rs` (J-S3, where a branch becomes a list of its own), which T6s
+deletes with the file.
+
+What T6r does with it: adds the descent to `JsStmt` beside its other
+two (the calls in tail position of a `return` in hand: both branches
+of a conditional, the last operand of a sequence, a call of a
+variable; the same steps), calls it from `decide` under `with_stmt_at`,
+and makes `VarFacts::site` the id the interface gives (production only
+compares it with `NO_SITE`: `rg -n '\.site\b' src/bir` shows `close.rs`
+as its one reader). Until T6s `Rows` implements the descent by calling
+`return_sites`; T6s deletes `return_sites` and `Scope::spine` with
+`norm.rs`. If T6r's design turn finds the descent does not fit its
+walk, the turn-back stays until T6s and nothing else depends on it:
+it uses no transition function.
+
+**(d) The leaves.** `Js::var` builds a strictly pure node
+(`plain::node` sets `STRICT` on a variable). `Js::qualified` and
+`Js::undefined` do not, where `pure_expression` did, because whether a
+module reference or an `undefined` is known pure is the caller's
+knowledge: six sites of `qualified` build it without the flag, as
+they did with `plain::node` before the interface (`prim_block.rs` 2,
+`prim.rs`, `jsx.rs`, `external.rs` 2). So the pair `qualified` then
+`assume_strict` is the form, and no constructor is added: a
+`qualified_strict` would be a second name for two sites, and a
+constructor that always marks would be wrong at six.
+
+Every site where a node is made and then marked (`rg -n 'assume_strict'
+src/bir/lower`, 18 calls outside the trait):
+
+| What is marked | Sites |
+| --- | --- |
+| `qualified` | `mod.rs` `enter` (the global leaf); `call.rs` `finish_application` (an external callee) |
+| `copy_leaf` of a module member | `export.rs` `copy_replacement` |
+| `var` (the flag is already set: the mark writes the bit it has) | `args.rs` `evaluate_now`; `external.rs` `hold_external_receiver`, `compile_js_object_create` 3, `translate_scoped_global_value`; `ffi_args.rs` `hold_in_variable`; `call.rs` `apply_with_arity`; `jsx.rs` `jsx_callee`; `import.rs` `import_of_path`, `wrap_then_path` |
+| a node that is not a leaf | `rec.rs` `recursive_dummy` (an array or an object); `args.rs` `evaluate_now` and `ffi_args.rs` `hold_external_arg` (a `refill`); `konst.rs` `strict` (a constant) |
+
+None can be reached with the flag missing: at each site the mark is
+the statement after the construction, in straight-line code, before
+the handle is given to anything. The eleven marks of a `var` are
+no-ops left by the conversion slices; T6x-c1 (`args.rs`, `call.rs`,
+`import.rs`) and T6x-c2 (`external.rs`, `ffi_args.rs`, `jsx.rs`) delete
+them in their files, and each says so in its end state. The test-only
+`complete` of `mod.rs` makes its `undefined` the same way in b3b.
+
+**(e) `append_outputs`.** It keeps its value parameter and owns the
+value it is given (its doc comment states the rule since pull request
+357). Five of its eight calls give the value moved out of the second
+output; three give `None`, because the caller has consumed that value
+or keeps it for itself (`expr.rs` twice, `unit.rs` once). Not chosen:
+the first probe's form, a `bool` for "the second output's value is the
+result's". The function would move the value out of `second` itself,
+which saves a line at five calls and leaves the other three a flag to
+get right in place of a value they no longer hold. Accepted as built.
+
+**(f) `FreePool::probe` and `ProbeInput`.** Neither has a production
+caller: `rg -n 'ProbeInput|\.probe\(cx' src/bir/lower` shows the
+definition, the body of `probe` and two tests of `out.rs`; the lowering
+pushes `Free` records itself (`cond.rs`, `expr.rs`, `mod.rs`
+`probe_leaf`). b3b deletes both, with the counter `FreePool::probes`
+that only `probe` wrote, in its last commit. `FreePool<Rows>` is then
+80 bytes (the size test and the cost note of `State::realize` move
+from 88, by the deleted field). Not `#[cfg(test)]`: a function kept
+for its tests is a second path that the tests then keep alive.
+
+The two tests were tests of `probe`'s policy, which production has in
+`cond.rs::finish_if`. They become tests of `FreePool::realize`, which
+is what runs: `ten_thousand_deferred_nodes_are_realized_once` builds
+the chain of 10,000 sequences with `push`, as the lowering does, and
+keeps its assertions on the result, on `realized` and on the order of
+the visits (it loses the one on `probes`);
+`a_deferred_conditional_is_realized_after_its_branches` replaces
+`nonfree_child_is_kept_without_reprobing` and asserts the order then,
+else, test and that an output that is not deferred is returned without
+a realization. The prompt gives both verbatim.
+
+**(g) The turn-backs T6x-b leaves, and the slice that removes each.**
+On this turn's head, the transition calls under a comment that names a
+later slice, and the others the row leaves:
+
+| File, function | The call | Because | Removed by |
+| --- | --- | --- | --- |
+| `call.rs` `finish_application` | `B::from_node(value)` | `call_node` and `apply_with_arity` give rows | T6x-d |
+| `cond.rs` `finish_if` | `B::node(test)` | the rows of 3.6 (`effect_conditional`, `return_conditional`, `assigning_conditional`) take a row | T6x-c3 |
+| `variant.rs` `bind_named_scrutinee` | `B::node(..)` twice | `Plan::value` holds a row | T6x-c3 |
+| `mod.rs` `enter` | `B::from_node(self.constant(value))` | `konst.rs::constant` gives a row | T6x-d |
+| `unit.rs` `lower` | `<Rows as js::Js>::node(value)` into `drop_pure_effect`. Written on `Rows` by name (the function is not generic), so `count_lowering_ids.py` does not count it | `expr.rs::drop_pure_effect` takes a row | T6x-d, with the row of `drop_pure_effect` |
+| `out.rs` `take_list` | `B::list_id(list)` into `close` | `close` takes a pool list | T6x-b3b |
+| `mod.rs` `complete_unit`, `complete` | `B::list_id(..)` twice, `.map(B::node)` twice, `B::stmt_from_node` | `finish` and `extract_exports` take rows | T6x-b3b |
+| `mod.rs` `complete_unit` (after b3b) | `B::list_from(self.coerced_list(run))` | `export.rs::coerced_list` gives a pool list | T6x-e |
+| `close.rs` `decide` (after b3b) | `NodeId(js.id(..))`; not a transition function | `scope::return_sites` takes a row | T6r ((c)) |
+| `mod.rs` `finish` (after b3b) | `NodeId(js.stmt_id(..))`; not a transition function | `finish_bulk`, `replay_names` and the importer take a row | T6s ((b)) |
+
+Every other transition call on trunk (433 after b3b) is inside the
+cluster of a c slice or `export.rs`, without a comment: the counts by
+file are in the table of T6x and in the probe prompt of T6x-c1.
+
+**(i) What the probes of T6x-c1 to f start from.** Counted on this
+turn's head (`python3 ../scripts/count_lowering_ids.py` from
+`compiler-rust`; 437 transition calls, 433 after b3b). These counts
+replace the ones in the rows of the table of T6x, which were taken
+before T6x-a or after it.
+
+| Row | Files and their transition calls | What T6x-b changed in the row |
+| --- | --- | --- |
+| T6x-c1 | `prim.rs` 133 (123 `from_node`), `prim_cmp.rs` 7, `prim_block.rs` 0, `konst.rs` 15, `record.rs` 7, `import.rs` 8, `args.rs` 18, `call.rs` 10: 198 | A value arrives as a handle: `sequence_arguments` takes `&mut [Out<B>]` and moves each value out, and turns it back where it pushes into `values: &mut Vec<NodeId>` (`args.rs`, three arms); `primitive_result` takes `B::E` and `call.rs` wraps `values[0]` for it. So the row starts at the push into `values`, not at the output. `probe_leaf` takes a handle, which removed five turn-backs at its callers |
+| T6x-c2 | `external.rs` 33, `ffi_args.rs` 53, `jsx.rs` 19: 105, and 5 `push_list` | `hold_external_receiver`, `hold_external_arg` and `hold_external_obj_args` read an output's value in place and take it only where they hold it; what they hand on is still a row (`external_values`, the argument lists). `ffi_args.rs` fell from 64 to 53 and `external.rs` from 40 to 33 |
+| T6x-c3 | `cond.rs` 35, `expr.rs` 2, `switch.rs` 5, `variant.rs` 13, `untagged.rs` 20, `location.rs` 0: 75 | `cond.rs` fell from 55 to 35 and `expr.rs` from 11 to 2: `finish_if`, `short_circuit`, `free_value`, `free_effect`, `push_s_if_empty`, `output` and `hold_effect` take or give handles. What is left in `cond.rs` is the rows of 3.6 (`effect_conditional`, `return_conditional`, `assigning_conditional`, behind the one `B::node(test)` of `finish_if`) and `Conditional`'s three fields (corrected when the row was built: they are ids of the source tree and hold no value); in `variant.rs`, `Plan::value` |
+| T6x-c4 | `loops.rs` 4, `try_.rs` 1, `exit.rs` 2, `rec.rs` 6, `tail.rs` 4, `assign.rs` 0, `label.rs` 0: 17 | `recursive_block` takes a handle and `assign.rs` has nothing left. The plan fields `loops::Plan::values` hold rows |
+| T6x-d | 33 rows in the callers' table of the script, 97 calls in other files. Three are not rows of this slice: `enter` (matched by name against `names.rs`), `locate_switch_run` (a source node only) and `extract_exports` (b3b) | `realize_conditional`, `append_outputs`, `leaf`, `probe_leaf` and `primitive_result` left the table. `drop_pure_effect` lost its caller in `mod.rs` (`Realizer::effect` calls `JsStmt::effect`) and has one written on `Rows` by name in `unit.rs`, which the script does not count ((g)) |
+| T6x-e | `export.rs` 37 (10 `from_node`, 7 `node`, 15 `at`, 4 `stmt_from_node`, 1 `stmt_node`), 36 after b3b; and ten `NodeId(self.js.id(..))` in `export.rs` and `jsx.rs` | After b3b `extract_exports` takes the unit's value as a handle; `Tables::values` still holds rows (it turns each back with `B::node(self.js.pop())`). `coerced_list` gives a pool list that `complete_unit` wraps ((g)) |
+| T6x-f | The seven transition functions of the two traits, `push_list`, and what calls them when e is merged | After b3b nothing in `close.rs` or `out.rs` calls one; `mod.rs` has two, both another slice's ((g)). `finish` reads the root by its id and needs none |
+
+Read off the code for the design of c1, not probed (corrected in the
+review of this turn, which read every use): the vector the values of an
+application or a primitive are sequenced into is one field of `State`,
+`argument_values`. In production it is taken and given back in two
+functions, both of c1: `finish_application` (`call.rs`) and
+`finish_primitive_payload` (`prim.rs`). Every other file that names it
+(`konst.rs`, `import.rs`, `prim_block.rs`, `external.rs`, `ffi_args.rs`,
+`jsx.rs`, `tail.rs`) reads its capacity in an allocation test and
+nothing else, so the field's element type can change in c1 without a
+wrap in another cluster. What crosses clusters is what is made from it:
+`finish_self_call` (`tail.rs`, c4) takes `values: &[NodeId]` from
+`call.rs`, a row of T6x-d, and the externals are given a pool list
+(`compile_js_call`) or an iterator of rows (`compile_jsx`). Whether c1
+can be built beside c2 to c4 with those calls wrapped is the first
+question of c1's probe.
+
+**(h) Changes to earlier sections of this document**, each with its
+reason:
+
+- "T6: the interface" (a), the read-back table: the read by reference
+  of a statement of a list in flight, left open there and in "T6x-a:
+  the statement stack, after the probe" (e), is
+  `JsStmt::with_stmt_at`.
+- "T6: the interface" (a), the read-back table, "`JSeq` ends in
+  `complete_unit`, `extract_exports`": after b3b only `extract_exports`
+  walks the spine. (Edited in the review of b3b, pull request 363.)
+- "T6x: the cut", the row of T6x-b: rewritten for b3b. `close.rs`
+  "takes the interface from `out.rs`" as the row said; what the row did
+  not say is in (b), (c) and (f).
+- "T6x-a: the statement stack, after the probe" (a), the table of the
+  stack: `close(a, ListId)` is `close(js: &B, a, B::L)` after b3b.
+- "T6: the cut of the interface, revisited", row T6x: `State::{leaf,
+  seq, effect}` were b3a's; `complete_unit`, `complete` and `finish`
+  are b3b's. (That row is left as written: it names the functions of T6x, and this
+  bullet says which part converted each.)
+- T6r gains one thing ((c)): the descent of a returned value. T6s
+  gains the root's row in `finish` ((b)).
+- "T6x-a: the statement stack, after the probe" (a), the table of the
+  stack: `last`, `last_slot`, `take_run_rev` and `trim` cross a dead
+  range from its end in one step, where they took one per slot. `kill`
+  marks the last slot of a range of more than one slot with the
+  range's length (`Slot::DeadEnd`); a slot stays 12 bytes on rows. The
+  read from the end that (c) there describes for the actions of a
+  switch crosses one step per run of the last switch, not one per
+  slot.
+- One expected value of a test of the lowering changes on trunk in
+  this turn, by that change: `out.rs`,
+  `the_actions_of_ten_thousand_switches_leave_only_the_slots_of_their_runs`
+  counted 8 slots crossed (four dead ranges of two slots) and counts
+  4. In b3b one pinned size moves by a deletion (`FreePool<Rows>`, 88
+  to 80) and two tests of a deleted function are replaced ((f)).
+- Tests added in this turn, each seen to fail without what it is there
+  for: rule 6 of `if_head` for a run that ends in `continue` (the
+  comparison with `js3_simplify_if` runs the same head on both sides
+  and passed with `continue` removed from the rule); a hold of 10,000
+  statements read through `statement_refs` and `take_run_rev`; a dead
+  range of 10,000 slots crossed from its end; the number of merged
+  guards at each size of the guard-chain test of `tail.rs`.
+- `scripts/count_lowering_ids.py` stops with an error where it finds
+  no file (from the repository root it printed zeros) and has a
+  `--self-test`.
+
+**Corrections after the review of this turn.** Made in place by the
+reviewer's commit, or owed as said:
+
+1. (i): `argument_values` is taken and given back in two functions of
+   c1 only; the paragraph and step 1 of the probe prompt of T6x-c1 said
+   it crossed three rows. Corrected in both places.
+2. The prompt of T6x-b3b set `Instruction count` at most +0.02% as a
+   gate. The default build does not reach the lowering, and b3a read
+   +0.023% on code it cannot run: a limit the builder cannot control.
+   Reworded to a report with a stop above the job's spread. The prompt
+   listed the fragment as a fifth item of "four commits": it is part of
+   commit 4.
+3. (h) listed two lines of earlier sections as changed that this turn
+   did not edit; each now says so.
+4. `out.rs`: the cost note of `Runs::last` and the doc comment of
+   `Slot::Dead` still described a slot-by-slot crossing; corrected. The
+   invariant `Slot::DeadEnd` rests on is stated in its doc comment (no
+   assertion checks it: a check would read the range it is there to
+   skip).
+5. `emit/builder.rs`, `S::value` gives nothing for a `switch`, where
+   `JsStmt::value_of` gives the scrutinee. The builder makes no `switch`
+   yet; the doc comment says who adds it.
+6. The self-test of `scripts/count_lowering_ids.py` is run by the
+   `script-tests` job (the reviewer's commit adds the step). It pins no
+   count, by intent: it fails where the script finds no file or no
+   call, not when a slice moves the number.
+7. Owed by the design turn of T6v, which puts the builder behind the
+   interface before T6s: the two reads of an id as a row that b3b
+   leaves (`close::decide`, the `return` arm, until T6r; `finish`, the
+   root, until T6s) are right on rows only. That the id is the row is
+   a fact of `Rows`, not a promise of `Js::id` or `JsStmt::stmt_id`
+   (on the builder the id is the `node_id` of an owned node). T6v says
+   how its tests reach `finish` on the builder, or that they stop
+   before it; if T6r leaves the `return` arm's turn-back in place,
+   T6v's design owes the same for `decide`.
+8. Owed by the next design turn, as tests: an allocation count around
+   the reads of `a_statement_of_a_list_in_flight_is_read_where_it_is`
+   (the doc comment of `with_stmt_at` says it allocates nothing, and no
+   test would see an allocation); a `return` without a value among the
+   shapes of `a_statement_reads_the_expression_it_evaluates_first`.
+9. Accepted as it is: in `tail.rs` the test
+   `a_block_wider_than_the_operand_stack_is_unblocked_without_growing_it`
+   is renamed `a_body_wider_than_the_operand_stack_is_moved_without_growing_it`
+   and its assertion message reworded; its condition is unchanged.
+
+#### T6x-e and T6x-f: the fold reads where its rows are
+
+Status: design, with the interface on trunk; T6x-e2 is built (pull
+request 389). What the lowering's interface owes before the transition
+functions can be deleted was decided from a probe that built it once
+(draft pull request 383, not merged; its body is the report). The
+functions this section adds are in `bir/lower/js.rs`, `js_stmt.rs` and
+`out.rs` with their bodies on rows (`bir/j/rows.rs`, `rows_stmt.rs`) and
+on the builder (`emit/builder.rs`). Decisions 1 to 12 are the eighth
+design turn's; the ninth ("The ninth design turn: the fold built once",
+below the corrections) built the remaining slices once in a throw-away
+copy, replaced decision 5's deferred release (decision 13), corrected
+decision 3 (decision 14) and wrote the prompts in 11.9 of the slices
+whose build ran.
+
+**What was measured.** A throw-away build (not pushed) wrote one line
+per event of the export fold to a file: the rows of each unit that
+reaches `build_rows`, each call of `substitute_after` with its number
+of uses and the depth of each use below its row's statement, each read
+of a binder in `alias_of`, each climb of `declared`, each removed row.
+Run over the lowering's tests (`cargo test --lib bir::lower`) and, in
+check mode (`RESCRIPT_BACKEND=check rescript clean` and `build`), over
+`tests/tests`, the runtime and a 3,735-module application:
+
+| Corpus | Units that reach the fold | With a top-level block | Calls of `substitute_after` | Reads of a binder in `alias_of` | Climbs of `declared` |
+| --- | --- | --- | --- | --- | --- |
+| the lowering's tests | 75 | 0 | 5, with 0, 0, 0, 1 and 10,000 uses | 0 | 0 |
+| `tests/tests` | 1,148 | 0 | 0 | 0 | 0 |
+| the runtime | 232 | 0 | 0 | 0 | 0 |
+| the application | 3,979 | 0 | 0 | 0 | 0 |
+
+Every use the tests replace lies two nodes below its row's statement
+(the argument or callee of a call that is an expression statement):
+9,997 of them were read. No unit of the three corpora removes a row,
+dissolves a block or reads a declaration through a binder; the five
+calls of the tests come from Lambda built by hand, not simplified (the
+simplifier removes the alias the fold moves). The first run of the
+tests wrote its lines in several writes and 4 of 10,161 were torn; the
+figures above are from whole lines, and the corpora were run again
+with one write a line.
+
+A block statement at the top level does come from a source program,
+though from none of the corpora: an untagged variant matched at the top
+level with an arm that raises,
+
+    @unboxed type u = A(array<int>) | B(dict<int>)
+    @val external y: u = "y"
+    switch y {
+    | A(_) => throw(Not_found)
+    | B(o) => Console.log(o)
+    }
+
+lowers to the guard and the other arm as two statements of one block
+(`untagged.rs`, the arm `Op::Block` of the dispatch: `explicit_block`
+over a run of more than one statement; `finish_untagged` unnests it only
+under a `return`). `build_rows` then writes a row with `Row::BLOCK` and
+one with `Row::NESTED` for each statement inside. The rows inside such
+a block are guards, expression statements and assignments. A
+declaration was not found there: a variable the export block reads is
+bound by a `Let` of the unit's spine, `unit.rs` lowers each such `Let`
+as a group of its own, and a group that declares writes `let x;` before
+its block and assigns inside it. So "a removed row that stands in a
+block" was reached by no program and no hand-built Lambda; it is not
+argued impossible (decision 11).
+
+**The rule.** No function of the interface takes an id in order to find
+a node. An id is a key: compared, stored to say "the same node as",
+read from a handle before the handle moves, or used to read a fact the
+implementation keeps in a table indexed by it.
+
+**Decisions.**
+
+1. *A JSX element takes its callee apart.* `Js::jsx_element(a, callee,
+   mark, info, has_children)`, as `call`, `new_` and `tagged` take
+   theirs. One function in the end: T6x-e2 calls it from `compile_jsx`
+   and deletes `Js::jsx` in the same pull request. It has a name of its
+   own because `jsx` is taken until then, and a rename after the
+   deletion would be a second edit of every call. On rows the callee is
+   pushed and rotated below the operands since the mark
+   (`slice::rotate_right(1)`): one move of 4 bytes an operand, then the
+   list is written once. Not chosen: a slot reserved at the mark. The
+   mark is taken through `&self`, a reserved slot needs a placeholder of
+   the handle type, and the builder has no use for it: it moves the
+   callee into the element and the operands off its stack. The builder
+   has no JSX element: T6d owes the body (`emit/builder_program.rs`),
+   which takes the callee as a handle beside the mark and moves nothing
+   twice. Costs one step and one per operand, the callee counted; the
+   test on rows reads 1,003 and 10,003 at 1,000 and 10,000 children.
+   Probe site: `jsx.rs::compile_jsx` (commit cca7635c3 of the probe).
+
+2. *A copy of a chain of member reads.* `Js::copy_members(a, r, made)`:
+   the reads from `r` down to the first node that is not a `Dot`, and
+   that node as a leaf, each with its cold data. Both callers copy down
+   to exactly that node (`duplicate_jsx_key` stops its shape check at a
+   reference, a module reference or a literal, and returns before any
+   copy when a node above is not a `Dot` with a position;
+   `copy_replacement` pushes while the kind is `Dot`), so the probe's
+   removal of the proposed `depth` stands. `made` is given the id of
+   each node made. That is a key under the rule: `export.rs` keeps
+   `row_of`, a table indexed by id that remembers the row of an ancestor
+   a site walk passed, and a node made in a slot rows had freed must not
+   inherit what the slot held. It does not show that `row_of` is keyed
+   by something an owning implementation cannot give: the builder gives
+   ids that ascend and are never reused, so `made` clears entries that
+   are already empty there. Not chosen: reading the ids off the copy
+   afterwards (a second walk of a chain the first made). On rows the
+   reads go above whatever the work stack `Rows::work` holds, because a
+   substitution (decision 6) asks for a copy during its own walk; the
+   test of that failed with the first body, which asserted an empty
+   stack. One step a node made: 1,001 and 10,001 at 1,000 and 10,000
+   reads, on rows and on the builder. Probe sites:
+   `jsx.rs::duplicate_jsx_key`, `export.rs::copy_replacement`.
+
+3. *The statements of a block the caller holds.* (Decision 14 corrects
+   the last part: the final list takes the statements of a dissolved
+   block out in a pass before the list is written, not while it is
+   written.) Four functions of
+   `JsStmt`, each O(1): `block_len`; `with_block_stmt` (a read by
+   reference, as `with_stmt_at` reads a list in flight);
+   `lend_block_stmt` (the statement lent with the implementation and
+   the pools); `take_block_stmt` (the statement moved out, a hole
+   left). They are the probe's 3 to 6 under final names, and each is
+   called by the probe's `export.rs`: `block_len` and the read by
+   `add_row` and `with_row`, the lend by `has_toplevel_effect`
+   (`effect_free` takes the implementation mutably) and by the copy of
+   a nested row's value, the take by `coerced_list` for the statements
+   of a block it dissolves. The read cannot be written with the lend:
+   `same_reusable_value` reads the initialisers of two rows at once
+   (`reusable_declared`), and two lends of statements the same stack
+   holds cannot be alive together.
+
+   *A hole.* On rows `Bir::detach` clears the parent link and leaves the
+   entry in the block's list, so the indexes after it stay; the two
+   readers and a second take panic on an entry whose parent is not the
+   block. On the builder a block owns an arena vector of statements,
+   which has no empty slot: the hole is an empty statement, which no
+   constructor of the builder makes, so a hole is told from a statement
+   and the later indexes stay. It costs one node of the arena for each
+   statement taken. Not chosen: removing the element (every later index
+   of the block would be wrong, or every later row rewritten); an
+   `Option` in the vector (the vector is oxc's). What the final list
+   does with a hole: nothing reaches it. A hole is made only where the
+   fold has flattened the block (`substitute_after` sets `flattened`
+   before any row is removed), and `coerced_list` then takes every
+   statement that remains out of every block by its index and releases
+   the blocks; a block with a hole is given to no list and no
+   constructor, so no hole is printed. `Builder::release` (T6e) must
+   skip an empty statement.
+
+   *The handle of a nested statement on the builder.* A statement
+   inside a block is the node alone; its row is in the table
+   (`Builder::statement_row`). The builder's handle `S` carries the row
+   beside the node, so a reference to a handle cannot be made for a
+   statement inside a block. The builder's functions therefore give the
+   node (`block_statement`, `block_statement_mut`), and this changes
+   "T6: the interface" (a), the table of handles: for T6v, `B::S` on
+   the builder is the oxc statement (16 bytes, where the table says
+   `S<'a>`, 24), and a reader takes its row from the table, one load
+   more a read. The statement stack then moves 16 bytes a statement.
+   Not chosen: a block that keeps its statements as handles in the pool
+   until a constructor consumes it. A block that came out of an `if`
+   (`take_if`) is already an oxc vector, so two forms of block would
+   exist and the read would work on one of them.
+
+4. *The value of a statement in hand is copied with the expression
+   half.* `JsStmt::value_of` gives a reference that borrows the
+   statement and not the pools (its signature lost the lifetime on the
+   pools; no caller changed). So `js.copy_members(a, js.value_of(a,
+   s)?, ..)` and `js.copy_leaf(a, ..)` compile for a statement the
+   stack, a block or the fold's tables hold, and the probe's
+   `copy_value(s, cold, ..)` is dropped with its `bool`. On the builder
+   `S::value` already borrows the statement only.
+
+5. *The stack names places; nothing is taken out by one.* (Decision
+   13 replaces the second half: a removed row is released at once, as
+   on trunk, and `StatementStack::take_placed` takes it out by its
+   place. What stands of this decision: the places, the two readers,
+   and that no held entry is ever emptied.)
+   `StatementStack::placed_refs` gives each statement of a run with
+   its place (a slot, or an index among the held statements with bit
+   31 set), and `at_place` and `at_place_mut` read one. The probe's
+   `take_place` and its change of `take_run` are not taken. Read
+   against the invariant of `Slot::DeadEnd`: a slot whose statement is
+   taken becomes `Dead(1)`, which every function accepts (`take` does
+   the same). A held statement taken leaves `None` inside a hold whose
+   span still counts it, and then `statement_refs`, `take_run_rev`,
+   `slot_ref` (behind `first`, `first_single_slot`, `only`, `last`,
+   `at`, `head`), `head_mut` and `take` of a hold of one panic on it,
+   and `slot_len`, so `only` and `last_at`, count a statement that is
+   not there. The functions that hand out statements and those that
+   consume them would no longer accept the same set. So no emptied held
+   entry is made. A removed row of the top level keeps its handle on
+   the stack until `coerced_list` takes the run; the list's iterator is
+   given it there in order, as today, and puts it with the dissolved
+   blocks to be released after the list is made, where trunk dropped
+   the handle unreleased. Ownership: the stack until `take_run`, then
+   `coerced_list`, then `release_stmt`. No handle has two owners and
+   none is dropped. A removed row inside a block is taken out by its
+   index in the same pass that dissolves the block and released the
+   same way. What this moves on rows: the release of a removed
+   declaration happens when the list is made, not when the row is
+   removed, so its initialiser's sites live through the rest of the
+   fold. `mentions` must not count them: the row keeps its entry in
+   `row_of` and `mentions` skips a site whose row is `REMOVED` (one
+   test of bits it already loads). Not built in this turn (decision
+   12).
+
+6. *The replacement of a use (the probe's gap 2).*
+   `JsStmt::substitute(a, s, var, uses, make)` replaces at most `uses`
+   references to exactly `var` inside the statement `s`, which the
+   caller holds at its row's place, each by what `make` gives, and stops
+   at the last. The fold records, per later row that holds a use, how
+   many it holds (`mentions` already finds the row of each site), and
+   `Tables::later` holds rows and counts in place of site ids. On rows
+   the body walks the statement on `Rows::work` and calls
+   `Bir::replace`; on the builder it walks the nodes the builder makes
+   with a work stack of the call.
+
+   | Option | On rows | On the builder | Verdict |
+   | --- | --- | --- | --- |
+   | (i) a path of operand indexes recorded with the site, replaced along the path | the index of a node in its owner is a scan of the owner (a use in a call of n arguments costs n, n uses n squared) or a column written for every operand of every unit | the same column, 4 bytes a node, and a mutable step into operand i for every kind of node | not chosen: every unit pays for a path no unit of the corpora uses |
+   | (ii) walk the statement at the row's place | one visit a node of each later row that holds a use, where trunk has one a use | the same | chosen |
+   | (iii) not an edit: the variable keeps a declaration, or the fold decides before the uses are built | the moved declaration stands after its uses, so keeping it changes the program; deciding earlier needs the later rows, which do not exist yet | the same | not possible without changing the JavaScript |
+   | (iv) an index from id to node on the owning side | nothing | per reference its slot, as a path from a statement, rewritten whenever the statement moves into a list | not chosen: a cost for every reference of every unit |
+
+   The cost of (ii): one call is O(nodes of the statement up to its
+   last use). k moved variables that each have a use in one statement
+   of n nodes cost k times n, where trunk costs the uses: quadratic for
+   a unit whose every export is a moved alias used in one large
+   statement. The rows `Tables::later` names bound it (a row without a
+   use is not walked) and the count stops a walk at the row's last use.
+   On the corpora it is never run; the test of 10,000 references to one
+   alias has one use a row and stays linear. The copies are made in the
+   order of the walk, where trunk made them in the order of the sites;
+   the nodes are the same. The steps on rows and on the builder are
+   linear from 1,000 to 10,000 references and a reference behind n
+   nodes costs n (tests on both). `Bir::replace` then has no call in
+   `export.rs` after T6x-e4, and T6x-f's end state allows none.
+
+7. *The declaration no row declares (the probe's gap 1).*
+   `JsStmt::alias_at(a, id)` gives the variable a declaration binds its
+   own to when its initialiser is a reference. `alias_of` reads nothing
+   else of that statement (its kind, and the variable of its value).
+   The id is the variable's binder, a key; on rows the body reads the
+   row, on the builder a table of the declarations whose initialiser is
+   a reference, pushed by `declare` in id order (8 bytes each, a binary
+   search a read) and kept right by `substitute`. No unit and no test
+   reaches the branch. Not chosen: a column by variable written by
+   every declaration (a store a declaration for a read no unit makes);
+   an index from id to node.
+
+8. *The functions under "Reading by id".* They are served by keys on
+   both sides and stay:
+
+   | Function | Callers on trunk | Callers after T6x-e4 | On the builder |
+   | --- | --- | --- | --- |
+   | `Js::owner` | `declared`, `row_of`, `mentions` | the same | the column `owners` of "T6: the interface" (f), T6v |
+   | `Js::kind_of` | `classify`, `declared`, `row_of` | `declared`, `row_of` (`classify` reads the row's statement) | the row table |
+   | `Js::is_callee` | `mentions` | the same | a bit written with the owner, T6v |
+   | `Js::id_bound` | `row_of` | the same | the length of the row table |
+   | `JsStmt::alias_at` | none | `alias_of` | decision 7 |
+
+   None hands a node out, so none breaks the rule; what they cost the
+   builder is (f)'s column, one store an operand, for a walk
+   (`mentions`) whose frequency this turn did not measure. T6v's design
+   owes that measurement before it builds the column.
+
+   The ids trunk hands to code a later slice owns are unchanged by this
+   turn:
+
+   | Place | The id | Removed by |
+   | --- | --- | --- |
+   | `names::adopt` (from `call.rs`) | the row of a node whose names are adopted | T6r |
+   | `close::decide`, the `return` arm | the returned value, for `scope::return_sites` | T6r ("T6x-b" (c)) |
+   | `finish` | the root block | T6s ("T6x-b" (b)) |
+
+   Item 7 of the corrections of "T6x-b: an output's value, as built"
+   stays T6v's; item 8 is paid here (decision 11).
+
+9. *The eight calls in three test helpers.* T6x-f removes the
+   transition functions from the two traits, so no generic code can
+   name one, and keeps them as functions of `Rows` compiled for tests:
+   the tests of `out.rs` (34 calls), `js_stmt_tests.rs` (12) and
+   `js_tests.rs` (4) build rows on the arena and wrap them, and they are
+   tests of rows. The three helpers are generic and go:
+   `call.rs::call_node` (one use, an argument with an effect in the
+   test `arity_groups_match_legacy`) becomes `call_values` over
+   `out::of_row`; `cond.rs::empty_block` and `raw_if` (the hand of
+   `if_statement_is_simplify_if_for_every_rule`) become two arms of that
+   hand written on the arena, as its `throw` and `break` are. No test
+   is deleted.
+
+10. *The allocation counts.* `build_rows` reads a block's statements
+    by recursion (`block_len`, `with_block_stmt`); it no longer pushes
+    every statement of the top level through `Tables::path`. Two of the
+    four counts of `unit.rs` then read one lower (switches 103 to 102,
+    untagged 156 to 155: `path` is allocated by `row_of` in the other
+    two units and by nothing in these). They move in T6x-e3, the slice
+    that moves `build_rows`, with this reason in the test's comment.
+    The recursion is as deep as blocks nest at the top level, one frame
+    of `add_row` and one closure a level; a later read of a nested row
+    costs one read a level. Not chosen: an explicit stack kept in the
+    tables. A read of a row n blocks down would then start from the top
+    each time, or the stack would hold references into blocks, which a
+    table cannot keep. Not measured: the stack a unit of very deep
+    blocks needs; the source program above makes one level, and an
+    untagged match inside the arm of another makes one more (test of
+    decision 11 at three).
+
+11. *Tests added by this turn*, each seen to fail:
+
+    | Test | What it is there for | Broken how |
+    | --- | --- | --- |
+    | `export.rs`, `a_block_of_the_top_level_is_read_and_kept_when_nothing_moves` | a unit with a top-level block through the whole lowering, against the legacy export code | the skip of a nested row removed from `coerced_list` |
+    | `a_moved_alias_used_inside_a_block_dissolves_the_block`, `a_block_inside_a_block_is_dissolved_with_it` | a use inside a block replaced, one and two blocks down; the blocks dissolved | the detach of a nested statement removed |
+    | `the_final_list_of_a_unit_that_dissolves_a_block_moves_each_statement_once` | `coerced_list` at 1,000 and 10,000 rows: rows walked, statements moved and interface steps grow by 9,000; the heap allocations (2) do not grow | a second visit of the rows added. It cannot see a scan that touches no counter |
+    | `external.rs`, `ten_thousand_spliced_elements_and_pushed_arguments_have_linear_counts` | the spliced array and the push loop of a named external without arity at 1,000, 2,000 and 10,000 | either loop made to cost more as it goes |
+    | `js_stmt_tests.rs`, `a_statement_of_a_list_in_flight_is_read_where_it_is` (edited) | no heap allocation around the read | not broken: the body is one indexed read |
+    | `builder_tests.rs`, `a_return_without_a_value_reads_no_expression` | `S::value` of a `return` without one | the test is of a node the builder does not make |
+    | `rows_tests.rs`, `a_release_and_a_leaf_leave_the_operand_stack_alone`; `builder_tests.rs`, `a_leaf_leaves_the_operand_stack_alone` | the sentence added to `Js::release` and the leaf constructors | the builder has no `release` until T6e |
+
+    The Lambda of the three block tests is built by hand: an alias the
+    simplifier would remove, around the untagged match of the source
+    program above. A removed row inside a block has no test through the
+    lowering (see "What was measured"); the take that would serve it is
+    tested on rows and on the builder.
+
+12. *The cut, and what was built.*
+
+    | Slice | What | After | Built once in a throw-away copy |
+    | --- | --- | --- | --- |
+    | T6x-e2 | `jsx.rs` on `jsx_element` and `copy_members`; `Js::jsx` deleted; `State::external_values` stays for `ffi_args.rs` | this turn | yes: two commits, each with the three filters at 579, 71 and 40; clippy and `cargo doc` clean; transition calls 30 to 26; cost notes `changed/new=5; missing/generic=0`. Its prompt is in 11.9 |
+    | T6x-e3 | `export.rs`, kinds 1 and 4: a row says where its statement is; reads go from there; a removed row is released when the list is made (decision 5); two allocation counts move (decision 10) | T6x-e2 | no |
+    | T6x-e4 | `export.rs`, kinds 2 and 3 and the binder: positions in place of expression ids, `substitute`, `alias_at` | T6x-e3 | no |
+    | T6x-f | the transition functions leave the two traits; test helpers as decision 9; `norm::jm14_push_effect_expression` compiled for tests (its five callers are tests of `norm_tests.rs` and `js_stmt_tests.rs`) | T6x-e4 | no |
+
+    T6x-e3, e4 and f have no prompt yet: a prompt is written from a
+    build that ran, and theirs did not run in this turn. What their
+    design turn starts from: the probe's `export.rs` (commits
+    861411754, 8f1a9c8e6, ed23e65e7) with the names of this section,
+    without `take_place` and `copy_value`, and with decisions 5 and 6,
+    which the probe did not build. No commit of the probe applies
+    unchanged on this turn's head: each adds to the traits or to rows at
+    the places this turn wrote (`git apply --check` of each of the nine
+    fails in `rows.rs`, `rows_stmt.rs`, `js_stmt.rs` or `export.rs`).
+    T6x-f no longer waits for T6r: `names.rs` and `globals.rs` call no
+    transition function (the 30 calls are `export.rs` 18, `jsx.rs` 4
+    and the helpers' 8).
+
+**Corrections after the review of this turn** (the review of pull
+request 388; items 1 to 3 are made in place, the others are owed by the
+design turn that builds T6x-e3, e4 and f once and writes their prompts):
+
+1. Made: the doc comments of `JsStmt::substitute`, `JsStmt::alias_at`
+   and `StatementStack::placed_refs`, and of two tests of the builder,
+   cited the decision before their own (5, 6 and 4 for 6, 7 and 5).
+   Decision 9 counted 38 transition calls in the tests of `out.rs`;
+   there are 34 (7 `from_node`, 5 `node`, 20 `stmt_from_node`, 2
+   `stmt_node`). The one use of `call.rs::call_node` is in the test
+   `arity_groups_match_legacy`.
+   State: made in pull request 388; nothing owed.
+2. Made: the doc comment of `JsStmt::substitute` says what the caller
+   promises about an assigned variable. The two bodies differ on a
+   reference that is the target of an assignment: rows replace it (it
+   is a `Var` node, and a site on trunk), the builder passes it (an
+   assignment target is not an expression there). The fold never asks
+   (a declaration of `LetKind::Variable` is not moved, in either of the
+   two functions that move one), so no test can tell; T6x-e4 checks the
+   number `substitute` returns against the number of uses the fold
+   recorded for the row, so that a difference stops the build instead
+   of leaving a reference.
+   State: the doc comment was made in pull request 388. The assertion is
+   T6x-e4's: see the State line of item 5.
+3. Made: the prompt of T6x-e2 names its changelog fragment and its
+   search for `external_values` says what it prints.
+   State: made in pull request 388; T6x-e2 is on trunk (pull request
+   389).
+4. Owed, decision 5 (the release of a removed row when the list is
+   made). It is not final as written: it names one reader that sees the
+   statement trunk had released (`mentions`), and there are others.
+   - `define` reads `vars.binder(var)` of the variable it declares, and
+     that variable can be the removed row's own: `move_reused_to_tail`
+     removes the first declaration that carries the export's name and
+     holds its value, and the arm after it tests `reused == export`, so
+     the two can be one variable. On trunk `release_row` has released
+     the declaration before `define` runs (`Bir::release` unbinds: the
+     binder is none and the variable's fact is `Unknown`), so `define`
+     binds the variable itself. With the release deferred the binder is
+     still there and `define` would bind a copy: another variable in
+     the exported tree.
+   - The table `row_of` is filled at the first call of a unit and
+     leaves out the rows removed before it. "The row keeps its entry"
+     therefore holds only for a row removed after the fill. A site in a
+     removed row of the top level filled later climbs to no row and is
+     skipped, which is right by accident; a site in a removed row
+     inside a block climbs to the block's row and is counted there.
+   - What `Bir::release` does at that moment besides freeing nodes: it
+     unbinds the declared variable and resets its fact, clears the
+     owner of a function header, marks every site below as released,
+     and runs `drain_dead`. Each needs its reader named or the sentence
+     that none reads it between the removal and the list.
+   The design turn builds T6x-e3 once and chooses, with the readers
+   shown: (a) the removal unbinds and marks at once and only the
+   handle's release waits; (b) a removed row that stands in a slot is
+   taken at once (a slot left `Dead(1)` is accepted by every function
+   of the stack; only an emptied HELD entry is not) and only a held one
+   waits; or (c) as written, with every reader changed. A test in which
+   a reused binding of the export's own variable moves is owed with it;
+   if the lowering's tests have one already (they compare with the
+   legacy export code), the build names it.
+   State: paid in pull request 390 by decision 13 (the release is not
+   deferred), with the test of the export's own variable (commit
+   7f51ad14c) and `StatementStack::take_placed` (commit 4bc2aec19). The
+   lowering's tests had no such unit.
+5. Owed, decision 6. A test of `substitute` on a shape where the order
+   of the walk and trunk's order of sites differ (uses at two depths,
+   and inside a function literal), compared with trunk's replacement as
+   the flat test is; the steps of a call that stops at `uses` with
+   references left; and the debug assertion of item 2.
+   State: paid in pull request 390. The tests are commit 19dad7ede
+   (`rows_stmt_tests.rs`, `builder_tests.rs`); the debug assertion is in
+   `substitute_after` of the build of T6x-e4, and its prompt carries it
+   ("with a debug assertion that the number replaced is the number
+   recorded"). Decision 16.
+6. Owed, decision 3 and 5: a removed row that stands inside a block has
+   no test through the lowering and no reason it cannot happen. The
+   row of T6x-e3 owes one of the two.
+   State: paid in pull request 390 by two tests through the lowering
+   (commit 75470d61b): a removed row inside a block and a removed row
+   that is held. Decision 13.
+7. Owed, the builder (test-only until T6v; none blocks T6x-e2):
+   `size_of` tests for `Property`, `Pending` and the alias entry;
+   `reserve` reserves neither `members` nor `aliases`; `realias`
+   removes from the middle of a vector (a shift of the entries after
+   it) without a step test; an alias entry outlives the release of its
+   declaration (T6e); and the push `declare` makes for every alias
+   declaration is paid by every unit for a read no unit of the corpora
+   makes, which T6v measures with the column of decision 8.
+   State: still owed, by T6v. No build of the ninth turn needed one.
+8. Owed, small: a debug assertion where a place is made that a slot
+   index is below `StatementStack::HELD` (today a comment); the body of
+   pull request 388 did not list three changes of built code that
+   change no behaviour (`Rows::jsx` moved into `jsx_over`, the
+   builder's `dot` onto `dot_row`, the constant `HELD`).
+   State: the debug assertion is in `placed_refs` (commit 4bc2aec19).
+   The three changes are recorded here; the merged body is not edited.
+9. Not done by the turn: the probe prompt of T6r (K5).
+   State: paid in pull request 390: "Probe of T6r" in 11.9, after the
+   prompt of T6x-f.
+10. Checked in the review beyond the turn's own runs: the source
+    program of "What was measured", alone and with an alias used inside
+    the match and exported, builds in check mode on trunk with no
+    difference from the legacy backend and the JavaScript of the
+    reference compiler. That shows the program is lowered alike, not
+    which rows the fold writes for it: the block rows are known from
+    the turn's instrumented build and from the three hand-built tests.
+    State: a record; nothing owed.
+
+**The ninth design turn: the fold built once** (pull request 390). The
+turn converted `export.rs` in a throw-away copy, slice by slice, settled
+what the review of the eighth turn left open on that build, and wrote
+the prompts of the slices from the builds that ran (11.9). Seen first,
+on trunk at 67070ede3d: `count_lowering_ids.py --self-test` 30
+transition calls (26 once T6x-e2 was merged, 0b05ebef12); `--lib
+bir::lower` 579 passed, `--lib bir::j` 71, `--lib emit::builder` 40;
+the allocation counts of `unit.rs` 86, 103, 86, 156.
+
+13. *A removed row is released at once, as on trunk* (replaces decision
+    5 where it defers the release; what decision 5 says of
+    `placed_refs`, `at_place` and `at_place_mut` and its refusal of an
+    emptied held entry stand). When `substitute_after` has removed a
+    row, `release_row` makes its holder give the statement up and
+    releases it through the interface, at the moment trunk releases it:
+
+    | Where the row stands | How it is given up | What is left |
+    | --- | --- | --- |
+    | a slot of the stack | `StatementStack::take_placed` | the slot `Dead(1)`, as `take` leaves one; the run gives nothing for it |
+    | inside a block of the top level | `JsStmt::take_block_stmt`, the block reached with `at_place_mut` and one `lend_block_stmt` a level | a hole at its index (decision 3); the block is dissolved by `coerced_list` (`substitute_after` set `flattened` before the removal) |
+    | a held statement of the stack | `take_placed` exchanges it for a stand-in | the stand-in in its entry, which the run gives in its place and `coerced_list` releases |
+
+    *Why not deferred.* What `Bir::release` of a removed declaration
+    changes, and who reads it before the final list is made:
+
+    | What the release changes (`edit.rs`) | Readers between the removal and the list | With the release deferred |
+    | --- | --- | --- |
+    | the binder of the declared variable becomes none, its fact `Unknown` (`unbind`) | `define`, the first line (`vars.binder(var).is_some()`), when the variable it declares is the removed row's own: the arm `MovedReused` with `reused == export`. `declared`, `declared_now` and `alias_of` return before they read the binder for a variable a row declares (`decl[var] != 0`) | `define` binds a copy: a second variable in the exported tree. Seen: the test below fails, and only it (35 of the 36 tests of `export.rs` pass) |
+    | each `Var` and module reference below is marked released in the site table, its occurrence and use counts fall (`register_kind`, `adjust_direct`) | `mentions` of the variable the initialiser reads (`let x = f` removed, then an export that asks about `f`): a later export's `move_alias_to_tail`, `move_reused_to_tail`, `is_recursive_function` | the site of a removed row counts as a later use and as a later initialiser, which blocks a move trunk makes, and `substitute_after` would replace a use inside a statement that is not printed |
+    | the nodes are freed and their slots reused | `row_of` (a table by id), which `built` and `copy_members`' `made` clear for each node made | nothing, while the nodes live |
+    | the entry of the statement in `row_of` is cleared (`release_row`) | `row_of` from a site below it | a site in a removed row inside a block would climb to the block's row (the review's second point) |
+    | the owner of a function header is cleared (`unbind`) | none: a removed row's initialiser is a reference, a module member or a chain of static reads over one (`move_alias_to_tail` refuses the kinds `Other` and `Literal`; `reused_binding` accepts what `same_reusable_value` accepts), never a function literal |
+    | `drain_dead` | none: it frees the value of a level-L `Let` only, and the lowering's arena holds none. The throw-away build counted its kills in an arena with a site table: 0 over the lowering's tests, the runtime and `tests/tests` |
+
+    With the release where trunk has it, no row of this table has a
+    reader that sees anything else than on trunk, and the table of
+    readers a deferral would have to change is empty. `row_of` needs no
+    entry for a removed row: nothing below it is live, so no site climbs
+    to it; the fill leaves `REMOVED` rows out as on trunk.
+
+    *The evidence.* `export.rs`,
+    `a_reused_binding_of_the_exports_own_variable_moves_and_is_bound_again`:
+    `let x = Other.f` with `x` exported as `Other.f`, with 0, 1 and 3
+    later calls of `x`, through the whole lowering against the legacy
+    export code. No source program was found for it: the simplifier
+    substitutes an alias of a module member before the lowering, so the
+    Lambda is built by hand, as that of the three block tests. With
+    `release_row` deferred to `coerced_list` in the throw-away copy it
+    fails on "a copy of the export's variable was declared" (two
+    variables named `x`, one on trunk), while both printed texts still
+    equal the legacy ones: a copy prints as its origin. So the test
+    counts variables; the comparison of texts cannot see the
+    difference.
+
+    *The held case is real.* Instrumented, the throw-away build wrote
+    one line a unit and one a removed row. The lowering's tests: 92
+    units reach the fold, 19 rows removed, all in a slot. The runtime
+    and `tests/tests` in check mode: 1,380 units (232 and 1,148), no row
+    removed, 15 units with a held statement at the top level, one of
+    them with a held declaration, none with a declaration inside a
+    block. A held declaration at the top level is the temporary of an
+    argument that is evaluated before a later one (`args.rs`,
+    `evaluate_now`: `let tmp = value`, for a value that is not safe to
+    delay; whether the fold can remove one of those was not examined).
+    A declaration the fold does remove is held where a run is moved
+    into a hold: the run of an argument of a static
+    exit with more than one argument (`exit.rs::exit_child`,
+    `hold_run`). Two tests through the whole lowering, against the
+    legacy export code, remove such rows:
+    `a_removed_row_that_is_held_is_released_and_the_hold_is_written`
+    (`let x = Other.f` in the first argument of an exit with two) and
+    `a_removed_row_inside_a_block_is_taken_out_of_the_block` (the same
+    `let` in the arm of the untagged match of "What was measured"). Both
+    pass on trunk and on the build of T6x-e3; item 6 of the corrections
+    is paid by them.
+
+    *The stand-in.* An empty block that is not explicit
+    (`JsStmt::block_of` of a list of none). On rows one `SBlock` row and
+    an empty list, made at the removal and released when the list is
+    made: two steps and one. On an owning implementation one block node
+    of the arena, which a bump arena does not give back before the unit
+    ends: one node for each removed row that was held, none in the
+    corpora. `take_placed(place, stand_in)` is O(1), one write; it
+    counts no step and allocates nothing, and calls `stand_in` for a
+    held statement only (test at 1,000 and 10,000 held statements).
+    Read against `out.rs`: a slot left `Dead(1)` is what `take` and
+    `drop_empty_blocks` leave, and `placed_refs`, `take_run`,
+    `take_run_rev`, `slot_len`, `live`, `first`, `last_at`, `trim` and
+    `kill` cross it as one dead slot; it is no `DeadEnd`, and nothing
+    writes a statement into it. A hold keeps every entry, so the
+    functions that hand out statements and those that consume them
+    accept the same set (`statement_refs`, `slot_ref`, `head_mut`,
+    `take`, `take_run`, `take_run_rev`: the test reads `first`, `last`,
+    `only`, `has_statements`, `statement_refs`, `take_run` and
+    `take_run_rev` after both kinds of take). No stand-in reaches the
+    printed list: the only reader of the run after the fold is
+    `coerced_list`, which takes the run in order, knows a removed row
+    of the top level whose place has the `HELD` bit, and puts what the
+    run gives for it with the dissolved blocks, released after the list
+    is made.
+
+    Not chosen: (i) unbinding and marking at the removal and releasing
+    the handle later. It needs a function that retires a statement in
+    place on both sides (on rows a release that keeps the root, and a
+    husk the readers then have to refuse), for a state no reader needs.
+    (iii) decision 5 as written, with `define`, `mentions` and `row_of`
+    changed to test `REMOVED`: three readers changed and a statement
+    kept alive for nothing. The probe's `take_place`, which empties a
+    held entry, stays refused (decision 5).
+
+14. *The final list stages the statements of a dissolved block*
+    (corrects decision 3, which has `coerced_list` take each statement
+    out of its block "by its index" while the list is written).
+    `JsStmt::list` is given an iterator, and an iterator cannot borrow
+    the implementation and the pools the list is being written with: a
+    statement cannot be taken out of its block from inside it. So the
+    first pass of `coerced_list`, which counts the list, also takes each
+    statement of a dissolved block out (`take_block_stmt`; the block is
+    reached with `at_place_mut`, or, a block inside a block, where it
+    was staged) into `Tables::blocks`, and writes the index there into
+    the row's place; the second pass moves it from there into the list.
+    A block of the top level stays on the stack until the run is taken.
+    Cost: a statement of a dissolved block is moved twice (trunk: a
+    detach in place and one move); `blocks` is `Vec<Option<S>>` (8 bytes
+    an entry on rows), reserved once for every row in a unit that is
+    flattened and not touched in one that is not, so a unit that
+    dissolves no block allocates what it did. Seen: the four counts of
+    `unit.rs` read 86, 102, 86, 155 on the build (decision 10's two
+    moved, the other two as they were), and
+    `the_final_list_of_a_unit_that_dissolves_a_block_moves_each_statement_once`
+    passes unchanged (2 allocations at 1,000 and at 10,000 rows). Not
+    chosen: a `list` that hands its closure the implementation (on rows
+    the list pool is borrowed while the list is written, so the body
+    would buffer the statements itself); the probe's `take_place` of
+    the block before the run is taken (decision 5).
+
+15. *T6x-e3 as built* (the throw-away copy; its diff is the comment
+    that starts `// T6X-THROWAWAY e3` on pull request 390, its prompt is
+    in 11.9). Two commits on trunk at 0b05ebef12 with this turn: the
+    conversion of `export.rs` with the three attributes of `out.rs` and
+    the two numbers of `unit.rs`, then `JsStmt::block_ids` compiled for
+    tests (`build_rows` was its only caller outside tests; five tests of
+    `js_stmt_tests.rs` read with it, so it is not deleted). 331 lines
+    added and 195 removed in five files. What was seen on it:
+
+    | Check | Before (trunk with this turn) | On the build |
+    | --- | --- | --- |
+    | `--lib bir::lower`, `bir::j`, `emit::builder` | 585, 71, 40 | 585, 71, 40 |
+    | `count_lowering_ids.py --self-test` | 26 | 21 (`export.rs` 18 to 13: `stmt_from_node` 6 to 1, the one left is the binder of `alias_of`) |
+    | the allocation counts of `unit.rs` | 86, 103, 86, 156 | 86, 102, 86, 155, as decision 10 expected |
+    | `size_of::<Row>()` | 8 | 8: the place, and the row of the block of a nested row in the bits above the nine flags (a unit of more than 2^23 rows inside blocks is refused by an assertion) |
+    | clippy and `cargo doc`, warnings denied | clean | clean |
+    | `check_lowering_cost_docs.py` | `changed/new=1; missing/generic=0` | `changed/new=22; missing/generic=0` |
+    | check mode, the runtime and `tests/tests` (a debug build) | | the lowering stage identical for 113 of 113 and 905 of 906 units; the other one is the ratchet's unsupported unit |
+
+    A row inside a block is read through its block: one
+    `with_block_stmt` a level, from the place of the block of the top
+    level. `with_row` and `with_row_mut` descend by recursion behind a
+    `&mut dyn FnMut`, so the descent is one function and no closure
+    type grows with the depth. `declared_by` still gives the id of the
+    initialiser, read where the statement is: an id read from a handle
+    is a key, and T6x-e4 replaces what is done with it. Not run on this
+    build: the parity suites, `Instruction count`, the 3,735-module
+    application.
+
+16. *The substitution, as built* (completes decision 6).
+
+    *The order.* `substitute` promises no order of replacement, and
+    nothing needs one. The test
+    `a_substitution_at_two_depths_and_inside_a_function_is_trunks_but_for_the_order_of_the_new_sites`
+    (`rows_stmt_tests.rs`) builds `f(x, x.name, function () { return
+    f(x, x); }, x);`, the references inside the literal first, so that
+    the sites (newest first) and the walk (last operand first, a
+    literal entered before the operand before it) meet the five
+    references in different orders. The arena after the walk is the
+    arena after trunk's replacement at the sites, dump for dump: a copy
+    is made in a free slot and written over its target
+    (`Bir::replace`), so each node keeps its id whatever the order.
+    What differs is the site table: each copy is a new `Var` and gets
+    the next site, so the copies' sites are in the order they were
+    made. Three readers walk sites: `mentions`, which sets flags and
+    counts by row and is the same for any order; the naming log's
+    `close` (`names.rs`, `read_sites`), which joins each site into a run
+    that it then sorts (`ident_order`); and `globals::decide`, which
+    tests whether a variable has a site and qualifies each live site by
+    itself. So neither body was changed and
+    the doc comment of `JsStmt::substitute` stands. The builder has no
+    function literal; its test of the six shapes compares printed
+    text, which no order changes.
+
+    *The steps of a call that stops.* On rows and on the builder
+    (`a_substitution_that_stops_with_references_left_reads_no_further`):
+    asked for 100 references, a call reads the same with 1,000 and with
+    10,000 in the statement, and each further reference asked for costs
+    two steps on rows (its node and the copy) and one on the builder
+    (the copy is counted by its constructor).
+
+    *What the fold records.* `Tables::later` holds the later rows that
+    hold a reference, each once, in the order `mentions` met them;
+    `Tables::later_uses`, dense by row, holds how many. Not a hash map
+    and not a sort: the row is an index. `later_uses` is sized by the
+    first collecting pass that finds a later reference, not by
+    `build_rows`, so a unit without one allocates what it did (the four
+    counts of `unit.rs` did not move on the build). `substitute_after`
+    asserts in debug builds that `substitute` replaced as many as were
+    recorded for the row (item 2 of the corrections).
+
+    *One first copy.* A copy of the replacement can be a copy of the
+    initialiser of a row (`Replacement::Member`, `Replacement::Node` of
+    a row), and that row stands on the statement stack, like the later
+    row that is lent to `substitute`: the two cannot be borrowed
+    together. So `substitute_after` copies the replacement once before
+    it lends anything, makes the copy for each use from that first copy
+    (`Js::var`, `Js::copy_leaf` with `assume_strict`, or
+    `Js::copy_members`, as the replacement's kind says), and returns
+    the first copy, which becomes the value of the declaration of the
+    export tail, where trunk made one more copy after the uses. The
+    number of copies is trunk's (one a use and one); their order is
+    not, which the paragraph above allows. `move_alias_to_tail` and
+    `move_reused_to_tail` return that expression in place of the
+    replacement. Not chosen: reading the removed row inside the lend
+    (two borrows of the stack); taking the removed row off the stack
+    before the substitution (the release would come before its last
+    reader).
+
+17. *T6x-e4 as built* (the throw-away copy on the build of T6x-e3; its
+    diff is the comment that starts `// T6X-THROWAWAY e4` on pull
+    request 390, its prompt is in 11.9). One commit: the positions
+    change the signatures of `replacement`, `copy_replacement` and
+    `same_reusable_value`, which every moving function calls, so
+    nothing compiles in between. 365 lines added and 206 removed in
+    `export.rs`.
+
+    | Check | On the build of T6x-e3 | On the build of T6x-e4 |
+    | --- | --- | --- |
+    | `--lib bir::lower`, `bir::j`, `emit::builder` | 585, 71, 40 | 585, 71, 40 (the copy did not hold the three tests of decision 16; trunk with this turn reads 585, 73, 41) |
+    | `count_lowering_ids.py --self-test` | 21 | 8: `export.rs` has none; the eight are the three test helpers of decision 9 |
+    | `Bir::replace`, `Bir::detach`, `Bir::release`, `B::at`, `B::node`, `B::stmt_from_node` in `export.rs` above its tests | 12 lines | none |
+    | the allocation counts of `unit.rs` | 86, 102, 86, 155 | the same |
+    | the step bounds of `ten_thousand_references_to_a_moved_alias_are_each_visited_once` | pass | pass, unedited |
+    | clippy and `cargo doc`, warnings denied | clean | clean |
+    | `check_lowering_cost_docs.py` | `changed/new=22; missing/generic=0` | `changed/new=48; missing/generic=0` |
+    | check mode, the runtime and `tests/tests` (a debug build) | 113 of 113 and 905 of 906 identical | the same |
+
+    `same_reusable_value` reads the two initialisers where they are:
+    one `with_row` inside the other, the two references taken in the
+    innermost read, the steps counted in a local. Both reads are shared
+    borrows of the stack, so this needs nothing of the interface.
+    `copy_replacement` and the copies of `substitute_after` use
+    `Js::copy_members`; `copy_cold` and `dot` have no call left in
+    `export.rs`. Not run on this build: the parity suites,
+    `Instruction count`, the 3,735-module application.
+
+18. *T6x-f as built, and what the script checks afterwards* (the
+    throw-away copy on the build of T6x-e4; its diff is the comment
+    that starts `// T6X-THROWAWAY f` on pull request 390, its prompt is
+    in 11.9). One commit, 96 lines added and 118 removed in eleven
+    files: the eight functions leave `Js` and `JsStmt`; their bodies
+    move into two `impl Rows` compiled for tests; the three helpers of
+    decision 9 go as it says; `jm14_push_effect_expression` is compiled
+    for tests.
+
+    Decision 9 counted the calls of the tests on `Rows` by name; the
+    build found eight more test lines that name a transition function
+    through a trait (`<Rows as JsStmt>::stmt_from_node(` in `args.rs`
+    twice, `cond.rs` three times, `oracle_tests.rs` once,
+    `...::list_id(` in `oracle_tests.rs`, `<Rows as Js>::from_node(` in
+    `mod.rs`): they name it on `Rows`. The tests use all of `at`,
+    `list_from` and `list_id` too (`js_tests.rs`, `js_stmt_tests.rs`),
+    so `Rows` keeps the eight, not seven.
+
+    *The script.* Until this turn `count_lowering_ids.py --self-test`
+    checked only that it found a call, so the number could rise unseen;
+    and with no call left it fails unless it is given
+    `--no-calls-left`, which the workflow does not pass. Two changes:
+
+    - In this pull request (it runs green on trunk as it is): the
+      self-test fails above `CEILING`, 26 today; T6x-e3 lowers it to
+      21 and T6x-e4 to 8, each in the commit that removes the calls.
+    - In T6x-f: no call may be left (`calls == 0`); neither trait may
+      declare one of the eight names (the seven the script counts and
+      `push_list`); and each of them in `rows.rs` and
+      `rows_stmt.rs` must stand in an impl under `#[cfg(test)]`. The
+      flag goes. After the slice the compiler holds the first line
+      itself (generic code cannot name a function no trait declares,
+      and built code cannot call one compiled for tests); the script
+      holds what the compiler does not: that nobody puts a function
+      back into a trait or takes the attribute off. Both new checks
+      were seen to fail on the build (a `fn node` added to `Js`; the
+      attribute removed from the impl of `rows_stmt.rs`).
+
+    | Check | On the build of T6x-e4 | On the build of T6x-f |
+    | --- | --- | --- |
+    | `--lib bir::lower`, `bir::j`, `emit::builder` | 585, 71, 40 | 585, 71, 40 (trunk with this turn: 585, 73, 41) |
+    | `count_lowering_ids.py --self-test` | 8 | 0 |
+    | transition functions declared by the two traits | 8 | 0 |
+    | clippy and `cargo doc`, warnings denied | clean | clean |
+    | check mode, the runtime and `tests/tests` (a debug build) | 113 of 113 and 905 of 906 identical | the same |
+
+    Not run on this build: the parity suites, `Instruction count`, the
+    3,735-module application. The builder (`emit/builder.rs`) was not
+    touched by any of the three builds: it has no transition function,
+    and its owed items (item 7 of the corrections) stay T6v's.
+
+**Corrections after the review of the ninth turn** (the review of pull
+request 390; items 1 to 6 are made in place, the others are owed):
+
+1. Made: decisions 3 and 5 say where they stand that decisions 14 and
+   13 replace part of them.
+2. Made: the doc comment of `StatementStack::placed_refs` said that no
+   function takes a statement out by its place; `take_placed` does. The
+   doc comment of `take_placed` says what a second take of a place
+   gives.
+3. Made: the check the prompt of T6x-f puts into
+   `count_lowering_ids.py` covered the seven names the script counts
+   and not `push_list`, the eighth function that leaves the traits (the
+   first pass put `fn push_list` back into `Js` on the build and the
+   self-test still passed). The prompt's code reads `T+['push_list']`
+   in both checks. Run in the review on the three throw-away builds
+   applied in order: the self-test passes on the build, stops with "a
+   trait of the lowering declares a transition function" when
+   `push_list` is declared in `Js`, and stops with "is not in an impl
+   compiled for tests" when the attribute is taken off the `impl Rows`
+   of `rows.rs`.
+4. Made: each of the three prompts says that the task wins where a
+   common block disagrees and names the places (the stand-in and the
+   staging against the list of T6x-a; the allocation counts after
+   T6x-e3; `Instruction count` as a report; the check-mode figure). The
+   prompt of T6x-e3 said its first search prints 11 lines on trunk; it
+   prints 9. The prompt of T6x-f says the builder may read its
+   throw-away and that the script's hunks of it do not apply. The probe
+   prompt of T6r says what happens to a function that loses its last
+   production caller.
+5. Made: decision 16 named two readers of the site lists. There is a
+   third, `globals::decide` (`globals.rs`): it tests whether a variable
+   has any site and qualifies each live site by itself, so its result
+   does not depend on their order either.
+6. Made: the test `a_removed_row_that_is_held_is_released_and_the_hold_is_written`
+   asserts the arm and the printed text and not that the removed row
+   stood in a hold (on trunk a row has no place to read). The prompt of
+   T6x-e3 has the builder show it on the built slice: with the test of
+   the `HELD` bit taken out of `coerced_list` the test must fail.
+7. Owed, by the next design turn of T6, as tests: the assertion itself
+   in that test, and in `a_removed_row_inside_a_block_is_taken_out_of_the_block`
+   that the removed row is a nested one (after T6x-e3 a row has a place
+   and `Row::NESTED` to read, through a record compiled for tests as
+   `Coerced::blocks` is); a run in which a slot taken by `take_placed`
+   stands beside a dead range, on either side (both shapes were read
+   against `last_at`, `take_run_rev`, `trim` and the forward readers in
+   the review and hold; no test builds them); the staging of decision
+   14 with a dissolved block of 1,000 and of 10,000 statements (the
+   test of the final list grows the statements after the block, and its
+   count of moved statements is the list's length, so it cannot see the
+   second move).
+8. Owed, to the coordinator, not to a builder: a check-mode build of
+   the 3,735-module application after T6x-f is merged (the three
+   throw-away builds ran check mode over the runtime and `tests/tests`
+   only, with a debug build).
+9. Read in the review and accepted as built: decision 13 (the three
+   cases; the stand-in has one owner at each moment: the stack, then
+   the final list's `blocks`, then `release_stmt`; a removed row that
+   stands in a slot gives nothing to the run; no reader of the run
+   comes between a removal and the final list). Decision 14 (the
+   statements of a dissolved block are moved twice, `blocks` is
+   reserved once in a unit that is flattened and not at all in one that
+   is not). Decision 16 (the first copy is made before the uses and
+   becomes the value of the tail's declaration; trunk makes it after
+   them; both make one copy and one per use, and a copy of the copy is
+   the copy of the original, cold data included, because the same two
+   functions make both; `row_of` is moved out of the tables for the
+   length of `substitute_after` and of `copy_row_value`, and nothing
+   called in between reads it). `JsStmt::block_ids` compiled for tests.
+   The ceiling of the script. T6x-e4 and T6x-f as one commit each
+   (T6x-e4 is about 570 changed lines and gets a first-pass review).
+10. Not rerun in the review: the three builds' test filters, clippy and
+    check mode (the throw-away diffs were applied and compared with the
+    prompts' code and end-state searches by the first pass, without a
+    compiler).
+
+**Changes to earlier sections**, each with its reason:
+
+- "T6: the interface" (a): `jsx(a, mark, JsId, has_children)` becomes
+  `jsx_element(a, callee, mark, JsId, has_children)` (decision 1); the
+  read-back table gains `copy_members`; `JsStmt::value_of` borrows the
+  statement only (decision 4); `B::S` on the builder is the oxc
+  statement for T6v (decision 3).
+- "T6x: the cut": the rows of T6x-e and T6x-f are rewritten for the cut
+  of decision 12.
+- `count_lowering_ids.py --self-test` prints 30 on this turn's head and
+  26 after T6x-e2.
+- (ninth turn) "T6x: the cut": the rows of T6x-e3, e4 and f are
+  rewritten as built (decisions 15, 17 and 18); decision 5's deferred
+  release is replaced by decision 13 and decision 3's take inside the
+  list by decision 14; decision 9's "first seven" is eight (decision
+  18). `count_lowering_ids.py --self-test` gains a ceiling (decision
+  18).
 
 ### 11.5 Worker prompt for T4b
 
@@ -6854,6 +8124,2746 @@ allocation tests fail); `take_list` for an action list (it closes a
 list that has nothing to decide); the clause runs of untagged.rs
 taken in another order; a hole left unfilled; a signature of cond.rs
 or of another file changed.
+```
+
+T6x-b3b (with the common block of phase C and the common block of
+T6x-a1 to T6x-a4, read with "T6x-b3b" for the four slices; the
+paragraph "The probe" of that block is replaced by the one in the task;
+read also 11.4 "T6x-b: an output's value, as built"):
+
+```text
+Task T6x-b3b: the close of a list and the unit's finish go through the
+lowering's interface. One slice, one pull request against
+ocaml-to-rust-rewrite.
+
+Precondition, check it first and stop with a report if it fails: `rg -n
+'fn with_stmt_at' compiler-rust/src/bir/lower/js_stmt.rs` shows one
+line (the design turn of T6x-b is merged); `cargo test --manifest-path
+compiler-rust/Cargo.toml --lib bir::lower` reads 572 passed, `--lib
+bir::j` 58, `--lib emit::builder` 28, none ignored; from compiler-rust,
+`python3 ../scripts/count_lowering_ids.py | grep '^| total' | head -1`
+prints `| total | 15834 | 174 | 87 | 437 | 241 | 126 | 57 | 5 | 3 | 2 |
+3 | 0 | 5 | 162 |` (the first number may differ by lines trunk added;
+the fourth must be 437).
+
+Yours: src/bir/lower/close.rs whole; in src/bir/lower/out.rs
+`StatementStack::take_list` (one line), `StatementStack::close`,
+`FreePool::probe`, the field `FreePool::probes`, the imports and the
+tests named below; in src/bir/lower/mod.rs `complete_unit`, `complete`,
+`finish` (the one that takes `list`), the enum `ProbeInput` and one
+number in the doc comment of `realize`; in src/bir/lower/export.rs
+`extract_exports` and the one test line that calls it; in
+src/bir/node.rs the deletion of `set_block_info`; the changelog
+fragment. Nothing else. You add no function to a trait: the one this
+slice needs, `JsStmt::with_stmt_at`, is on trunk.
+
+The probe. This part was converted once as a throw-away (branch
+`bir-lower-statement-probe`; `git fetch origin
+bir-lower-statement-probe`). You may read `git show e1e5175130` and
+`git show 6b6be5b6e2 -- compiler-rust/src/bir/lower/mod.rs` as a
+starting point. They are unreviewed, they have no cost notes, and they
+leave four places marked `// PROBE-GAP`: where this task gives code,
+the task is right and the probe is not. Merge nothing and cherry-pick
+nothing from that branch.
+
+Commits, in this order, each compiling and passing the three filters on
+its own (the design turn built them in this order), each pushed when
+made:
+
+1. The close. close.rs, with these imports in place of the three it
+   has (`super::scope`, `strictly_pure`, `crate::bir::{..}`):
+
+       use super::js::{Js, Pools};
+       use super::js_stmt::JsStmt;
+       use super::scope::{Decision, VarFacts};
+       use crate::bir::{FuncHeader, NodeId};
+       use crate::emit::row::{Kind, flag};
+
+   and this body (the doc comment of `decide` stays; add to its cost
+   paragraph, after "have their capacity.": "A statement is read where
+   it is (`JsStmt::with_stmt_at`, O(1)): the list is not turned into
+   rows and no statement leaves it."):
+
+       pub(super) fn decide<B: JsStmt>(js: &B, bir: &mut Pools, list: B::L) {
+           let count = js.len(bir, list);
+           let mut steps = 0;
+           for at in (0..count).rev() {
+               steps += 1;
+               match js.kind_at(bir, list, at) {
+                   Kind::Return => {
+                       // `scope::return_sites` takes a row until T6r: the returned
+                       // value is named by its id.
+                       let value = js.with_stmt_at(bir, list, at, |statement| js.value_of(bir, statement).map(|value| js.id(bir, value)));
+                       let value = NodeId(value.expect("a return has a value"));
+                       super::scope::return_sites(bir, value, at + 1 == count)
+                   }
+                   Kind::Declare => {
+                       let decision = js.with_stmt_at(bir, list, at, |statement| {
+                           let var = js.declared(bir, statement).expect("a declaration declares");
+                           let kind = u16::from(js.stmt_aux(bir, statement));
+                           let value = js.value_of(bir, statement);
+                           // From here to `inline`: the lines of trunk, with
+                           // `js.has(bir, value, flag::STRICT)` for
+                           // `strictly_pure(bir, value)` and
+                           // `inlinable_function(js, bir, value)`.
+                           Decision::new(var, status, inline, built)
+                       });
+                       bir.js_scope.as_mut().expect("lowering scope").decisions.push(decision);
+                   }
+                   _ => {}
+               }
+           }
+           bir.js_scope.as_mut().expect("lowering scope").close_steps += steps;
+       }
+
+       /// `inline_function_decl_from_variable` of the legacy pass: a function
+       /// literal that is not a method, not `async` and has no directive. O(1):
+       /// the header of the literal and its attributes, two reads.
+       fn inlinable_function<B: Js>(js: &B, bir: &Pools, value: B::Ref<'_>) -> bool {
+           let Some(header) = js.function_of(bir, value) else { return false };
+           // the two lines of trunk
+       }
+
+   The decision is computed inside the closure, which only reads, and
+   pushed after it: a reference into the statement (`value_of`) does
+   not leave the closure. `inlinable_function` stays behind the three
+   tests of `inline` that come before it, as on trunk: it is not
+   called for every declaration.
+   out.rs: `close(&mut self, js: &B, a: &mut Pools, list: B::L)`,
+   calling `super::close::decide(js, a, list)` under `a.js_scope
+   .is_some()`; in `take_list` the two lines of the close become
+   `self.close(js, a, list);`; `use crate::bir::{Bir, ListId};` goes
+   from the head of the file and the tests import `crate::bir::{Bir,
+   NodeId}`. mod.rs, `complete_unit`: the close of the coerced list
+   becomes
+
+       let list = self.coerced_list(run);
+       // `coerced_list` gives a pool list until T6x-e.
+       self.statements.close(&self.js, &mut self.arena, B::list_from(list));
+
+   The test of close.rs: make `let rows = Rows::default();` before the
+   first `decide`, pass `&rows` to both calls, and import
+   `crate::bir::j::rows::Rows` and `crate::bir::{Bir, ListId, View}` in
+   the test module. It reads what it read: 10,004 steps (`10_001 + 3`),
+   20,000 decisions, no allocation in the second close. Those numbers
+   do not change; if one does, stop and report.
+
+2. The export block's payload. export.rs, `extract_exports`: the
+   parameter is `value: Option<B::E>` and the first line `let mut value
+   = value?;`; the filter of the block literal is `.filter(|&info|
+   matches!(self.arena.block_tag(info), TagInfo::ModuleExport(_)))`;
+   the identifiers are copied where they were taken out:
+
+       let TagInfo::ModuleExport(exports) = self.arena.block_tag(info) else { unreachable!("checked above") };
+       let exports = exports.clone();
+
+   In its doc comment, "No allocation: the identifiers are moved out
+   of the block's payload." becomes "One allocation: the identifiers
+   are copied out of the block's payload, which is the shape's and is
+   shared with every other block of that shape and with the source
+   (`Bir::block_info`)." `use crate::bir::JsPayload;` goes. The test
+   `rows_and_references_are_read_without_allocation_once_the_tables_
+   are_warm` calls `state.extract_exports(out.value, out.finished)`.
+   mod.rs, `complete_unit`: from `let value = out.value.map(B::node);`
+   to the call of `extract_exports` (the comment, the walk of the
+   comma spine, the copy of the payload and the write) becomes one
+   line, `let exports = self.extract_exports(out.value,
+   out.finished);`. src/bir/node.rs: `Node::set_block_info` and its
+   doc comment are deleted (`rg -n 'set_block_info' compiler-rust/src`
+   must then be empty; no test calls it).
+
+3. The finish. mod.rs: `fn finish(mut self, list: B::L, _finished:
+   Finished, coerced: export::Coerced) -> Lowered`, its doc comment
+   "The root block over the top-level list in flight, which is
+   consumed. One step per statement of the list and one write per
+   catch of the unit.", and the root made so:
+
+       // The rest of the unit's finish reads the root by its id: the bulk
+       // finish and the importer take a row until T6s, the replay of the
+       // names until T6r.
+       let root = self.js.block_of(&mut self.arena, list);
+       let root = NodeId(self.js.stmt_id(&self.arena, &root));
+
+   `complete_unit` gives `finish` a `B::L`: `let list =
+   B::list_from(self.coerced_list(run));` under the comment of commit
+   1, then `self.statements.close(&self.js, &mut self.arena, list);`,
+   and the other arm is `self.statements.take_list(&mut self.js, &mut
+   self.arena, run)` without `B::list_id`. `complete` (tests only):
+
+       let value = out.value.unwrap_or_else(|| {
+           let mut undefined = self.js.undefined(&mut self.arena, false);
+           self.js.assume_strict(&mut self.arena, &mut undefined);
+           undefined
+       });
+       let statement = self.js.exp(&mut self.arena, value);
+       self.statements.push(statement);
+
+   and its list is the result of `take_list` as it is.
+   `State::pure_expression` stays `#[cfg(test)]`: tests of args.rs,
+   call.rs and cond.rs call it.
+
+4. The probe function that nothing calls. out.rs: delete
+   `FreePool::probe` with its doc comment, the field `probes` with its
+   doc comment (and `probes: 0` in `Default`), and `ProbeInput` from
+   the import. mod.rs: delete the enum `ProbeInput` with its doc
+   comment; in the doc comment of `realize`, "two moves of its 88
+   bytes" becomes "two moves of its 80 bytes". out.rs tests:
+   `size_of::<FreePool<Rows>>()` is 80 (the field is gone: the one
+   size this slice moves), and the last two tests of the file
+   (`ten_thousand_deferred_nodes_are_probed_and_realized_once`,
+   `nonfree_child_is_kept_without_reprobing`) are replaced by these
+   two, verbatim:
+
+       /// A chain of 10,000 deferred sequences over one leaf, pushed as the
+       /// lowering pushes them (`Free` records, the tail first), is realized
+       /// once per record on the explicit stack: the leaf, then each head.
+       #[test]
+       fn ten_thousand_deferred_nodes_are_realized_once() {
+           let mut pool = FreePool::default();
+           let mut oracle = Oracle::default();
+           let cx = Cx::value();
+           let mut free = pool.push(Free::Leaf(Rows::from_node(NodeId(0))));
+           for n in 1..=10_000 {
+               free = pool.push(Free::Seq { first: Rows::from_node(NodeId(n)), second: free });
+           }
+           assert!(oracle.visits.is_empty());
+           let out = pool.realize(cx, Probed::Free(free), &mut oracle);
+           assert_eq!(out.value.map(Rows::node), Some(NodeId(0)));
+           assert_eq!(pool.realized, 10_001);
+           assert_eq!(oracle.visits, (0..=10_000).collect::<Vec<_>>());
+       }
+       /// A deferred conditional is realized after its branches, the then
+       /// branch first; an output that is not deferred is returned as it is
+       /// and realizes nothing.
+       #[test]
+       fn a_deferred_conditional_is_realized_after_its_branches() {
+           let mut pool = FreePool::default();
+           let mut oracle = Oracle::default();
+           let cx = Cx::returning();
+           let then_ = pool.push(Free::Leaf(Rows::from_node(NodeId(1))));
+           let else_ = pool.push(Free::Leaf(Rows::from_node(NodeId(3))));
+           let free = pool.push(Free::Cond { test: Rows::from_node(NodeId(2)), then_, else_ });
+           let out = pool.realize(cx, Probed::Free(free), &mut oracle);
+           assert_eq!(out.value.map(Rows::node), Some(NodeId(1)));
+           assert_eq!(pool.realized, 3);
+           assert_eq!(oracle.visits, vec![1, 3, 2]);
+           let kept = pool.realize(cx, Probed::Out(output(Span { start: 0, len: 1 }, None, Finished::True)), &mut oracle);
+           assert_eq!(kept.finished, Finished::True);
+           assert_eq!(pool.realized, 3);
+       }
+
+The fragment changes/three-trees-t6x-b3b.internal.md, one bullet, is
+part of commit 4: the slice is four commits.
+
+Tests. You edit only what is named above: the two calls and the
+imports of the test of close.rs, the import line of the tests of
+out.rs, one line of a test of export.rs, the size of `FreePool<Rows>`,
+and the two replaced tests. No other expected value changes; the
+replaced tests keep every assertion that does not name the deleted
+counter. `--lib bir::lower` reads 572 passed after every commit (two
+tests replaced by two), `--lib bir::j` 58, `--lib emit::builder` 28.
+The tests that guard commit 2 exist and you do not edit them:
+unit.rs `export_consumption_does_not_empty_shared_block_metadata`,
+`supported_unit_exercises_both_texts_and_shared_export_coercion` and
+the four `full_unit_allocation_boundary_*` (86, 103, 86, 156).
+
+End state, each command run from compiler-rust and pasted with its
+output. A command is one line, however long. The design turn ran each
+on trunk and on its own build of this slice; "now" is what trunk
+prints, "then" what you must print:
+
+    rg -n 'B::(from_node|node|at|stmt_from_node|stmt_node|list_from|list_id)\(|\.map\(B::node\)' src/bir/lower/close.rs src/bir/lower/out.rs src/bir/lower/mod.rs
+
+  Now seven lines: out.rs `take_list` (`B::list_id`); mod.rs
+  `complete_unit` 2, `complete` 3, `enter` 1. Then two: mod.rs
+  `complete_unit` (`B::list_from(self.coerced_list(run))`, T6x-e) and
+  `enter` (`B::from_node(self.constant(value))`, T6x-d).
+
+    rg -n 'fn decide|fn close\(|fn finish\(mut self|fn inlinable_function' src/bir/lower/close.rs src/bir/lower/out.rs src/bir/lower/mod.rs
+
+  Then: `pub(super) fn decide<B: JsStmt>(js: &B, bir: &mut Pools,
+  list: B::L)`; `fn inlinable_function<B: Js>(js: &B, bir: &Pools,
+  value: B::Ref<'_>) -> bool`; `pub(super) fn close(&mut self, js: &B,
+  a: &mut Pools, list: B::L)`; `fn finish(mut self, list: B::L,
+  _finished: Finished, coerced: export::Coerced) -> Lowered`.
+
+    rg -n -A2 'pub\(super\) fn extract_exports' src/bir/lower/export.rs
+
+  Then the second line after it reads `value: Option<B::E>,`.
+
+    rg -n 'set_block_info|ProbeInput|\.probes\b|pub probes' src/bir
+
+  Now 16 lines; then empty.
+
+    rg -n 'View::|\.view\(|lists\.get|strictly_pure' src/bir/lower/close.rs
+
+  Now 13 lines; then five, all inside `mod tests` (the rows the test
+  builds).
+
+    rg -n 'with_stmt_at\(' src/bir/lower --glob '!*_tests.rs' --glob '!js_stmt.rs'
+
+  Now empty; then two lines, both in close.rs.
+
+    rg -n 'js_info\(|block_from_list|new_node\(|pure_expression\(' src/bir/lower/mod.rs
+
+  Now nine lines; then five: the definition of `pure_expression` (two
+  lines) and three `source.new_node` of a test.
+
+    rg -n 'mem::take\(exports\)|block_tag\(' src/bir/lower/export.rs src/bir/lower/mod.rs
+
+  Now two lines (the take in export.rs, `block_tag` in mod.rs); then
+  two, both `block_tag` in export.rs.
+
+    python3 ../scripts/count_lowering_ids.py | grep '^| total' | head -1
+
+  The design turn's build read `| total | 15775 | 169 | 86 | 433 | 240
+  | 126 | 57 | 4 | 3 | 3 | 0 | 0 | 5 | 148 |`: `from_node` 241 to 240
+  (export.rs), `stmt_from_node` 5 to 4 and `list_id` 3 to 0 (mod.rs
+  and out.rs), `list_from` 2 to 3 (mod.rs, until T6x-e). Paste yours
+  beside it and explain any difference in columns four to thirteen.
+
+Cost notes. From compiler-rust: `python3
+../scripts/check_lowering_cost_docs.py --base
+origin/ocaml-to-rust-rewrite`. It reports every function whose
+signature or body changed (the design turn's build: `changed/new=8;
+missing/generic=0; removed=0`) and its last line must read
+`missing/generic=0`. The notes this task gives (`decide`,
+`inlinable_function`, `extract_exports`, `finish`) are the ones to
+write; `close`, `take_list`, `complete_unit` and `complete` keep
+theirs, which still say what a call costs.
+
+Gates of the pull request, beside those of the common blocks: the
+three filters with the counts above; clippy with `-D warnings`; `cargo
+doc` with warnings denied; CI `Backend bridge coverage` at zero
+differences and the parity jobs for JavaScript, the standard library
+and genType green, read before the pull request is marked ready (after
+commit 2 the payloads made after the export fold have ids one lower on
+rows, which no decision reads: these jobs are the check, and if one is
+not clean you stop and report the first difference); the four
+allocation counts; CI `Instruction count` read and reported, with one
+rerun and both figures. For this slice that replaces the limit of the
+common block: the default build does not reach the lowering, so the
+figure is the job's spread (the three parts of this row on trunk read
++0.014%, -0.039% and +0.023%). If both runs read above +0.05%, stop and
+report the functions the job lists.
+
+Run by the design turn, in a copy that was not pushed: these four
+commits one after the other; after each, the three filters passed; on
+the last, rebased on the design turn's final head, they read 572, 58
+and 28, with clippy and `cargo doc` clean, the cost-note check
+at zero, the allocation counts and the close test unchanged; 117 lines
+added and 188 removed in five files. Not run: `Backend bridge
+coverage`, the parity suites, `Instruction count`, check mode.
+
+Shortcuts that count as failure, beside the common lists: `B::list_id`,
+`B::stmt_from_node` or `B::stmt_node` in close.rs; `take_at` in
+`decide` (it moves the statement out); a `Vec` of the statements or of
+their ids; `inlinable_function` called before the tests that precede
+it on trunk; a second `with_stmt_at` for the same statement; the
+payload copied in `complete_unit` or written into a node
+(`set_block_info`, `js_info` in mod.rs); `std::mem::take` of the
+identifiers (it empties a payload other blocks share: six tests fail);
+the root turned back with `B::stmt_node`; `FreePool::probe` or
+`ProbeInput` kept under `#[cfg(test)]`; an edit of scope.rs, of
+`coerced_list`, of `coerce_exports` or of any function of export.rs
+other than `extract_exports`; an edit of js.rs, js_stmt.rs, rows.rs,
+rows_stmt.rs or src/emit.
+```
+
+
+T6x-e2 (with the common block of phase C and the common block of
+T6x-a1 to T6x-a4; read also 11.4 "T6x-e and T6x-f: the fold reads where
+its rows are", decisions 1 and 2). Built: pull request 389. The prompts
+of the slices after it follow it, each written from a build that ran.
+
+```text
+Task T6x-e2: jsx.rs builds a JSX element with its callee apart and
+copies a key with the interface. One slice, one pull request against
+ocaml-to-rust-rewrite.
+
+Precondition, check it first and stop with a report if it fails: `rg -n
+'fn jsx_element' compiler-rust/src/bir/lower/js.rs` shows one line (the
+design turn of T6x-e and f is merged); `cargo test --manifest-path
+compiler-rust/Cargo.toml --lib bir::lower` reads 579 passed, `--lib
+bir::j` 71, `--lib emit::builder` 40, none ignored; from compiler-rust,
+`python3 ../scripts/count_lowering_ids.py --self-test` prints `32
+files, 30 transition calls` and `python3
+../scripts/count_lowering_ids.py | grep '^| total' | head -1` prints
+`| total | 16062 | 89 | 15 | 30 | 3 | 2 | 15 | 6 | 2 | 2 | 0 | 0 | 0 |
+146 |` (the first number may differ by lines trunk added; the fourth
+must be 30).
+
+Yours: in src/bir/lower/jsx.rs the functions `compile_jsx` and
+`duplicate_jsx_key`; in src/bir/lower/js.rs the deletion of `Js::jsx`
+and three sentences of the doc comment of `Js::jsx_element`; in
+src/bir/j/rows.rs the body of `jsx_element`, the deletion of `jsx` and
+of `Rows::jsx_over`, and two cells of the module's table; in
+src/bir/lower/js_tests.rs the two places that call `r.jsx(`; the
+changelog fragment `changes/three-trees-t6x-e2.internal.md`. Nothing
+else. You add no function to a trait.
+
+The probe. This file was converted once as a throw-away (draft pull
+request 383, commit cca7635c3). You may read it. Copy nothing from it:
+its functions are named `jsx_apart` and `copy_members` with other
+bodies on rows, and its commit does not apply. Where this task gives
+code, the task is right.
+
+Commits, in this order, each compiling and passing the three filters on
+its own (the design turn built them in this order), each pushed when
+made:
+
+1. jsx.rs. First edit: `compile_jsx`, whole, doc comment included:
+
+           /// X: compile_jsx. O(props + children + spelling bytes), after shared
+           /// argument sequencing. Optional undefined props are consumed and omitted.
+           /// Property keys go directly into the unit's pool. The operands after
+           /// the callee are pushed on the operand stack as they come, and the
+           /// callee, built after them, is given apart (`Js::jsx_element`): one
+           /// move each, nothing allocated once the stack has its capacity.
+           pub(super) fn compile_jsx(
+               &mut self,
+               jsx: &JsxElement,
+               args: impl IntoIterator<Item = B::E>,
+           ) -> B::E {
+               let mut args = args.into_iter();
+               let mut props = PropertySpan {
+                   start: crate::bir::pools::index(self.arena.pools.property_keys.len()), len: 0,
+               };
+               // The callee is built last (built earlier, its module and variable
+               // would be registered before the key's runtime module), so it is
+               // given to `Js::jsx_element` apart from the operands pushed here.
+               let mark = self.js.mark();
+               let tag = args.next().expect("JSX tag");
+               self.js.push(tag);
+               if jsx.jsx_spread {
+                   let spread = args.next().expect("JSX spread");
+                   self.js.push(spread);
+               }
+               for (name, optional) in &jsx.jsx_props {
+                   self.primitive_steps += 1;
+                   let value = args.next().expect("JSX prop");
+                   if *optional && self.js.kind(&self.arena, B::of(&value)) == Kind::Undefined {
+                       self.js.release(&mut self.arena, value);
+                   } else {
+                       let key = PropertyKey::Literal(self.arena.intern_text(name));
+                       self.arena.pools.property_keys.push(key);
+                       props.len += 1;
+                       self.js.push(value);
+                   }
+               }
+               for _ in 0..jsx.jsx_children.unwrap_or(0) {
+                   self.primitive_steps += 1;
+                   let child = args.next().expect("JSX child");
+                   self.js.push(child);
+               }
+               if jsx.jsx_key {
+                   let key = self.jsx_key(args.next().expect("JSX key"));
+                   self.js.push(key);
+               }
+               assert!(args.next().is_none(), "JSX argument count");
+               let callee = self.jsx_callee(&jsx.jsx_ffi);
+               let info = self.arena.js_info(crate::bir::JsPayload::Jsx(JsxHeader {
+                   spread: jsx.jsx_spread,
+                   props,
+                   children: jsx.jsx_children.unwrap_or(0) as u32,
+                   key: jsx.jsx_key,
+                   multi: jsx.jsx_multi,
+                   fragment: jsx.jsx_fragment,
+               }));
+               self.js.jsx_element(&mut self.arena, callee, mark, info, jsx.jsx_children.is_some())
+           }
+
+   Then `duplicate_jsx_key`, whole, doc comment included (it is the
+   last function of the `impl`; the closing brace of the `impl` stays):
+
+           /// A: is_okay_to_duplicate(false), then the copy. O(d) for a d-deep
+           /// member spine: the walk here reads the shape, and the copy
+           /// (`Js::copy_members`) reads the chain again and makes its d + 1
+           /// nodes. A failed shape leaves the original key untouched and creates
+           /// no nodes. A reference is read with `var_of` before the kind
+           /// (THREE_TREES 11.4, "For T6v: a dotted global").
+           fn duplicate_jsx_key(&mut self, key: &B::E) -> Option<B::E> {
+               let mut r = B::of(key);
+               loop {
+                   self.primitive_steps += 1;
+                   let reference = self.js.var_of(&self.arena, r).map(|var| {
+                       !self
+                           .arena
+                           .vars
+                           .flags(var)
+                           .contains(crate::bir::VarFlags::JS_GLOBAL)
+                           || !self.arena.vars.name(var).as_str().contains('.')
+                   });
+                   match (reference, self.js.kind(&self.arena, r)) {
+                       (Some(true), _) => break,
+                       (None, Kind::Dot)
+                           if self
+                               .js
+                               .member_of(&self.arena, r)
+                               .is_some_and(|(_, position)| position.get().is_some()) =>
+                       {
+                           r = self.js.operand(&self.arena, r, 0);
+                       }
+                       (None, Kind::Qualified | Kind::Bool | Kind::Str | Kind::Number) => break,
+                       (None, Kind::Template) if self.js.aux(&self.arena, r) == 1 => break,
+                       _ => return None,
+                   }
+               }
+               // The shape ends at the first node that is not a member read, which
+               // is where the copy of the chain ends too.
+               Some(self.js.copy_members(&mut self.arena, B::of(key), |_| {}))
+           }
+       }
+
+   After this commit: the three filters read 579, 71 and 40; the
+   self-test prints `32 files, 26 transition calls`.
+
+2. `Js::jsx` is deleted. In js.rs remove the method `jsx` with its doc
+   comment; in the doc comment of `jsx_element` the sentences that
+   refer to `Js::jsx` say what they mean without it ("one per operand,
+   the callee counted as one."; "Panics when the operands are not the
+   tag and what the header counts."; the reference to the decision ends
+   "decision 1: `jsx.rs::compile_jsx`.)"). In rows.rs remove `jsx` and
+   `jsx_over`, and `jsx_element` is:
+
+           fn jsx_element(&mut self, a: &mut Pools, callee: E, mark: Mark, info: JsId, has_children: bool) -> E {
+               let start = self.since(mark);
+               self.operands.push(callee.0);
+               self.operands[start..].rotate_right(1);
+               let JsPayload::Jsx(header) = a.javascript(info) else { panic!("a JSX header") };
+               // The callee and the tag, then what the header counts.
+               let expected = 2 + usize::from(header.spread) + header.props.len as usize + header.children as usize + usize::from(header.key);
+               assert_eq!(self.operands.len() - start, expected, "the operands the JSX header counts");
+               let id = plain::node(
+                   a,
+                   View::JJsx {
+                       values: &self.operands[start..],
+                       info,
+                   },
+                   u16::from(has_children),
+               );
+               self.cut(start, id)
+           }
+
+   In the table at the top of rows.rs the cell of `jsx_element` ends
+   "then `plain::node` with the operands since the mark as the list and
+   the children bit as `aux`: one step and one per operand, the callee
+   one of them", and the cell of "a list constructor" loses "the
+   children bit of `jsx`,". In js_tests.rs the two calls of `r.jsx(`
+   (the JSX case of the read-back test and
+   `a_jsx_element_without_the_operands_of_its_header_is_refused`)
+   build the callee `u.f` with `r.var`, push only the tag `u.x`, and
+   call `r.jsx_element(&mut u.b, callee, mark, info, ..)`; their
+   expected values and the panic message do not change.
+
+End state, run from compiler-rust and paste the output. On the design
+turn's throw-away head each printed what is given; on trunk before the
+slice, what is in brackets:
+- `rg -n 'B::at\(|external_values|self\.scratch' src/bir/lower/jsx.rs`
+  prints nothing [11 lines].
+- `rg -c 'fn jsx\(' src/bir/lower/js.rs src/bir/j/rows.rs` prints
+  nothing [`rows.rs:1` and `js.rs:1`].
+- `rg -n 'jsx_element\(' src/bir/lower src/bir/j | wc -l` prints 7 [4].
+- `rg -n 'copy_members\(' src/bir/lower/jsx.rs` prints one line [none].
+- `rg -n 'external_values' src/bir/lower/*.rs` prints lines of
+  `ffi_args.rs`, `external.rs` and `mod.rs` only [and of `jsx.rs`]. The field
+  stays: the splice of `ffi_args.rs` uses it.
+- `python3 ../scripts/count_lowering_ids.py | grep '^| total' | head
+  -1` printed `| total | 16033 | 89 | 15 | 26 | 3 | 2 | 11 | 6 | 2 | 2
+  | 0 | 0 | 0 | 146 |`, and the row of `jsx.rs` `| 273 | 2 | 0 | 0 | 0
+  | 0 | 0 | ...` (its `at` 4 to 0). Paste yours and explain any
+  difference in columns four to thirteen.
+
+Tests. You edit the two places of js_tests.rs and nothing else in a
+test; no expected value changes, in particular not in the tests of
+jsx.rs, of oracle_tests.rs and of unit.rs (allocation counts 86, 103,
+86, 156; `size_of::<Rows>()` 416; `Row` of export.rs 8 bytes). The
+filters stay at 579, 71 and 40: this slice adds no test, because
+`jsx_element` and `copy_members` have theirs (rows_tests.rs,
+builder_tests.rs), and the tests of jsx.rs and the JSX cases of
+oracle_tests.rs run the two converted functions against the legacy
+code. If a JSX test fails with ids or runtime modules in another
+order, the callee was built before the key: stop and compare with the
+code above.
+
+Cost notes. From compiler-rust: `python3
+../scripts/check_lowering_cost_docs.py --base
+origin/ocaml-to-rust-rewrite`; the design turn's build read
+`changed/new=5; missing/generic=0; removed=0`, and the last figure
+before `removed` must be 0.
+
+Every commit: `cargo clippy --manifest-path compiler-rust/Cargo.toml
+--all-targets -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc
+--manifest-path compiler-rust/Cargo.toml --no-deps`, both clean.
+
+Gates of the pull request, beside those of the common blocks: the
+three filters with the counts above; CI `Backend bridge coverage` at
+zero differences and the parity jobs for JavaScript, the standard
+library and genType green, read before the pull request is marked
+ready; CI `Instruction count` read and reported (the default build
+does not reach the lowering, so the figure is the job's spread; above
++0.05% on two runs, stop and report). The body of the pull request
+lists the two edited tests and says that no attribute was added.
+
+Run by the design turn, in a copy that was not pushed: these two
+commits one after the other; after the first the lowering filter read
+579 and the self-test 26; after the second the three filters read 579,
+71 and 40, with clippy and `cargo doc` clean and the cost-note check at
+zero; 54 lines added and 100 removed in four files. Not run: `Backend bridge
+coverage`, the parity suites, `Instruction count`, check mode, and so
+the order of the runtime modules a keyed element registers was checked
+by the lowering's tests only.
+
+Shortcuts that count as failure, beside the common lists: `B::at`,
+`B::node` or `B::from_node` in jsx.rs; `Js::jsx` kept, or kept under
+`#[cfg(test)]`; a `Vec` of the operands in `compile_jsx`, or
+`State::external_values` or `State::scratch` used there; the callee
+built before the key or before the operands; a slot reserved at the
+mark; a second walk of the key's chain to copy it, or `copy_leaf` and
+`copy_cold` called from jsx.rs; `duplicate_jsx_key` copying before its
+shape check has passed; `jsx_element` renamed to `jsx`; an edit of
+`jsx_tag`, `printed_form`, `jsx_key`, `jsx_callee`, of ffi_args.rs,
+export.rs, js_stmt.rs, rows_stmt.rs, out.rs or src/emit; the field
+`external_values` removed.
+```
+
+
+T6x-e3 (with the common block of phase C and the common block of
+T6x-a1 to T6x-a4; read also 11.4 "T6x-e and T6x-f: the fold reads where
+its rows are", decisions 3, 5, 10, 13 and 14). Written from a throw-away
+build that ran (pull request 390; its diff is a comment there that
+starts `// T6X-THROWAWAY e3`).
+
+```text
+Task T6x-e3: a row of the export fold says where its statement is, and
+a removed row is given up by its holder. One slice, one pull request
+against ocaml-to-rust-rewrite.
+
+Precondition, check it first and stop with a report if it fails: `rg -n
+'fn take_placed' compiler-rust/src/bir/lower/out.rs` shows one line (the
+ninth design turn, pull request 390, is merged) and `rg -c 'fn jsx\('
+compiler-rust/src/bir/lower/js.rs` prints nothing (T6x-e2 is merged);
+`cargo test --manifest-path compiler-rust/Cargo.toml --lib bir::lower`
+reads 585 passed, `--lib bir::j` 73, `--lib emit::builder`
+41, none ignored; from compiler-rust, `python3
+../scripts/count_lowering_ids.py --self-test` prints `32 files, 26
+transition calls` and `python3 ../scripts/count_lowering_ids.py | grep
+'export.rs' | head -1` prints `| `export.rs` | 1885 | 7 | 5 | 18 | 0 |
+1 | 11 | 6 | 0 | 0 | 0 | 0 | 0 | 6 |` (the first number may differ by
+lines trunk added; the fourth must be 18).
+
+Yours: in src/bir/lower/export.rs the module's doc comment, `Row`,
+`Tables::blocks`, `build_rows`, the new functions `add_row`, `with_row`,
+`with_row_dyn`, `with_row_mut`, `with_row_mut_dyn` and `row_key`, and
+the functions `declared_by`, `initialiser`, `has_toplevel_effect`,
+`row_of`, `release_row`, `define`, `equivalent_later`,
+`reusable_declared`, `alias_of` and `coerced_list`; in
+src/bir/lower/out.rs the attribute `#[cfg(test)]` of `at_place`,
+`at_place_mut` and `take_placed` and the sentence of each doc comment
+that announces its removal; in src/bir/lower/unit.rs two numbers and a
+comment; in src/bir/lower/js_stmt.rs and src/bir/j/rows_stmt.rs the
+attribute of `block_ids` and three doc comments; in
+scripts/count_lowering_ids.py the number of `CEILING`; the changelog
+fragment `changes/three-trees-t6x-e3.internal.md`. Nothing else. You add no
+function to a trait and none to the statement stack. Not yours: every
+other function of export.rs (in particular `classify`, `replacement`,
+`member_of`, `copy_replacement`, `substitute_after`, `mentions`,
+`same_reusable_value`, `move_alias_to_tail`: they keep their ids and
+their comments "By id 2" and "By id 3" for T6x-e4), every test, jsx.rs,
+js.rs, rows.rs, src/emit.
+
+What the slice is. On trunk a row of the fold holds the id of its
+statement, and five places make a handle from that id
+(`B::stmt_from_node`) or edit the arena by it (`Bir::detach`,
+`Bir::release`). After the slice a row holds the PLACE of its
+statement: for a row of the top level its place on the statement stack
+(`StatementStack::placed_refs`), for a row inside a block its index in
+the block and the row of the block, for a declaration the fold made its
+index in `Tables::inserted` or `Tables::tail`. Every read goes from the
+place by reference. A removed row is released at once, where trunk
+releases it (decision 13: do not defer it), by making its holder give
+it up. The final list takes the statements of a dissolved block out in
+its first pass (decision 14).
+
+The probe. export.rs was converted once as a throw-away (draft pull
+request 383, commits 861411754 and 8f1a9c8e6) and once more by the
+design turn (the comment on pull request 390). You may read both. Copy
+nothing from the probe: it has `StatementStack::take_place`, which was
+refused, and other names (`with_block_stmt_at`, `with_block_stmt_mut`,
+`take_from_block`). Copy nothing from pull request 383; from the
+comment on pull request 390 you may copy. Where this task gives code,
+the task is right.
+
+Where the common blocks and this task disagree, the task wins. Four
+places are known. (1) The block of T6x-a1 to T6x-a4 counts "a
+placeholder statement kept in a slot or a field" and "a staging vector"
+as failure: the stand-in of a held removed row (decision 13) and
+`Tables::blocks` as this task gives them are neither, they are the
+design. (2) That block holds the four allocation counts of unit.rs at
+86, 103, 86, 156: after commit 1 of this task they are 86, 102, 86,
+155, as the task says. (3) `Instruction count` is read and reported as
+this task says, not held at the block's +0.02%. (4) The block's
+check-mode figure (`scripts/compare_build_instructions.py`) is not
+yours to produce: CI `Backend bridge coverage` is the gate of check
+mode.
+
+Commits, in this order, each compiling and passing the three filters on
+its own (the design turn built them in this order), each pushed when
+made:
+
+1. export.rs, out.rs and unit.rs, together (the three attributes of
+   out.rs cannot go before their callers exist: a function of the stack
+   without a caller fails clippy; and a row cannot hold a place while
+   `release_row` or `coerced_list` still reads an id from it).
+
+   `use super::js::Pools;` is added below `use super::*;`. The module's
+   doc comment: its last paragraph and the list of four kinds become
+
+           //! Since T6x-e the export values, the fold's own declarations and the final
+           //! list are handles of the interface. Since T6x-e3 a row says where its
+           //! statement is (`Row::place`: a place on the statement stack, an index in
+           //! its block, or in `inserted` or `tail`), every read of a row's statement
+           //! goes from there by reference (`State::with_row`), a removed row is
+           //! given up by whoever holds it and released at once, and the statements of
+           //! a dissolved block are taken out of it by their index (THREE_TREES 11.4,
+           //! "T6x-e and T6x-f: the fold reads where its rows are", decisions 13 and
+           //! 14). Three kinds of place still read or edit a node through its id
+           //! alone, each under a comment that starts "By id" and its number. On rows
+           //! an id is the node; an implementation that owns its nodes cannot serve
+           //! them, and slice T6x-e4 converts each:
+           //!
+           //! 1. the declaration of a variable no row declares, read through the
+           //!    variable's binder (`alias_of`);
+           //! 2. an expression read by its id (a row's initialiser, a replacement, a
+           //!    later use), with the copy of a chain of member reads;
+           //! 3. an expression written in place of a use named by its id.
+
+   `Row`:
+
+           /// One top-level statement, in output order. Its index is stable for the
+           /// whole fold. It says where its statement is, and every read of the
+           /// statement goes from there by reference (`State::with_row`).
+           #[derive(Clone, Copy, Debug)]
+           pub(super) struct Row {
+               /// Where the statement is: a row of the top level, its place on the
+               /// statement stack (`StatementStack::placed_refs`); a `NESTED` row, its
+               /// index among the statements of its block (`Row::parent`); an
+               /// `INSERTED` row, its index in `Tables::inserted`; a `TAIL` row, its
+               /// index in `Tables::tail`. In `coerced_list`, once a statement was
+               /// taken out of a block that is dissolved: its index in
+               /// `Tables::blocks`.
+               place: u32,
+               /// The flags below, and above `Row::PARENT` the row of the block of a
+               /// `NESTED` row.
+               bits: u32,
+           }
+
+   and in `impl Row`, above `DECL`, and below `has`:
+
+               /// The bits of `Row::bits` above the flags: the row of the block a
+               /// `NESTED` row stands in.
+               const PARENT: u32 = 9;
+
+               /// The row of the block a `NESTED` row stands in. O(1).
+               fn parent(self) -> u32 {
+                   self.bits >> Row::PARENT
+               }
+
+   `Tables::blocks`:
+
+               /// What `coerced_list` stages: each statement it takes out of a block
+               /// it dissolves, until the list takes it (the entry is then `None`),
+               /// and what it releases once the list is made (the dissolved blocks,
+               /// the stand-in of a removed row that was held). Empty between calls.
+               blocks: Vec<Option<S>>,
+
+   `build_rows` keeps its head (the clears and the loop over the
+   exports) and its doc comment; from `let mut work = ...` to its end it
+   becomes
+
+                   for (place, statement) in self.statements.placed_refs(run) {
+                       Self::add_row(&self.js, &self.arena, &mut t, statement, place, None);
+                   }
+                   t.name_next.resize(t.rows.len(), 0);
+                   self.coercion = t;
+               }
+
+   so it no longer takes `Tables::path` or `State::scratch`. The new
+   functions, in this order after `build_rows`:
+
+               /// The row of `build_rows` for the statement `s` at `place`, then, for a
+               /// block statement, the rows of its statements in order (each read
+               /// where it is, `JsStmt::with_block_stmt`), recursively: the rows in
+               /// pre-order, as trunk's work stack gave them. One step per row; no
+               /// allocation once the tables have their capacity.
+               fn add_row(js: &B, a: &Pools, t: &mut Tables<B::E, B::S>, s: &B::S, place: u32, parent: Option<u32>) {
+                   t.steps += 1;
+                   let row = t.rows.len() as u32;
+                   let mut bits = match parent {
+                       Some(parent) => {
+                           assert!(parent < 1 << (32 - Row::PARENT), "a block row beyond the parent bits");
+                           Row::NESTED | parent << Row::PARENT
+                       }
+                       None => 0,
+                   };
+                   match js.stmt_kind(a, s) {
+                       row::Kind::Block => {
+                           bits |= Row::BLOCK;
+                           t.rows.push(Row { place, bits });
+                           for index in 0..js.block_len(a, s) {
+                               js.with_block_stmt(a, s, index, |inner| Self::add_row(js, a, t, inner, index, Some(row)));
+                           }
+                           return;
+                       }
+                       row::Kind::Declare => {
+                           bits |= Row::DECL;
+                           let var = js.declared(a, s).expect("a declaration binds");
+                           let value = js.value_of(a, s);
+                           if let Some(value) = value {
+                               bits |= Row::VALUE;
+                               if js.kind(a, value) == row::Kind::Fun {
+                                   bits |= Row::FUNCTION;
+                                   t.last_function = row + 1;
+                               }
+                           }
+                           let origin = a.vars.j_origin[var.index()];
+                           if t.decl[origin.index()] == 0 {
+                               t.decl[origin.index()] = row + 1;
+                           }
+                           if value.is_some() {
+                               if let Some(&export) = t.names.get(&a.vars.name(origin)) {
+                                   t.name_next.resize(row as usize + 1, 0);
+                                   let tail = &mut t.name_tail[export as usize];
+                                   if *tail == 0 {
+                                       t.name_head[export as usize] = row + 1;
+                                   } else {
+                                       t.name_next[*tail as usize - 1] = row + 1;
+                                   }
+                                   *tail = row + 1;
+                               }
+                           }
+                       }
+                       row::Kind::Rest => {
+                           bits |= Row::DECL | Row::VALUE;
+                           let var = js.declared(a, s).expect("a rest binds");
+                           let origin = a.vars.j_origin[var.index()];
+                           if t.decl[origin.index()] == 0 {
+                               t.decl[origin.index()] = row + 1;
+                           }
+                       }
+                       _ => {}
+                   }
+                   if bits & (Row::DECL | Row::BLOCK) == 0 {
+                       t.last_plain = row + 1;
+                   }
+                   t.rows.push(Row { place, bits });
+               }
+
+               /// The statement of `row`, read where it is (`Row::place`): `read` is
+               /// given it by reference and what it returns is returned. O(1) for a
+               /// row of the top level, of `inserted` or of `tail`; for a nested row
+               /// one `JsStmt::with_block_stmt` per block between it and the top
+               /// level. Counts no step; allocates nothing.
+               fn with_row<R>(&self, row: u32, read: impl FnOnce(&B::S) -> R) -> R {
+                   let mut read = Some(read);
+                   let mut result = None;
+                   self.with_row_dyn(row, &mut |s| result = Some((read.take().expect("read once"))(s)));
+                   result.expect("the row's statement was read")
+               }
+
+               /// `with_row` behind a reference to a closure, so that the descent
+               /// through the blocks of a nested row is one function. Cost: that of
+               /// `with_row`.
+               fn with_row_dyn(&self, row: u32, read: &mut dyn FnMut(&B::S)) {
+                   let Row { place, bits } = self.coercion.rows[row as usize];
+                   if bits & Row::INSERTED != 0 {
+                       read(&self.coercion.inserted[place as usize].1)
+                   } else if bits & Row::TAIL != 0 {
+                       read(&self.coercion.tail[place as usize])
+                   } else if bits & Row::NESTED != 0 {
+                       let parent = self.coercion.rows[row as usize].parent();
+                       self.with_row_dyn(parent, &mut |block| {
+                           self.js.with_block_stmt(&self.arena, block, place, |s| read(s))
+                       })
+                   } else {
+                       read(self.statements.at_place(place))
+                   }
+               }
+
+               /// The statement of `row` lent to `edit` with the implementation and
+               /// the pools, as `JsStmt::lend_block_stmt` lends a statement of a
+               /// block. Cost: that of `with_row`, and what `edit` costs.
+               fn with_row_mut<R>(&mut self, row: u32, edit: impl FnOnce(&mut B, &mut Pools, &mut B::S) -> R) -> R {
+                   let mut edit = Some(edit);
+                   let mut result = None;
+                   self.with_row_mut_dyn(row, &mut |js, a, s| result = Some((edit.take().expect("edit once"))(js, a, s)));
+                   result.expect("the row's statement was lent")
+               }
+
+               /// `with_row_mut` behind a reference to a closure. Cost: that of
+               /// `with_row_mut`.
+               fn with_row_mut_dyn(&mut self, row: u32, edit: &mut dyn FnMut(&mut B, &mut Pools, &mut B::S)) {
+                   let Row { place, bits } = self.coercion.rows[row as usize];
+                   if bits & Row::INSERTED != 0 {
+                       edit(&mut self.js, &mut self.arena, &mut self.coercion.inserted[place as usize].1)
+                   } else if bits & Row::TAIL != 0 {
+                       edit(&mut self.js, &mut self.arena, &mut self.coercion.tail[place as usize])
+                   } else if bits & Row::NESTED != 0 {
+                       let parent = self.coercion.rows[row as usize].parent();
+                       self.with_row_mut_dyn(parent, &mut |js, a, block| {
+                           js.lend_block_stmt(a, block, place, |js, a, s| edit(js, a, s))
+                       })
+                   } else {
+                       edit(&mut self.js, &mut self.arena, self.statements.at_place_mut(place))
+                   }
+               }
+
+               /// The id of the statement of `row`, read where it is: a key, compared
+               /// with an id `Js::owner` gives and stored in `Tables::row_of`. Cost:
+               /// that of `with_row`.
+               fn row_key(&self, row: u32) -> NodeId {
+                   self.with_row(row, |s| NodeId(self.js.stmt_id(&self.arena, s)))
+               }
+
+   `declared_by`, whole:
+
+               /// The variable, the initialiser and the kind of a declaration row.
+               /// Cost: O(1), a fixed number of reads of the statement.
+               fn declared_by(&self, row: u32) -> (VarId, Option<NodeId>, LetKind) {
+                   self.with_row(row, |handle| {
+                       let kind = match self.js.stmt_aux(&self.arena, handle) & 3 {
+                           0 => LetKind::Strict,
+                           1 => LetKind::Alias,
+                           2 => LetKind::StrictOpt,
+                           _ => LetKind::Variable,
+                       };
+                       let var = self.js.declared(&self.arena, handle).expect("a declaration row");
+                       match self.js.stmt_kind(&self.arena, handle) {
+                           row::Kind::Declare => {
+                               let value = self.js.value_of(&self.arena, handle);
+                               (self.origin(var), value.map(|value| NodeId(self.js.id(&self.arena, value))), kind)
+                           }
+                           row::Kind::Rest => (self.origin(var), Some(NodeId(self.js.stmt_id(&self.arena, handle))), kind),
+                           _ => unreachable!("a declaration row"),
+                       }
+                   })
+               }
+
+   In `initialiser`, `equivalent_later` and `reusable_declared` the
+   comparison with `self.coercion.rows[row as usize].stmt` becomes a
+   comparison with `self.row_key(row)` (the marker of a rest row, until
+   T6x-e4 replaces it), and the doc comment of `initialiser` says
+   "Cost: O(1), two reads of the row's statement where it is
+   (`with_row`), plus one block per level for a nested row."
+
+   `has_toplevel_effect`, whole (its doc comment stays):
+
+               fn has_toplevel_effect(&mut self, row: u32) -> bool {
+                   let bits = self.coercion.rows[row as usize].bits;
+                   if bits & Row::DECL != 0 {
+                       return self.with_row(row, |handle| match self.js.stmt_kind(&self.arena, handle) {
+                           row::Kind::Declare => self
+                               .js
+                               .value_of(&self.arena, handle)
+                               .is_some_and(|value| !self.js.has(&self.arena, value, flag::STRICT)),
+                           _ => true,
+                       });
+                   }
+                   self.coercion.steps += 1;
+                   !self.with_row_mut(row, |js, a, handle| js.effect_free(a, handle))
+               }
+
+   In `row_of` the fill reads each key where the row is; the function
+   starts
+
+                   if self.coercion.row_of.is_empty() {
+                       self.coercion.row_of.resize(self.js.id_bound(&self.arena) as usize, 0);
+                       for index in 0..self.coercion.rows.len() {
+                           self.coercion.steps += 1;
+                           if self.coercion.rows[index].bits & (Row::REMOVED | Row::INSERTED | Row::TAIL) == 0 {
+                               let key = self.row_key(index as u32);
+                               self.coercion.row_of[key.index()] = (index as u32 + 1) << 1;
+                           }
+                       }
+                   }
+                   let t = &mut self.coercion;
+                   let mut path = std::mem::take(&mut t.path);
+
+   and is unchanged from there. A removed row gets no entry, as on
+   trunk: it was released, so no site climbs to it (decision 13).
+
+   `release_row`, whole:
+
+               /// Release the statement of a removed row, at once: its holder gives
+               /// it up and it is released through the interface, so that nothing
+               /// that reads after the removal sees its variable bound or its
+               /// references live (decision 13). A row in a slot of the stack leaves
+               /// the slot dead; a row inside a block leaves a hole at its index, so
+               /// the indexes of the later rows of the block stay right; a held row is
+               /// exchanged for an empty block, which `coerced_list` releases
+               /// (`StatementStack::take_placed`). Cost: the read of its key
+               /// (`row_key`), one write, one step for a statement taken out of a
+               /// block, two for the stand-in of a held one, and one step per node
+               /// released.
+               fn release_row(&mut self, index: u32) {
+                   let row = self.coercion.rows[index as usize];
+                   // The key is read before the handle moves.
+                   let key = self.row_key(index);
+                   if !self.coercion.row_of.is_empty() {
+                       self.coercion.row_of[key.index()] = 0;
+                   }
+                   let statement = if row.bits & Row::NESTED != 0 {
+                       self.with_row_mut(row.parent(), |js, a, block| js.take_block_stmt(a, block, row.place))
+                   } else {
+                       debug_assert!(row.bits & (Row::INSERTED | Row::TAIL) == 0, "a removed row of the fold's own");
+                       let (js, a) = (&mut self.js, &mut self.arena);
+                       self.statements.take_placed(row.place, || {
+                           let empty = js.list(a, 0, std::iter::empty());
+                           js.block_of(a, empty)
+                       })
+                   };
+                   self.js.release_stmt(&mut self.arena, statement);
+               }
+
+   In `define` the statement's id is no longer kept: the line `let stmt
+   = self.built(...)` loses `let stmt =`, and the push of the row is
+
+                   // The caller keeps the declaration in `inserted` or `tail`, at the
+                   // end of either.
+                   let place = if place == Row::INSERTED { self.coercion.inserted.len() } else { self.coercion.tail.len() };
+                   self.coercion.rows.push(Row { place: place as u32, bits });
+
+   `alias_of`, whole (the binder is T6x-e4's; its transition call
+   stays, under its comment):
+
+               /// O:150 collect_export_aliases, for one variable: the variable its
+               /// declaration aliases, when the declaration is in the final block.
+               /// Cost: that of `declared_now`.
+               fn alias_of(&mut self, var: VarId) -> Option<VarId> {
+                   if !self.declared_now(var) {
+                       return None;
+                   }
+                   let alias = |handle: &B::S| {
+                       if self.js.stmt_kind(&self.arena, handle) != row::Kind::Declare {
+                           return None;
+                       }
+                       let value = self.js.value_of(&self.arena, handle)?;
+                       self.js.var_of(&self.arena, value)
+                   };
+                   let target = match self.declaration(var, true) {
+                       Some(row) => self.with_row(row, alias),
+                       None => {
+                           let stmt = self.arena.vars.binder(var)?;
+                           // By id 1: the declaration of a variable no row declares
+                           // (below an `if` of the top level), found from its binder.
+                           alias(&B::stmt_from_node(stmt))
+                       }
+                   };
+                   target.map(|var| self.origin(var))
+               }
+
+   `coerced_list`, whole:
+
+               /// The statements of the coerced top level, written over the run `run`
+               /// of the stack as one list: the rows that remain, each rebound export
+               /// inserted before its row, then the rebound exports of the tail. A
+               /// flattened block loses its block statements. A first pass over the
+               /// rows counts the list and, in a flattened block, takes each
+               /// statement of a dissolved block out of its block by its index
+               /// (`JsStmt::take_block_stmt`, one step each on the interface) into
+               /// `blocks`: the list is written from an iterator, which cannot borrow
+               /// the implementation to take a statement out while it runs (decision
+               /// 14). The second pass moves each statement into the list: the top
+               /// level's out of the run, in order, a dissolved block's out of
+               /// `blocks`, the fold's declarations out of `inserted` and `tail`.
+               /// Cost: both passes walk the rows, and the tables count one step per
+               /// row, once; the second also walks the slots of the run; the list
+               /// counts one step and one per statement on the interface; each
+               /// dissolved block and each stand-in is released, one step per node
+               /// released. `blocks` allocates once in a unit that dissolves a block
+               /// (it is reserved for every row, 8 bytes each on rows); a unit that
+               /// dissolves none allocates nothing here once the tables have their
+               /// capacity.
+               pub(super) fn coerced_list(&mut self, run: Span) -> B::L {
+                   let flattened = self.coercion.flattened;
+                   let mut len = self.coercion.inserted.len();
+                   let mut blocks = std::mem::take(&mut self.coercion.blocks);
+                   debug_assert!(blocks.is_empty());
+                   if flattened {
+                       blocks.reserve(self.coercion.rows.len());
+                   }
+                   for index in 0..self.coercion.rows.len() {
+                       self.coercion.steps += 1;
+                       let row = self.coercion.rows[index];
+                       let Row { place, bits } = row;
+                       if bits & (Row::REMOVED | Row::INSERTED) != 0 {
+                           continue;
+                       }
+                       if bits & Row::TAIL != 0 {
+                           len += 1;
+                           continue;
+                       }
+                       if flattened {
+                           // Each statement of a dissolved block is taken out of its
+                           // block by its index and waits in `blocks`, where its
+                           // row's place points from here on. Its block is on the
+                           // stack, or, a block inside a block, in `blocks` already.
+                           if bits & Row::NESTED != 0 {
+                               let parent = self.coercion.rows[row.parent() as usize];
+                               let block = if parent.bits & Row::NESTED != 0 {
+                                   blocks[parent.place as usize].as_mut().expect("a dissolved block")
+                               } else {
+                                   self.statements.at_place_mut(parent.place)
+                               };
+                               let statement = self.js.take_block_stmt(&mut self.arena, block, place);
+                               self.coercion.rows[index].place = blocks.len() as u32;
+                               blocks.push(Some(statement));
+                           }
+                           if bits & Row::BLOCK != 0 {
+                               continue;
+                           }
+                       } else if bits & Row::NESTED != 0 {
+                           continue;
+                       }
+                       len += 1;
+                   }
+                   let mut inserted = std::mem::take(&mut self.coercion.inserted);
+                   let mut tail = std::mem::take(&mut self.coercion.tail);
+                   let list = {
+                       let rows = &self.coercion.rows;
+                       let blocks = &mut blocks;
+                       let mut inserted = inserted.drain(..).peekable();
+                       let mut tail = tail.drain(..);
+                       let mut top = self.statements.take_run(run);
+                       let mut index = 0;
+                       let statements = std::iter::from_fn(|| loop {
+                           if let Some((_, statement)) = inserted.next_if(|&(at, _)| at as usize == index) {
+                               return Some(statement);
+                           }
+                           let Row { place, bits } = *rows.get(index)?;
+                           index += 1;
+                           if bits & Row::INSERTED != 0 {
+                               continue;
+                           }
+                           if bits & Row::TAIL != 0 {
+                               return tail.next();
+                           }
+                           if bits & Row::NESTED != 0 {
+                               if flattened && bits & (Row::REMOVED | Row::BLOCK) == 0 {
+                                   return Some(blocks[place as usize].take().expect("a statement of a dissolved block"));
+                               }
+                               continue;
+                           }
+                           // The rows of the top level are the run's statements, in
+                           // order. A removed one left its slot when it was removed;
+                           // a held one left a stand-in, which is released below with
+                           // the blocks that were dissolved.
+                           if bits & Row::REMOVED != 0 && place & StatementStack::<B>::HELD == 0 {
+                               continue;
+                           }
+                           let own = top.next().expect("a statement of the top-level run");
+                           if bits & Row::REMOVED != 0 || (flattened && bits & Row::BLOCK != 0) {
+                               blocks.push(Some(own));
+                               continue;
+                           }
+                           return Some(own);
+                       });
+                       self.js.list(&mut self.arena, len as u32, statements)
+                   };
+                   // The blocks whose statements were taken out above, and the
+                   // stand-ins.
+                   for block in blocks.drain(..).flatten() {
+                       self.js.release_stmt(&mut self.arena, block);
+                   }
+                   self.coercion.blocks = blocks;
+                   self.coercion.inserted = inserted;
+                   self.coercion.tail = tail;
+                   self.statements.copied += len;
+                   self.statements.kill(run);
+                   list
+               }
+
+   out.rs: remove `#[cfg(test)]` above `at_place`, `at_place_mut` and
+   `take_placed`, and from their doc comments the sentences "(Slice
+   T6x-e3 removes the attribute with its first caller in `export.rs`.)"
+   (twice) and "Slice T6x-e3 removes the attribute with that caller."
+   (the parenthesis before it then closes after "top level."). unit.rs:
+   `assert_unit_allocation_count("switches", 103)` becomes 102 and
+   `("untagged", 156)` becomes 155, and the comment above the four
+   tests gains, after "interface\" (a)).":
+
+               // interface" (a)). The switches and the untagged unit read one lower
+               // since T6x-e3: `export.rs::build_rows` reads a block's statements by
+               // recursion and no longer pushes every statement of the top level
+               // through `Tables::path`, which nothing else allocates in these two
+               // units (`row_of` does in the other two). THREE_TREES 11.4, "T6x-e
+               // and T6x-f: the fold reads where its rows are", decision 10.
+
+   In scripts/count_lowering_ids.py `CEILING=26` becomes `CEILING=21`:
+   the self-test fails above it, so the calls this commit removed
+   cannot come back unseen.
+
+   After this commit: the three filters read 585, 73 and 41; the
+   self-test prints `32 files, 21 transition calls`.
+
+2. `JsStmt::block_ids` is compiled for tests: `build_rows` was its only
+   caller outside tests, and five tests of js_stmt_tests.rs read with
+   it. Add `#[cfg(test)]` above `fn block_ids` in js_stmt.rs (below its
+   doc comment) and above its body in rows_stmt.rs. In js_stmt.rs the
+   doc comment of `block_ids` ends "Panics on a statement that is not a
+   `Block`. Compiled for tests since T6x-e3: `export.rs::build_rows`
+   reads a block with [`JsStmt::block_len`] and
+   [`JsStmt::with_block_stmt`]."; the doc comment of `stmt_id` no longer
+   links to it ("what [`Js::owner`] gives for its value, the id it has
+   once a block holds it, and a key for [`Js::kind_of`]") and its last
+   parenthesis ends "since a slot is reused; `export.rs::row_of` keys
+   its table by the id of each row's statement.)". A doc link from a
+   public item to an item compiled for tests fails `cargo doc`.
+
+End state, run from compiler-rust and paste the output. On the design
+turn's throw-away head each printed what is given; on trunk before the
+slice, what is in brackets:
+- `rg -n 'B::stmt_from_node|arena\.(detach|release)\(' src/bir/lower/export.rs`
+  prints one line, in `alias_of` [9 lines].
+- The test of a held removed row is seen to fail without the branch it
+  is there for. This is a check you do NOT commit. In `coerced_list`
+  replace the condition `bits & Row::REMOVED != 0 && place &
+  StatementStack::<B>::HELD == 0` by `bits & Row::REMOVED != 0`, run
+  `cargo test --manifest-path compiler-rust/Cargo.toml --lib
+  a_removed_row_that_is_held_is_released_and_the_hold_is_written`,
+  paste the line that fails, and put the condition back. If the test
+  PASSES with the condition changed, the removed row of that test is
+  not held: stop and report it, do not change the test.
+- `rg -n '\.stmt\b|statement_refs|block_ids|self\.scratch' src/bir/lower/export.rs`
+  prints nothing.
+- `rg -c 'By id' src/bir/lower/export.rs` prints 11 [19].
+- `rg -n -B1 'fn (at_place|at_place_mut|take_placed)\(' src/bir/lower/out.rs | rg -c 'cfg\(test\)'`
+  prints nothing [3].
+- `rg -n -B1 'fn block_ids' src/bir/lower/js_stmt.rs src/bir/j/rows_stmt.rs | rg -c 'cfg\(test\)'`
+  prints 2 [nothing].
+- `python3 ../scripts/count_lowering_ids.py --self-test` prints `32
+  files, 21 transition calls` [26], and `python3
+  ../scripts/count_lowering_ids.py | grep 'export.rs' | head -1`
+  printed `| `export.rs` | 2019 | 8 | 6 | 13 | 0 | 1 | 11 | 1 | 0 | 0 |
+  0 | 0 | 0 | 1 |` (its `stmt_from_node` 6 to 1). Paste yours and
+  explain any difference in columns four to thirteen.
+
+Tests. You edit the two numbers of unit.rs and nothing else in a test.
+You add none: the tests this slice needs are on trunk since the design
+turn, and each runs the converted functions against the legacy export
+code. They are, in export.rs:
+`a_reused_binding_of_the_exports_own_variable_moves_and_is_bound_again`
+(fails with "a copy of the export's variable was declared" when the
+release of a removed row is deferred to `coerced_list`),
+`a_removed_row_inside_a_block_is_taken_out_of_the_block` (the hole),
+`a_removed_row_that_is_held_is_released_and_the_hold_is_written` (the
+stand-in: with the test of the `HELD` bit left out of `coerced_list` it
+fails in `validate` with "unreachable live node or untracked free
+slot"), the three block tests and
+`the_final_list_of_a_unit_that_dissolves_a_block_moves_each_statement_once`
+(its allocations stay 2 at 1,000 and at 10,000 rows). No other expected
+value changes: `size_of::<Rows>()` 416, `Row` of export.rs 8 bytes, the
+allocation counts 86 and 86 of the conditionals and the applications.
+The two that move read 102 and 155 in the design turn's build, for the
+reason the comment gives; if yours read anything else, stop and report.
+
+Cost notes. From compiler-rust: `python3
+../scripts/check_lowering_cost_docs.py --base
+origin/ocaml-to-rust-rewrite`; the design turn's build read
+`changed/new=22; missing/generic=0;
+removed=0` against a base without pull request 390, and the figure after `missing/generic=` must be 0.
+
+Every commit: `cargo clippy --manifest-path compiler-rust/Cargo.toml
+--all-targets -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc
+--manifest-path compiler-rust/Cargo.toml --no-deps`, both clean.
+
+Gates of the pull request, beside those of the common blocks: the
+three filters with the counts above; CI `Backend bridge coverage` at
+zero differences and the parity jobs for JavaScript, the standard
+library and genType green, read before the pull request is marked
+ready; CI `Instruction count` read and reported (the default build
+does not reach the lowering, so the figure is the job's spread; above
++0.05% on two runs, stop and report). The body of the pull request
+lists the two edited numbers with their reason and the attributes
+removed (three in out.rs) and added (`#[cfg(test)]` on `block_ids`,
+twice).
+
+Run by the design turn, in a copy that was not pushed: these two
+commits one after the other on trunk at 0b05ebef12 with pull request
+390; after the second the three filters read 585, 71 and 40 (the copy
+did not hold the three tests that pull request added to `bir::j` and
+`emit::builder` afterwards; with them 585, 73 and 41), with clippy and
+`cargo doc` clean and the cost-note check at
+zero; 331 lines added and 195 removed in five files. A check-mode build
+(`RESCRIPT_BACKEND=check`, a debug build of `rescript`, `clean` then
+`build`) of the runtime and of `tests/tests`: the lowering stage
+identical for 113 of 113 units of the runtime and 905 of 906 of
+`tests/tests`, the one other being the unit the ratchet already lists
+as unsupported. Not run: the parity suites,
+`Instruction count`, the 3,735-module application.
+
+Shortcuts that count as failure, beside the common lists: an id used to
+find a node (`B::stmt_from_node`, `B::at`, `Bir::detach`,
+`Bir::release`, `arena.parents`) in any function this task converts;
+the id of a statement stored in `Row` or in a table beside it;
+`StatementStack::take_place` or any other way to empty a held entry;
+the release of a removed row moved to `coerced_list`, or `define`,
+`mentions` or `row_of` changed to skip a removed row; a `Vec` allocated
+per row, per block or per call of `with_row`; `Tables::path` or
+`State::scratch` used by `build_rows`; a third pass over the rows in
+`coerced_list`, or `blocks` reserved in a unit that is not flattened; a
+stand-in given to the list; `JsStmt::block_ids` deleted (five tests call
+it) or left without the attribute; an `allow`; `Row` larger than 8
+bytes; a helper left without a caller; an edit of `substitute_after`,
+`copy_replacement`, `mentions`, `same_reusable_value`, of a test other
+than the two numbers, of js.rs, rows.rs, jsx.rs or src/emit.
+```
+
+
+T6x-e4 (with the common block of phase C and the common block of
+T6x-a1 to T6x-a4; read also 11.4 "T6x-e and T6x-f: the fold reads where
+its rows are", decisions 2, 4, 6, 7, 16 and 17). Written from a
+throw-away build that ran (pull request 390; its diff is a comment there
+that starts `// T6X-THROWAWAY e4`).
+
+```text
+Task T6x-e4: an expression the export fold names is a position, the
+uses of a moved variable are replaced by a walk of their rows, and the
+binder of a variable no row declares is a key. One slice, one pull
+request against ocaml-to-rust-rewrite.
+
+Precondition, check it first and stop with a report if it fails: T6x-e3
+is merged (`rg -n 'fn with_row_dyn' compiler-rust/src/bir/lower/export.rs`
+shows one line); `cargo test --manifest-path compiler-rust/Cargo.toml
+--lib bir::lower` reads 585 passed, `--lib bir::j` 73, `--lib
+emit::builder` 41, none ignored; from compiler-rust, `python3
+../scripts/count_lowering_ids.py --self-test` prints `32 files, 21
+transition calls`, and `sed '/^mod tests/q' src/bir/lower/export.rs | rg
+-c 'By id'` prints 11.
+
+Yours: src/bir/lower/export.rs above its tests (the module's doc
+comment, the types `At`, `Binds`, `Init`, `Replacement`, two fields of
+`Tables`, and the functions named below); in
+scripts/count_lowering_ids.py the number of `CEILING`, which becomes 8
+(from 21) in the same commit; and the changelog fragment
+`changes/three-trees-t6x-e4.internal.md`. Nothing else: no test, no
+other file. You add no function to a trait. Not yours: `Row`,
+`build_rows`, `add_row`, `with_row`, `with_row_dyn`, `row_key`,
+`row_of`, `release_row`, `define`, `coerced_list`, `declared`,
+`declared_now`, `alias_chain`, `resolve_exports` and every function
+this task does not name.
+
+What the slice is. After T6x-e3 the fold still names an expression by
+its id (a row's initialiser, a replacement, a later use) and reaches it
+with `B::at`, writes a copy over a use with `Bir::replace`, and reads
+the declaration of a variable no row declares from its binder with
+`B::stmt_from_node`. After the slice:
+- an expression the fold names is a position, `At`: the initialiser of
+  a row, read where the row is, or the export value the caller holds;
+- `mentions` records, per later row that holds a reference to the moved
+  variable, how many it holds (`Tables::later`, `Tables::later_uses`),
+  and `substitute_after` calls `JsStmt::substitute` once for each such
+  row, with a debug assertion that the number replaced is the number
+  recorded;
+- `substitute_after` makes ONE copy of the replacement first and gives
+  it back as the value of the declaration of the export tail; the copy
+  for each use is made from that one. The replacement itself may be
+  the initialiser of a row of the stack, and a row of the stack cannot
+  be read while a later row of the stack is lent to `substitute`
+  (decision 16). `move_alias_to_tail` and `move_reused_to_tail`
+  therefore return that expression, not the replacement;
+- `alias_of` asks `JsStmt::alias_at` with the binder as a key.
+
+The probe. Read the comment `// T6X-THROWAWAY e4` on pull request 390:
+it is this slice built once. The probe of pull request 383 (commit
+ed23e65e7) has the positions but not the substitution, and its
+`JsStmt::copy_value` does not exist. Where this task gives code, the
+task is right.
+
+Where the common blocks and this task disagree, the task wins. Three
+places are known. (1) The block of T6x-a1 to T6x-a4 holds the four
+allocation counts of unit.rs at 86, 103, 86, 156: since T6x-e3 they are
+86, 102, 86, 155, and those hold here. (2) `Instruction count` is read
+and reported as this task says, not held at the block's +0.02%. (3) The
+block's check-mode figure (`scripts/compare_build_instructions.py`) is
+not yours to produce: CI `Backend bridge coverage` is the gate of check
+mode. This slice is one commit of about 570 changed lines; it is not
+cut, for the reason the task gives.
+
+One commit (the design turn built it as one: the positions change the
+signature of `replacement`, `copy_replacement` and `same_reusable_value`,
+which every moving function calls, and nothing compiles in between).
+
+The module's doc comment: its paragraph "Since T6x-e ..." and the list
+after it become
+
+           //! Since T6x-e the export values, the fold's own declarations and the final
+           //! list are handles of the interface, and no function of the fold finds a
+           //! node from its id (THREE_TREES 11.4, "T6x-e and T6x-f: the fold reads
+           //! where its rows are"). A row says where its statement is (`Row::place`:
+           //! a place on the statement stack, an index in its block, or in `inserted`
+           //! or `tail`) and every read of it goes from there by reference
+           //! (`State::with_row`); a removed row is given up by whoever holds it and
+           //! released at once (decision 13). An expression the fold names is a
+           //! position (`At`: the initialiser of a row, or the export value in
+           //! hand). The uses of a moved variable are replaced by a walk of each
+           //! later row that holds one (`JsStmt::substitute`, decision 6). An id is
+           //! a key only: `row_of` is a table by id, filled from the ids of the
+           //! rows' statements and climbed with `Js::owner` from a site, and the
+           //! binder of a variable no row declares is given to `JsStmt::alias_at`.
+
+The types. Below `Kind`, in place of `Init` and `Replacement`:
+
+           /// Where an expression the fold names is: the initialiser of a row (the
+           /// value of its statement, `JsStmt::value_of`, read at the row's place), or
+           /// the export value being coerced, which the caller holds (`At::VALUE`).
+           /// A position, not a node: it is read through `State::with_row` or the
+           /// caller's handle. 4 bytes.
+           #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+           struct At(u32);
+           impl At {
+               /// The export value in hand.
+               const VALUE: At = At(u32::MAX);
+               /// The initialiser of `row`. O(1).
+               fn row(row: u32) -> At {
+                   debug_assert!(row != u32::MAX);
+                   At(row)
+               }
+               /// The row whose initialiser this is; `None` for the export value.
+               /// O(1).
+               fn of_row(self) -> Option<u32> {
+                   (self != At::VALUE).then_some(self.0)
+               }
+           }
+
+           /// What a declaration row binds its variable to.
+           #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+           enum Binds {
+               /// `let x;`.
+               Nothing,
+               /// `let x = value`: the initialiser is `At::row` of the row.
+               Value,
+               /// A rest of a record (`SRest`): no initialiser the fold reads.
+               Rest,
+           }
+
+           /// The initialiser of a declaration row, classified once where it is read.
+           #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+           enum Init {
+               Absent,
+               Literal(At),
+               Qualified(At),
+               /// A reference to a variable (its origin) and where it is.
+               Var(VarId, At),
+               Fun,
+               Other(At),
+           }
+
+           /// S:282 the expression a moved alias is replaced by. Every use is a copy.
+           #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+           enum Replacement {
+               /// A reference to a variable.
+               Var(VarId),
+               /// A copy of an existing expression: a literal, a module member, or a
+               /// chain of static field reads over one.
+               Node(At),
+               /// A module member without the source metadata of the node it is read from.
+               Member(At),
+           }
+
+In `Tables`, in place of the field `later`:
+
+               /// The references to the variable of the last collecting `mentions`
+               /// pass that stand in a later row, as the rows that hold one, each
+               /// once, in the order the pass met them: what `substitute_after`
+               /// walks.
+               later: Vec<u32>,
+               /// The number of those references each row holds. Dense by row, zero
+               /// for a row that is not in `later`; sized by the first collecting
+               /// pass that finds one.
+               later_uses: Vec<u32>,
+
+and `later_uses: Vec::new(),` in `Default`. `with_row_mut_dyn` is
+replaced by `lend_row`. The functions, each whole, doc comment
+included, in the order they stand in the file:
+
+               /// The statement of `row` lent to `edit` with the implementation and
+               /// the pools, as `JsStmt::lend_block_stmt` lends a statement of a
+               /// block. Cost: that of `with_row`, and what `edit` costs.
+               fn with_row_mut<R>(&mut self, row: u32, edit: impl FnOnce(&mut B, &mut Pools, &mut B::S) -> R) -> R {
+                   let mut edit = Some(edit);
+                   let mut result = None;
+                   Self::lend_row(
+                       &mut self.coercion,
+                       &mut self.statements,
+                       &mut self.js,
+                       &mut self.arena,
+                       row,
+                       &mut |js, a, s| result = Some((edit.take().expect("edit once"))(js, a, s)),
+                   );
+                   result.expect("the row's statement was lent")
+               }
+
+               /// `with_row_mut` on the parts of the state it borrows, so that a
+               /// caller may hold a table it moved out of the tables beside it, and
+               /// behind a reference to a closure, so that the descent through the
+               /// blocks of a nested row is one function. Cost: that of
+               /// `with_row_mut`.
+               fn lend_row(
+                   t: &mut Tables<B::E, B::S>,
+                   stack: &mut StatementStack<B>,
+                   js: &mut B,
+                   a: &mut Pools,
+                   row: u32,
+                   edit: &mut dyn FnMut(&mut B, &mut Pools, &mut B::S),
+               ) {
+                   let Row { place, bits } = t.rows[row as usize];
+                   if bits & Row::INSERTED != 0 {
+                       edit(js, a, &mut t.inserted[place as usize].1)
+                   } else if bits & Row::TAIL != 0 {
+                       edit(js, a, &mut t.tail[place as usize])
+                   } else if bits & Row::NESTED != 0 {
+                       let parent = t.rows[row as usize].parent();
+                       Self::lend_row(t, stack, js, a, parent, &mut |js, a, block| {
+                           js.lend_block_stmt(a, block, place, |js, a, s| edit(js, a, s))
+                       })
+                   } else {
+                       edit(js, a, stack.at_place_mut(place))
+                   }
+               }
+
+               /// The variable, what it is bound to and the kind of a declaration
+               /// row. Cost: O(1), a fixed number of reads of the statement where it
+               /// is (`with_row`).
+               fn declared_by(&self, row: u32) -> (VarId, Binds, LetKind) {
+                   self.with_row(row, |handle| {
+                       let kind = match self.js.stmt_aux(&self.arena, handle) & 3 {
+                           0 => LetKind::Strict,
+                           1 => LetKind::Alias,
+                           2 => LetKind::StrictOpt,
+                           _ => LetKind::Variable,
+                       };
+                       let var = self.js.declared(&self.arena, handle).expect("a declaration row");
+                       match self.js.stmt_kind(&self.arena, handle) {
+                           row::Kind::Declare => {
+                               let binds = match self.js.value_of(&self.arena, handle) {
+                                   Some(_) => Binds::Value,
+                                   None => Binds::Nothing,
+                               };
+                               (self.origin(var), binds, kind)
+                           }
+                           row::Kind::Rest => (self.origin(var), Binds::Rest, kind),
+                           _ => unreachable!("a declaration row"),
+                       }
+                   })
+               }
+
+               /// Classify an expression as an initialiser. Cost: O(1), the kind and
+               /// the variable of a reference, read where the expression is
+               /// (`kind_and_var`).
+               fn classify(&self, at: At, value: Option<&B::E>) -> Init {
+                   match self.kind_and_var(at, value) {
+                       (row::Kind::Var, var) => Init::Var(self.origin(var.expect("a reference")), at),
+                       (row::Kind::Qualified, _) => Init::Qualified(at),
+                       (row::Kind::Fun, _) => Init::Fun,
+                       (kind, _) if Self::is_literal(kind) => Init::Literal(at),
+                       _ => Init::Other(at),
+                   }
+               }
+
+               /// The kind of the expression at `at`, and its variable when it is a
+               /// reference: read in the row's statement (`with_row`, `value_of`) or
+               /// in the export value `value`. Cost: O(1), plus one block per level
+               /// for a nested row. Panics on `At::VALUE` without the value.
+               fn kind_and_var(&self, at: At, value: Option<&B::E>) -> (row::Kind, Option<VarId>) {
+                   match at.of_row() {
+                       Some(row) => self.with_row(row, |s| {
+                           self.read_kind_and_var(self.js.value_of(&self.arena, s).expect("an initialiser"))
+                       }),
+                       None => self.read_kind_and_var(B::of(value.expect("the export value in hand"))),
+                   }
+               }
+
+               /// `kind_and_var` of a reference in hand. O(1): the kind, and the
+               /// variable of a reference only.
+               fn read_kind_and_var(&self, r: B::Ref<'_>) -> (row::Kind, Option<VarId>) {
+                   let kind = self.js.kind(&self.arena, r);
+                   (kind, if kind == row::Kind::Var { self.js.var_of(&self.arena, r) } else { None })
+               }
+
+               /// The variable of the expression at `at` when it is a reference, read
+               /// where it is. Cost: as `kind_and_var`.
+               fn var_at(&self, at: At, value: Option<&B::E>) -> Option<VarId> {
+                   match at.of_row() {
+                       Some(row) => self.with_row(row, |s| {
+                           self.js.var_of(&self.arena, self.js.value_of(&self.arena, s).expect("an initialiser"))
+                       }),
+                       None => self.js.var_of(&self.arena, B::of(value.expect("the export value in hand"))),
+                   }
+               }
+
+               /// The module and member of the expression at `at` when it is a module
+               /// reference, read where it is. Cost: as `kind_and_var`.
+               fn qualified_at(&self, at: At, value: Option<&B::E>) -> Option<(crate::bir::ImportId, Option<crate::bir::StrId>)> {
+                   match at.of_row() {
+                       Some(row) => self.with_row(row, |s| {
+                           self.js.qualified_of(&self.arena, self.js.value_of(&self.arena, s).expect("an initialiser"))
+                       }),
+                       None => self.js.qualified_of(&self.arena, B::of(value.expect("the export value in hand"))),
+                   }
+               }
+
+               /// The initialiser of a declaration row. Cost: O(1), two reads of the
+               /// row's statement where it is (`with_row`), plus one block per level
+               /// for a nested row.
+               fn initialiser(&self, row: u32) -> Init {
+                   match self.declared_by(row) {
+                       (_, Binds::Nothing, _) => Init::Absent,
+                       (_, Binds::Rest, _) => Init::Other(At::row(row)),
+                       (_, Binds::Value, _) => self.classify(At::row(row), None),
+                   }
+               }
+
+               /// S:282 resolve_tail_move_replacement_expression. `start` is the
+               /// expression the walk starts from: an existing expression (a row's
+               /// initialiser, or the export value `value`), or a reference to a
+               /// variable the legacy code builds for the walk. One step per
+               /// declaration on the same-name alias chain.
+               fn replacement(
+                   &mut self,
+                   start: Result<At, VarId>,
+                   rebound: VarId,
+                   prefer_materialized_root: bool,
+                   flat: bool,
+                   value: Option<&B::E>,
+               ) -> Replacement {
+                   let unresolved = match start {
+                       Ok(at) => Replacement::Node(at),
+                       Err(var) => Replacement::Var(var),
+                   };
+                   let mut current = match start {
+                       Ok(at) => match self.var_at(at, value) {
+                           Some(var) => self.origin(var),
+                           None => return unresolved,
+                       },
+                       Err(var) => var,
+                   };
+                   let resolved = loop {
+                       if !self.enter_chain(current) {
+                           break unresolved;
+                       }
+                       let Some(row) = self.declaration(current, flat) else {
+                           break Replacement::Var(current);
+                       };
+                       let (_, _, kind) = self.declared_by(row);
+                       let init = self.initialiser(row);
+                       // lam_pass_lets_dce.ml:21-23 substitutes Strict, Alias and
+                       // StrictOpt only: stop at a Variable binding.
+                       if init == Init::Absent || kind == LetKind::Variable {
+                           break Replacement::Var(current);
+                       }
+                       match init {
+                           Init::Qualified(at) => {
+                               break if current == rebound {
+                                   Replacement::Member(at)
+                               } else {
+                                   Replacement::Var(current)
+                               };
+                           }
+                           Init::Var(next, _)
+                               if self.arena.vars.name(next) == self.arena.vars.name(current) =>
+                           {
+                               current = next
+                           }
+                           Init::Literal(at) => {
+                               break if prefer_materialized_root && current != rebound {
+                                   Replacement::Var(current)
+                               } else {
+                                   Replacement::Node(at)
+                               };
+                           }
+                           _ => break Replacement::Var(current),
+                       }
+                   };
+                   self.leave_chain();
+                   resolved
+               }
+
+               /// The module member a replacement reads, if it is one. Cost: O(1), one
+               /// read.
+               fn member_of(&self, replacement: Replacement, value: Option<&B::E>) -> Option<(crate::bir::ImportId, Option<crate::bir::StrId>)> {
+                   let (Replacement::Node(at) | Replacement::Member(at)) = replacement else {
+                       return None;
+                   };
+                   self.qualified_at(at, value)
+               }
+
+               /// S:428 ml_module_field_tail_move_replacement and S:414 its same-name
+               /// form. Cost: O(1), two reads where the replacement is (`member_of`).
+               fn is_ml_member(&self, replacement: Replacement, name: Option<Name>, value: Option<&B::E>) -> bool {
+                   self.member_of(replacement, value).is_some_and(|(module, member)| {
+                       self.arena.pools.j_modules[module.index()].kind == crate::js_ir::op::Kind::Ml
+                           && name.is_none_or(|name| {
+                               member.is_some_and(|member| self.arena.text(member) == name.as_str())
+                           })
+                   })
+               }
+
+               /// The kind of a replacement as an initialiser (S:256 on the replacement).
+               /// Cost: that of `chain_kind` for a variable, O(1) otherwise.
+               fn replacement_kind(&mut self, replacement: Replacement, flat: bool, value: Option<&B::E>) -> Kind {
+                   match replacement {
+                       Replacement::Var(var) => self.chain_kind(var, flat).unwrap_or(Kind::Other),
+                       Replacement::Member(_) => Kind::Qualified,
+                       Replacement::Node(at) => {
+                           let init = self.classify(at, value);
+                           self.initialiser_kind(init, flat)
+                       }
+                   }
+               }
+
+               /// One pass over the sites of `var` for every question the fold asks
+               /// about its references relative to the row `index` (S:728
+               /// statement_mentions_ident_anywhere, S:632
+               /// later_toplevel_initializer_mentions_ident, S:626
+               /// later_toplevel_function_mentions_ident, S:394
+               /// tail_move_uses_are_safe_to_inline, S:469
+               /// replacement_resolves_to_recursive_function). With `collect`, the
+               /// references in later rows are kept for `substitute_after`, so that a
+               /// reference is read from its chain once. Cost: one step per site of
+               /// the variable (one per `Var` node ever built for it, released ones
+               /// included), plus `row_of`. No allocation once `later` has its capacity.
+               fn mentions(&mut self, var: VarId, index: u32, collect: bool) -> Mentions {
+                   let mut found = Mentions::default();
+                   if collect {
+                       let t = &mut self.coercion;
+                       for row in t.later.drain(..) {
+                           t.later_uses[row as usize] = 0;
+                       }
+                   }
+                   let Some(scope) = &self.arena.js_scope else {
+                       unreachable!("the lowering arena records sites")
+                   };
+                   let mut at = scope.site_heads[var.index()];
+                   while at != 0 {
+                       self.coercion.steps += 1;
+                       self.coercion.site_visits += 1;
+                       let site = self.arena.js_scope.as_ref().expect("sites").sites[at as usize - 1];
+                       at = site.next;
+                       if site.node == NodeId(u32::MAX) {
+                           continue;
+                       }
+                       let Some(parent) = self.js.owner(&self.arena, site.node.0) else {
+                           continue;
+                       };
+                       let place = self.row_of(NodeId(parent));
+                       if place == 1 {
+                           continue;
+                       }
+                       let (row, function) = ((place >> 1) - 1, place & 1 != 0);
+                       if collect && row > index {
+                           let t = &mut self.coercion;
+                           if t.later_uses.len() < t.rows.len() {
+                               t.later_uses.resize(t.rows.len(), 0);
+                           }
+                           if t.later_uses[row as usize] == 0 {
+                               t.later.push(row);
+                           }
+                           t.later_uses[row as usize] += 1;
+                       }
+                       let bits = self.coercion.rows[row as usize].bits;
+                       if row < index {
+                           found.0 |= Mentions::PRIOR;
+                       } else if row == index {
+                           found.0 |= Mentions::OWN;
+                       } else {
+                           found.0 |= Mentions::LATER;
+                           if bits & Row::FUNCTION != 0 {
+                               found.0 |= Mentions::LATER_FUNCTION;
+                           }
+                           if bits & Row::VALUE != 0 && !function {
+                               found.0 |= Mentions::LATER_INITIALISER;
+                           }
+                           if !self.js.is_callee(&self.arena, site.node.0) {
+                               found.0 |= Mentions::LATER_UNSAFE;
+                           }
+                       }
+                   }
+                   found
+               }
+
+               /// A fresh copy of a replacement. A variable and a module member are one
+               /// node (`var`, or `copy_leaf`); a literal or a chain of static field
+               /// reads over one is `Js::copy_members`: one node per read and the
+               /// leaf, each with the cold data of the original. One step per node;
+               /// no allocation once the implementation's work stack has the chain's
+               /// depth.
+               fn copy_replacement(&mut self, replacement: Replacement, value: Option<&B::E>) -> B::E {
+                   match replacement {
+                       Replacement::Var(var) => {
+                           let copy = self.js.var(&mut self.arena, var);
+                           self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
+                           copy
+                       }
+                       Replacement::Member(at) => {
+                           let row = at.of_row().expect("a member is a row's initialiser");
+                           let mut copy = self.copy_row_value(row, false);
+                           self.js.assume_strict(&mut self.arena, &mut copy);
+                           copy
+                       }
+                       Replacement::Node(at) => match at.of_row() {
+                           Some(row) => self.copy_row_value(row, true),
+                           None => {
+                               let row_of = &mut self.coercion.row_of;
+                               let value = B::of(value.expect("the export value in hand"));
+                               self.js.copy_members(&mut self.arena, value, |id| Self::forget(row_of, id))
+                           }
+                       },
+                   }
+               }
+
+               /// A copy of the initialiser of `row`, read where the row is: the chain
+               /// of member reads with its cold data (`Js::copy_members`) when `cold`,
+               /// else the node alone (`Js::copy_leaf`). `row_of` forgets each node
+               /// made (`forget`). Cost: one step per node made, and the descent of
+               /// `with_row_mut` for a nested row.
+               fn copy_row_value(&mut self, row: u32, cold: bool) -> B::E {
+                   // Moved out for the length of the lend and back: no allocation.
+                   let mut row_of = std::mem::take(&mut self.coercion.row_of);
+                   let copy = self.with_row_mut(row, |js, a, s| {
+                       // The reference borrows the statement, not the pools.
+                       let value = js.value_of(a, s).expect("an initialiser");
+                       if cold {
+                           js.copy_members(a, value, |id| Self::forget(&mut row_of, id))
+                       } else {
+                           let copy = js.copy_leaf(a, value);
+                           Self::forget(&mut row_of, js.id(a, B::of(&copy)));
+                           copy
+                       }
+                   });
+                   self.coercion.row_of = row_of;
+                   copy
+               }
+
+               /// S:160 substitute_after: remove the declaration row `index`, whose
+               /// variable is `var`, and replace every reference to it that the
+               /// collecting `mentions` pass found in a later row by a copy of the
+               /// replacement. Returns the first copy, which no use takes: the value
+               /// of the declaration of the export tail. The other copies are made
+               /// from it, because the replacement itself may be the initialiser of a
+               /// row of the stack, which cannot be read while a later row of the
+               /// stack is lent. Cost: one step and one `JsStmt::substitute` per later
+               /// row that holds a reference (one visit per node of the row's
+               /// statement up to its last reference: decision 6), and one copy per
+               /// reference; no site is read again. The block is flattened from here
+               /// on.
+               fn substitute_after(&mut self, index: u32, var: VarId, replacement: Replacement, value: &B::E) -> B::E {
+                   let first = self.copy_replacement(replacement, Some(value));
+                   let mut later = std::mem::take(&mut self.coercion.later);
+                   let mut row_of = std::mem::take(&mut self.coercion.row_of);
+                   for row in later.drain(..) {
+                       self.coercion.steps += 1;
+                       let uses = std::mem::take(&mut self.coercion.later_uses[row as usize]);
+                       let replaced = self.with_row_mut(row, |js, a, s| {
+                           js.substitute(a, s, var, uses, |js, a| match replacement {
+                               Replacement::Var(var) => {
+                                   let copy = js.var(a, var);
+                                   Self::forget(&mut row_of, js.id(a, B::of(&copy)));
+                                   copy
+                               }
+                               Replacement::Member(_) => {
+                                   let mut copy = js.copy_leaf(a, B::of(&first));
+                                   js.assume_strict(a, &mut copy);
+                                   Self::forget(&mut row_of, js.id(a, B::of(&copy)));
+                                   copy
+                               }
+                               Replacement::Node(_) => js.copy_members(a, B::of(&first), |id| Self::forget(&mut row_of, id)),
+                           })
+                       });
+                       // The references of the row are the sites `mentions` counted:
+                       // a difference is a reference left in the program (a variable
+                       // that is assigned is not moved, `JsStmt::substitute`).
+                       debug_assert_eq!(replaced, uses, "the uses of a moved variable in row {row}");
+                   }
+                   self.coercion.row_of = row_of;
+                   self.coercion.later = later;
+                   self.coercion.flattened = true;
+                   let row = &mut self.coercion.rows[index as usize];
+                   row.bits |= Row::REMOVED;
+                   first
+               }
+
+               /// A node the fold built may take the slot of a released one: forget
+               /// what `row_of` remembered for the slot. One write.
+               fn built(&mut self, node: NodeId) -> NodeId {
+                   Self::forget(&mut self.coercion.row_of, node.0);
+                   node
+               }
+
+               /// What `built` writes, on the table alone, for a copy that reports the
+               /// ids of the nodes it makes. One write.
+               fn forget(row_of: &mut [u32], id: u32) {
+                   if let Some(entry) = row_of.get_mut(id as usize) {
+                       *entry = 0;
+                   }
+               }
+
+               /// S:47 move_same_name_export_alias_to_export_tail. Returns the
+               /// replacement and the kind of the moved declaration. Cost: the alias
+               /// chains of the value, one `mentions` pass for the target, one for the
+               /// materialised root, one for the replacement when it is a function,
+               /// and `substitute_after` when the alias moves.
+               fn move_alias_to_tail(&mut self, export: VarId, value: &B::E) -> Option<(B::E, LetKind)> {
+                   let var = self.js.var_of(&self.arena, B::of(value))?;
+                   let target = self.origin(var);
+                   if self.arena.vars.name(target) != self.arena.vars.name(export) {
+                       return None;
+                   }
+                   let index = self.declaration(target, true)?;
+                   let (_, binds, property) = self.declared_by(index);
+                   if binds == Binds::Nothing {
+                       return None;
+                   }
+                   let init = self.initialiser(index);
+                   let kind = self.initialiser_kind(init, true);
+                   if property == LetKind::Variable || kind == Kind::Other {
+                       return None;
+                   }
+                   // S:112-121: a binding that resolves to a literal stays in source
+                   // order, whatever its kind of `let`.
+                   if kind == Kind::Literal {
+                       return None;
+                   }
+                   let uses = self.mentions(target, index, true);
+                   let later_initialiser = uses.has(Mentions::LATER_INITIALISER);
+                   let prefer_materialized_root = match self.materialized_root(init, true) {
+                       Some(root) if root != target => {
+                           later_initialiser || self.mentions(root, index, false).has(Mentions::LATER)
+                       }
+                       _ => false,
+                   };
+                   let replacement = self.replacement(Ok(At::row(index)), target, prefer_materialized_root, true, Some(value));
+                   let qualified = kind == Kind::Qualified;
+                   let qualified_safe = self.is_ml_member(replacement, Some(self.arena.vars.name(target)), Some(value))
+                       || !uses.has(Mentions::LATER_UNSAFE);
+                   let recursive = self.is_recursive_function(replacement);
+                   let blocked = uses.has(Mentions::LATER_FUNCTION)
+                       || (qualified && self.coercion.last_function > index + 1)
+                       || replacement == Replacement::Var(target)
+                       || matches!(replacement, Replacement::Node(at)
+                           if self.var_at(at, Some(value)).is_some_and(|var| self.origin(var) == target))
+                       || uses.has(Mentions::PRIOR)
+                       || (qualified && !qualified_safe)
+                       || later_initialiser
+                       || !self.later_effect_allows(index, uses, kind, qualified_safe, recursive);
+                   if blocked {
+                       return None;
+                   }
+                   Some((self.substitute_after(index, target, replacement, value), property))
+               }
+
+               /// S:582 direct_reused_same_name_export_alias_binding: the first
+               /// declaration carrying the export's name whose initialiser is the
+               /// export's value. One step per declaration of that name.
+               fn reused_binding(&mut self, export: u32, value: &B::E) -> Option<u32> {
+                   let mut at = self.coercion.name_head[export as usize];
+                   while at != 0 {
+                       self.coercion.steps += 1;
+                       let row = at - 1;
+                       at = self.coercion.name_next[row as usize];
+                       if !self.visible(row, true) {
+                           continue;
+                       }
+                       if self.declared_by(row).1 != Binds::Nothing && self.same_reusable_value(row, At::VALUE, Some(value)) {
+                           return Some(row);
+                       }
+                   }
+                   None
+               }
+
+               /// O:308 same_reusable_export_value, of the initialiser of `left` and
+               /// the expression at `right` (another row's initialiser, or the export
+               /// value `value`). Both are read where they are: the references are
+               /// taken inside the innermost read, where one lifetime serves both, and
+               /// the steps are counted in a local, so that the walk borrows nothing
+               /// mutably. A rest row has no initialiser here: one step, and unequal.
+               /// One step per static read of
+               /// the shorter chain.
+               fn same_reusable_value(&mut self, left: u32, right: At, value: Option<&B::E>) -> bool {
+                   let mut steps = 0;
+                   let same = match right.of_row() {
+                       Some(right) => self.with_row(left, |ls| {
+                           self.with_row(right, |rs| {
+                               let (l, r) = (self.js.value_of(&self.arena, ls), self.js.value_of(&self.arena, rs));
+                               self.same_values(l, r, &mut steps)
+                           })
+                       }),
+                       None => {
+                           let value = value.expect("the export value in hand");
+                           self.with_row(left, |ls| {
+                               let (l, r) = (self.js.value_of(&self.arena, ls), Some(B::of(value)));
+                               self.same_values(l, r, &mut steps)
+                           })
+                       }
+                   };
+                   self.coercion.steps += steps;
+                   same
+               }
+
+               /// The walk of `same_reusable_value` over two references in hand. Cost:
+               /// one step per pair read, added to `steps`, at most one per static
+               /// read of the shorter chain and one more.
+               fn same_values<'a>(&'a self, mut left: Option<B::Ref<'a>>, mut right: Option<B::Ref<'a>>, steps: &mut usize) -> bool {
+                   loop {
+                       *steps += 1;
+                       let (Some(l), Some(r)) = (left, right) else {
+                           return false;
+                       };
+                       match (self.js.kind(&self.arena, l), self.js.kind(&self.arena, r)) {
+                           (row::Kind::Var, row::Kind::Var) => {
+                               let (lv, rv) = (self.js.var_of(&self.arena, l), self.js.var_of(&self.arena, r));
+                               return self.ident(lv.expect("a reference")) == self.ident(rv.expect("a reference"));
+                           }
+                           (row::Kind::Qualified, row::Kind::Qualified) => {
+                               let (lm, lf) = self.js.qualified_of(&self.arena, l).expect("a module reference");
+                               let (rm, rf) = self.js.qualified_of(&self.arena, r).expect("a module reference");
+                               return self.arena.pools.j_modules[lm.index()]
+                                   == self.arena.pools.j_modules[rm.index()]
+                                   && lf.map(|f| self.arena.text(f)) == rf.map(|f| self.arena.text(f));
+                           }
+                           (row::Kind::Dot, row::Kind::Dot)
+                               if self.js.aux(&self.arena, l) == 0 && self.js.aux(&self.arena, r) == 0 =>
+                           {
+                               let (lp, lpos) = self.js.member_of(&self.arena, l).expect("a member read");
+                               let (rp, rpos) = self.js.member_of(&self.arena, r).expect("a member read");
+                               if self.arena.text(lp) != self.arena.text(rp) || lpos != rpos {
+                                   return false;
+                               }
+                               left = Some(self.js.operand(&self.arena, l, 0));
+                               right = Some(self.js.operand(&self.arena, r, 0));
+                           }
+                           _ => return false,
+                       }
+                   }
+               }
+
+               /// S:183 move_reused_same_name_export_binding_to_export_tail. Cost: the
+               /// declarations of the export's name, the alias chains of the value,
+               /// one `mentions` pass for the reused variable and `substitute_after`
+               /// when the binding moves.
+               fn move_reused_to_tail(&mut self, export: u32, value: &B::E) -> Option<(B::E, LetKind)> {
+                   let index = self.reused_binding(export, value)?;
+                   let (reused, _, property) = self.declared_by(index);
+                   let replacement = self.replacement(Ok(At::VALUE), reused, false, true, Some(value));
+                   let kind = self.replacement_kind(replacement, true, Some(value));
+                   let uses = self.mentions(reused, index, true);
+                   let qualified_safe = self.is_ml_member(replacement, Some(self.arena.vars.name(reused)), Some(value))
+                       || !uses.has(Mentions::LATER_UNSAFE);
+                   let recursive = self.is_recursive_function(replacement);
+                   let blocked = property == LetKind::Variable
+                       || (kind == Kind::Literal
+                           && (property != LetKind::Alias || self.coercion.last_function <= index + 1))
+                       || kind == Kind::Other
+                       || uses.has(Mentions::PRIOR)
+                       || (kind == Kind::Qualified && !qualified_safe)
+                       || uses.has(Mentions::LATER_INITIALISER)
+                       || !self.later_effect_allows(index, uses, kind, qualified_safe, recursive);
+                   if blocked {
+                       return None;
+                   }
+                   Some((self.substitute_after(index, reused, replacement, value), property))
+               }
+
+               /// O:84 resolve_declared_same_name_self_alias_target. Cost: the
+               /// same-name alias chain of the export.
+               fn self_alias_target(&mut self, var: VarId) -> Option<VarId> {
+                   match self.replacement(Err(var), var, false, false, None) {
+                       Replacement::Var(target) => {
+                           (target != var && self.declaration(target, false).is_some()).then_some(target)
+                       }
+                       _ => None,
+                   }
+               }
+
+               /// The predicate of O:266: a declaration of a later export whose
+               /// initialiser equals the literal (B:237 ocaml_eq_expression). Cost:
+               /// O(1) to reach the initialiser, then `Js::equal`: one step per pair of
+               /// nodes it inspects, bounded by the smaller tree.
+               fn equivalent_later(&self, row: u32, export: u32, value: &B::E) -> bool {
+                   if !self.coercion.rows[row as usize].has(Row::DECL | Row::VALUE) {
+                       return false;
+                   }
+                   let (var, binds, _) = self.declared_by(row);
+                   binds == Binds::Value
+                       && self.coercion.position[var.index()] > export + 1
+                       && self.with_row(row, |s| {
+                           let initialiser = self.js.value_of(&self.arena, s).expect("an initialiser");
+                           self.js.equal(&self.arena, initialiser, B::of(value), &mut 0)
+                       })
+               }
+
+               /// O:101 reusable_declared_same_name_export_alias: another declaration
+               /// of the export's name with the export's own initialiser. One step per
+               /// declaration of that name.
+               fn reusable_declared(&mut self, export: u32, var: VarId) -> Option<VarId> {
+                   let row = self.declaration(var, true)?;
+                   if self.declared_by(row).1 != Binds::Value {
+                       return None;
+                   }
+                   self.reusable_binding(export, var, At::row(row), None)
+               }
+
+               /// O:150 collect_export_aliases, for one variable: the variable its
+               /// declaration aliases, when the declaration is in the final block.
+               /// Cost: that of `declared_now`.
+               fn alias_of(&mut self, var: VarId) -> Option<VarId> {
+                   if !self.declared_now(var) {
+                       return None;
+                   }
+                   let target = match self.declaration(var, true) {
+                       Some(row) => self.with_row(row, |handle| {
+                           if self.js.stmt_kind(&self.arena, handle) != row::Kind::Declare {
+                               return None;
+                           }
+                           let value = self.js.value_of(&self.arena, handle)?;
+                           self.js.var_of(&self.arena, value)
+                       }),
+                       // A variable no row declares (below an `if` of the top level):
+                       // its binder is a key, and the implementation keeps the alias
+                       // of each declaration (`JsStmt::alias_at`, decision 7).
+                       None => self.js.alias_at(&self.arena, self.arena.vars.binder(var)?.0),
+                   };
+                   target.map(|var| self.origin(var))
+               }
+
+               /// O:295 reusable_same_name_export_binding: the first declaration that
+               /// carries the export's name, is not the export and is no `Variable`,
+               /// with the export's value as initialiser. One step per declaration of
+               /// that name.
+               fn reusable_binding(&mut self, export: u32, var: VarId, initialiser: At, value: Option<&B::E>) -> Option<VarId> {
+                   let mut at = self.coercion.name_head[export as usize];
+                   while at != 0 {
+                       self.coercion.steps += 1;
+                       let row = at - 1;
+                       at = self.coercion.name_next[row as usize];
+                       if !self.visible(row, true) {
+                           continue;
+                       }
+                       let (reused, binds, property) = self.declared_by(row);
+                       if reused != var
+                           && property != LetKind::Variable
+                           && binds != Binds::Nothing
+                           && self.same_reusable_value(row, initialiser, value)
+                       {
+                           return Some(reused);
+                       }
+                   }
+                   None
+               }
+
+In `coerce_exports` four edits and no other: the two arms that move a
+declaration bind what the moving function returns,
+
+           if let Some((late, property)) = self.move_alias_to_tail(export, &value) {
+
+           if let Some((late, property)) = self.move_reused_to_tail(index, &value) {
+
+and lose their line `let late = self.copy_replacement(replacement);`;
+the two calls of `replacement` in the arm `DeclaredTarget` and in
+`self_alias_target` gain a last argument `None`; the arm `Reused` reads
+
+           if let Some(reused) = self.reusable_binding(index, export, At::VALUE, Some(&value)) {
+
+and loses its line `let id = NodeId(...)`. In `reused_binding`'s caller
+in the arm `KeptReused`, `let (reused, _, property) =
+self.declared_by(row);` is unchanged.
+
+End state, run from compiler-rust and paste the output. On the design
+turn's throw-away head each printed what is given; on trunk with
+T6x-e3, what is in brackets. `N` is `sed '/^mod tests/q'
+src/bir/lower/export.rs`:
+- `N | rg -c 'B::(at|node|from_node|stmt_from_node|stmt_node)\(|arena\.(replace|detach|release)\('`
+  prints nothing [12].
+- `N | rg -c 'By id'` prints nothing [11].
+- `N | rg -c 'NodeId'` prints 10 [32]: `Tables::path`, `row_key`,
+  `row_of`, `mentions`, `copy_replacement`, `define` and `built`, where
+  an id is a key.
+- `N | rg -c '\.substitute\(|\.alias_at\(|\.copy_members\('` prints 5
+  [nothing].
+- `N | rg -c 'copy_cold|\.dot\('` prints nothing [4].
+- `python3 ../scripts/count_lowering_ids.py --self-test` prints `32
+  files, 8 transition calls` [21]: the eight of the three test helpers
+  (`call.rs`, `cond.rs`), which are T6x-f's. `python3
+  ../scripts/count_lowering_ids.py | grep 'export.rs' | head -1`
+  printed `| `export.rs` | 2178 | 3 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0
+  | 0 | 0 | 0 |`.
+
+Tests. You edit none and add none. The tests this slice needs are on
+trunk: in export.rs every test that moves a declaration runs the
+substitution against the legacy export code
+(`a_moved_alias_is_replaced_where_it_is_called`,
+`ten_thousand_references_to_a_moved_alias_are_each_visited_once`, the
+three block tests, the three tests of decision 13); in rows_stmt_tests.rs
+and builder_tests.rs the tests of `substitute`, `alias_at` and
+`copy_members`. No expected value changes: the allocation counts of
+unit.rs stay 86, 102, 86, 155 (`later_uses` is sized by the first
+collecting pass that finds a later reference, not by `build_rows`: a
+table allocated for every unit would move all four), `size_of::<Rows>()`
+416, `Row` 8 bytes, and the step bounds of
+`ten_thousand_references_to_a_moved_alias_are_each_visited_once`. If a
+step bound moves, stop and report: do not edit it.
+
+Cost notes. From compiler-rust: `python3
+../scripts/check_lowering_cost_docs.py --base
+origin/ocaml-to-rust-rewrite`; the design turn's build read
+`changed/new=48; missing/generic=0; removed=0` against a base without
+T6x-e3, and the figure after `missing/generic=` must be 0.
+
+Before the commit: `cargo clippy --manifest-path compiler-rust/Cargo.toml
+--all-targets -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc
+--manifest-path compiler-rust/Cargo.toml --no-deps`, both clean.
+
+Gates of the pull request, beside those of the common blocks: the
+three filters with the counts above; CI `Backend bridge coverage` at
+zero differences and the parity jobs for JavaScript, the standard
+library and genType green, read before the pull request is marked
+ready; CI `Instruction count` read and reported (the default build
+does not reach the lowering, so the figure is the job's spread; above
++0.05% on two runs, stop and report). The body of the pull request
+says that no test and no attribute changed.
+
+Run by the design turn, in a copy that was not pushed: this commit on
+its build of T6x-e3; the three filters read 585, 71 and 40 there (the
+copy did not hold the two tests pull request 390 adds to `bir::j` and
+`emit::builder`), with clippy and `cargo doc` clean and the cost-note
+check at zero; 365 lines added and 206 removed in export.rs. A check-mode
+build of the runtime and of `tests/tests` (a debug build): the lowering
+stage identical for 113 of 113 and 905 of 906 units, the one other
+being the unit the ratchet already lists as unsupported.
+Not run: the parity suites, `Instruction count`, the 3,735-module
+application.
+
+Shortcuts that count as failure, beside the common lists: an id used to
+find a node (`B::at`, `B::node`, `B::stmt_from_node`, `Bir::replace`)
+anywhere in export.rs; the id of an expression stored in `Init`,
+`Replacement` or a table; `Tables::later` holding sites or nodes; a
+`Vec` allocated per row, per use or per call; `later_uses` resized in
+`build_rows`; the later rows sorted to count them; a second pass over
+the sites for what `mentions` recorded; `substitute` called for a row
+that holds no use, or once per use; the debug assertion on the number
+replaced left out or weakened; the copy for a use read from the row of
+the removed declaration inside the lend of a later row; `copy_leaf`,
+`dot` and `copy_cold` in place of `copy_members`; an `allow`; a helper
+left without a caller; an edit of a test, of `Row`, of `coerced_list`,
+`release_row` or `row_of`, of js.rs, js_stmt.rs, out.rs, src/bir/j or
+src/emit.
+```
+
+
+T6x-f (with the common block of phase C and the common block of T6x-a1
+to T6x-a4; read also 11.4 "T6x-e and T6x-f: the fold reads where its
+rows are", decisions 9 and 18). Written from a throw-away build that ran
+(pull request 390; its diff is a comment there that starts `//
+T6X-THROWAWAY f`).
+
+```text
+Task T6x-f: the transition functions leave the two traits of the
+lowering's interface. One slice, one pull request against
+ocaml-to-rust-rewrite.
+
+Precondition, check it first and stop with a report if it fails: T6x-e4
+is merged: from compiler-rust, `python3
+../scripts/count_lowering_ids.py --self-test` prints `32 files, 8
+transition calls` and `rg -n 'B::(from_node|node|at|stmt_from_node|stmt_node|list_from|list_id)\(' src/bir/lower`
+prints five lines, three in cond.rs and two in call.rs, all in
+functions under `#[cfg(test)]`; `cargo test --manifest-path
+compiler-rust/Cargo.toml --lib bir::lower` reads 585 passed, `--lib
+bir::j` 73, `--lib emit::builder` 41, none ignored.
+
+The probe. Read the comment `// T6X-THROWAWAY f` on pull request 390:
+it is this slice built once, on the build of T6x-e4. Its two hunks of
+scripts/count_lowering_ids.py were made before the script had `CEILING`
+and do not apply: for the script, write what this task gives. Where
+this task gives code, the task is right.
+
+Where the common blocks and this task disagree, the task wins. Three
+places are known. (1) The block of T6x-a1 to T6x-a4 holds the four
+allocation counts of unit.rs at 86, 103, 86, 156: since T6x-e3 they are
+86, 102, 86, 155, and those hold here. (2) `Instruction count` is read
+and reported as this task says, not held at the block's +0.02%. (3) The
+block's check-mode figure (`scripts/compare_build_instructions.py`) is
+not yours to produce: CI `Backend bridge coverage` is the gate of check
+mode.
+
+Yours: in src/bir/lower/js.rs the deletion of `from_node`, `node`, `at`
+and `push_list` and one `use`; in src/bir/lower/js_stmt.rs the deletion
+of `stmt_from_node`, `stmt_node`, `list_from` and `list_id` and one
+`use`; in src/bir/j/rows.rs and src/bir/j/rows_stmt.rs the same eight
+bodies moved out of the two trait impls into an `impl Rows` compiled for
+tests, and three sentences of the module comments; in src/bir/j/norm.rs
+one attribute and one doc comment; in src/bir/lower/call.rs the helper
+`call_node` and its one use; in src/bir/lower/cond.rs the helpers
+`empty_block` and `raw_if` and their two uses; eight test lines that
+name a transition function through a trait (args.rs 2, cond.rs 3,
+oracle_tests.rs 2, mod.rs 1); scripts/count_lowering_ids.py; the
+changelog fragment `changes/three-trees-t6x-f.internal.md`. Nothing
+else. No test is deleted and no expected value changes.
+
+What the slice is. The eight functions were the way a caller that was
+not converted turned a row into a handle and back. After T6x-e4 no
+built code calls one. They leave the traits, so that no generic code
+(`B::node(..)`) can name one and the builder (the implementation that
+owns its nodes) never has to give them a body. The tests of rows build
+rows on the arena and wrap them (`Rows::stmt_from_node(NodeId(7))`: 34
+calls in out.rs, 12 in js_stmt_tests.rs, 4 in js_tests.rs, and
+`r.push_list` once): for them `Rows` keeps the eight as functions of its
+own, compiled for tests.
+
+One commit (the design turn built it as one: a function cannot leave a
+trait while a helper still calls it through the trait).
+
+js.rs: remove the section comment "// ---- The transition (deleted by
+T6x with their last call) ----" with `from_node`, `node` and `at` and
+their doc comments, and `push_list` with its doc comment; the `use` of
+`crate::bir` loses `ListId` and `NodeId`. js_stmt.rs: remove the same
+section comment with `stmt_from_node`, `stmt_node`, `list_from` and
+`list_id`; the `use` loses `ListId` and `NodeId`.
+
+rows.rs: remove the bodies of `from_node`, `node`, `at` and `push_list`
+from `impl Js for Rows`, the row of `push_list` from the module's table,
+and `ListId` from the `use`; above the `impl Rows` that holds `leaf`
+add
+
+           /// For the tests of rows, which build rows on the arena and wrap them
+           /// (`out.rs`, `js_tests.rs`, `js_stmt_tests.rs`): a handle is its row. No
+           /// generic code can name these: they are not of the interface (THREE_TREES
+           /// 11.4, "T6x-e and T6x-f: the fold reads where its rows are", decision 9).
+           #[cfg(test)]
+           impl Rows {
+               /// The handle of a J row built on the arena. O(1).
+               pub(crate) fn from_node(node: NodeId) -> E {
+                   E(node)
+               }
+               /// The J row of a handle. O(1).
+               pub(crate) fn node(e: E) -> NodeId {
+                   e.0
+               }
+               /// The reference of a J row built on the arena. O(1).
+               pub(crate) fn at(node: NodeId) -> NodeId {
+                   node
+               }
+               /// The nodes of a pool list of detached J expressions, pushed as
+               /// operands in order. One move per node; counts no step.
+               pub(crate) fn push_list(&mut self, a: &Pools, list: crate::bir::ListId) {
+                   self.operands.extend_from_slice(a.lists.get(list));
+               }
+           }
+
+   The module comment's sentence on the representation becomes "`of`,
+   `reserve`, `steps`, `mark`, `push`, `pop` and `kind_of` are the
+   representation, as are the functions kept for the tests of rows
+   (`from_node`, `node`, `at`, `push_list`: the interface has no
+   transition function since T6x-f); every other body is the row of the
+   table below."
+
+rows_stmt.rs: remove the four bodies from `impl JsStmt for Rows`; above
+the `impl Rows` that holds `block_entry` add
+
+           /// For the tests of rows (see the like block of `rows.rs`): a statement
+           /// is its row and a list its pool list.
+           #[cfg(test)]
+           impl Rows {
+               /// The handle of a J statement built on the arena. O(1).
+               pub(crate) fn stmt_from_node(node: NodeId) -> S {
+                   S(node)
+               }
+               /// The J row of a statement. O(1).
+               pub(crate) fn stmt_node(s: S) -> NodeId {
+                   s.0
+               }
+               /// The list in flight of a pool list. O(1).
+               pub(crate) fn list_from(list: ListId) -> ListId {
+                   list
+               }
+               /// The pool list of a list in flight. O(1).
+               pub(crate) fn list_id(list: ListId) -> ListId {
+                   list
+               }
+           }
+
+   The module comment: "The transition functions are the
+   representation." becomes "The interface has no transition function
+   since T6x-f; the four this file keeps for the tests of rows
+   (`stmt_from_node`, `stmt_node`, `list_from`, `list_id`) are the
+   representation.", and "A reader and the transition functions count
+   nothing." becomes "A reader counts nothing."
+
+norm.rs: `#[cfg(test)]` above `pub fn jm14_push_effect_expression` (its
+five callers are tests of norm_tests.rs and js_stmt_tests.rs), and the
+doc comment of `jm14_effect_expression` no longer links to it: its
+first sentence becomes "J-M14 with each statement given to `sink` as it
+is made, in order." A doc link to an item compiled for tests fails
+`cargo doc`.
+
+The test helpers (decision 9). call.rs: delete `call_node` with its doc
+comment; the doc comment of `call_values` starts "C:1144
+compile_apply_call_inner: `callee(args)`; the constructor performs no
+rewrite."; in the test `arity_groups_match_legacy` the line
+`args.push(state.call_node(value, &[], Default::default()));` becomes
+
+           let call = state.call_values(crate::bir::lower::out::of_row(value), std::iter::empty(), Default::default());
+           args.push(crate::bir::lower::out::row(call));
+
+cond.rs: delete `empty_block` and `raw_if`; in the hand of
+`if_statement_is_simplify_if_for_every_rule` the arm `'o'` becomes
+
+           'o' => {
+               let list = self.state.arena.lists.push(&[]);
+               self.state.arena.explicit_block_from_list(list)
+           }
+
+and the last line of the arm `'i' | 'j'` (`self.state.raw_if(test, yes,
+no)`) becomes
+
+           // Both blocks as given: no rule of J-S3.
+           let then_ = self.state.arena.block_from_list(yes);
+           let else_ = self.state.arena.block_from_list(no);
+           self.state.arena.new_node(View::SIf { condition: test, then_, else_: Some(else_) }, 0)
+
+The eight test lines: `<crate::bir::j::rows::Rows as
+...::js_stmt::JsStmt>::stmt_from_node(` (args.rs twice, cond.rs three
+times, oracle_tests.rs once), `...::JsStmt>::list_id(` (oracle_tests.rs)
+and `<crate::bir::j::rows::Rows as js::Js>::from_node(` (mod.rs) become
+`crate::bir::j::rows::Rows::stmt_from_node(`, `::list_id(` and
+`::from_node(`. Find them with `rg -n 'as
+(crate::bir::lower::)?(js::Js|js_stmt::JsStmt)>::(from_node|node|at|stmt_from_node|stmt_node|list_from|list_id)'
+src`.
+
+scripts/count_lowering_ids.py: `CEILING` and its assertion go, with the
+assertion `calls>0 or '--no-calls-left'`; in their place
+
+               # Since T6x-f the lowering has no transition call and the two traits
+               # declare no transition function, so generic code cannot name one; the
+               # implementation on rows keeps them for its tests only.
+               assert calls==0, f'{calls} transition calls in src/bir/lower: none may be left'
+               declared=[(f,k) for f in ('js','js_stmt') for k in T+['push_list'] if re.search(r'\n\s*fn '+k+r'\b', non_test(open(f'src/bir/lower/{f}.rs').read()))]
+               assert not declared, f'a trait of the lowering declares a transition function: {declared}'
+               for f in ('rows','rows_stmt'):
+                   t=open(f'src/bir/j/{f}.rs').read()
+                   for m in re.finditer(r'\n([^\n]*)\n[^\n]*fn ('+'|'.join(T+['push_list'])+r')\b', t):
+                       start=t.rfind('\nimpl', 0, m.start())
+                       assert t[:start].rstrip().endswith('#[cfg(test)]'), f'{f}.rs: `{m.group(2)}` is not in an impl compiled for tests'
+
+   and the module's doc comment says so in its last sentence. The
+   workflow calls `--self-test` without a flag: do not edit a file
+   under .github/workflows.
+
+End state, run from compiler-rust and paste the output. On the design
+turn's throw-away head each printed what is given; before the slice,
+what is in brackets:
+- `rg -n 'B::(from_node|node|at|stmt_from_node|stmt_node|list_from|list_id)\(' src/bir/lower | wc -l`
+  prints 0 [5].
+- `rg -n 'fn (from_node|node|at|stmt_from_node|stmt_node|list_from|list_id|push_list)\b' src/bir/lower/js.rs src/bir/lower/js_stmt.rs | wc -l`
+  prints 0 [8].
+- the same pattern over `src/bir/j/rows.rs src/bir/j/rows_stmt.rs`
+  prints 8 [8]: the bodies moved, none was deleted.
+- `rg -n 'as (crate::bir::lower::)?(js::Js|js_stmt::JsStmt)>::(from_node|node|at|stmt_from_node|stmt_node|list_from|list_id)' src | wc -l`
+  prints 0 [8].
+- `rg -n 'fn (call_node|empty_block|raw_if)\b' src/bir/lower | wc -l`
+  prints 0 [3].
+- `rg -n -B1 'pub fn jm14_push_effect_expression' src/bir/j/norm.rs | rg -c 'cfg\(test\)'`
+  prints 1 [nothing].
+- `python3 ../scripts/count_lowering_ids.py --self-test` prints `32
+  files, 0 transition calls` [8], and the total row printed `| total |
+  16315 | 82 | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 140 |`.
+- The two new checks of the script fail when they should. Show both,
+  then undo: add `fn node(e: Self::E) -> u32;` to `pub trait Js` (the
+  self-test must stop with "a trait of the lowering declares a
+  transition function"), and remove `#[cfg(test)]` above the new `impl
+  Rows` of rows_stmt.rs (it must stop with "is not in an impl compiled
+  for tests"). The first check holds `push_list` too, which the script
+  does not count as a call: `fn push_list(&mut self, a: &Pools, list:
+  u32);` added to `pub trait Js` must stop the self-test the same way.
+
+Tests. You edit the eight lines and the two helpers' uses named above
+and nothing else in a test; no test is added or deleted and no expected
+value changes. The filters stay at 585, 73 and 41. If a test of rows
+does not compile because it calls one of the eight on a value (`r.at(`)
+or through `Js::`, change the call to `Rows::name(`: do not put the
+function back into a trait.
+
+Cost notes. From compiler-rust: `python3
+../scripts/check_lowering_cost_docs.py --base
+origin/ocaml-to-rust-rewrite`; the figure after `missing/generic=` must
+be 0.
+
+Before the commit: `cargo clippy --manifest-path compiler-rust/Cargo.toml
+--all-targets -- -D warnings` (an unused import or a function without a
+caller fails it) and `RUSTDOCFLAGS="-D warnings" cargo doc
+--manifest-path compiler-rust/Cargo.toml --no-deps`, both clean.
+
+Gates of the pull request, beside those of the common blocks: the
+three filters with the counts above; CI `Test the lowering id count`
+green with the changed script; CI `Backend bridge coverage` at zero
+differences and the parity jobs green, read before the pull request is
+marked ready; CI `Instruction count` read and reported (eight
+`#[inline]` bodies leave the built code of the lowering, which the
+default build does not reach; above +0.05% on two runs, stop and
+report). The body of the pull request lists the attributes added
+(`#[cfg(test)]` on two `impl Rows` and on `jm14_push_effect_expression`)
+and removed (`#[inline]` on the eight moved bodies).
+
+Run by the design turn, in a copy that was not pushed: this commit on
+its build of T6x-e4; the three filters read 585, 71 and 40 there (the
+copy did not hold the three tests pull request 390 adds), clippy and
+`cargo doc` clean, the cost-note check at zero, the self-test at 0 and
+its two new checks seen to fail as above; 96 lines added and 118
+removed in eleven files. A check-mode build of the runtime and of
+`tests/tests` (a debug build): the lowering stage identical for 113 of
+113 and 905 of 906 units. Not run: the parity suites, `Instruction
+count`, the 3,735-module application.
+
+Shortcuts that count as failure, beside the common lists: a transition
+function left in a trait, or left there under `#[cfg(test)]`; a new
+trait or a `pub` function that gives a row for a handle; one of the
+eight on `Rows` outside an impl compiled for tests; a test deleted, or
+a test of out.rs, js_tests.rs or js_stmt_tests.rs rewritten to avoid
+the functions; `call_node`, `empty_block` or `raw_if` kept; the flag
+`--no-calls-left` kept or the workflow edited; an `allow`; an edit of
+export.rs, jsx.rs, out.rs outside its tests, or src/emit.
+```
+
+
+Probe of T6r (a throw-away conversion; issued verbatim, with the common
+block of phase C; no build prompt for T6r exists until this probe and
+its design turn):
+
+```text
+Task: probe row T6r of the lowering's interface (compiler-rust/docs/
+THREE_TREES.md 11.4, "T6: the interface" (d) and (g), and "T6x-e and
+T6x-f: the fold reads where its rows are", decision 8). This is a
+measurement, not a slice: its pull request is a draft that is never
+merged, and its body is the report.
+
+Start from trunk with the ninth design turn merged (`rg -n 'fn
+take_placed' compiler-rust/src/bir/lower/out.rs` shows one line). It
+does not wait for T6x-e3, e4 or f: names.rs, globals.rs and close.rs
+call no transition function. Branch from trunk; open the draft pull
+request against ocaml-to-rust-rewrite after the first push, titled
+"Probe: T6r (not for merge)". Say in the report which of T6x-e3, e4 and
+f were on trunk when you branched.
+
+Convert the row: names.rs and globals.rs reach J nodes through the
+interface only. Today `names::replay`, the naming log (`open`, `close`,
+`read_sites`, `unprinted`, `adopt`, `eta_shape`), `scope::return_sites`
+(called from the `return` arm of `close::decide`) and `globals::decide`
+(`binding_scope`, `shadowed`) take `&Bir` and read `bir.view(node)`,
+`bir.parents` and `bir.func_owners` by id. "T6: the interface" (d)
+proposes for them `JsStmt::{bodies, body, set_body, functions, globals,
+binder, rest_fields}`, the replay generic over `JsStmt`, and the
+external-shadow decision made in the replay's walk.
+
+Rules of a probe:
+- You MAY add the seven functions of (d) to `JsStmt` with a body on
+  rows (src/bir/j/rows_stmt.rs), each under a comment `// PROBE-ADD n:`
+  with its cost in one line: they are what is measured. You add nothing
+  else to the traits and nothing to src/emit. Where the conversion
+  needs something the interface and those seven do not give, write what
+  works today under a comment `// PROBE-GAP n: <what is needed, in one
+  line>` and go on. Number the gaps in order of appearance.
+- No cost notes, no changelog discipline beyond one fragment, no `allow`
+  attribute. A test is edited only so that it compiles; no expected
+  value changes. If one would, leave the test failing and report it.
+- A function that loses its last production caller by a step: compile
+  it for tests (`#[cfg(test)]`) if a test still calls it, else delete
+  it, in a commit of its own that the report lists. Never an `allow`,
+  never a warning left.
+- One commit per step below, pushed when made. After each: `cargo check
+  --all-targets --manifest-path compiler-rust/Cargo.toml`, and `cargo
+  test --manifest-path compiler-rust/Cargo.toml --lib bir::lower` and
+  `--lib bir::j` (never the whole suite). A step that does not compile
+  alone is merged with the next and the report says so.
+- Do not run `Instruction count` or the parity suites, and do not wait
+  for CI. Step 6 runs check mode once.
+
+Steps:
+1. The return arm: `scope::return_sites` reads the returned expression
+   through `Js` (`kind`, `operand`, `var_of`, on the reference
+   `value_of` gives inside `with_stmt_at`), and `close::decide` no
+   longer turns the value into an id for it. It writes
+   `VarFacts::site`, the id of a call: list every reader of that field
+   and say for each whether it compares the id, tests it against
+   `NO_SITE`, or finds the call from it.
+2. `names::adopt` (three calls of call.rs, one of ffi_args.rs): it takes
+   the handle or a reference, not a row. Count what it reads below the
+   node (`Log::adopted_nodes`) and through which functions of `Js`.
+3. The naming log's close: `read_sites` and `unprinted` read
+   `bir.view(site.node)` and climb parents from a site. Convert what the
+   interface serves (`Js::kind_of`, `Js::owner`, `Js::is_callee`); mark
+   the rest. Then, in a commit of its own that may be dropped, try the
+   other form: the site records what `close` needs when the reference
+   is built (the variable or the import, 4 bytes), so that `close` reads
+   no node; say what `unprinted` still needs and what a released
+   reference costs.
+4. `names::replay` generic over `JsStmt`, on the seven functions: one
+   frame per open list, each list rebuilt (`take_at`, stage, `list`).
+   The prelude, `Scratch::marks`, `Scratch::next` and
+   `ambiguous_orders` go if the descent makes them unnecessary; if one
+   cannot go, that is a gap.
+5. `globals::decide` in the replay's walk: a count per referenced
+   global name of the bindings that cover the place the walk is at;
+   `binding_scope`, `shadowed`, `Globals::marks` and the epochs go.
+6. Measure, with what steps 1 to 5 built: a debug build of `rescript`;
+   `RESCRIPT_BACKEND=check`, `clean` then `build`, of
+   packages/@rescript/runtime and of tests/tests, with
+   `RESCRIPT_BACKEND_STATS` set to a directory. Report the units of the
+   lowering stage that are identical and those that are not, and
+   "Naming log against the pass" (compared, uncompared, sum of
+   differences) as `scripts/test_backend_coverage.py` prints it, before
+   and after.
+
+The report (the body of the draft pull request), with these sections:
+(1) Size: `git diff --stat` against trunk; changed lines per commit,
+    production and test apart; whether the row is under 600 lines and,
+    if not, the cut the commits give, each part compiling and passing
+    at its place.
+(2) PROBE-ADDs: for each of the seven, the signature as built, its body
+    on rows in one line, its callers, its cost as counted (a step test
+    is not asked for; say what one call visits), and what its body
+    would be on an implementation that owns its nodes (read
+    src/emit/builder.rs; do not write it).
+(3) PROBE-GAPs: for each, the file, function and line, what is needed,
+    what you wrote instead, and the signature you would propose with
+    its cost on both sides.
+(4) Ids that stay: every id the converted files still store or pass
+    (`VarFacts::site`, `Site::node`, `Child`, `ScopeRow`, the rows of
+    `Globals`, `Printed`), with for each: who writes it, who reads it,
+    and whether a reader finds a node from it. The rule is that of the
+    eighth design turn: an id is a key (compared, stored to say "the
+    same node as", used to read a fact the implementation keeps in a
+    table indexed by it), never a way to find a node.
+(5) "Reading by id" after the conversion: the callers of `Js::owner`,
+    `Js::kind_of`, `Js::is_callee` and `Js::id_bound` in names.rs,
+    globals.rs, scope.rs and close.rs, and how often each ran in step 6
+    (a counter in the probe, removed from no commit: it is a probe).
+    T6v needs these numbers to decide the column of owners.
+(6) The walk: moves per statement in the replay (the claim of (d) is
+    "moves equal statements"); the allocation counts of unit.rs (86,
+    103, 86, 156 on trunk, or what trunk reads when you branch) before
+    and after, with the reason for each change; whether one walk serves
+    the external-shadow decision for every kind of binder
+    `binding_scope` knows (a declaration, a parameter, a loop variable,
+    a catch variable, the cases of a `switch`, an explicit block
+    spliced into its list) and which test shows each.
+(7) The sites: the two forms of step 3 side by side (lines, what
+    `close` reads, bytes a site, what a release writes), and which you
+    would build.
+(8) Tests: every test edited and why; every test of names.rs,
+    globals.rs, scope.rs and close.rs that builds rows by hand and
+    would need the functions `Rows` keeps for tests after T6x-f.
+(9) What you did not run and what you are not sure of.
+
+Shortcuts that count as failure: a function added to a trait that is
+not one of the seven; a gap closed with `B::at`, `B::node` or any
+transition function without a `PROBE-GAP` comment above it; an expected
+value changed; a test deleted; the generated JavaScript changed (check
+mode shows it); a report that gives a figure without the command that
+printed it.
+```
+
+
+Probe of T6x-c1 (a throw-away conversion; issued verbatim, with the
+common block of phase C; no build prompt for T6x-c1 to f exists until
+each has its probe and its design turn):
+
+```text
+Task: probe row T6x-c1 of the cut of T6x (compiler-rust/docs/
+THREE_TREES.md 11.4, "T6x: the cut" and "T6x-b: an output's value, as
+built" (i)). This is a measurement, not a slice: its pull request is a
+draft that is never merged, and its body is the report.
+
+Start from trunk with T6x-b3b merged (`rg -n 'fn decide<B: JsStmt>'
+compiler-rust/src/bir/lower/close.rs` shows one line). Branch from it;
+open the draft pull request against ocaml-to-rust-rewrite after the
+first push, titled "Probe: T6x-c1 (not for merge)".
+
+Convert the row: in prim.rs, prim_cmp.rs, prim_block.rs, konst.rs,
+record.rs, import.rs, args.rs and call.rs a value is a `B::E` from the
+place it is made to the place it is consumed. `values` holds handles
+from `sequence_arguments` on. A function of these files that only
+these files call takes and returns handles. A function another file
+calls keeps its signature (it is T6x-d's) and you wrap at the call,
+unless keeping it forces a turn-back and a wrap of the same value in
+one function: then change it, with its callers, and list it in (3).
+
+Rules of a probe:
+- You add nothing to the traits `Js` and `JsStmt` and nothing to
+  src/bir/j or src/emit. Where the conversion needs something the
+  interface does not give, write the turn-back that works today under
+  a comment `// PROBE-GAP n: <what is needed, in one line>` and go on.
+  Number the gaps in order of appearance.
+- No cost notes, no changelog discipline beyond one fragment, no `allow`
+  attribute. A test is edited only so that it compiles; no expected
+  value changes. If one would, leave the test failing and report it.
+- One commit per step below, pushed when made. After each: `cargo
+  check --all-targets --manifest-path compiler-rust/Cargo.toml`, and
+  `cargo test --manifest-path compiler-rust/Cargo.toml --lib
+  bir::lower` and `--lib bir::j` (never the whole suite). A step that
+  does not compile alone is merged with the next and the report says
+  so.
+- Do not run `Instruction count`, check mode or the parity suites, and
+  do not wait for CI.
+
+Steps:
+1. The storage: `State::argument_values` and the `values` parameter of
+   `sequence_arguments` and of `finish_primitive_values` hold `B::E`
+   (`Vec<Option<B::E>>` if a value is moved out of the middle, `Vec<
+   B::E>` if not: say which and why). The field is taken and given
+   back in call.rs and prim.rs only; the other files read its capacity
+   in a test. What is made from it leaves the row (the `values` slice
+   `finish_self_call` of tail.rs takes, the pool list `compile_js_call`
+   and the iterator `compile_jsx` take): wrap at those calls and count
+   the wraps by file.
+2. prim.rs: the reads `B::from_node(values[i])` become moves or reads
+   in place; `push_values`, `bin_of`, `first_value`.
+3. konst.rs (`constant_children`, `constant_values`), record.rs,
+   import.rs, prim_cmp.rs, prim_block.rs.
+4. args.rs (`Evaluation::values`, `evaluate_now`) and call.rs
+   (`call_reversed`, `eta_arguments`, the wrap of `values[0]`).
+
+The report (the body of the draft pull request), with these sections:
+(1) Size: `git diff --stat` against trunk; changed lines per commit,
+    production and test apart; whether the row is under 600 lines and,
+    if not, the cut the commits give, each part compiling and passing
+    at its place.
+(2) PROBE-GAPs: for each, the file, function and line, what is needed,
+    what you wrote instead, and the signature you would propose with
+    its cost on rows and on a builder that owns its nodes.
+(3) Signatures: every function whose signature changed, before and
+    after, with its callers in other files; which changes the row
+    could not avoid and which you made to remove a turn-back.
+(4) `values`: what its element type became and why; every place a
+    value is read from it more than once (an index read twice, a value
+    read and then moved, a slice passed on while an element is used),
+    with the line on trunk and what you did there. This is the table
+    of "one value, two consumers" for this row.
+(5) The shared field: for `argument_values`, `external_values`,
+    `constant_values` and `scratch`, the files that use each and
+    whether step 1 could change the type without editing a function of
+    a file that is not of this row. Say plainly whether c1 can be
+    built beside c2 to c4, or what must come before them.
+(6) Counts: `python3 ../scripts/count_lowering_ids.py | grep '^|
+    total' | head -1` from compiler-rust before and after, and the row
+    of each file of this row before and after; the marks
+    `assume_strict` after `Js::var` in args.rs, call.rs and import.rs
+    that you deleted (they write a flag the node has).
+(7) Tests: the counts of the two filters on trunk and after each
+    commit; every test edited to compile, with what changed; the four
+    allocation counts of unit.rs and every `size_of` assertion, held
+    or not.
+(8) What surprised you: anything the row's description or this prompt
+    says that the code contradicts.
+(9) What you did not run.
 ```
 
 
