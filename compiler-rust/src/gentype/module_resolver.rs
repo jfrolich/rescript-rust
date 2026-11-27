@@ -251,6 +251,17 @@ pub fn apply(
     }
 }
 
+thread_local! {
+    /// [`source_file_exists`]'s answers on this thread, for one build.
+    static SOURCE_EXISTS: std::cell::RefCell<(u64, crate::fast_hash::AHashMap<String, bool>)> =
+        std::cell::RefCell::new((0, crate::fast_hash::AHashMap::new()));
+}
+
+/// Drop this thread's file-existence answers.
+pub fn release_thread_cache() {
+    SOURCE_EXISTS.with(|cache| *cache.borrow_mut() = (0, crate::fast_hash::AHashMap::new()));
+}
+
 /// Whether a source file exists. Sources do not change during a build, so
 /// in-process builds remember the answer per worker until the next build.
 fn source_file_exists(path: &str) -> bool {
@@ -258,11 +269,7 @@ fn source_file_exists(path: &str) -> bool {
     if generation == 0 {
         return Path::new(path).exists();
     }
-    thread_local! {
-        static CACHE: std::cell::RefCell<(u64, crate::fast_hash::AHashMap<String, bool>)> =
-            std::cell::RefCell::new((0, crate::fast_hash::AHashMap::new()));
-    }
-    CACHE.with(|cache| {
+    SOURCE_EXISTS.with(|cache| {
         let mut cache = cache.borrow_mut();
         if cache.0 != generation {
             *cache = (generation, crate::fast_hash::AHashMap::new());

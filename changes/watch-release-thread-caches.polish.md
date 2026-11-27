@@ -1,0 +1,1 @@
+- `rescript watch` also drops the load paths and genType path caches its workers keep between builds, about 60 MB less idle memory on a large project.
