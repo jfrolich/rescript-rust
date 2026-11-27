@@ -167,6 +167,14 @@ fn in_process_type_declarations_cache() -> &'static InProcessTypeDeclarationsCac
     CACHE.get_or_init(|| Mutex::new(InProcessTypeDeclarationsTables::default()))
 }
 
+/// Forget every registered type declaration. A long-running process calls
+/// this between builds: the next build registers the declarations of the
+/// modules it compiles or loads again.
+pub fn clear_in_process_type_declarations() {
+    let mut cache = in_process_type_declarations_cache().lock().unwrap();
+    *cache = InProcessTypeDeclarationsTables::default();
+}
+
 fn normalize_cmt_path_lexically(path: PathBuf) -> PathBuf {
     path.components()
         .filter(|component| !matches!(component, std::path::Component::CurDir))

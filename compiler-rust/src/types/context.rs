@@ -72,6 +72,16 @@ thread_local! {
     static FIRST_ARRAY_INITIALIZATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
+/// Drop the first type-node arrays this thread keeps for later pools, but
+/// not one a live pool leases.
+pub(crate) fn release_first_node_arrays() {
+    FIRST_NODE_ARRAYS.with(|arrays| {
+        arrays
+            .borrow_mut()
+            .retain(|array| Rc::strong_count(array) > 1)
+    });
+}
+
 /// Lease one array: at most one reference-count probe per retained array,
 /// no initialization on reuse, or exactly N initializations and one amortized
 /// O(1) list append on a new allocation. Called once per pool, not per lookup.

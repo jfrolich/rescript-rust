@@ -45,6 +45,11 @@ static HASHER: LazyLock<ahash::RandomState> = LazyLock::new(content_hasher);
 static GLOBAL: LazyLock<Box<[Mutex<Table>]>> =
     LazyLock::new(|| (0..SHARDS).map(|_| Mutex::new(Table::default())).collect());
 
+/// Empty this thread's cache of interned names; the names stay interned.
+pub fn release_thread_cache() {
+    LOCAL.with(|local| *local.borrow_mut() = Table::default());
+}
+
 thread_local! {
     /// Names this thread has already interned, so repeated lookups skip the
     /// shared table and its lock.

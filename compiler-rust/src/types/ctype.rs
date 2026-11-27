@@ -392,6 +392,12 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Drop this thread's pooled pair tables and occurrence marks.
+pub(crate) fn release_thread_pools() {
+    PAIR_TABLE_POOL.with(|pool| pool.borrow_mut().clear());
+    OCCUR_MARKS.with(|marks| *marks.borrow_mut() = OccurMarks::default());
+}
+
 /// The unified-pair set of a [`UnifyState`]. Most states live for one
 /// `unify`/`moregen` call, so their tables come from a per-thread pool and go
 /// back to it, cleared, on drop instead of regrowing from empty every time.
