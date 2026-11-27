@@ -141,6 +141,18 @@ const _: () = assert_send_sync::<ModuleView>();
 
 static CURRENT: Mutex<Option<Arc<World>>> = Mutex::new(None);
 
+/// Drop this worker's view-build scratch context and its predefined
+/// environment, which holds the world it was built over.
+pub(crate) fn release_worker_state() {
+    drop(SCRATCH.with(|slot| slot.borrow_mut().take()));
+    drop(WORKER_INITIAL_ENV.with(|slot| slot.borrow_mut().take()));
+}
+
+/// Forget the current world, so that it is freed once no worker holds it.
+pub(crate) fn release_current() {
+    drop(CURRENT.lock().unwrap().take());
+}
+
 #[cfg(test)]
 thread_local! {
     /// Hash probes of the unit table made by this thread.

@@ -370,6 +370,22 @@ thread_local! {
     static LIST_WRITES: Cell<usize> = const { Cell::new(0) };
 }
 
+/// Drop the first list arrays this thread keeps for later pools (but not
+/// one a live pool leases) and its pooled spilled sets.
+pub(crate) fn release_thread_pools() {
+    FIRST_TYPE_LISTS.with(|arrays| {
+        arrays
+            .borrow_mut()
+            .retain(|array| Rc::strong_count(array) > 1)
+    });
+    FIRST_ARG_LISTS.with(|arrays| {
+        arrays
+            .borrow_mut()
+            .retain(|array| Rc::strong_count(array) > 1)
+    });
+    SPILLED_SET_POOL.with(|pool| pool.borrow_mut().clear());
+}
+
 /// Number of first list arrays this thread has created (items, arguments).
 #[cfg(test)]
 pub(crate) fn first_list_arrays() -> (usize, usize) {

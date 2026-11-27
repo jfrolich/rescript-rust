@@ -45,6 +45,29 @@ pub fn begin_build() {
     BUILD_GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
+/// Drop what this thread keeps for later compilations: its type store, its
+/// view-build scratch context and predefined environment (which hold the
+/// shared world of the build that made them), its pooled arrays and tables,
+/// and its cache of interned names. The next compilation on the thread
+/// starts as on a fresh one. A long-running process (`rescript watch`) runs
+/// this on every worker once a build is done, so that idle workers do not
+/// keep what the last build made; it must not run during a compilation.
+pub fn release_worker_caches() {
+    drop(THREAD_TYPE_STORE.with(|slot| slot.borrow_mut().take()));
+    super::world::release_worker_state();
+    super::context::release_first_node_arrays();
+    super::type_expr::release_thread_pools();
+    super::ctype::release_thread_pools();
+    crate::name::release_thread_cache();
+}
+
+/// Drop the shared type world of the last build (its frozen type pool and
+/// unit table) once no worker holds it (see [`release_worker_caches`]). The
+/// next build creates its own anyway.
+pub fn release_shared_world() {
+    super::world::release_current();
+}
+
 /// Number of builds started with `begin_build` in this process (0 when none
 /// has, e.g. a standalone `bsc` run).
 pub fn build_generation() -> u64 {
