@@ -8040,24 +8040,30 @@ fn build_load_path(options: &CompilerOptions) -> Vec<PathBuf> {
     build_load_path_with_display(options).0
 }
 
+type LoadPathKey = (Option<PathBuf>, Vec<PathBuf>, Option<&'static FsPath>);
+type LoadPathEntry = (
+    LoadPathKey,
+    std::sync::Arc<Vec<PathBuf>>,
+    std::sync::Arc<Vec<PathBuf>>,
+);
+thread_local! {
+    static LOAD_PATHS: std::cell::RefCell<Vec<LoadPathEntry>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Drop this thread's cached load paths.
+pub fn release_thread_caches() {
+    LOAD_PATHS.with(|cache| cache.borrow_mut().clear());
+}
+
 /// Load path shared by modules with the same compiler options, built once
 /// per worker thread. Normalizing every include path again for each
 /// in-process module allocated thousands of paths per module.
 fn shared_load_path_with_display(
     options: &CompilerOptions,
 ) -> (std::sync::Arc<Vec<PathBuf>>, std::sync::Arc<Vec<PathBuf>>) {
-    type Key = (Option<PathBuf>, Vec<PathBuf>, Option<&'static FsPath>);
-    type Entry = (
-        Key,
-        std::sync::Arc<Vec<PathBuf>>,
-        std::sync::Arc<Vec<PathBuf>>,
-    );
-    thread_local! {
-        static CACHE: std::cell::RefCell<Vec<Entry>> =
-            const { std::cell::RefCell::new(Vec::new()) };
-    }
     let cwd = crate::process_cwd::current_dir().ok();
-    CACHE.with(|cache| {
+    LOAD_PATHS.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some((_, paths, display)) =
             cache.iter().find(|((runtime, includes, entry_cwd), _, _)| {

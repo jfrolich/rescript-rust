@@ -570,12 +570,20 @@ pub fn record_and_release(build_state: &mut BuildCommandState) {
     with_build_lock(&build_folder, || {
         clean::write_in_process_record(build_state, CompilerInfoWrite::AfterBuild);
         release_compile_state(build_state);
+        if std::env::var_os("RESCRIPT_WATCH_MEM").is_some() {
+            build_state.previous_in_process = None;
+            release_process_caches();
+            eprintln!("[watch-mem] --- without record");
+        }
         clean::read_previous_in_process_build(
             build_state,
             clean::PreviousOutputs::Keep,
             &ahash::AHashSet::new(),
         );
     });
+    if std::env::var_os("RESCRIPT_WATCH_MEM").is_some() {
+        eprintln!("[watch-mem] --- with record");
+    }
     release_process_caches();
 }
 
@@ -634,11 +642,66 @@ fn release_process_caches() {
     // A thread's frees of memory another thread allocated wait in the
     // owner's heap until the owner collects, and idle workers do not: so
     // collect on every worker, after every worker has freed its part.
+    if std::env::var_os("RESCRIPT_WATCH_RELIEF").is_some() {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // SAFETY: asks the system allocator to return free memory; no pointer is read.
+        let released = unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+        if std::env::var_os("RESCRIPT_WATCH_MEM").is_some() {
+            eprintln!("[watch-mem] system malloc released {} MB", released >> 20);
+        }
+    }
     pools::on_every_worker(|| {
         // SAFETY: `mi_collect` frees and purges the calling thread's empty
         // allocator pages; it takes no pointer and touches no live block.
         unsafe { libmimalloc_sys::mi_collect(true) };
     });
+    if std::env::var_os("RESCRIPT_WATCH_MEM").is_some() {
+        mem_report();
+    }
+}
+
+fn mem_report() {
+    unsafe extern "C" {
+        fn mi_heap_main() -> *mut libmimalloc_sys::mi_heap_t;
+    }
+    // (block size) -> (live blocks, pages, page bytes)
+    type Hist = std::collections::BTreeMap<usize, (usize, usize, usize)>;
+    unsafe extern "C" fn visit(
+        _heap: *const libmimalloc_sys::mi_heap_t,
+        area: *const libmimalloc_sys::mi_heap_area_t,
+        block: *mut std::ffi::c_void,
+        _size: usize,
+        arg: *mut std::ffi::c_void,
+    ) -> bool {
+        unsafe {
+            if block.is_null() {
+                let hist = &mut *(arg as *mut Hist);
+                let e = hist.entry((*area).block_size).or_default();
+                e.0 += (*area).used;
+                e.1 += 1;
+                e.2 += (*area).committed;
+            }
+        }
+        true
+    }
+    let mut hist = Hist::new();
+    unsafe {
+        libmimalloc_sys::mi_heap_visit_blocks(mi_heap_main(), false, Some(visit), &mut hist as *mut Hist as *mut std::ffi::c_void);
+    }
+    let (mut live, mut committed) = (0usize, 0usize);
+    let mut rows: Vec<_> = hist.iter().map(|(size, (used, pages, comm))| (size * used, *size, *used, *pages, *comm)).collect();
+    for r in &rows { live += r.0; committed += r.4; }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.4));
+    eprintln!("[watch-mem] live={} MB committed={} MB", live >> 20, committed >> 20);
+    if std::env::var_os("RESCRIPT_WATCH_STATS").is_some() {
+        // SAFETY: prints mimalloc's statistics to stderr.
+        unsafe { libmimalloc_sys::mi_stats_print(std::ptr::null_mut()) };
+    }
+    for (bytes, size, used, pages, comm) in rows.iter().take(if std::env::var_os("RESCRIPT_WATCH_MEM_ROWS").is_some() { 14 } else { 0 }) {
+        eprintln!("[watch-mem]   block {size:>8} B: live {:>5} KB in {pages:>5} pages, committed {:>6} KB ({used} blocks)", bytes >> 10, comm >> 10);
+    }
 }
 
 /// When a successful build records the compiler identity in the package

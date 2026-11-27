@@ -437,6 +437,21 @@ struct WatchArgs<'a> {
     tooling_requests: Option<std::sync::mpsc::Receiver<crate::tooling_server::ToolingRequest>>,
 }
 
+/// Prototype: run every build as a `rescript build` child process.
+fn subprocess_builds() -> bool {
+    std::env::var_os("RESCRIPT_WATCH_SUBPROCESS").is_some()
+}
+
+fn child_build(path: &Path) -> Result<build::CompilationOutcome, String> {
+    let status = std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+        .arg("build")
+        .arg(path)
+        .env_remove("RESCRIPT_WATCH_SUBPROCESS")
+        .status()
+        .map_err(|e| e.to_string())?;
+    if status.success() { Ok(build::CompilationOutcome::Clean) } else { Err(format!("build exited with {status}")) }
+}
+
 /// What the module registry holds between builds. Each build leaves it
 /// empty (`build::record_and_release`), and the next build starts from the
 /// build record; editor tooling fills it from the record when it is first
@@ -676,14 +691,19 @@ fn watch_loop(
 
                 release_tooling_registry(&mut build_state, &mut registry);
                 let timing_total = Instant::now();
-                let result = build::incremental_build(
-                    &mut build_state,
-                    false,
-                    false,
-                    show_progress,
-                    true,
-                    plain_output,
-                );
+                let result = if subprocess_builds() {
+                    child_build(path)
+                } else {
+                    build::incremental_build(
+                        &mut build_state,
+                        false,
+                        false,
+                        show_progress,
+                        true,
+                        plain_output,
+                    )
+                    .map_err(|e| e.to_string())
+                };
 
                 match result {
                     Ok(result) => {
@@ -704,7 +724,9 @@ fn watch_loop(
                     }
                 }
 
-                build::record_and_release(&mut build_state);
+                if !subprocess_builds() {
+                    build::record_and_release(&mut build_state);
+                }
                 needs_compile_type = CompileType::None;
             }
             CompileType::Full => {
@@ -753,6 +775,9 @@ fn watch_loop(
                         current_watches =
                             update_watches(watcher, std::mem::take(&mut current_watches), &next_watch_paths);
 
+                        if subprocess_builds() {
+                            return Ok(Err(String::from("defer")));
+                        }
                         let result = build::incremental_build_without_lock(
                             &mut build_state,
                             false,
@@ -766,6 +791,10 @@ fn watch_loop(
                         Ok(result.map_err(|e| e.to_string()))
                     },
                 );
+                let rebuild = match rebuild {
+                    Ok(Err(defer)) if defer == "defer" => Ok(child_build(path)),
+                    other => other,
+                };
                 match rebuild {
                     Ok(Ok(result)) => {
                         finish_successful_watch_compile(
@@ -801,7 +830,7 @@ fn watch_loop(
                         }
                     }
                 }
-                if !initialization_failed {
+                if !initialization_failed && !subprocess_builds() {
                     build::record_and_release(&mut build_state);
                 }
                 needs_compile_type = CompileType::None;
@@ -920,21 +949,31 @@ pub fn start(
             let current_watches = register_watches(&mut watcher, &compute_watch_paths(&build_state, path));
 
             let timing_total = Instant::now();
-            let initial_compile_result = build::incremental_build_without_lock(
-                &mut build_state,
-                false,
-                true,
-                show_progress,
-                false,
-                plain_output,
-                build::CompilerInfoWrite::AfterBuild,
-            )
-            .ok()
-            .map(|result| (timing_total, result));
+            let initial_compile_result = if subprocess_builds() {
+                None
+            } else {
+                build::incremental_build_without_lock(
+                    &mut build_state,
+                    false,
+                    true,
+                    show_progress,
+                    false,
+                    plain_output,
+                    build::CompilerInfoWrite::AfterBuild,
+                )
+                .ok()
+                .map(|result| (timing_total, result))
+            };
 
             Ok::<StartupBuildResult, anyhow::Error>((build_state, current_watches, initial_compile_result))
         })?;
-    build::record_and_release(&mut build_state);
+    let initial_compile_result = if subprocess_builds() {
+        let timing_total = Instant::now();
+        child_build(path).ok().map(|result| (timing_total, result))
+    } else {
+        build::record_and_release(&mut build_state);
+        initial_compile_result
+    };
 
     if let Some(status) = stop_requested(&stop_status) {
         exit_watch(show_progress, "\nExiting...");

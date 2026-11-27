@@ -172,6 +172,12 @@ macro_rules! pooled_table {
 }
 
 pooled_table!((), VISIT_SET_POOL);
+
+/// Drop this thread's pooled visit tables.
+pub(crate) fn release_thread_pools() {
+    VISIT_SET_POOL.with(|pool| pool.borrow_mut().clear());
+    REF_TABLE_POOL.with(|pool| pool.borrow_mut().clear());
+}
 pooled_table!(TypeExprRef, REF_TABLE_POOL);
 
 /// A cleared table borrowed from the thread's pool, returned on drop.

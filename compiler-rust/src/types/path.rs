@@ -168,6 +168,11 @@ thread_local! {
         (0..LOCAL_CACHE).map(|_| Cell::new(None)).collect();
 }
 
+/// Empty this thread's cache of recently interned paths.
+pub(crate) fn release_thread_cache() {
+    LOCAL.with(|local| local.iter().for_each(|slot| slot.set(None)));
+}
+
 #[inline]
 fn shard(hash: u64) -> usize {
     // The table uses the low bits; pick the shard from the high ones.

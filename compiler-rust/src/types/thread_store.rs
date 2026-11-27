@@ -59,6 +59,12 @@ pub fn release_worker_caches() {
     super::type_expr::release_thread_pools();
     super::ctype::release_thread_pools();
     crate::name::release_thread_cache();
+    if std::env::var_os("RESCRIPT_WATCH_EXTRA").is_some() {
+        super::type_marks::release_thread_pools();
+        super::path::release_thread_cache();
+        crate::gentype::main::release_thread_caches();
+        crate::driver::release_thread_caches();
+    }
 }
 
 /// Drop the shared type world of the last build (its frozen type pool and
