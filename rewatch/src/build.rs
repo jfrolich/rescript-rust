@@ -559,6 +559,88 @@ pub fn incremental_build(
     })
 }
 
+/// Record the build just made, then drop what it keeps in memory, so that
+/// the next build starts as a one-shot `rescript build` does: from the
+/// record, loading only the stored interfaces its compiles read. A watcher
+/// runs this after every build, so between builds it keeps the module graph
+/// and the record, not every compiled interface and type graph (on a
+/// 3,700-module project, about 300 MB instead of 1 GB and more).
+pub fn record_and_release(build_state: &mut BuildCommandState) {
+    let build_folder = build_state.root_folder.clone();
+    with_build_lock(&build_folder, || {
+        clean::write_in_process_record(build_state, CompilerInfoWrite::AfterBuild);
+        release_compile_state(build_state);
+        clean::read_previous_in_process_build(
+            build_state,
+            clean::PreviousOutputs::Keep,
+            &ahash::AHashSet::new(),
+        );
+    });
+    release_process_caches();
+}
+
+/// Drop the compiled state of the last build, written down or not: the
+/// module registry and what the build recorded about its compiles.
+pub fn release_compile_state(build_state: &mut BuildCommandState) {
+    *build_state.module_registry.get_mut().unwrap() =
+        rescript_compiler::cmi::persistent_env::ModuleRegistry::new();
+    build_state.stored_asts.get_mut().unwrap().clear();
+    build_state.in_memory_interfaces.get_mut().unwrap().clear();
+    build_state.published_item_digests.get_mut().unwrap().clear();
+    build_state.prepared_interfaces.get_mut().unwrap().clear();
+    build_state.in_memory_deps.get_mut().unwrap().clear();
+    build_state.loaded_units.get_mut().unwrap().clear();
+    build_state.unit_reads.get_mut().unwrap().clear();
+    build_state.verified_imports.get_mut().unwrap().clear();
+    build_state.recorded_cores.get_mut().unwrap().clear();
+    build_state.parse_warnings.get_mut().unwrap().clear();
+    build_state.clear_gentype_contexts();
+    build_state.compiled_modules.clear();
+    build_state.invalidated_modules.clear();
+    build_state.loaded_modules.clear();
+    build_state.written_modules.clear();
+    build_state.incremental_plan = false;
+    build_state.js_confirmed_at.clear();
+    build_state.source_mtimes.clear();
+    build_state.module_times = None;
+}
+
+/// Fill the registry a watcher left empty after its build (see
+/// [`record_and_release`]) for editor tooling, which type-checks a module
+/// against the interfaces of the others: the runtime's and Belt's, and
+/// every module's stored interface in the build record, decoded on first
+/// lookup. Empty it with [`release_tooling_registry`] before the next build.
+pub fn prepare_tooling_registry(build_state: &mut BuildCommandState) -> Result<()> {
+    snapshot::prepare_belt(build_state)?;
+    let modules: ahash::AHashSet<String> = build_state.modules.keys().cloned().collect();
+    incremental::load_stored_for_tooling(build_state, &modules);
+    compile::prepare_registry_for_tooling(build_state)
+}
+
+/// Empty the registry [`prepare_tooling_registry`] filled, keeping the
+/// build record the next build starts from.
+pub fn release_tooling_registry(build_state: &mut BuildCommandState) {
+    release_compile_state(build_state);
+    release_process_caches();
+}
+
+/// Drop what the compiler keeps for later compilations outside a build's
+/// state: the shared type world, genType's declarations, and what every
+/// worker thread pools, then return the freed memory to the system.
+fn release_process_caches() {
+    rescript_compiler::types::thread_store::release_shared_world();
+    rescript_compiler::gentype::main::clear_in_process_type_declarations();
+    pools::on_every_worker(rescript_compiler::types::thread_store::release_worker_caches);
+    // A thread's frees of memory another thread allocated wait in the
+    // owner's heap until the owner collects, and idle workers do not: so
+    // collect on every worker, after every worker has freed its part.
+    pools::on_every_worker(|| {
+        // SAFETY: `mi_collect` frees and purges the calling thread's empty
+        // allocator pages; it takes no pointer and touches no live block.
+        unsafe { libmimalloc_sys::mi_collect(true) };
+    });
+}
+
 /// When a successful build records the compiler identity in the package
 /// databases (see `compiler_info`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -926,7 +1008,7 @@ pub fn incremental_build_without_lock(
         build_state.loaded_units.lock().unwrap().clear();
         build_state.unit_reads.lock().unwrap().clear();
         build_state.verified_imports.lock().unwrap().clear();
-        build_state.incremental_plan = None;
+        build_state.incremental_plan = false;
         build_state.previous_in_process = None;
         build_state.loaded_modules.clear();
         build_state.compiled_modules.clear();

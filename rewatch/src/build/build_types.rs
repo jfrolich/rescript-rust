@@ -437,8 +437,11 @@ pub struct BuildCommandState {
     // JavaScript, source copies or compiler log): `rescript bsc` builds an
     // `-I` package this way without touching its files.
     pub in_memory_only: bool,
-    // The incremental plan of a fresh in-process build, consumed by `compile`.
-    pub incremental_plan: Option<super::incremental::IncrementalPlan>,
+    // Whether `incremental::plan` planned this fresh in-process build, for
+    // `compile`: it compiles the stale modules, loads the stored interfaces
+    // of the modules they read, and compiles a module's dependents only when
+    // its interface digest changed, in rounds (see `incremental::next_round`).
+    pub incremental_plan: bool,
     // The latest build of this process; recorded in the in-process manifest.
     pub build_run: BuildRun,
     // The parse warnings of the latest parse of each source file, saved so a
@@ -580,7 +583,7 @@ impl BuildCommandState {
             previous_in_process: None,
             recorded_cores: Mutex::new(AHashMap::new()),
             in_memory_only: false,
-            incremental_plan: None,
+            incremental_plan: false,
             build_run: BuildRun::NotStarted,
             parse_warnings: Mutex::new(AHashMap::new()),
             js_confirmed_at: AHashMap::new(),

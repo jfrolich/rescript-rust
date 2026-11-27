@@ -130,6 +130,7 @@ fi
 ./watch/08-watch-overlapping-source-removed.sh &&
 ./watch/09-watch-recovers-from-invalid-config.sh &&
 ./watch/10-watch-recovers-new-dependency-config.sh &&
+./watch/31-watch-recompiles-readers-only.sh &&
 
 # Lock tests
 ./lock/01-lock-when-watching.sh &&

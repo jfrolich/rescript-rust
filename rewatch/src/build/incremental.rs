@@ -28,9 +28,9 @@
 //!   module's interface recompiles only that module, and one that changes
 //!   some items only the modules that read those.
 //!
-//! Every other module is not compiled, nor parsed. Watch mode keeps the
-//! earlier behavior: it compiles every module into memory anyway, and
-//! recompiles every transitive dependent of a stale module.
+//! Every other module is not compiled, nor parsed. A watcher builds the same
+//! way: it records each build as it finishes and starts the next one from
+//! that record (`build::record_and_release`).
 //!
 //! The warnings of the previous build are recorded with it and reported again
 //! for the modules that are not recompiled, as the build does for any module
@@ -39,7 +39,7 @@
 use super::build_types::{BuildCommandState, Module, PendingReads, SourceType};
 use super::packages::Package;
 use super::state_db::{self, ItemDigests, ModuleRow, PackageState, SourceDeps, UnitReads};
-use crate::config::{Config, SourceMapCommand};
+use crate::config::Config;
 use ahash::{AHashMap, AHashSet};
 use rayon::prelude::*;
 use rescript_compiler::binary_ast::Dependencies;
@@ -48,7 +48,7 @@ use rescript_compiler::name::Name;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::MutexGuard;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 /// What one package's database recorded about the previous build.
 #[derive(Debug, Default)]
@@ -90,20 +90,6 @@ impl PackageRecord {
 #[derive(Debug, Default)]
 pub struct PreviousInProcessBuild {
     pub packages: AHashMap<String, PackageRecord>,
-}
-
-/// The incremental part of a fresh in-process build's plan, consumed by
-/// [`super::compile::compile`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IncrementalPlan {
-    /// One-shot builds compile the dependents of a recompiled module only
-    /// when its interface digest changed, in rounds (see [`next_round`]),
-    /// instead of compiling every transitive dependent.
-    Cutoff,
-    /// Watch mode keeps every module in memory for later rebuilds and editor
-    /// tooling, so every up-to-date module is a support module and every
-    /// transitive dependent of a stale module is compiled.
-    SupportEverything,
 }
 
 /// A unit's interface digest (its whole-unit item digest) with its item
@@ -549,23 +535,19 @@ fn outputs_as_recorded(
         && previous.state.meta.contains_key(state_db::META_OUTPUTS)
 }
 
-/// For a one-shot build that kept `package_name`'s sources as `previous`
-/// recorded them, the modules of the package whose recorded row may differ
+/// For a build that kept `package_name`'s sources as `previous` recorded
+/// them, the modules of the package whose recorded row may differ
 /// from `previous`: those this build compiled, wrote, invalidated or left
 /// dirty, those whose imports it verified, and those without a recorded
 /// row. Every other module's row is the recorded one: the build restored its
 /// warnings and confirmation time and kept its digests. `None` when the
-/// whole record must be rebuilt (watch mode, which records several builds at
-/// once, or changed sources).
+/// whole record must be rebuilt (changed sources).
 fn changed_modules<'a>(
     build_state: &'a BuildCommandState,
     compiles: &CompileRecords,
     package_name: &str,
     previous: &PackageRecord,
 ) -> Option<AHashSet<&'a String>> {
-    if build_state.build_state.source_map_command == SourceMapCommand::Watch {
-        return None;
-    }
     let mut source_count = 0;
     let mut changed = AHashSet::new();
     for (module_name, module) in build_state.modules.iter() {
@@ -740,32 +722,16 @@ pub fn seed_recorded_deps(build_state: &mut BuildCommandState) {
 /// The modules a compile of `stale` touches: those it compiles and writes,
 /// and the support modules it compiles for the registry.
 fn modules_to_compile(build_state: &BuildCommandState, stale: &AHashSet<String>) -> AHashSet<String> {
-    let plan = build_state
-        .incremental_plan
-        .as_ref()
-        .expect("planned before choosing what to parse");
+    assert!(
+        build_state.incremental_plan,
+        "planned before choosing what to parse"
+    );
+    // The dependents of a stale module are decided round by round, once its
+    // new interface digest is known (see `next_round`).
     let mut universe = stale.clone();
-    let mut frontier: Vec<String> = if *plan == IncrementalPlan::Cutoff {
-        Vec::new()
-    } else {
-        stale.iter().cloned().collect()
-    };
-    while let Some(module_name) = frontier.pop() {
-        if let Some(module) = build_state.get_module(&module_name) {
-            for dependent in &module.dependents {
-                if universe.insert(dependent.clone()) {
-                    frontier.push(dependent.clone());
-                }
-            }
-        }
-    }
-    let support = support_modules(build_state, &universe, plan);
+    let support = support_modules(build_state, &universe);
     // Support modules with a stored interface are loaded, not parsed.
-    let loadable = if *plan == IncrementalPlan::Cutoff {
-        stored_loadable(build_state, stale, &support)
-    } else {
-        AHashSet::new()
-    };
+    let loadable = stored_loadable(build_state, stale, &support);
     universe.extend(
         support
             .into_iter()
@@ -1405,7 +1371,8 @@ pub fn everything_up_to_date(build_state: &mut BuildCommandState) -> bool {
 /// recorded build, whatever its JavaScript says. A check takes no build
 /// lock, so a watcher may be building beside it. The watcher's JavaScript is
 /// then newer than the sources it compiled, while the record, which the
-/// watcher writes when it exits, still holds their earlier interfaces. The
+/// watcher writes once that build is done, still holds their earlier
+/// interfaces. The
 /// record covers only inputs older than the start of the build it records,
 /// and only when that build finished without errors.
 fn changed_beside_record(build_state: &BuildCommandState, module_name: &str, times: &ModuleTimes) -> bool {
@@ -1462,168 +1429,112 @@ fn carry_js_confirmed_at(
 pub fn plan(build_state: &mut BuildCommandState) {
     let times = module_times(build_state);
 
-    // The newest input over each module's transitive dependencies. A
-    // dependency cycle is a compile error reported later; it only has to
-    // terminate here.
-    fn newest_closure(
-        module_name: &str,
-        build_state: &BuildCommandState,
-        times: &AHashMap<String, ModuleTimes>,
-        memo: &mut AHashMap<String, Option<SystemTime>>,
-        visiting: &mut AHashSet<String>,
-    ) -> Option<SystemTime> {
-        if let Some(known) = memo.get(module_name) {
-            return *known;
-        }
-        if !visiting.insert(module_name.to_string()) {
-            return None;
-        }
-        let mut newest = match times.get(module_name) {
-            Some(ModuleTimes::Recorded(times)) => times.newest_input,
-            Some(ModuleTimes::Unrecorded) => None,
-            // A namespace map has no sources of its own.
-            None => Some(UNIX_EPOCH),
-        };
-        if let Some(module) = build_state.get_module(module_name) {
-            for dep in &module.deps {
-                if build_state.get_module(dep).is_none() {
-                    continue;
-                }
-                let dep_newest = newest_closure(dep, build_state, times, memo, visiting);
-                newest = match (newest, dep_newest) {
-                    (Some(a), Some(b)) => Some(a.max(b)),
-                    _ => None,
-                };
-            }
-        }
-        visiting.remove(module_name);
-        memo.insert(module_name.to_string(), newest);
-        newest
-    }
-
-    let cutoff = build_state.build_state.source_map_command != SourceMapCommand::Watch;
     let mut stale = AHashSet::new();
-    if cutoff {
-        // A module is stale when its own inputs changed, when a module it
-        // references is new (a name may now resolve to it), or when a module
-        // whose interface its compile read now has a different digest.
-        // Dependents of a recompiled module are decided once its new digest
-        // is known (see `next_round`).
-        // After a build that succeeded in every package, with the same
-        // modules, every recorded import is consistent: it names an existing
-        // module, with that module's recorded digest (the build compiled or
-        // verified every module whose imports changed). Only a build after a
-        // failed one, or with modules added or removed, compares them.
-        let check_imports = !imports_consistent(build_state);
-        let digests = if check_imports {
-            recorded_digests(build_state)
-        } else {
-            AHashMap::new()
-        };
-        let mut import_candidates: Vec<(String, Vec<(String, u64)>)> = Vec::new();
-        for (module_name, own) in &times {
-            let own_stale = !matches!(
-                own,
-                ModuleTimes::Recorded(RecordedTimes { newest_input: Some(newest), output: Some(output), .. })
-                    if newest <= output
-            ) || changed_beside_record(build_state, module_name, own);
-            let row = recorded_row(build_state, module_name);
-            let unknown_imports =
-                row.is_none_or(|row| row.interface_digest.is_none() || row.imports.is_none());
-            let references_new_module = build_state.get_module(module_name).is_some_and(|module| {
-                module
-                    .deps
-                    .iter()
-                    .any(|dep| matches!(times.get(dep), Some(ModuleTimes::Unrecorded)))
-            });
-            let import_removed = check_imports
-                && row.and_then(|row| row.imports.as_ref()).is_some_and(|imports| {
-                    imports
-                        .list()
-                        .iter()
-                        .any(|(import, _)| !build_state.modules.contains_key(import))
-                });
-            let unreplayable_warnings = has_unreplayable_warnings(build_state, module_name);
-            // Its recorded interface was compiled without locations.
-            let located = build_state.located_modules.contains(module_name);
-            if build_state.get_module(module_name).is_some_and(|module|
-                build_state.packages[&module.package_name].prebuilt) { continue; }
-            if own_stale
-                || unknown_imports
-                || references_new_module
-                || import_removed
-                || unreplayable_warnings
-                || located
-            {
-                stale.insert(module_name.clone());
-                continue;
-            }
-            if !check_imports {
-                continue;
-            }
-            let changed: Vec<(String, u64)> = row
-                .and_then(|row| row.imports.as_ref())
-                .into_iter()
-                .flat_map(state_db::Imports::list)
-                .filter_map(|(import, digest)| {
-                    let current = *digests.get(import)?;
-                    (current != *digest).then(|| (import.clone(), current))
-                })
-                .collect();
-            if !changed.is_empty() {
-                import_candidates.push((module_name.clone(), changed));
-            }
-        }
-        // An import's digest changed since the module was compiled (an
-        // earlier build stopped before deciding about it): compare the items
-        // it read with what the unit's record says now.
-        if !import_candidates.is_empty() {
-            let mut by_package: AHashMap<&str, Vec<&str>> = AHashMap::new();
-            for (_, changed) in &import_candidates {
-                for (unit, _) in changed {
-                    if let Some(module) = build_state.get_module(unit) {
-                        by_package
-                            .entry(module.package_name.as_str())
-                            .or_default()
-                            .push(unit.as_str());
-                    }
-                }
-            }
-            let mut recorded_items: AHashMap<String, std::sync::Arc<ItemDigests>> = AHashMap::new();
-            for (package_name, mut units) in by_package {
-                units.sort();
-                units.dedup();
-                if let Some(package) = build_state.get_package(package_name) {
-                    recorded_items.extend(
-                        state_db::read_items(package, &units)
-                            .into_iter()
-                            .map(|(unit, items)| (unit, std::sync::Arc::new(items))),
-                    );
-                }
-            }
-            stale.extend(affected_by_changed_imports(
-                build_state,
-                std::mem::take(&mut import_candidates),
-                &|unit| recorded_items.get(unit).cloned(),
-            ));
-        }
+    // A module is stale when its own inputs changed, when a module it
+    // references is new (a name may now resolve to it), or when a module
+    // whose interface its compile read now has a different digest.
+    // Dependents of a recompiled module are decided once its new digest
+    // is known (see `next_round`).
+    // After a build that succeeded in every package, with the same
+    // modules, every recorded import is consistent: it names an existing
+    // module, with that module's recorded digest (the build compiled or
+    // verified every module whose imports changed). Only a build after a
+    // failed one, or with modules added or removed, compares them.
+    let check_imports = !imports_consistent(build_state);
+    let digests = if check_imports {
+        recorded_digests(build_state)
     } else {
-        let mut memo = AHashMap::new();
-        let mut visiting = AHashSet::new();
-        let mut names: Vec<&String> = times.keys().collect();
-        names.sort();
-        for module_name in names {
-            let own = &times[module_name];
-            let newest = newest_closure(module_name, build_state, &times, &mut memo, &mut visiting);
-            let up_to_date = matches!(
-                (own, newest),
-                (ModuleTimes::Recorded(RecordedTimes { output: Some(output), .. }), Some(newest))
-                    if newest <= *output
-            );
-            if !up_to_date {
-                stale.insert(module_name.clone());
+        AHashMap::new()
+    };
+    let mut import_candidates: Vec<(String, Vec<(String, u64)>)> = Vec::new();
+    for (module_name, own) in &times {
+        let own_stale = !matches!(
+            own,
+            ModuleTimes::Recorded(RecordedTimes { newest_input: Some(newest), output: Some(output), .. })
+                if newest <= output
+        ) || changed_beside_record(build_state, module_name, own);
+        let row = recorded_row(build_state, module_name);
+        let unknown_imports = row.is_none_or(|row| row.interface_digest.is_none() || row.imports.is_none());
+        let references_new_module = build_state.get_module(module_name).is_some_and(|module| {
+            module
+                .deps
+                .iter()
+                .any(|dep| matches!(times.get(dep), Some(ModuleTimes::Unrecorded)))
+        });
+        let import_removed = check_imports
+            && row.and_then(|row| row.imports.as_ref()).is_some_and(|imports| {
+                imports
+                    .list()
+                    .iter()
+                    .any(|(import, _)| !build_state.modules.contains_key(import))
+            });
+        let unreplayable_warnings = has_unreplayable_warnings(build_state, module_name);
+        // Its recorded interface was compiled without locations.
+        let located = build_state.located_modules.contains(module_name);
+        if build_state
+            .get_module(module_name)
+            .is_some_and(|module| build_state.packages[&module.package_name].prebuilt)
+        {
+            continue;
+        }
+        if own_stale
+            || unknown_imports
+            || references_new_module
+            || import_removed
+            || unreplayable_warnings
+            || located
+        {
+            stale.insert(module_name.clone());
+            continue;
+        }
+        if !check_imports {
+            continue;
+        }
+        let changed: Vec<(String, u64)> = row
+            .and_then(|row| row.imports.as_ref())
+            .into_iter()
+            .flat_map(state_db::Imports::list)
+            .filter_map(|(import, digest)| {
+                let current = *digests.get(import)?;
+                (current != *digest).then(|| (import.clone(), current))
+            })
+            .collect();
+        if !changed.is_empty() {
+            import_candidates.push((module_name.clone(), changed));
+        }
+    }
+    // An import's digest changed since the module was compiled (an
+    // earlier build stopped before deciding about it): compare the items
+    // it read with what the unit's record says now.
+    if !import_candidates.is_empty() {
+        let mut by_package: AHashMap<&str, Vec<&str>> = AHashMap::new();
+        for (_, changed) in &import_candidates {
+            for (unit, _) in changed {
+                if let Some(module) = build_state.get_module(unit) {
+                    by_package
+                        .entry(module.package_name.as_str())
+                        .or_default()
+                        .push(unit.as_str());
+                }
             }
         }
+        let mut recorded_items: AHashMap<String, std::sync::Arc<ItemDigests>> = AHashMap::new();
+        for (package_name, mut units) in by_package {
+            units.sort();
+            units.dedup();
+            if let Some(package) = build_state.get_package(package_name) {
+                recorded_items.extend(
+                    state_db::read_items(package, &units)
+                        .into_iter()
+                        .map(|(unit, items)| (unit, std::sync::Arc::new(items))),
+                );
+            }
+        }
+        stale.extend(affected_by_changed_imports(
+            build_state,
+            std::mem::take(&mut import_candidates),
+            &|unit| recorded_items.get(unit).cloned(),
+        ));
     }
 
     log::debug!(
@@ -1637,11 +1548,7 @@ pub fn plan(build_state: &mut BuildCommandState) {
     }
     restore_warnings(build_state, &|module_name| !stale.contains(module_name));
     carry_js_confirmed_at(build_state, &times, &|module_name| !stale.contains(module_name));
-    build_state.incremental_plan = Some(if cutoff {
-        IncrementalPlan::Cutoff
-    } else {
-        IncrementalPlan::SupportEverything
-    });
+    build_state.incremental_plan = true;
 }
 
 /// The recorded row of a module, from its package's database.
@@ -1780,19 +1687,7 @@ pub fn downstream_of(build_state: &BuildCommandState, modules: &AHashSet<String>
 
 /// The support modules of a compile universe: the modules to compile without
 /// writing JavaScript.
-pub fn support_modules(
-    build_state: &BuildCommandState,
-    universe: &AHashSet<String>,
-    plan: &IncrementalPlan,
-) -> AHashSet<String> {
-    if *plan == IncrementalPlan::SupportEverything {
-        return build_state
-            .modules
-            .keys()
-            .filter(|module_name| !universe.contains(*module_name))
-            .cloned()
-            .collect();
-    }
+pub fn support_modules(build_state: &BuildCommandState, universe: &AHashSet<String>) -> AHashSet<String> {
     dependency_closure(build_state, universe, |_| false)
 }
 
@@ -1980,7 +1875,7 @@ fn affected_by_changed_imports(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
     fn a_record_knows_its_clean_start_and_sources() {
