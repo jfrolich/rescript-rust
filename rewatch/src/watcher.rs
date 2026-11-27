@@ -934,9 +934,8 @@ pub fn start(
 
             Ok::<StartupBuildResult, anyhow::Error>((build_state, current_watches, initial_compile_result))
         })?;
-    build::record_and_release(&mut build_state);
-
     if let Some(status) = stop_requested(&stop_status) {
+        build::record_and_release(&mut build_state);
         exit_watch(show_progress, "\nExiting...");
         return Ok(status);
     }
@@ -961,6 +960,9 @@ pub fn start(
             result,
         );
     }
+    // As after every later build: report the build first, then record it
+    // and drop what it kept in memory.
+    build::record_and_release(&mut build_state);
     watch_loop(WatchArgs {
         watcher: &mut watcher,
         current_watches,
