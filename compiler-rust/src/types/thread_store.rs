@@ -48,7 +48,8 @@ pub fn begin_build() {
 /// Drop what this thread keeps for later compilations: its type store, its
 /// view-build scratch context and predefined environment (which hold the
 /// shared world of the build that made them), its pooled arrays and tables,
-/// and its cache of interned names. The next compilation on the thread
+/// its cache of interned names, its load paths and genType's path and
+/// file-existence caches. The next compilation on the thread
 /// starts as on a fresh one. A long-running process (`rescript watch`) runs
 /// this on every worker once a build is done, so that idle workers do not
 /// keep what the last build made; it must not run during a compilation.
@@ -59,6 +60,9 @@ pub fn release_worker_caches() {
     super::type_expr::release_thread_pools();
     super::ctype::release_thread_pools();
     crate::name::release_thread_cache();
+    super::type_marks::release_thread_pools();
+    crate::gentype::main::release_thread_caches();
+    crate::driver::release_thread_caches();
 }
 
 /// Drop the shared type world of the last build (its frozen type pool and

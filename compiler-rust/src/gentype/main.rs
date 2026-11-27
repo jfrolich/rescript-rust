@@ -175,6 +175,22 @@ pub fn clear_in_process_type_declarations() {
     *cache = InProcessTypeDeclarationsTables::default();
 }
 
+thread_local! {
+    /// Canonical directories seen by [`canonicalize_with_cached_parent`].
+    static CANONICAL_DIRS: std::cell::RefCell<HashMap<PathBuf, PathBuf>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Keys resolved by [`normalize_cmt_cache_key`].
+    static RESOLVED_KEYS: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Drop this thread's path and file-existence caches.
+pub fn release_thread_caches() {
+    CANONICAL_DIRS.with(|dirs| *dirs.borrow_mut() = HashMap::new());
+    RESOLVED_KEYS.with(|keys| *keys.borrow_mut() = HashMap::new());
+    crate::gentype::module_resolver::release_thread_cache();
+}
+
 fn normalize_cmt_path_lexically(path: PathBuf) -> PathBuf {
     path.components()
         .filter(|component| !matches!(component, std::path::Component::CurDir))
@@ -188,10 +204,6 @@ fn normalize_cmt_path_lexically(path: PathBuf) -> PathBuf {
 /// per thread. For an existing file that is not a symlink, the canonical path
 /// is the canonical parent joined with the file name.
 fn canonicalize_with_cached_parent(path: &Path) -> Option<PathBuf> {
-    thread_local! {
-        static CANONICAL_DIRS: std::cell::RefCell<HashMap<PathBuf, PathBuf>> =
-            std::cell::RefCell::new(HashMap::new());
-    }
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
         return std::fs::canonicalize(path).ok();
     };
@@ -212,10 +224,6 @@ fn normalize_cmt_cache_key(cmt_file: &str) -> String {
     // The key is requested several times per artifact; remember the keys that
     // resolved through an existing directory (a missing directory may appear
     // later, so its lexical fallback is not remembered).
-    thread_local! {
-        static RESOLVED_KEYS: std::cell::RefCell<HashMap<String, String>> =
-            std::cell::RefCell::new(HashMap::new());
-    }
     if let Some(key) = RESOLVED_KEYS.with(|keys| keys.borrow().get(cmt_file).cloned()) {
         return key;
     }
