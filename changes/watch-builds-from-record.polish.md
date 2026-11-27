@@ -1,0 +1,1 @@
+- `rescript watch` keeps much less memory between builds: it records each build in the build database as it finishes and starts the next one from that record, as `rescript build` does, instead of keeping every compiled interface in memory. Editing a module now recompiles only the dependents that read what changed, also in watch mode.

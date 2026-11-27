@@ -3,7 +3,6 @@
 mod dependency_cycle;
 
 use super::build_types::*;
-use super::incremental::IncrementalPlan;
 use super::logs;
 use super::packages;
 use super::qos;
@@ -663,11 +662,8 @@ pub fn compile(
     )
     .entered();
     let compile_parent_span = Span::current();
-    let incremental_plan = build_state.incremental_plan.take();
-    let has_support_work = incremental_plan
-        .as_ref()
-        .is_some_and(|plan| *plan == IncrementalPlan::SupportEverything);
-    if dirty_modules.is_empty() && !has_support_work {
+    let incremental_plan = std::mem::take(&mut build_state.incremental_plan);
+    if dirty_modules.is_empty() {
         set_length(0);
         let mut warnings = String::new();
         append_compile_warnings(
@@ -731,7 +727,7 @@ pub fn compile(
     // transitively depends on it.
     // A cut-off build decides the dependents round by round instead.
     let mut compile_universe = dirty_modules.clone();
-    let mut frontier = if incremental_plan == Some(IncrementalPlan::Cutoff) {
+    let mut frontier = if incremental_plan {
         Vec::new()
     } else {
         dirty_modules.iter().cloned().collect::<Vec<_>>()
@@ -750,11 +746,12 @@ pub fn compile(
         frontier = next_frontier;
     }
 
-    let mut round_registry_only = incremental_plan
-        .as_ref()
-        .map(|plan| super::incremental::support_modules(build_state, &compile_universe, plan))
-        .unwrap_or_default();
-    if incremental_plan.is_some() {
+    let mut round_registry_only = if incremental_plan {
+        super::incremental::support_modules(build_state, &compile_universe)
+    } else {
+        AHashSet::new()
+    };
+    if incremental_plan {
         log::debug!(
             "incremental build: compiling {} modules, {} more for their dependencies only",
             compile_universe.len(),
@@ -765,7 +762,7 @@ pub fn compile(
     // A cut-off build compiles in rounds: the dependents of a module whose
     // interface digest changed are compiled in the next round
     // (see `incremental::next_round`).
-    let cutoff = incremental_plan == Some(IncrementalPlan::Cutoff);
+    let cutoff = incremental_plan;
 
     let js_writer = JsWriter::spawn();
     let digest_prep = DigestPrep::spawn(build_state.snapshot_module_registry());
@@ -1309,7 +1306,7 @@ pub fn compile(
     // A full build does not compile the modules that depend on a failed
     // one, and reports nothing for them: do not replay the warnings of their
     // earlier compile either (they stay recorded, for the builds after).
-    let blocked_by_failure = if incremental_plan.is_some() && !failed_this_build.is_empty() {
+    let blocked_by_failure = if incremental_plan && !failed_this_build.is_empty() {
         super::incremental::downstream_of(build_state, &failed_this_build)
     } else {
         AHashSet::new()

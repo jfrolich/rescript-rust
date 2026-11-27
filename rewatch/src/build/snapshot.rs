@@ -1043,10 +1043,6 @@ impl rescript_compiler::cmi::persistent_env::SnapshotModules for BeltPackage {
 /// and one registry attachment. No core is read or copied by this operation.
 pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) -> Result<()> {
     if state.revoked_snapshots[1] { return Ok(()); }
-    if state.source_map_command == crate::config::SourceMapCommand::Watch
-        && !state.diagnostic_locations
-        && state.packages.get("@rescript/belt").is_some_and(|package| package.prebuilt)
-    { return Ok(()); }
     if let Some(package) = state.build_state.packages.get_mut("@rescript/belt") { package.prebuilt = false; }
     let Some(package) = state.packages.get("@rescript/belt") else { return Ok(()); };
     if package.is_root { return Ok(()); }

@@ -63,9 +63,10 @@ fn compile_threads_for(logical: usize, efficiency: usize) -> usize {
     target.min(scaling_cap)
 }
 
+static COMPILE_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+
 fn compile_pool() -> &'static rayon::ThreadPool {
-    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
-    POOL.get_or_init(|| {
+    COMPILE_POOL.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
             .num_threads(compile_threads())
             .thread_name(|index| format!("rewatch-compile-worker-{index}"))
@@ -73,6 +74,17 @@ fn compile_pool() -> &'static rayon::ThreadPool {
             .build()
             .expect("failed to create the in-process compile pool")
     })
+}
+
+/// Run `op` once on the calling thread and once on every thread of the
+/// global pool and of the large pool, if it was started: for what workers
+/// keep in thread-local storage between builds.
+pub fn on_every_worker(op: impl Fn() + Sync) {
+    op();
+    rayon::broadcast(|_| op());
+    if let Some(pool) = COMPILE_POOL.get() {
+        pool.broadcast(|_| op());
+    }
 }
 
 /// The pool for `work` items (modules to parse or compile): the large pool

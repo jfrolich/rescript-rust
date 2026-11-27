@@ -407,28 +407,17 @@ fn print_build_failed_footer() {
     println!("\nBuild failed. Watching for changes...");
 }
 
-fn cleanup_before_watch_exit(
-    path: &Path,
-    build_state: &BuildCommandState,
-    show_progress: bool,
-    message: &str,
-) {
+// Every build was recorded when it finished (`build::record_and_release`),
+// so exiting has nothing left to write.
+fn exit_watch(show_progress: bool, message: &str) {
     if show_progress {
         println!("{message}");
     }
-    build::with_build_lock(path, || {
-        clean::cleanup_after_build(build_state, build::CompilerInfoWrite::AfterBuild)
-    });
 }
 
 // Removing lib/rescript/watch.lock asks the watcher to quit.
-fn exit_after_lockfile_removed(path: &Path, build_state: &BuildCommandState, show_progress: bool) {
-    cleanup_before_watch_exit(
-        path,
-        build_state,
-        show_progress,
-        "\nExiting... (lockfile removed)",
-    );
+fn exit_after_lockfile_removed(show_progress: bool) {
+    exit_watch(show_progress, "\nExiting... (lockfile removed)");
 }
 
 struct WatchArgs<'a> {
@@ -448,13 +437,31 @@ struct WatchArgs<'a> {
     tooling_requests: Option<std::sync::mpsc::Receiver<crate::tooling_server::ToolingRequest>>,
 }
 
+/// What the module registry holds between builds. Each build leaves it
+/// empty (`build::record_and_release`), and the next build starts from the
+/// build record; editor tooling fills it from the record when it is first
+/// asked, and the next build empties it again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IdleRegistry {
+    Empty,
+    Tooling,
+}
+
 /// Answer one editor tooling request from the current build state.
 fn serve_tooling_request(
-    build_state: &BuildCommandState,
+    build_state: &mut BuildCommandState,
+    registry: &mut IdleRegistry,
     crate::tooling_server::ToolingRequest { request, reply }: crate::tooling_server::ToolingRequest,
 ) {
     use crate::tooling_server::{Reply, Request};
     let Request::Run { cwd, args } = request;
+    if *registry == IdleRegistry::Empty {
+        if let Err(err) = build::prepare_tooling_registry(build_state) {
+            let _ = reply.send(Reply::Error(format!("{err:#}")));
+            return;
+        }
+        *registry = IdleRegistry::Tooling;
+    }
     let answer = match crate::build::tooling::run_command(build_state, cwd, args) {
         Ok(output) => Reply::Output(output),
         Err(err) => Reply::Error(format!("{err:#}")),
@@ -464,13 +471,23 @@ fn serve_tooling_request(
 
 /// Answer editor tooling's pending requests from the current build state.
 fn serve_tooling_requests(
-    build_state: &BuildCommandState,
+    build_state: &mut BuildCommandState,
+    registry: &mut IdleRegistry,
     requests: Option<&std::sync::mpsc::Receiver<crate::tooling_server::ToolingRequest>>,
 ) {
     if let Some(requests) = requests {
         while let Ok(request) = requests.try_recv() {
-            serve_tooling_request(build_state, request);
+            serve_tooling_request(build_state, registry, request);
         }
+    }
+}
+
+/// Empty the registry editor tooling filled, before a build: a build starts
+/// from the build record with an empty registry.
+fn release_tooling_registry(build_state: &mut BuildCommandState, registry: &mut IdleRegistry) {
+    if *registry == IdleRegistry::Tooling {
+        build::release_tooling_registry(build_state);
+        *registry = IdleRegistry::Empty;
     }
 }
 
@@ -497,10 +514,11 @@ fn watch_loop(
     let mut needs_compile_type = CompileType::None;
     let mut initialization_failed = false;
     let mut reported_contents = ReportedContents::default();
+    let mut registry = IdleRegistry::Empty;
     loop {
-        serve_tooling_requests(&build_state, tooling_requests.as_ref());
+        serve_tooling_requests(&mut build_state, &mut registry, tooling_requests.as_ref());
         if let Some(status) = stop_requested(&stop_status) {
-            cleanup_before_watch_exit(path, &build_state, show_progress, "\nExiting...");
+            exit_watch(show_progress, "\nExiting...");
             break Ok(status);
         }
         let mut events: Vec<Event> = vec![];
@@ -524,7 +542,7 @@ fn watch_loop(
                 .any(|path| path.ends_with(LockKind::Watch.file_name()))
                 && let EventKind::Remove(_) = event.kind
             {
-                exit_after_lockfile_removed(path, &build_state, show_progress);
+                exit_after_lockfile_removed(show_progress);
                 return Ok(0);
             }
 
@@ -656,6 +674,7 @@ fn watch_loop(
                     print_rebuild_header(CompileType::Incremental);
                 }
 
+                release_tooling_registry(&mut build_state, &mut registry);
                 let timing_total = Instant::now();
                 let result = build::incremental_build(
                     &mut build_state,
@@ -685,6 +704,7 @@ fn watch_loop(
                     }
                 }
 
+                build::record_and_release(&mut build_state);
                 needs_compile_type = CompileType::None;
             }
             CompileType::Full => {
@@ -693,6 +713,7 @@ fn watch_loop(
                     print_rebuild_header(CompileType::Full);
                 }
 
+                release_tooling_registry(&mut build_state, &mut registry);
                 let timing_total = Instant::now();
                 // Reinitialization runs cleanup for previous build artifacts, so full rebuilds need
                 // the same build lock boundary as regular `rescript build`.
@@ -700,9 +721,8 @@ fn watch_loop(
                     path,
                     || -> anyhow::Result<Result<build::CompilationOutcome, String>> {
                         // Reinitialization compares the sources and outputs on disk with the
-                        // recorded build to remove what deleted sources and configuration
-                        // changes left behind: record the builds this watcher made first.
-                        clean::write_in_process_record(&build_state, build::CompilerInfoWrite::AfterBuild);
+                        // recorded build (every build was recorded when it finished) to remove
+                        // what deleted sources and configuration changes left behind.
                         let mut next_build_state = build::initialize_build(
                             false,
                             filter,
@@ -781,6 +801,9 @@ fn watch_loop(
                         }
                     }
                 }
+                if !initialization_failed {
+                    build::record_and_release(&mut build_state);
+                }
                 needs_compile_type = CompileType::None;
 
                 // The removal event of watch.lock can be lost while watches are re-registered
@@ -789,7 +812,7 @@ fn watch_loop(
                     .join(LockKind::Watch.file_name())
                     .exists()
                 {
-                    exit_after_lockfile_removed(path, &build_state, show_progress);
+                    exit_after_lockfile_removed(show_progress);
                     return Ok(0);
                 }
             }
@@ -799,7 +822,7 @@ fn watch_loop(
                 match &tooling_requests {
                     Some(requests) => {
                         if let Ok(request) = requests.recv_timeout(Duration::from_millis(50)) {
-                            serve_tooling_request(&build_state, request);
+                            serve_tooling_request(&mut build_state, &mut registry, request);
                         }
                     }
                     None => std::thread::sleep(Duration::from_millis(50)),
@@ -873,7 +896,7 @@ pub fn start(
 
     // Initialization can clean previous build artifacts, so it has to be serialized
     // with the initial compile too.
-    let (build_state, current_watches, initial_compile_result): StartupBuildResult =
+    let (mut build_state, current_watches, initial_compile_result): StartupBuildResult =
         build::with_build_lock(path, || {
             let mut build_state = build::initialize_build(
                 false,
@@ -911,9 +934,10 @@ pub fn start(
 
             Ok::<StartupBuildResult, anyhow::Error>((build_state, current_watches, initial_compile_result))
         })?;
+    build::record_and_release(&mut build_state);
 
     if let Some(status) = stop_requested(&stop_status) {
-        cleanup_before_watch_exit(path, &build_state, show_progress, "\nExiting...");
+        exit_watch(show_progress, "\nExiting...");
         return Ok(status);
     }
 
