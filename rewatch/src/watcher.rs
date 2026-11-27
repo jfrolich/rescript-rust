@@ -13,7 +13,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -424,7 +424,7 @@ struct WatchArgs<'a> {
     watcher: &'a mut RecommendedWatcher,
     current_watches: Vec<RegisteredWatch>,
     initial_build_state: BuildCommandState,
-    events: Receiver<notify::Result<Event>>,
+    inputs: Receiver<WatchInput>,
     stop_status: Arc<AtomicUsize>,
     path: &'a Path,
     show_progress: bool,
@@ -434,7 +434,66 @@ struct WatchArgs<'a> {
     clear_screen: bool,
     prod: bool,
     features: Option<Vec<String>>,
-    tooling_requests: Option<std::sync::mpsc::Receiver<crate::tooling_server::ToolingRequest>>,
+}
+
+/// What wakes the watch loop: a file event or an editor tooling request.
+enum WatchInput {
+    File(notify::Result<Event>),
+    Tooling(crate::tooling_server::ToolingRequest),
+}
+
+impl From<crate::tooling_server::ToolingRequest> for WatchInput {
+    fn from(request: crate::tooling_server::ToolingRequest) -> Self {
+        WatchInput::Tooling(request)
+    }
+}
+
+/// How long the watch loop waits for input before it checks the stop
+/// signals again.
+const IDLE_WAIT: Duration = Duration::from_millis(50);
+/// A save can arrive as several events (an editor's temporary file and
+/// rename, a formatter's second write): after a file event, the loop
+/// collects events until none has arrived for `SETTLE_QUIET`, for at most
+/// `SETTLE_LIMIT` (a checkout's stream of events is built in batches).
+const SETTLE_QUIET: Duration = Duration::from_millis(10);
+const SETTLE_LIMIT: Duration = Duration::from_millis(50);
+
+/// Wait for the loop's next input. File events come back with the events
+/// that followed them within the settle window; tooling requests that
+/// arrive meanwhile go to `deferred`, to be answered after the build.
+fn next_file_events(
+    inputs: &Receiver<WatchInput>,
+    deferred: &mut Vec<crate::tooling_server::ToolingRequest>,
+) -> Vec<notify::Result<Event>> {
+    match inputs.recv_timeout(IDLE_WAIT) {
+        Ok(WatchInput::File(event)) => {
+            let mut events = vec![event];
+            let limit = Instant::now() + SETTLE_LIMIT;
+            loop {
+                let wait = SETTLE_QUIET.min(limit.saturating_duration_since(Instant::now()));
+                if wait.is_zero() {
+                    break;
+                }
+                match inputs.recv_timeout(wait) {
+                    Ok(WatchInput::File(event)) => events.push(event),
+                    Ok(WatchInput::Tooling(request)) => deferred.push(request),
+                    Err(_) => break,
+                }
+            }
+            events
+        }
+        Ok(WatchInput::Tooling(request)) => {
+            deferred.push(request);
+            Vec::new()
+        }
+        Err(RecvTimeoutError::Timeout) => Vec::new(),
+        // The watcher and the tooling server keep their senders for the
+        // whole watch; do not spin should both have gone.
+        Err(RecvTimeoutError::Disconnected) => {
+            std::thread::sleep(IDLE_WAIT);
+            Vec::new()
+        }
+    }
 }
 
 /// What the module registry holds between builds. Each build leaves it
@@ -469,19 +528,6 @@ fn serve_tooling_request(
     let _ = reply.send(answer);
 }
 
-/// Answer editor tooling's pending requests from the current build state.
-fn serve_tooling_requests(
-    build_state: &mut BuildCommandState,
-    registry: &mut IdleRegistry,
-    requests: Option<&std::sync::mpsc::Receiver<crate::tooling_server::ToolingRequest>>,
-) {
-    if let Some(requests) = requests {
-        while let Ok(request) = requests.try_recv() {
-            serve_tooling_request(build_state, registry, request);
-        }
-    }
-}
-
 /// Empty the registry editor tooling filled, before a build: a build starts
 /// from the build record with an empty registry.
 fn release_tooling_registry(build_state: &mut BuildCommandState, registry: &mut IdleRegistry) {
@@ -496,7 +542,7 @@ fn watch_loop(
         watcher,
         mut current_watches,
         initial_build_state,
-        events: event_receiver,
+        inputs,
         stop_status,
         path,
         show_progress,
@@ -506,7 +552,6 @@ fn watch_loop(
         clear_screen,
         prod,
         features,
-        tooling_requests,
     }: WatchArgs<'_>,
 ) -> Result<i32> {
     let mut build_state = initial_build_state;
@@ -515,19 +560,17 @@ fn watch_loop(
     let mut initialization_failed = false;
     let mut reported_contents = ReportedContents::default();
     let mut registry = IdleRegistry::Empty;
+    let mut tooling_requests = Vec::new();
     loop {
-        serve_tooling_requests(&mut build_state, &mut registry, tooling_requests.as_ref());
+        for request in tooling_requests.drain(..) {
+            serve_tooling_request(&mut build_state, &mut registry, request);
+        }
         if let Some(status) = stop_requested(&stop_status) {
             exit_watch(show_progress, "\nExiting...");
             break Ok(status);
         }
         let mut events: Vec<Event> = vec![];
-        let mut pending = event_receiver.try_iter().peekable();
-        if pending.peek().is_some() {
-            // Wait for events to settle
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        for result in pending {
+        for result in next_file_events(&inputs, &mut tooling_requests) {
             match result {
                 Ok(event) => events.push(event),
                 Err(error) => log::debug!("file watcher error: {error}"),
@@ -816,18 +859,7 @@ fn watch_loop(
                     return Ok(0);
                 }
             }
-            CompileType::None => {
-                // We want to sleep for a little while so the CPU can schedule other work. That way we end
-                // up not burning CPU cycles. Editor tooling requests end the wait early.
-                match &tooling_requests {
-                    Some(requests) => {
-                        if let Ok(request) = requests.recv_timeout(Duration::from_millis(50)) {
-                            serve_tooling_request(&mut build_state, &mut registry, request);
-                        }
-                    }
-                    None => std::thread::sleep(Duration::from_millis(50)),
-                }
-            }
+            CompileType::None => {}
         }
     }
 }
@@ -876,9 +908,15 @@ pub fn start(
     prod: bool,
     features: Option<Vec<String>>,
 ) -> Result<i32> {
-    let (event_sender, event_receiver) = std::sync::mpsc::channel();
-    let mut watcher =
-        RecommendedWatcher::new(event_sender, Config::default()).expect("Could not create watcher");
+    let (input_sender, inputs) = std::sync::mpsc::channel();
+    let file_events = input_sender.clone();
+    let mut watcher = RecommendedWatcher::new(
+        move |event| {
+            let _ = file_events.send(WatchInput::File(event));
+        },
+        Config::default(),
+    )
+    .expect("Could not create watcher");
 
     let path = Path::new(folder);
 
@@ -886,11 +924,11 @@ pub fn start(
 
     // In-process builds write no typed artifacts: editor tooling asks the
     // watcher, which compiles them on demand.
-    let (tooling_server, tooling_requests) = match crate::tooling_server::start(path) {
-        Ok((server, requests)) => (Some(server), Some(requests)),
+    let tooling_server = match crate::tooling_server::start(path, input_sender) {
+        Ok(server) => Some(server),
         Err(err) => {
             log::warn!("Could not start the editor tooling server: {err}");
-            (None, None)
+            None
         }
     };
 
@@ -967,7 +1005,7 @@ pub fn start(
         watcher: &mut watcher,
         current_watches,
         initial_build_state: build_state,
-        events: event_receiver,
+        inputs,
         stop_status,
         path,
         show_progress,
@@ -977,7 +1015,6 @@ pub fn start(
         clear_screen,
         prod,
         features,
-        tooling_requests,
     })
 }
 
