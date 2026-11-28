@@ -1,0 +1,1 @@
+- Make the backend lowering read the class of an `@instanceOf` type from its module and scope, and count the variables the substitution pass binds for block elements when deciding which JavaScript globals a binding shadows, as the backend in use does.
