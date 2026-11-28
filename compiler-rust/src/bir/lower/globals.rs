@@ -78,8 +78,8 @@ fn is_js_global(ident: &Ident) -> bool {
 }
 
 impl Globals {
-    /// The row of `name`, added when new. One lookup; a new row also reads
-    /// the name's bytes once for an underscore (`underscored`).
+    /// The row of `name`, added when new. Cost: one lookup; O(name bytes)
+    /// for a new row, which is read once for an underscore (`underscored`).
     fn row(&mut self, name: Name) -> u32 {
         let next = self.rows.len() as u32;
         let row = *self.names.entry(name).or_insert(next);
