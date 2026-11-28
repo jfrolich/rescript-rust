@@ -8017,7 +8017,8 @@ fn trace_of(out: &Coercion, at: usize) -> Vec<[Ty; 2]> {
 /// What every call of `subtype` and `force_subtype` leaves.
 fn assert_subtype_left(c: &Checker, out: &Coercion) {
     assert!(c.subtyping.is_empty() && c.frames.is_empty() && c.saved.is_empty() && c.scopes.is_empty());
-    assert!(c.related.keys.is_empty(), "the table of pairs is cleared twice (ctype.ml:4213, 4217)");
+    assert!(c.subtyped.keys.is_empty(), "the table of pairs is cleared twice (ctype.ml:4213, 4217)");
+    assert_eq!(c.scope_floor, 0, "the floor of the scopes is what the entry found");
     assert_eq!((out.quiet, out.held, out.dirty), (0, NONE, false));
     assert!(c.extras.fields.is_empty() && c.extras.row_scratch.is_empty());
 }
@@ -9223,4 +9224,345 @@ fn enlarging_at_ten_thousand() {
         assert!(l <= s * factor, "shape {at}: {s} steps at 1,000, {l} at 10,000");
         assert!(*s >= 1_000, "shape {at} is vacuous: {s}");
     }
+}
+
+/// What the inclusion check of a [`Relating`] supplier does with the
+/// checker it is handed. OCaml's `!package_subtype` is
+/// `Includemod.modtypes`, which compares the items of two signatures
+/// with `Ctype.moregeneral` (a value, includecore.ml:47) and
+/// `Ctype.equal` (a type declaration, includecore.ml:92-157): the real
+/// supplier calls the kernel's own relations on this `Checker`.
+#[derive(Clone, Copy)]
+enum Runs {
+    /// No relation: two signatures without items.
+    Nothing,
+    /// The first statement of the outer `moregen` and of `eqtype_list`
+    /// (compiler/ml/ctype.ml:3089, 3358) and nothing else:
+    /// `Checker::empty_scopes`. A stand-in that runs before R3i is
+    /// built.
+    Empties,
+    /// What a relation does to `Checker::related`, and nothing else:
+    /// the table cleared and the pair entered. A stand-in that runs
+    /// before R3i is built.
+    Table(Ty, Ty),
+    /// `Checker::equal` of two empty lists.
+    Equal,
+    /// `Checker::equal`, without renaming, of the two types.
+    EqualPair(Ty, Ty),
+}
+
+/// A supplier whose two module types (7 and 8) are different paths and
+/// always compatible, after running [`Runs`]. A name is its position:
+/// two arguments at the same position have the same name. No module
+/// type has an answer for a name it does not list.
+struct Relating {
+    runs: Runs,
+}
+
+impl Relating {
+    fn run(&self, c: &mut Checker) -> bool {
+        match self.runs {
+            Runs::Nothing => {}
+            Runs::Empties => c.empty_scopes(),
+            Runs::Table(left, right) => {
+                c.related.keys.clear();
+                c.related.keys.insert(super::unify::PairSet::key(left, right));
+            }
+            Runs::Equal => assert!(c.equal(false, &[], &[])),
+            Runs::EqualPair(left, right) => assert!(!c.equal(false, &[left], &[right])),
+        }
+        true
+    }
+}
+
+impl PackageDecls for Relating {
+    fn compare(&self, left: u32, right: u32) -> std::cmp::Ordering {
+        left.cmp(&right)
+    }
+    fn complete(&mut self, _: &mut Checker, _: u32, _: u32, _: u32) -> Completion {
+        Completion::Missing
+    }
+    fn compatible(&mut self, c: &mut Checker, _: Node, _: Node) -> bool {
+        self.run(c)
+    }
+    fn same_path(&self, _: u32, _: u32) -> bool {
+        false
+    }
+    fn subtype(&mut self, c: &mut Checker, _: Node, _: Node) -> bool {
+        self.run(c)
+    }
+}
+
+/// A checker at level 2 whose declarations are a [`Relating`].
+fn relating(mode: Mode, runs: Runs) -> Checker {
+    let mut c = checker(mode);
+    c.packages = Some(Box::new(Relating { runs }));
+    c
+}
+
+/// `'a. (first, second)` twice, over two new universal variables `u`
+/// and `v`: element `package` is a package without arguments (or, with
+/// `int`, with one argument `int` under the name 0) of the module type 7
+/// on the left and 8 on the right; the other element is the variable.
+/// Returns the two types and `[u, v]`.
+fn package_and_univar(c: &mut Checker, package: usize, int: bool) -> ([Ty; 2], [Ty; 2]) {
+    let vars = [univar_at(c, 2), univar_at(c, 2)];
+    let types = [0, 1].map(|side| {
+        let arguments = if int { vec![constr(c, INT, &[])] } else { Vec::new() };
+        let module = package_at(c, 2, 7 + side as u32, 0, &arguments);
+        let mut elements = [vars[side]; 2];
+        elements[package] = module;
+        let body = tuple(c, &elements);
+        poly_of(c, 2, body, &[vars[side]])
+    });
+    (types, vars)
+}
+
+/// The scopes of universal variables are emptied by an entry that runs
+/// INSIDE a polymorphic body, and come back when that body is left
+/// (CHECKER_REWRITE 8.6, decision 127; 8.13, "The scopes after an
+/// inclusion check"). OCaml: `univar_pairs` is one global;
+/// `enter_poly` puts `old_univars` back at its own exit only
+/// (compiler/ml/ctype.ml:1675, 1678); the outer `moregen` (3089) and
+/// `eqtype_list` (3358), which `unify_package` reaches through
+/// `!package_subtype` (2172-2180), start with `current_univar_pairs ()
+/// := []`. So the next pair of universal variables of the same body has
+/// no entry in `unify_univar` (`[] -> raise (Unify [])`, 1559).
+///
+/// Witnesses, each the shape of a source program of 8.13 that OCaml
+/// refuses or accepts, with a supplier whose inclusion check does what
+/// the entry of a relation does to the scopes ([`Runs::Empties`]; the
+/// test with the relation itself is
+/// `an_inclusion_check_that_runs_a_relation_empties_the_scopes`):
+/// - UPkgFirst, `'a. (module(S), 'a)` against `'a. (module(T), 'a)`:
+///   REFUSED. The package pair is unified first, the check empties the
+///   scopes, the pair of the two variables clashes.
+/// - UVarFirst, `'a. ('a, module(S))`: accepted, the variables are
+///   paired before the check.
+/// - UEmptyFirst, UPkgFirst with a check that runs nothing: accepted.
+/// - `('a. (module(S), 'a), 'b. 'b)`: REFUSED in its first element, and
+///   with that element `'a. ('a, module(S))` accepted: the scope of the
+///   SECOND polymorphic type is read, because the first put the floor
+///   back when it was left.
+///
+/// After each call no scope is open and the floor is 0, on both
+/// answers. Seen to fail with `empty_scopes` storing nothing (the first
+/// and fourth witnesses are accepted), and with `leave_poly` not
+/// putting the floor back (the floor is 1 after the first witness).
+#[test]
+fn emptied_scopes_come_back_when_the_polymorphic_type_is_left() {
+    for mode in [Mode::Success, Mode::Explain] {
+        for (package, runs, accepted) in
+            [(0, Runs::Empties, false), (1, Runs::Empties, true), (0, Runs::Nothing, true)]
+        {
+            let mut c = relating(mode, runs);
+            let ([left, right], [u, v]) = package_and_univar(&mut c, package, false);
+            assert_eq!(c.unify(left, right).is_ok(), accepted, "package at {package}");
+            assert!(c.scopes.is_empty() && c.frames.is_empty());
+            assert_eq!(c.scope_floor, 0);
+            if accepted {
+                assert_eq!(c.g.repr(u), c.g.repr(v));
+            }
+        }
+        for (package, accepted) in [(0, false), (1, true)] {
+            let mut c = relating(mode, Runs::Empties);
+            let ([l1, r1], _) = package_and_univar(&mut c, package, false);
+            let (a, b) = (univar_at(&mut c, 2), univar_at(&mut c, 2));
+            let (l2, r2) = (poly_of(&mut c, 2, a, &[a]), poly_of(&mut c, 2, b, &[b]));
+            let (left, right) = (tuple(&mut c, &[l1, l2]), tuple(&mut c, &[r1, r2]));
+            assert_eq!(c.unify(left, right).is_ok(), accepted, "package at {package}");
+            assert!(c.scopes.is_empty() && c.frames.is_empty());
+            assert_eq!(c.scope_floor, 0);
+        }
+    }
+}
+
+/// A relation that runs while another relation runs has a table of
+/// pairs of its own, and the outer one has its table again afterwards
+/// (`Type_pairs.create` a call, compiler/ml/ctype.ml:3115, 3370;
+/// CHECKER_REWRITE 8.6, decision 128): `Checker::enter_relation` and
+/// `Checker::leave_relation`, which the entries of `moregen` and
+/// `equal` call. The first relation shelves nothing; one entered inside
+/// it finds an empty table; the outer table comes back with its pair,
+/// and the inner table is kept for the next nested relation (no
+/// allocation a relation). Seen to fail with `enter_relation` shelving
+/// nothing (the inner relation finds the outer pair).
+#[test]
+fn a_relation_inside_a_relation_has_a_table_of_its_own() {
+    let mut c = checker(Mode::Success);
+    let key = super::unify::PairSet::key;
+    let [x, y, z] = [(); 3].map(|()| var(&mut c));
+    for _ in 0..2 {
+        c.enter_relation();
+        assert!(c.related_shelf.is_empty(), "the first relation moves no table");
+        c.related.keys.clear();
+        c.related.keys.insert(key(x, y));
+        c.enter_relation();
+        assert!(c.related.keys.is_empty());
+        c.related.keys.insert(key(y, z));
+        c.enter_relation();
+        assert!(c.related.keys.is_empty());
+        c.leave_relation();
+        assert!(c.related.keys.contains(&key(y, z)) && c.related.keys.len() == 1);
+        c.leave_relation();
+        assert!(c.related.keys.contains(&key(x, y)) && c.related.keys.len() == 1);
+        c.leave_relation();
+        assert_eq!((c.relating, c.related_shelf.len(), c.related_spare.len()), (0, 0, 2));
+    }
+}
+
+/// The package arm of `subtype_rec` inside a polymorphic type
+/// (compiler/ml/ctype.ml:4073-4100 under 4063-4072; CHECKER_REWRITE
+/// 8.6, decision 127): the trial empties the scopes. `cstrs'` is built
+/// BEFORE the trial and holds the list as it was (4083); the `unify` of
+/// the trial is the typer's (`unify_pairs (ref env) ty1 ty2 []`,
+/// 2769-2773); every constraint made afterwards, until `enter_poly`
+/// puts `old_univars` back (1675), holds `[]`, and a pair of universal
+/// variables among them clashes when it is forced (1559).
+///
+/// Witnesses, each the shape of a coercion of 8.13, the supplier's
+/// check running nothing unless said:
+/// - PkgFirst, `'a. (module(S with type t = int), 'a)` against the same
+///   with `T`: REFUSED when forced. The constraints: `(int, int)` under
+///   the scope, then `(u, v)` under NO scope.
+/// - VarFirst, `'a. ('a, module(S with type t = int))`: accepted;
+///   both constraints are under the scope.
+/// - EmptyFirst, `'a. (module(S), 'a)` with no item: accepted; no pair
+///   is unified in the trial and the check runs no relation.
+/// - PkgNoCstr, the same when the check empties the scopes
+///   ([`Runs::Empties`], what the entry of a relation does): REFUSED.
+/// - `'a. ('b. (module(S with type t = int), 'b), 'a)`: `(int, int)`
+///   under the inner scope, `(b1, b2)` under none, `(a1, a2)` under the
+///   OUTER scope: the `Leave` frame of the inner type put the floor and
+///   the chain back.
+///
+/// Seen to fail against the prototype with `empty_scopes` left out of
+/// the trial (PkgFirst is accepted), with `out.held` not set to `NONE`
+/// after it (the same), and with the frames of the trial constrained
+/// after `out.held` is cut (the first constraint of PkgFirst is under no
+/// scope).
+///
+/// Reaches: R3g, R3q, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn a_trial_of_two_packages_empties_the_scopes_of_the_body_it_is_in() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut out = Coercion::default();
+        for (package, int, runs, scopes, accepted) in [
+            (0, true, Runs::Nothing, vec![0, NONE], false),
+            (1, true, Runs::Nothing, vec![0, 0], true),
+            (0, false, Runs::Nothing, vec![0], true),
+            (0, false, Runs::Empties, vec![NONE], false),
+        ] {
+            let mut c = relating(mode, runs);
+            let ([left, right], [u, v]) = package_and_univar(&mut c, package, int);
+            c.subtype(left, right, &mut out).unwrap();
+            assert_subtype_left(&c, &out);
+            let held: Vec<u32> = out.constraints.iter().map(|k| k.scopes).collect();
+            assert_eq!(held, scopes, "package at {package}, int {int}");
+            let last = pairs(&mut c, &out)[if package == 0 { out.constraints.len() - 1 } else { 0 }];
+            assert_eq!(last, [u, v]);
+            assert_eq!(c.force_subtype(&out).is_ok(), accepted, "package at {package}, int {int}");
+            assert_subtype_left(&c, &out);
+            if !accepted && mode == Mode::Explain {
+                assert_eq!(c.subtype_trace.last(), Some(&[u, v]));
+            }
+        }
+
+        let mut c = relating(mode, Runs::Nothing);
+        let ([l1, r1], [b1, b2]) = package_and_univar(&mut c, 0, true);
+        let (a1, a2) = (univar_at(&mut c, 2), univar_at(&mut c, 2));
+        let (t1, t2) = (tuple(&mut c, &[l1, a1]), tuple(&mut c, &[r1, a2]));
+        let (left, right) = (poly_of(&mut c, 2, t1, &[a1]), poly_of(&mut c, 2, t2, &[a2]));
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        let held: Vec<u32> = out.constraints.iter().map(|k| k.scopes).collect();
+        assert_eq!(held, [1, NONE, 0]);
+        assert_eq!(pairs(&mut c, &out)[1..], [[b1, b2], [a1, a2]]);
+        assert!(c.force_subtype(&out).is_err());
+        assert_subtype_left(&c, &out);
+    }
+}
+
+/// The table of pairs of `subtype_rec` is its own (`subtypes ()`,
+/// compiler/ml/ctype.ml:3641, one global cleared at 4213 and 4217),
+/// and a relation the inclusion check of two packages runs inside the
+/// walk has another (`Type_pairs.create`, 3115, 3370): CHECKER_REWRITE
+/// 8.6, decision 128.
+///
+/// Witness: `(module(S), x)` against `(module(T), y)` with a check
+/// that does to `Checker::related` what a relation on `(x, y)` does
+/// ([`Runs::Table`]): the walk meets `(x, y)` AFTER the check and its
+/// constraint is collected. Seen to fail against the prototype with
+/// `subtype_pair` reading `Checker::related` (no constraint: the
+/// coercion would be accepted without `x` and `y` being unified).
+///
+/// Reaches: R3g, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn the_pairs_of_a_coercion_are_not_those_of_a_relation_run_inside_it() {
+    let mut c = checker(Mode::Success);
+    let (x, y) = (var(&mut c), var(&mut c));
+    c.packages = Some(Box::new(Relating { runs: Runs::Table(x, y) }));
+    let (p1, p2) = (package_at(&mut c, 2, 7, 0, &[]), package_at(&mut c, 2, 8, 0, &[]));
+    let (left, right) = (tuple(&mut c, &[p1, x]), tuple(&mut c, &[p2, y]));
+    let mut out = Coercion::default();
+    c.subtype(left, right, &mut out).unwrap();
+    assert_subtype_left(&c, &out);
+    assert_eq!(pairs(&mut c, &out), [[x, y]]);
+}
+
+/// The same four structures with a supplier that calls the kernel's own
+/// relation on the checker it is handed, as the real one will
+/// ([`Runs::Equal`], [`Runs::EqualPair`]). It needs the bodies of R3i
+/// AND the first commit of the R3j builder (the entries of `moregen`
+/// and `equal` call `Checker::empty_scopes` and
+/// `Checker::enter_relation`; CHECKER_REWRITE 8.4, the prompt of R3j):
+/// it could NOT be run in the turn that wrote it, where R3i's bodies
+/// were not on the branch, and so was not seen to fail.
+///
+/// - Unification (programs UPkgFirst, UVarFirst, UEmptyFirst of 8.13):
+///   `'a. (module(S), 'a)` is REFUSED when the check runs `equal`,
+///   `'a. ('a, module(S))` accepted, and the first accepted when the
+///   check runs nothing.
+/// - Subtyping (PkgNoCstr): the constraint `(u, v)` is under no scope
+///   and forcing REFUSES.
+/// - The table of subtyping: the check runs `equal` on `(x, y)`, which
+///   enters the pair in ITS table and answers `false`; the walk's
+///   constraint `(x, y)` is still collected.
+/// - A relation inside a relation: `equal` of `(module(S), x)` and
+///   `(module(T), y)` where the check runs `equal` on `(x, y)`: the
+///   outer `equal` answers `false` (with one shared table the inner
+///   pair is found and `x` against `y` is skipped).
+///
+/// Reaches: R3g, R3i, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn an_inclusion_check_that_runs_a_relation_empties_the_scopes() {
+    for (package, runs, accepted) in [(0, Runs::Equal, false), (1, Runs::Equal, true), (0, Runs::Nothing, true)] {
+        let mut c = relating(Mode::Success, runs);
+        let ([left, right], _) = package_and_univar(&mut c, package, false);
+        assert_eq!(c.unify(left, right).is_ok(), accepted, "package at {package}");
+        assert!(c.scopes.is_empty() && c.frames.is_empty() && c.scope_floor == 0 && c.relating == 0);
+    }
+
+    let mut out = Coercion::default();
+    let mut c = relating(Mode::Success, Runs::Equal);
+    let ([left, right], [u, v]) = package_and_univar(&mut c, 0, false);
+    c.subtype(left, right, &mut out).unwrap();
+    assert_subtype_left(&c, &out);
+    assert_eq!((pairs(&mut c, &out), out.constraints[0].scopes), (vec![[u, v]], NONE));
+    assert!(c.force_subtype(&out).is_err());
+
+    let mut c = checker(Mode::Success);
+    let (x, y) = (var(&mut c), var(&mut c));
+    c.packages = Some(Box::new(Relating { runs: Runs::EqualPair(x, y) }));
+    let (p1, p2) = (package_at(&mut c, 2, 7, 0, &[]), package_at(&mut c, 2, 8, 0, &[]));
+    let (left, right) = (tuple(&mut c, &[p1, x]), tuple(&mut c, &[p2, y]));
+    c.subtype(left, right, &mut out).unwrap();
+    assert_subtype_left(&c, &out);
+    assert_eq!(pairs(&mut c, &out), [[x, y]]);
+
+    assert!(!c.equal(false, &[left], &[right]));
+    assert!(c.related_shelf.is_empty() && c.relating == 0);
 }

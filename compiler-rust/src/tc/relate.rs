@@ -777,11 +777,15 @@ impl Checker {
     /// right` in the order [`Checker::force_subtype`] unifies them
     /// (OCaml conses and reverses, 4231). Nothing is unified here.
     ///
-    /// No scope of universal variables is open at the entry (asserted in
-    /// debug builds: OCaml empties its list, 4214, and the kernel cuts
-    /// `scopes` back to empty at the end). [`Checker::related`] is
-    /// cleared at the entry and at the end, as OCaml clears twice, so
-    /// the table is empty between relations. [`Checker::subtype_trace`]
+    /// The scopes of universal variables are emptied at the entry
+    /// ([`Checker::empty_scopes`]; OCaml empties its list, 4214): what
+    /// was open stays below [`Checker::scope_floor`], and at the end
+    /// `scopes` has the length it had. [`Checker::subtyped`] is cleared
+    /// at the entry and at the end, as OCaml clears twice (4213, 4217).
+    /// It is the table of subtyping ALONE (`subtypes ()`, one global of
+    /// OCaml): the relations a supplier runs inside the walk have
+    /// [`Checker::related`] (`Type_pairs.create`, 3115, 3370) and do
+    /// not see or clear this one (CHECKER_REWRITE 8.6, decision 128). [`Checker::subtype_trace`]
     /// is cleared. The root pair goes on [`Checker::subtyping`] with the
     /// first link of the trace (`[(ty1, ty2)]`) and
     /// `Checker::subtype_frames` runs.
@@ -833,12 +837,19 @@ impl Checker {
     /// what the constraint before it had, `Checker::open_scopes` makes
     /// [`Checker::scopes`] the chain of its [`HeldScope`]s, outermost
     /// first (`unify_pairs`: `univar_pairs := pairs`,
-    /// ctype.ml:2769-2771); then [`Checker::unify`]. A unification leaves `scopes` as it found it
-    /// on both answers. After the last constraint, and after a clash,
-    /// `scopes` is emptied: OCaml leaves the last constraint's list in
-    /// place, and every later `unify` of the typer starts by emptying it
-    /// (`let unify env ty1 ty2 = unify_pairs (ref env) ty1 ty2 []`,
-    /// 2773).
+    /// ctype.ml:2769-2771); then [`Checker::unify`]. The chain is pushed
+    /// ABOVE the length `scopes` has at the entry, which is
+    /// [`Checker::scope_floor`] for every constraint: the floor is
+    /// written before each unification (one store a constraint),
+    /// because a unification may raise it (a package whose inclusion
+    /// check runs a relation) and OCaml assigns the list again for the
+    /// next constraint. A unification leaves the length of `scopes` as
+    /// it found it on both answers. After the last constraint, and
+    /// after a clash, `scopes` is cut to the length of the entry and
+    /// the floor is that length: OCaml leaves the last constraint's
+    /// list in place, and every later `unify` of the typer starts by
+    /// emptying it (`let unify env ty1 ty2 = unify_pairs (ref env) ty1
+    /// ty2 []`, 2773).
     ///
     /// NO speculation: the links stay, also those of the constraints
     /// before a clash and of the one that clashed (in `Mode::Explain`
@@ -854,7 +865,8 @@ impl Checker {
     /// the expansion of a trace is the printer's (8.13). In
     /// `Mode::Success` the unification has set `unexplained_failure`.
     ///
-    /// No scope is open at the entry (asserted in debug builds). A
+    /// A scope open at the entry is not read (the first `unify_pairs`
+    /// replaces the list). A
     /// caller that never forces drops `coercion`: nothing of it is held
     /// by the checker. Cost: O(constraints), one step each, plus the
     /// unifications; one step a scope closed or opened between two
@@ -941,8 +953,11 @@ impl Checker {
     ///   two types under its link: a constraint OCaml makes after a walk
     ///   that is still on the stack (`subtype_fields`, 4126-4133).
     /// - A [`SubKind::Leave`] frame: the innermost scope of
-    ///   [`Checker::scopes`] is popped and `out.held` is the frame's
-    ///   `left` again (`univar_pairs := old_univars`, ctype.ml:1675).
+    ///   [`Checker::scopes`] is popped, `out.held` is the frame's
+    ///   `left` again and [`Checker::scope_floor`] its `right`
+    ///   (`univar_pairs := old_univars`, ctype.ml:1675): what the entry
+    ///   found, also when the body emptied the scopes (a trial of two
+    ///   packages).
     /// - A [`SubKind::Invariant`] frame (an argument that may occur both ways,
     ///   3687-3691): a [`SubKind::Back`] frame of the same pair with the
     ///   `dirty` of `out`; `out.quiet` one more and `out.dirty` false;
@@ -1021,7 +1036,7 @@ impl Checker {
     /// OCaml's order of arms; `link` is the frame's (`trace`).
     ///
     /// 1. The two representatives; one node: nothing (3644-3646). The
-    ///    ordered pair in [`Checker::related`]: nothing; otherwise
+    ///    ordered pair in [`Checker::subtyped`]: nothing; otherwise
     ///    added (3648-3652).
     /// 2. A variable on either side: `Checker::constrain` (3654-3655).
     /// 3. Two arrows of one arity whose labels are the same
@@ -1269,7 +1284,8 @@ impl Checker {
     /// [`Checker::frames`] are taken off again, the scope it pushed is
     /// appended to `out.scopes` as a [`HeldScope`] whose parent is
     /// `out.held`, a [`SubKind::Leave`] frame keeps the old `out.held`
-    /// in its `left`, `out.held` is the new row, and the pair of the
+    /// in its `left` and in its `right` the floor `enter_poly` found
+    /// (the `left` of its `LeavePoly` frame), `out.held` is the new row, and the pair of the
     /// bodies goes above the `Leave` frame under the same link. So a
     /// constraint made below it records the scopes that are open where
     /// it is made, and [`Checker::force_subtype`] opens them again
@@ -1316,9 +1332,11 @@ impl Checker {
     /// the two nodes, which unification then refuses. Otherwise one
     /// merge of the two name lists
     /// ([`super::rows::PackageDecls::compare`]), one
-    /// [`SubKind::Constrain`] frame a name of `ntl2`, in name order, so
-    /// that they are popped, and so forced, last name first (`cstrs' @
-    /// cstrs`, reversed with the rest at 4231):
+    /// [`SubKind::Constrain`] frame a name of `ntl2`, in name order
+    /// (they are scratch above the length found: this body takes them
+    /// off again before it returns), so that they are constrained, and
+    /// so forced, last name first (`cstrs' @ cstrs`, reversed with the
+    /// rest at 4231):
     /// - a name both list: the two arguments;
     /// - a name only the RIGHT lists: the left module type's answer at
     ///   the left node's level
@@ -1334,14 +1352,29 @@ impl Checker {
     /// [`super::rows::PackageDecls::same_path`]: one speculation, each
     /// pair of the frames unified in name order,
     /// [`super::rows::PackageDecls::subtype`], and
-    /// [`Checker::restore`] on either answer. The arm that ends (also on
-    /// a clash of the trial or a `false`) takes its frames off and
-    /// `constrain`s the two nodes. The supplier is taken out of
-    /// `Checker::packages` for the calls and put back. The trial runs
-    /// under the scopes the walk has open; OCaml's `unify` there is the
-    /// typer's, which empties the list of scopes (2773), so that inside
-    /// a polymorphic type the constraints made after a trial record no
-    /// scope: not followed (CHECKER_REWRITE 8.6, decision 123).
+    /// [`Checker::restore`] on either answer. The supplier is taken out
+    /// of `Checker::packages` for the calls and put back.
+    ///
+    /// The scopes (CHECKER_REWRITE 8.6, decision 127). The `unify` of
+    /// the trial is the typer's, which empties the list of scopes
+    /// (`unify_pairs (ref env) ty1 ty2 []`, 2773), and the inclusion
+    /// check runs `moregen` and `eqtype_list`, which empty it too
+    /// (3089, 3358); nothing puts it back before the enclosing
+    /// `enter_poly` ends (1675). So: [`Checker::empty_scopes`] before
+    /// the first pair of the trial is unified (with no pair, only what
+    /// the supplier's relations do); the supplier says nothing about
+    /// what it ran. After the trial the frames are taken off: when the
+    /// arm goes on, each is `constrain`ed, last name first, under the
+    /// `out.held` the arm FOUND (`cstrs'` reads the list at 4083,
+    /// before the trial). Then, when [`Checker::scope_floor`] is the
+    /// length of [`Checker::scopes`] (no scope is read any more),
+    /// `out.held` is `NONE`: every constraint made from here to the
+    /// `Leave` frame of the enclosing polymorphic type records no
+    /// scope, and a pair of universal variables among them clashes when
+    /// it is forced (1559). The arm that ends (also on a clash of the
+    /// trial or a `false`) then `constrain`s the two nodes, under no
+    /// scope if the trial emptied them (4100 reads the list after the
+    /// trial).
     ///
     /// Cost: O(names of both), one step a merge step, 16 bytes of frame
     /// a name, plus the supplier; for two paths the unifications and
@@ -1563,6 +1596,59 @@ impl Checker {
     /// descriptor row, one `VariantRow`. (R3j)
     fn enlarge_variant(&mut self, frame: EnlargeFrame) {
         todo!("R3j")
+    }
+
+    /// The table of pairs of a relation that starts
+    /// (`Type_pairs.create`, compiler/ml/ctype.ml:3115 for `moregeneral`
+    /// and 3370 for `equal`: a table a call). The entries of `moregen`
+    /// and `equal` call it before they clear [`Checker::related`], and
+    /// [`Checker::leave_relation`] on every way out. The first relation
+    /// (no other is running) moves nothing: one load, one branch, one
+    /// store. A relation entered while another runs (the inclusion
+    /// check of two packages, from `unify_package`: the supplier is
+    /// handed this checker) puts the running one's table on
+    /// [`Checker::related_shelf`] and takes an empty one from
+    /// [`Checker::related_spare`], or a new one that has allocated
+    /// nothing. Subtyping has [`Checker::subtyped`] and unification no
+    /// table, so only a relation inside a relation moves one.
+    /// (CHECKER_REWRITE 8.6, decision 128)
+    #[inline]
+    pub fn enter_relation(&mut self) {
+        if self.relating != 0 {
+            self.shelve_related();
+        }
+        self.relating += 1;
+    }
+
+    /// The end of a relation [`Checker::enter_relation`] started: when
+    /// it ran inside another, its table is emptied and kept for the
+    /// next one, and the outer relation has its own again. O(1) for the
+    /// first relation; for a nested one the clear of its table.
+    #[inline]
+    pub fn leave_relation(&mut self) {
+        self.relating -= 1;
+        if self.relating != 0 {
+            self.unshelve_related();
+        }
+    }
+
+    /// O(1): the nested case of [`Checker::enter_relation`].
+    #[cold]
+    #[inline(never)]
+    fn shelve_related(&mut self) {
+        let inner = self.related_spare.pop().unwrap_or_default();
+        self.related_shelf.push(std::mem::replace(&mut self.related, inner));
+    }
+
+    /// The nested case of [`Checker::leave_relation`]: O(capacity of the
+    /// inner table) for its clear.
+    #[cold]
+    #[inline(never)]
+    fn unshelve_related(&mut self) {
+        let outer = self.related_shelf.pop().expect("the table of the outer relation");
+        let mut inner = std::mem::replace(&mut self.related, outer);
+        inner.keys.clear();
+        self.related_spare.push(inner);
     }
 }
 
