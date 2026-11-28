@@ -5508,7 +5508,6 @@ mod tests {
     ///
     /// Reaches: R3i.
     #[test]
-    #[ignore = "R3i build"]
     fn a_wrong_answer_of_a_relation_is_reported() {
         let program = compile(FIXED.to_string());
         let plan = Plan::new(Tier::Full, RELATIONS);
@@ -5539,7 +5538,6 @@ mod tests {
     ///
     /// Reaches: R3m, R3e, R3f, R3n, R3g, R3i.
     #[test]
-    #[ignore = "R3i build"]
     fn relation_plan_agrees_on_generated_cases() {
         for (at, programs) in [(0, 100), (1, 100), (2, 50)] {
             let with = RELATION_PLANS[at];

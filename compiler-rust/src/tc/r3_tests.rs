@@ -7566,7 +7566,6 @@ fn the_rigid_expansion_is_public_and_adds_the_chain() {
 ///
 /// Reaches: R3i.
 #[test]
-#[ignore = "R3i build"]
 fn moregeneral_instantiates_what_may_be_and_keeps_its_links() {
     let mut c = checker(Mode::Explain);
     let identity = |c: &mut Checker| {
@@ -7631,7 +7630,6 @@ fn moregeneral_instantiates_what_may_be_and_keeps_its_links() {
 ///
 /// Reaches: R3i.
 #[test]
-#[ignore = "R3i build"]
 fn equal_renames_bijectively_and_restores() {
     let mut c = checker(Mode::Explain);
     let pair = |c: &mut Checker, same: bool| {
@@ -7699,7 +7697,6 @@ fn equal_renames_bijectively_and_restores() {
 ///
 /// Reaches: R3i.
 #[test]
-#[ignore = "R3i build"]
 fn matches_instantiates_nothing_of_its_first_argument() {
     for mode in [Mode::Success, Mode::Explain] {
         let mut c = checker(mode);
@@ -7754,7 +7751,6 @@ fn matches_instantiates_nothing_of_its_first_argument() {
 ///
 /// Reaches: R3f, R3i.
 #[test]
-#[ignore = "R3i build"]
 fn matches_does_not_let_a_row_gain_a_tag() {
     let mut c = checker(Mode::Success);
     let open = |c: &mut Checker, tags: &[(&str, Tag)]| {
@@ -7797,7 +7793,6 @@ fn matches_does_not_let_a_row_gain_a_tag() {
 ///
 /// Reaches: R3i.
 #[test]
-#[ignore = "R3i build"]
 fn relations_at_ten_thousand() {
     fn wide_vars(c: &mut Checker, n: u32, level: u32) -> Ty {
         let vars: Vec<Ty> = (0..n).map(|_| var_at(c, level)).collect();
@@ -7857,7 +7852,6 @@ fn relations_at_ten_thousand() {
 ///
 /// Reaches: R3e, R3f, R3i.
 #[test]
-#[ignore = "R3i build"]
 fn relations_over_ten_thousand_fields_and_tags() {
     let labels = |prefix: &str, n: u32| -> Vec<String> { (0..n).map(|at| format!("{prefix}{at:05}")).collect() };
     let run = |n: u32| -> [u64; 5] {
@@ -7937,7 +7931,6 @@ fn relations_over_ten_thousand_fields_and_tags() {
 ///
 /// Reaches: R3f, R3n, R3i.
 #[test]
-#[ignore = "R3i build"]
 fn the_copy_of_the_subject_shares_the_references_of_its_rows() {
     let mut c = checker(Mode::Success);
     let row = |c: &mut Checker| {
