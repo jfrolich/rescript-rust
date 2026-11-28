@@ -115,8 +115,8 @@ impl Globals {
 /// marked node, each read at most twice per name (the second read marks it
 /// with the result), so the sites of one name cost at most two reads per
 /// node of the unit together. Nothing is allocated when the tables have
-/// their capacity. The tests in this file assert the counts at 10,000
-/// references and at 10,000 bindings.
+/// their capacity. The tests of `oracle_tests.rs` assert that the steps
+/// are linear at 10,000 references and at 10,000 bindings.
 pub(crate) fn decide(bir: &mut Bir, idents: &[Ident]) {
     let Some(mut scope) = bir.js_scope.take() else { return };
     let mut globals = std::mem::take(&mut scope.globals);
@@ -470,134 +470,6 @@ mod tests {
     }
     fn steps(b: &Bir) -> usize {
         b.js_scope.as_ref().unwrap().globals.steps
-    }
-
-    #[test]
-    fn a_unit_without_a_shadowing_binding_reads_its_variables_and_binders_only() {
-        let (mut b, mut idents) = arena();
-        let mut statements = Vec::new();
-        for _ in 0..10_000 {
-            let var = local(&mut b, &mut idents, "x");
-            statements.push(declare(&mut b, var));
-            let value = read(&mut b);
-            statements.push(effect(&mut b, value));
-        }
-        block(&mut b, &statements);
-        decide(&mut b, &idents);
-        // 10,001 variables, 10,000 binders; no site is walked.
-        assert_eq!(steps(&b), 10_001 + 10_000);
-        assert_eq!(b.js_scope.as_ref().unwrap().globals.qualified, 0);
-    }
-
-    #[test]
-    fn ten_thousand_references_under_one_binding_cost_five_steps_each() {
-        // `{ let g = null; g'; g'; ... }`: each reference reads itself, its
-        // statement and the marked block, then marks the first two.
-        let (mut b, mut idents) = arena();
-        let var = local(&mut b, &mut idents, "g");
-        let mut statements = vec![declare(&mut b, var)];
-        let mut sites = Vec::new();
-        for _ in 0..10_000 {
-            let value = read(&mut b);
-            sites.push(value);
-            statements.push(effect(&mut b, value));
-        }
-        block(&mut b, &statements);
-        decide(&mut b, &idents);
-        assert!(sites.iter().all(|site| qualified(&b, *site)));
-        // Two variables, one binder, one mark; per site: three reads up to
-        // the block and two marks.
-        assert_eq!(steps(&b), 2 + 1 + 1 + 10_000 * 5);
-        assert_eq!(b.js_scope.as_ref().unwrap().globals.qualified, 10_000);
-    }
-
-    #[test]
-    fn ten_thousand_references_at_depth_ten_thousand_read_each_node_twice() {
-        // One chain of 10,000 nested blocks without a binding and 10,000
-        // references at the bottom: the first walk reads and marks the
-        // chain, every later one stops at its own statement's parent.
-        let (mut b, mut idents) = arena();
-        let var = local(&mut b, &mut idents, "g");
-        let mut statements = Vec::new();
-        let mut sites = Vec::new();
-        for _ in 0..10_000 {
-            let value = read(&mut b);
-            sites.push(value);
-            statements.push(effect(&mut b, value));
-        }
-        let mut inner = block(&mut b, &statements);
-        for _ in 0..10_000 {
-            let condition = b.new_node(View::JNull, 0);
-            let statement = b.new_node(View::SIf { condition, then_: inner, else_: None }, 0);
-            inner = block(&mut b, &[statement]);
-        }
-        // The binding is in a sibling function: it shadows nothing here.
-        let declaration = declare(&mut b, var);
-        let body = block(&mut b, &[declaration]);
-        let header = b.function_header(crate::bir::VarSpan { start: 0, len: 0 }, Default::default(), crate::lambda::LamLoc::NONE);
-        let function = b.new_node(View::JFun { body, header }, 0);
-        let other = effect(&mut b, function);
-        let condition = b.new_node(View::JNull, 0);
-        let outer = b.new_node(View::SIf { condition, then_: inner, else_: None }, 0);
-        block(&mut b, &[outer, other]);
-        decide(&mut b, &idents);
-        assert!(sites.iter().all(|site| !qualified(&b, *site)));
-        // The first site: itself, its statement, 10,001 blocks, 10,001 `if`s
-        // and the root, read and marked; the others: three reads, two marks.
-        let chain = 2 + 10_001 + 10_001 + 1;
-        assert_eq!(steps(&b), 2 + 1 + 1 + 2 * chain + 9_999 * 5);
-    }
-
-    #[test]
-    fn ten_thousand_bindings_cost_one_mark_each() {
-        // 10,000 blocks, each `{ let g = null; g' }`.
-        let (mut b, mut idents) = arena();
-        let mut statements = Vec::new();
-        let mut sites = Vec::new();
-        for _ in 0..10_000 {
-            let var = local(&mut b, &mut idents, "g");
-            let declaration = declare(&mut b, var);
-            let value = read(&mut b);
-            sites.push(value);
-            let statement = effect(&mut b, value);
-            let then_ = block(&mut b, &[declaration, statement]);
-            let condition = b.new_node(View::JNull, 0);
-            statements.push(b.new_node(View::SIf { condition, then_, else_: None }, 0));
-        }
-        block(&mut b, &statements);
-        decide(&mut b, &idents);
-        assert!(sites.iter().all(|site| qualified(&b, *site)));
-        // 10,001 variables, 10,000 binders, 10,000 marks; per site three
-        // reads (itself, its statement, the marked block) and two marks.
-        assert_eq!(steps(&b), 10_001 + 10_000 + 10_000 + 10_000 * 5);
-    }
-
-    #[test]
-    fn a_loop_over_an_existing_variable_binds_nothing_and_the_declaration_of_its_target_covers_it() {
-        // `if (null) { let g = null; for (g = ...; ...) { g' } } g'`: the
-        // loop's target is a reference to the local `g`, not a binder; the
-        // declaration's block covers the loop, so the global inside it is
-        // qualified, the one after the `if` is not.
-        let (mut b, mut idents) = arena();
-        let var = local(&mut b, &mut idents, "g");
-        let declaration = declare(&mut b, var);
-        let variable = b.new_node(View::Var { var }, 0);
-        let finish = b.new_node(View::JNull, 0);
-        let inside = read(&mut b);
-        let statement = effect(&mut b, inside);
-        let body = block(&mut b, &[statement]);
-        let looped = b.new_node(View::SForRangeExisting { variable, parts: &[finish, body], label: None }, 0);
-        let covered = block(&mut b, &[declaration, looped]);
-        let condition = b.new_node(View::JNull, 0);
-        let branch = b.new_node(View::SIf { condition, then_: covered, else_: None }, 0);
-        let outside = read(&mut b);
-        let after = effect(&mut b, outside);
-        block(&mut b, &[branch, after]);
-        decide(&mut b, &idents);
-        assert_eq!(b.vars.binder(var), Some(declaration));
-        assert!(qualified(&b, inside));
-        assert!(!qualified(&b, outside) && !qualified(&b, variable));
-        assert_eq!(b.js_scope.as_ref().unwrap().globals.qualified, 1);
     }
 
     #[test]

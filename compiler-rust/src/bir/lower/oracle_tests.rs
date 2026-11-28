@@ -2603,3 +2603,191 @@ fn a_dead_block_or_an_alias_of_constants_binds_no_element() {
         assert_eq!(text.contains("globalThis.t_0"), qualified, "{kind:?} {read}: {text}");
     }
 }
+
+#[test]
+fn a_declaration_in_an_explicit_block_shadows_the_global_in_the_list_the_block_is_spliced_into() {
+    // `run = x => { let t = ext(<global location>); if (ext(t, t)) { return 1 }
+    // let location = ext(); return ext(location, location) }`. The lowering
+    // writes the conditional and what follows it as one explicit block after
+    // the statements of its test; the flatten pass splices the block, so
+    // `let location` stands in the list of the reference before it.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let (x, t, local) = (Ident::new("x", 10, IdentFlags::NONE), Ident::new("t", 11, IdentFlags::NONE), Ident::new("location", 14, IdentFlags::NONE));
+        let global = js_global(a, "location");
+        let held = ext_call(a, &[global]);
+        let (first, second) = (a.var(t), a.var(t));
+        let tested = ext_call(a, &[first, second]);
+        let test = a.let_(LetKind::Strict, t, held, tested);
+        let yes = a.const_(C::Int { i: 1, comment: None });
+        let value = ext_call(a, &[]);
+        let (first, second) = (a.var(local), a.var(local));
+        let used = ext_call(a, &[first, second]);
+        let no = a.let_(LetKind::Strict, local, value, used);
+        let body = a.if_raw(test, yes, no);
+        a.function_(1, &[x], body, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert_eq!(marked, 1, "{text}");
+    assert!(text.contains("  let t = ext(globalThis.location);\n"), "{text}");
+    assert!(text.contains("  let location = ext();\n"), "{text}");
+}
+
+#[test]
+fn a_loop_over_a_variable_declared_before_it_binds_nothing_and_the_declaration_covers_what_follows() {
+    // `run = () => { for location = ext() to (let t = ext(); ext(t, t)) {
+    // ext(location, <global location>) }; return ext(<global location>) }`. The
+    // bound needs a statement and the first value is not safe to delay, so
+    // the lowering declares the variable before the loop, in the function's
+    // list (`finish_loop`, the loop without a first value): the loop binds
+    // nothing, and the declaration covers the reference after the loop too,
+    // which a loop that declares its own variable does not
+    // (`a_loop_variable_shadows_the_global_in_the_loop`).
+    use crate::lambda::{DirectionFlag, LamLoc};
+    let build = |a: &mut LamArena| {
+        let (index, t) = (Ident::new("location", 11, IdentFlags::NONE), Ident::new("t", 12, IdentFlags::NONE));
+        let start = ext_call(a, &[]);
+        let held = ext_call(a, &[]);
+        let (first, second) = (a.var(t), a.var(t));
+        let bound = ext_call(a, &[first, second]);
+        let finish = a.let_(LetKind::Strict, t, held, bound);
+        let (read, inside) = (a.var(index), js_global(a, "location"));
+        let effect = ext_call(a, &[read, inside]);
+        let looped = a.for_(index, start, finish, DirectionFlag::Upto, effect);
+        let after = js_global(a, "location");
+        let result = ext_call(a, &[after]);
+        let body = a.seq_raw(looped, result);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert_eq!(marked, 2, "{text}");
+    assert!(text.contains("  let location = ext();\n"), "{text}");
+    assert!(text.contains("  for (let location_finish = ext(t, t); location <= location_finish; ++location) {\n"), "{text}");
+    assert!(text.contains("    ext(location, globalThis.location);\n"), "{text}");
+    assert!(text.contains("  return ext(globalThis.location);\n"), "{text}");
+}
+
+/// What the lowering's external-shadow decision did on the unit `let run =
+/// ext => body`, `body` built by `build` from `count`: the references it
+/// qualified and its steps (`SwitchStats::{globals_qualified,
+/// global_steps}`).
+fn shadow_counts(count: usize, build: impl Fn(&mut LamArena, usize) -> Lam) -> (usize, usize) {
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let body = build(&mut a, count);
+    let ext = Ident::new("ext", 13, IdentFlags::NONE);
+    let run = Ident::new("run", 900, IdentFlags::NONE);
+    let function = a.function_(1, &[ext], body, Default::default(), LamLoc::NONE);
+    let end = a.var(run);
+    let root = a.let_(LetKind::Strict, run, function, end);
+    let resolver = crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    let stats = lower_for_names(&a, root, &resolver, false, false).switch_stats;
+    (stats.globals_qualified, stats.global_steps)
+}
+
+/// The decision's steps on `build` grow by the same amount for each
+/// statement added: at 10,000 they are those at 1,000 plus nine times the
+/// difference between 2,000 and 1,000. Returns the references qualified at
+/// 10,000.
+fn shadow_steps_are_linear(build: impl Fn(&mut LamArena, usize) -> Lam + Copy) -> usize {
+    let [small, middle, large] = [1_000, 2_000, 10_000].map(|count| shadow_counts(count, build));
+    assert!(middle.1 > small.1, "{small:?} {middle:?}");
+    assert_eq!(large.1 - small.1, 9 * (middle.1 - small.1), "{small:?} {middle:?} {large:?}");
+    assert_eq!(large.0, 10 * small.0, "{small:?} {large:?}");
+    large.0
+}
+
+/// `ext(<global location>); ... (count times); last`.
+fn global_effects(a: &mut LamArena, count: usize, last: Lam) -> Lam {
+    let mut body = last;
+    for _ in 0..count {
+        let global = js_global(a, "location");
+        let effect = ext_call(a, &[global]);
+        body = a.seq_raw(effect, body);
+    }
+    body
+}
+
+#[test]
+fn the_decision_on_a_function_without_a_shadowing_binding_qualifies_nothing_in_linear_steps() {
+    // `let x = ext(<global location>); ext(x, x); ... (count times)`: no
+    // variable has the global's name, so no reference is walked.
+    let build = |a: &mut LamArena, count: usize| {
+        let mut body = a.const_(C::Int { i: 0, comment: None });
+        for i in 0..count {
+            let x = Ident::new("x", 1_000 + i as i32, IdentFlags::NONE);
+            let (first, second) = (a.var(x), a.var(x));
+            let used = ext_call(a, &[first, second]);
+            let rest = a.seq_raw(used, body);
+            let global = js_global(a, "location");
+            let value = ext_call(a, &[global]);
+            body = a.let_(LetKind::Strict, x, value, rest);
+        }
+        body
+    };
+    assert_eq!(shadow_steps_are_linear(build), 0);
+    // No reference is walked: at most two steps for each statement added
+    // (on trunk its variable and its binder).
+    let [small, large] = [1_000, 10_000].map(|count| shadow_counts(count, build).1);
+    assert!(large - small <= 2 * 9_000, "{small} {large}");
+}
+
+#[test]
+fn ten_thousand_references_under_one_declaration_are_qualified_in_linear_steps() {
+    // `let location = ext(); ext(<global location>); ...; return ext(location, location)`.
+    let build = |a: &mut LamArena, count: usize| {
+        let local = Ident::new("location", 14, IdentFlags::NONE);
+        let (first, second) = (a.var(local), a.var(local));
+        let last = ext_call(a, &[first, second]);
+        let effects = global_effects(a, count, last);
+        let value = ext_call(a, &[]);
+        a.let_(LetKind::Strict, local, value, effects)
+    };
+    assert_eq!(shadow_steps_are_linear(build), 10_000);
+}
+
+#[test]
+fn ten_thousand_declarations_each_in_its_own_function_are_decided_in_linear_steps() {
+    // `ext(() => { let location = ext(); return ext(location, location, <global location>) }); ...`.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena, count: usize| {
+        let mut body = a.const_(C::Int { i: 0, comment: None });
+        for i in 0..count {
+            let local = Ident::new("location", 1_000 + i as i32, IdentFlags::NONE);
+            let (first, second, global) = (a.var(local), a.var(local), js_global(a, "location"));
+            let used = ext_call(a, &[first, second, global]);
+            let value = ext_call(a, &[]);
+            let inner = a.let_(LetKind::Strict, local, value, used);
+            let function = a.function_(0, &[], inner, Default::default(), LamLoc::NONE);
+            let effect = ext_call(a, &[function]);
+            body = a.seq_raw(effect, body);
+        }
+        body
+    };
+    assert_eq!(shadow_steps_are_linear(build), 10_000);
+}
+
+#[test]
+fn ten_thousand_references_below_ten_thousand_conditionals_are_decided_in_linear_steps() {
+    // `if (ext()) { if (ext()) { ... ext(<global location>); ... } }` with
+    // the references at the bottom, and `let location` in a function
+    // beside the conditionals: it covers none of them.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena, count: usize| {
+        let unit = a.const_(C::Int { i: 0, comment: None });
+        let mut inner = global_effects(a, count, unit);
+        for _ in 0..count {
+            let (test, unit) = (ext_call(a, &[]), a.const_(C::Int { i: 0, comment: None }));
+            inner = a.if_raw(test, inner, unit);
+        }
+        let local = Ident::new("location", 14, IdentFlags::NONE);
+        let (first, second) = (a.var(local), a.var(local));
+        let used = ext_call(a, &[first, second]);
+        let value = ext_call(a, &[]);
+        let declared = a.let_(LetKind::Strict, local, value, used);
+        let function = a.function_(0, &[], declared, Default::default(), LamLoc::NONE);
+        let beside = ext_call(a, &[function]);
+        a.seq_raw(inner, beside)
+    };
+    assert_eq!(shadow_steps_are_linear(build), 0);
+}
