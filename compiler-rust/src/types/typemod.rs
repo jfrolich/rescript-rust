@@ -8648,13 +8648,17 @@ pub fn modtype_of_package(
 /// OCaml `Typemod.package_subtype` (compiler/ml/typemod.ml:1224-1236): the
 /// module type of the package `p1` with the constraints of `nl1`/`tl1`
 /// whose types have no free variable is included in that of `p2` without a
-/// coercion. Cost: building both module types and one module inclusion check.
+/// coercion, and whether the check compared a value, type or extension
+/// constructor pair: OCaml compares each with `Ctype.moregeneral` or
+/// `Ctype.equal`, which empty the universal pairs of the walk that asked
+/// (compiler/ml/ctype.ml:3089, 3358). Cost: building both module types and
+/// one module inclusion check.
 pub(crate) fn package_subtype(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     (p1, nl1, tl1): (&Path, &[Longident], crate::types::type_expr::TypeSlice<'_>),
     (p2, nl2, tl2): (&Path, &[Longident], crate::types::type_expr::TypeSlice<'_>),
-) -> bool {
+) -> (bool, bool) {
     let mut pers_env = ctx.persistent_env_clone();
     let mut mkmty =
         |path: &Path, lids: &[Longident], args: crate::types::type_expr::TypeSlice<'_>| {
@@ -8674,12 +8678,14 @@ pub(crate) fn package_subtype(
             modtype_of_package_constraints(env, path, &constraints?, &mut pers_env, ctx)
         };
     let (Some(mty1), Some(mty2)) = (mkmty(p1, nl1, tl1), mkmty(p2, nl2, tl2)) else {
-        return false;
+        return (false, false);
     };
-    matches!(
-        crate::types::includemod::modtypes(ctx, env, &mty1, &mty2),
+    let items = ctx.inclusion_items();
+    let included = matches!(
+        crate::types::includemod::modtypes(ctx, env, LocIdx::none(), &mty1, &mty2),
         Ok(crate::types::typedtree::ModuleCoercion::Tcoerce_none)
-    )
+    );
+    (included, ctx.inclusion_items() != items)
 }
 
 /// `modtype_of_package` on constraints already flattened to names.
@@ -9748,6 +9754,7 @@ fn merge_constraint<'a>(
                     let inclusion = crate::types::includemod::modtypes(
                         tctx.type_ctx,
                         &env,
+                        loc,
                         &newmd.md_type,
                         &md.md_type,
                     );
@@ -9976,6 +9983,7 @@ fn check_usage_of_path_of_substituted_item(
         env: &Env,
         funct: &Path,
         arg: &Path,
+        loc: LocIdx,
     ) -> Result<(), crate::types::includemod::IncludeModError> {
         let Ok(functor_md) = env.lookup_module(funct) else {
             return Ok(());
@@ -10012,7 +10020,8 @@ fn check_usage_of_path_of_substituted_item(
             )
         };
 
-        crate::types::includemod::modtypes(tctx.type_ctx, env, &mty_arg, &mty_param).map(|_| ())
+        crate::types::includemod::modtypes(tctx.type_ctx, env, loc, &mty_arg, &mty_param)
+            .map(|_| ())
     }
 
     fn check_path(
@@ -10029,7 +10038,7 @@ fn check_usage_of_path_of_substituted_item(
                 return;
             }
             if paths.iter().any(|path| path_is_strict_prefix(path, arg)) {
-                let retyped = retype_applicative_functor_type(tctx, env, funct, arg);
+                let retyped = retype_applicative_functor_type(tctx, env, funct, arg, loc);
                 match crate::types::includemod::escaped(tctx.type_ctx, retyped) {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {

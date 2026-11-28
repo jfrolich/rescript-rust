@@ -126,10 +126,13 @@ pub struct TypeTable {
     /// Per row of `rows`: the first of its `arity` bytes of `occurs`, or
     /// `NONE` for a type whose declaration the table does not have.
     pub variances: Vec<u32>,
-    /// One byte per parameter of a declared type: 1 when the parameter
-    /// may occur positively or negatively (`Variance.(mem May_pos v ||
-    /// mem May_neg v)`, compiler/ml/ctype.ml:1596), 0 for a parameter the
-    /// type does not use.
+    /// One byte per parameter of a declared type: `Variance.get_upper`
+    /// (compiler/ml/types.ml:125: `(mem May_pos v, mem May_neg v)`) as
+    /// [`MAY_POS`] and [`MAY_NEG`]; 0 for a parameter the type does not
+    /// use. Not 0 is `Variance.(mem May_pos v || mem May_neg v)`
+    /// (compiler/ml/ctype.ml:1596). (Widened in the eleventh skeleton
+    /// turn from one bit to the two: subtyping reads each, ctype.ml:3684,
+    /// 3489; CHECKER_REWRITE 8.6, decision 121.)
     pub occurs: Vec<u8>,
     /// Number of rows with a non-zero `scope`: when 0, lowering never tests a
     /// scope ([`Checker::lower`]).
@@ -195,7 +198,7 @@ impl TypeTable {
                         &pools.variance[range.start as usize..(range.start + range.len) as usize];
                     table
                         .occurs
-                        .extend(bytes.iter().map(|&bits| u8::from(bits & MAY_OCCUR != 0)));
+                        .extend(bytes.iter().map(|&bits| bits & MAY_OCCUR));
                     start
                 }
                 _ => NONE,
@@ -335,6 +338,24 @@ impl TypeTable {
         }
     }
 
+    /// `Variance.get_upper v` (compiler/ml/types.ml:125) of parameter
+    /// `parameter` of the type: `(co, cn)`, whether it may occur
+    /// positively and whether it may occur negatively; `None` for a type
+    /// whose declaration the table does not have (`Env.find_type`'s
+    /// `Not_found`, compiler/ml/ctype.ml:3703-3704, 3500), which is every
+    /// type of another unit until R5a fills its rows. O(1): two bounds
+    /// tests and two loads. (R3j)
+    #[inline]
+    pub fn upper(&self, type_index: u32, parameter: u32) -> Option<(bool, bool)> {
+        match self.variances.get(type_index as usize) {
+            Some(&start) if start != NONE => {
+                let bits = self.occurs[(start + parameter) as usize];
+                Some((bits & MAY_POS != 0, bits & MAY_NEG != 0))
+            }
+            _ => None,
+        }
+    }
+
     /// `Variance.(mem Inj)` of parameter `parameter` of the type
     /// (compiler/ml/ctype.ml:2361, 2018): bit `parameter` of
     /// `injective_bits[type_index]`; a type past the end of that table
@@ -432,7 +453,13 @@ impl TypeTable {
 /// positively or negatively (`Variance::bits`, types/variance.rs:
 /// `MayPos` is 1 and `MayNeg` is 2; `tests::sizes` checks it against
 /// `Variance::get_upper`).
-const MAY_OCCUR: u8 = 1 | 2;
+const MAY_OCCUR: u8 = MAY_POS | MAY_NEG;
+/// A byte of [`TypeTable::occurs`]: the parameter may occur positively
+/// (`May_pos`, compiler/ml/types.ml:105).
+pub const MAY_POS: u8 = 1;
+/// A byte of [`TypeTable::occurs`]: the parameter may occur negatively
+/// (`May_neg`, compiler/ml/types.ml:106).
+pub const MAY_NEG: u8 = 2;
 
 /// The row of a type with no manifest and no scope.
 const ABSTRACT: TypeInfo = TypeInfo {
@@ -2617,6 +2644,46 @@ mod tests {
         assert_ne!(manifest.body.0 & RELATIVE, 0);
     }
 
+    /// The variance of a compiled unit's parameters, as subtyping reads
+    /// it (`Variance.get_upper`, compiler/ml/types.ml:125): covariant,
+    /// contravariant, invariant and unused, each one byte of
+    /// `TypeTable::occurs`; a type of another unit has none.
+    #[test]
+    fn the_table_keeps_both_upper_bits_of_a_variance() {
+        use super::super::differential::{New, Tier, compile};
+        let program = compile(
+            "type co<'a> = Co('a)
+type contra<'a> = Contra('a => int)
+             type inv<'a> = Inv('a => 'a)
+type unused<'a> = Unused
+             external v: (co<int>, contra<int>, inv<int>, unused<int>) = \"v\"
+"
+                .to_string(),
+        );
+        let new = New::convert(&program, Tier::Kernel);
+        let table = TypeTable::from_segment(&new.segment);
+        let pools = &new.segment.signature;
+        let mut seen = 0;
+        for (index, path) in pools.paths.iter().enumerate() {
+            let PathRow::Ident(ident) = *path else { continue };
+            let range = pools.strings[pools.identifiers[ident as usize].name as usize];
+            let name = &pools.bytes[range.start as usize..(range.start + range.len) as usize];
+            let expected = match name {
+                b"co" => Some((true, false)),
+                b"contra" => Some((false, true)),
+                b"inv" => Some((true, true)),
+                b"unused" => Some((false, false)),
+                b"int" => None,
+                _ => continue,
+            };
+            assert_eq!(table.upper(index as u32, 0), expected, "{}", String::from_utf8_lossy(name));
+            assert_eq!(table.may_occur(index as u32, 0), expected != Some((false, false)));
+            seen += 1;
+        }
+        assert_eq!(seen, 5, "{:?}", pools.paths);
+        assert_eq!(table.upper(pools.paths.len() as u32 + 7, 0), None);
+    }
+
     #[test]
     fn sizes() {
         let upper = |bits: u8| crate::types::Variance::from_bits(bits).get_upper();
@@ -2624,6 +2691,7 @@ mod tests {
             (upper(MAY_OCCUR), upper(!MAY_OCCUR)),
             ((true, true), (false, false))
         );
+        assert_eq!((upper(MAY_POS), upper(MAY_NEG)), ((true, false), (false, true)));
         assert_eq!(std::mem::size_of::<TypeInfo>(), 16);
         // One per nullary constructor expanded under tracing or copied
         // by such an expansion (CHECKER_REWRITE 8.6, decisions 100, 109).

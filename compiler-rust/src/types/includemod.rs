@@ -1191,15 +1191,23 @@ fn with_local_pident_module_type<R>(
 /// Check if `mty_impl` is a subtype of `mty_sig` (implementation matches signature).
 ///
 /// Returns a coercion that can be applied to convert the implementation
-/// to the signature type.
+/// to the signature type. OCaml prints the check's warnings at `loc` while
+/// it runs, whatever its result (`Location.deprecated` from
+/// builtin_attributes.ml:122-125); they go to the lookup events, which the
+/// typer reports in call order.
 pub fn modtypes(
     type_ctx: &TypeContext,
     env: &Env,
+    loc: crate::parse_arena::LocIdx,
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
 ) -> IncludeModResult<ModuleCoercion> {
     let mut warnings = Vec::new();
-    modtypes_with_warnings(type_ctx, env, mty_impl, mty_sig, &mut warnings)
+    let result = modtypes_with_warnings(type_ctx, env, mty_impl, mty_sig, &mut warnings);
+    for warning in warnings {
+        type_ctx.record_warning(loc, warning);
+    }
+    result
 }
 
 /// OCaml `Includemod.modtypes`: check that `mty_impl` is included in
@@ -2653,6 +2661,7 @@ fn value_descriptions(
     // where `Ctype.moregeneral` compares the two value types directly. Forcing
     // manifest aliases up front changes Env.normalize_path side effects and
     // shifts subsequent Ident stamps.
+    type_ctx.note_inclusion_item();
     let moregeneral =
         same_value || ctype::moregeneral(type_ctx, env, true, impl_desc.val_type, expected_ty);
     let mut expected_desc = sig_desc.clone();
@@ -3354,6 +3363,7 @@ pub(crate) fn includecore_type_declarations(
     if !private_flags(impl_decl, sig_decl) {
         return Ok(vec![TypeMismatch::Privacy]);
     }
+    type_ctx.note_inclusion_item();
 
     let param_map = build_type_param_map(type_ctx, &impl_decl.type_params, &sig_decl.type_params);
     match (impl_decl.type_manifest, sig_decl.type_manifest) {
@@ -4049,7 +4059,7 @@ fn type_expr_lists_equal_for_inclusion(
     if impl_types.len() != sig_types.len() {
         return false;
     }
-    let mut seen = HashSet::new();
+    let mut seen = ManifestWalk::new();
     impl_types
         .iter()
         .zip(sig_types.iter())
@@ -4417,6 +4427,61 @@ fn build_type_param_map(
         .collect()
 }
 
+/// The state of one manifest comparison.
+struct ManifestWalk {
+    /// The pairs already entered.
+    pairs: HashSet<(TypeExprRef, TypeExprRef)>,
+    /// `None` until an inclusion check of two packages compares an item;
+    /// built then, once per walk.
+    forgotten: Option<Box<ForgottenUnivars>>,
+}
+
+/// What an inclusion check of two packages left of OCaml's universal pairs
+/// in `Ctype.equal` (compiler/ml/ctype.ml:3358): none of the bodies open
+/// at the check, and the pairs of each body entered after it, which
+/// `enter_poly` puts in front of the emptied list (ctype.ml:1656-1672).
+struct ForgottenUnivars {
+    /// The binders of the left side of each body entered since the first
+    /// check, innermost last.
+    bound: Vec<TypeExprRef>,
+    /// `Some(n)`: only `bound[n..]` still pair; `None`: the check is not in
+    /// force here (the bodies open at it were left).
+    below: Option<usize>,
+}
+
+impl ManifestWalk {
+    fn new() -> Self {
+        ManifestWalk {
+            pairs: HashSet::new(),
+            forgotten: None,
+        }
+    }
+
+    /// Whether the universal variable `ty` of the left side still pairs.
+    /// O(1) before any check; after one, a scan of the binders of the
+    /// bodies entered since.
+    fn univar_pairs(&self, ty: TypeExprRef) -> bool {
+        match self.forgotten.as_deref() {
+            Some(ForgottenUnivars {
+                bound,
+                below: Some(below),
+            }) => bound[*below..].contains(&ty),
+            _ => true,
+        }
+    }
+
+    /// The inclusion check of two packages compared an item. O(1).
+    fn forget_univars(&mut self) {
+        let forgotten = self.forgotten.get_or_insert_with(|| {
+            Box::new(ForgottenUnivars {
+                bound: Vec::new(),
+                below: None,
+            })
+        });
+        forgotten.below = Some(forgotten.bound.len());
+    }
+}
+
 fn type_exprs_equal_for_inclusion(
     type_ctx: &TypeContext,
     env: Option<&Env>,
@@ -4424,7 +4489,7 @@ fn type_exprs_equal_for_inclusion(
     impl_ty: TypeExprRef,
     sig_ty: TypeExprRef,
 ) -> bool {
-    let mut seen = HashSet::new();
+    let mut seen = ManifestWalk::new();
     type_exprs_equal_for_inclusion_inner(type_ctx, env, param_map, impl_ty, sig_ty, &mut seen)
 }
 
@@ -4434,12 +4499,12 @@ fn type_exprs_equal_for_inclusion_inner(
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_ty: TypeExprRef,
     sig_ty: TypeExprRef,
-    seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    seen: &mut ManifestWalk,
 ) -> bool {
     let impl_ty = type_ctx.repr(impl_ty);
     let sig_ty = type_ctx.repr(sig_ty);
 
-    if !seen.insert((impl_ty, sig_ty)) {
+    if !seen.pairs.insert((impl_ty, sig_ty)) {
         return true;
     }
 
@@ -4500,9 +4565,9 @@ fn type_exprs_equal_for_inclusion_inner(
     }
 
     match (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty)) {
-        (TypeDesc::Tvar(impl_name), TypeDesc::Tvar(sig_name))
-        | (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => {
-            impl_name == sig_name
+        (TypeDesc::Tvar(impl_name), TypeDesc::Tvar(sig_name)) => impl_name == sig_name,
+        (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => {
+            impl_name == sig_name && seen.univar_pairs(impl_ty)
         }
         (
             TypeDesc::Tarrow {
@@ -4572,14 +4637,50 @@ fn type_exprs_equal_for_inclusion_inner(
         (_, TypeDesc::Tlink(sig_next)) | (_, TypeDesc::Tsubst(sig_next)) => {
             type_exprs_equal_for_inclusion_inner(type_ctx, env, param_map, impl_ty, *sig_next, seen)
         }
+        // ctype.ml:3262-3263: a body without binders is no scope.
         (
             TypeDesc::Tpoly {
-                body: impl_body, ..
+                body: impl_body,
+                vars: impl_vars,
             },
-            TypeDesc::Tpoly { body: sig_body, .. },
-        ) => type_exprs_equal_for_inclusion_inner(
+            TypeDesc::Tpoly {
+                body: sig_body,
+                vars: sig_vars,
+            },
+        ) if impl_vars.is_empty() && sig_vars.is_empty() => type_exprs_equal_for_inclusion_inner(
             type_ctx, env, param_map, *impl_body, *sig_body, seen,
         ),
+        (
+            TypeDesc::Tpoly {
+                body: impl_body,
+                vars: impl_vars,
+            },
+            TypeDesc::Tpoly { body: sig_body, .. },
+        ) => {
+            // ctype.ml:3264-3265, 1656-1678 (`enter_poly`): after a check the body's
+            // own binders pair, and its exit puts back what the walk had.
+            let saved = seen.forgotten.as_deref_mut().map(|forgotten| {
+                let saved = (forgotten.below, forgotten.bound.len());
+                if forgotten.below.is_some() {
+                    forgotten.bound.extend(
+                        type_ctx
+                            .type_list(impl_vars)
+                            .iter()
+                            .map(|var| type_ctx.repr(var)),
+                    );
+                }
+                saved
+            });
+            let equal = type_exprs_equal_for_inclusion_inner(
+                type_ctx, env, param_map, *impl_body, *sig_body, seen,
+            );
+            if let Some(forgotten) = seen.forgotten.as_deref_mut() {
+                let (below, len) = saved.unwrap_or((None, 0));
+                forgotten.below = below;
+                forgotten.bound.truncate(len);
+            }
+            equal
+        }
         (
             TypeDesc::Tpackage {
                 path: impl_path,
@@ -4603,7 +4704,7 @@ fn type_exprs_equal_for_inclusion_inner(
                     &empty_env
                 }
             };
-            crate::types::ctype::unify_package(
+            let (result, compared) = crate::types::ctype::unify_package(
                 type_ctx,
                 env_or_empty,
                 (
@@ -4626,8 +4727,11 @@ fn type_exprs_equal_for_inclusion_inner(
                         Err(crate::types::TypeError::Unify(vec![]))
                     }
                 },
-            )
-            .is_some_and(|result| result.is_ok())
+            );
+            if compared {
+                seen.forget_univars();
+            }
+            result.is_some_and(|result| result.is_ok())
         }
         (TypeDesc::Tvariant(impl_row), TypeDesc::Tvariant(sig_row)) => {
             // OCaml compiler/ml/includecore.ml:87-151 compares type manifests
@@ -4676,7 +4780,7 @@ fn rows_equal_for_inclusion(
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_row: &RowDesc,
     sig_row: &RowDesc,
-    seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    seen: &mut ManifestWalk,
 ) -> bool {
     let impl_row = crate::types::btype::row_repr(type_ctx, impl_row);
     let sig_row = crate::types::btype::row_repr(type_ctx, sig_row);
@@ -4717,7 +4821,7 @@ fn row_fields_equal_for_inclusion(
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_field: &RowField,
     sig_field: &RowField,
-    seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    seen: &mut ManifestWalk,
 ) -> bool {
     let impl_field = crate::types::btype::row_field_repr(type_ctx, impl_field);
     let sig_field = crate::types::btype::row_field_repr(type_ctx, sig_field);
@@ -4887,11 +4991,11 @@ fn object_fields_equal_for_inclusion(
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_fields: TypeExprRef,
     sig_fields: TypeExprRef,
-    seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    seen: &mut ManifestWalk,
 ) -> bool {
     let (impl_fields_flat, impl_rest) = flatten_object_fields_for_inclusion(type_ctx, impl_fields);
     let (sig_fields_flat, sig_rest) = flatten_object_fields_for_inclusion(type_ctx, sig_fields);
-    let same_row = impl_rest == sig_rest || seen.contains(&(impl_rest, sig_rest));
+    let same_row = impl_rest == sig_rest || seen.pairs.contains(&(impl_rest, sig_rest));
 
     if !same_row {
         if let Some(env) = env {
@@ -4945,6 +5049,7 @@ fn extension_constructors(
     sig_ext: &ExtensionConstructor,
     subst: &InclusionSubst,
 ) -> IncludeModResult<()> {
+    type_ctx.note_inclusion_item();
     // includecore.ml:461-466: `Env.mark_extension_used usage env ext1
     // (Ident.name id)`.
     if !env.is_implicit_coercion() {
@@ -5169,6 +5274,13 @@ pub fn signature_modules(sig: &Signature) -> Vec<&Ident> {
 mod tests {
     use super::*;
     use crate::context::IdGenerator;
+
+    #[test]
+    fn manifest_walk_size() {
+        // Built once per manifest comparison and passed down by reference.
+        assert_eq!(std::mem::size_of::<ManifestWalk>(), 40);
+        assert_eq!(std::mem::size_of::<&mut ManifestWalk>(), 8);
+    }
     use crate::location::Location;
     use crate::types::Path;
     use crate::types::decl::{
@@ -5518,6 +5630,7 @@ mod tests {
         let result = modtypes(
             &type_ctx,
             &env,
+            crate::parse_arena::LocIdx::none(),
             &ModuleType::MtySignature(std::sync::Arc::new(sig)),
             &ModuleType::MtyIdent(Path::pident(modtype_id)),
         );
@@ -5545,7 +5658,13 @@ mod tests {
             result: Box::new(result_sig),
         };
 
-        let result = modtypes(&type_ctx, &env, &mty_impl, &mty_sig);
+        let result = modtypes(
+            &type_ctx,
+            &env,
+            crate::parse_arena::LocIdx::none(),
+            &mty_impl,
+            &mty_sig,
+        );
         assert!(result.is_ok());
     }
 

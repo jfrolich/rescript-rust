@@ -1,0 +1,13 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/package_univar_pairs_coerce_constraint_on_univar.res[0m:[2m9:56-97[0m
+
+   7 [2m│[0m   let x: t
+   8 [2m│[0m }
+   [1;31m9[0m [2m│[0m let g = (o: {"f": 'a. module(S with type t = 'a)}) => ([1;31mo :> {"f": 'a. m[0m
+     [2m│[0m [1;31module(T with type t = 'a)})[0m
+  10 [2m│[0m 
+
+  Type {"f": 'a. module(S with type t = 'a)} is not a subtype of
+    {"f": 'a. module(T with type t = 'a)} 
+  Type 'a is not compatible with type 'a0

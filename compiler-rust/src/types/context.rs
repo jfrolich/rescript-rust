@@ -746,6 +746,9 @@ pub(crate) enum LookupEvent {
     OpenSlot(OpenSlotEvent),
     /// `report_deprecated ?loc p deprecated` (env.ml:989-994).
     ModuleDeprecated(ModuleDeprecation),
+    /// A warning a check prints at `loc` while it runs, such as the
+    /// deprecation of an included item (builtin_attributes.ml:122-125).
+    Warning(crate::parse_arena::LocIdx, Box<crate::diagnostics::Warning>),
 }
 
 #[derive(Debug, Clone)]
@@ -892,6 +895,9 @@ pub struct TypeContext {
     /// one bound variable (see [`Self::note_bound_universal`]). Only then
     /// can the inclusion of the unit in its own inferred signature fail.
     bound_universals: Cell<bool>,
+    /// How many value, type and extension constructor pairs inclusion
+    /// checks compared in this unit (see [`Self::note_inclusion_item`]).
+    inclusion_items: Cell<u32>,
     /// `Ctype.passive_variants` (ctype.ml:2060).
     passive_variants: Cell<bool>,
     /// `Ctype.rigid_variants` (ctype.ml:2013), set by `expand_head_rigid`.
@@ -1451,6 +1457,7 @@ impl TypeContext {
             gadt_state: Cell::new(0),
             gadt_instance_scopes: RefCell::new(Vec::new()),
             bound_universals: Cell::new(false),
+            inclusion_items: Cell::new(0),
             passive_variants: Cell::new(false),
             rigid_variants: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
@@ -3075,6 +3082,19 @@ impl TypeContext {
         self.bound_universals.get()
     }
 
+    /// Record that an inclusion check compared a value, type or extension
+    /// constructor pair, which OCaml compares with `Ctype.moregeneral` or
+    /// `Ctype.equal` (compiler/ml/includecore.ml:47, 571-584, 726). One add.
+    pub(crate) fn note_inclusion_item(&self) {
+        self.inclusion_items
+            .set(self.inclusion_items.get().wrapping_add(1));
+    }
+
+    /// The count [`Self::note_inclusion_item`] keeps. One load.
+    pub(crate) fn inclusion_items(&self) -> u32 {
+        self.inclusion_items.get()
+    }
+
     /// Create a polymorphic type.
     pub fn new_poly(&self, body: TypeExprRef, vars: Vec<TypeExprRef>) -> TypeExprRef {
         self.new_type(TypeDesc::Tpoly {
@@ -3475,6 +3495,18 @@ impl TypeContext {
         );
     }
 
+    /// Record a warning a check prints while it runs.
+    pub(crate) fn record_warning(
+        &self,
+        loc: crate::parse_arena::LocIdx,
+        warning: crate::diagnostics::Warning,
+    ) {
+        self.assert_no_store_build("a warning");
+        self.open_slot_events
+            .borrow_mut()
+            .push(LookupEvent::Warning(loc, Box::new(warning)));
+    }
+
     /// Record a `report_deprecated` call of a module lookup.
     pub(crate) fn record_module_deprecation(&self, deprecation: ModuleDeprecation) {
         self.assert_no_store_build("a module deprecation");
@@ -3575,6 +3607,21 @@ impl TypeContext {
     /// The usage tables of OCaml `Env` (env.ml:27-53).
     pub(crate) fn usage(&self) -> std::cell::RefMut<'_, super::usage::UsageTables> {
         self.usage.borrow_mut()
+    }
+
+    /// The warnings recorded since the typer last drained its events.
+    pub(crate) fn take_recorded_warnings(
+        &self,
+    ) -> Vec<(crate::parse_arena::LocIdx, crate::diagnostics::Warning)> {
+        let mut warnings = Vec::new();
+        self.open_slot_events.borrow_mut().retain(|event| match event {
+            LookupEvent::Warning(loc, warning) => {
+                warnings.push((*loc, (**warning).clone()));
+                false
+            }
+            LookupEvent::OpenSlot(_) | LookupEvent::ModuleDeprecated(_) => true,
+        });
+        warnings
     }
 
     pub(crate) fn take_open_slot_events(&self) -> Vec<LookupEvent> {

@@ -1459,8 +1459,12 @@ fn type_mod_error_to_anyhow(
         suppress_info_style,
     );
     // The snippets the report re-parsed printed their parser warnings first
-    // (`Error_message_utils.Parser.parse_source`, Location.prerr_warning).
-    let reparse_warnings = format_reparse_warnings(type_ctx);
+    // (`Error_message_utils.Parser.parse_source`, Location.prerr_warning),
+    // as did the checks the typer and the report ran last
+    // (`Ctype.subtype` in `print_extra_type_clash_help`,
+    // error_message_utils.ml:770).
+    let reparse_warnings = format_check_warnings(type_ctx, arena, source, filename)
+        + &format_reparse_warnings(type_ctx);
     let error = if reparse_warnings.is_empty() {
         error
     } else {
@@ -1487,6 +1491,35 @@ fn type_mod_error_to_anyhow(
         .into(),
         Err(error) => error,
     }
+}
+
+/// The warnings checks printed after the typer last reported its own, as
+/// `Location.prerr_warning` prints them.
+fn format_check_warnings(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> String {
+    let warnings = type_ctx.take_recorded_warnings();
+    if warnings.is_empty() {
+        return String::new();
+    }
+    let config = type_ctx.report_warning_config();
+    let mut output = String::new();
+    for (loc, warning) in warnings {
+        if !config.is_active(&warning) {
+            continue;
+        }
+        let is_error = config.is_error(&warning);
+        let warning = TypeCoreWarning {
+            loc,
+            warning,
+            is_error,
+        };
+        output.push_str(&format_compiler_warning_report(arena, source, filename, &warning));
+    }
+    output
 }
 
 /// The parser warnings of the snippets an error report re-parsed, at their
