@@ -16593,7 +16593,7 @@ mod tests {
             let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
             let env = Env::empty();
             let mut univars = UnivarPairs::default();
-            let mut enter = |univars: &mut UnivarPairs| {
+            let enter = |univars: &mut UnivarPairs| {
                 let (l, r) = (ctx.new_univar(None), ctx.new_univar(None));
                 let (vl, vr) = (ctx.new_type_list(&[l]), ctx.new_type_list(&[r]));
                 univars
