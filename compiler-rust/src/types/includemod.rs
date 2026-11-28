@@ -4423,19 +4423,54 @@ fn build_type_param_map(
 struct ManifestWalk {
     /// The pairs already entered.
     pairs: HashSet<(TypeExprRef, TypeExprRef)>,
-    /// Whether an inclusion check of two packages compared an item in the
-    /// polymorphic body open here: OCaml's `Ctype.equal` then has no
-    /// universal pairs left, and no universal variable of that body matches
-    /// another (compiler/ml/ctype.ml:1559, 3358).
-    univars_forgotten: bool,
+    /// `None` until an inclusion check of two packages compares an item;
+    /// built then, once per walk.
+    forgotten: Option<Box<ForgottenUnivars>>,
+}
+
+/// What an inclusion check of two packages left of OCaml's universal pairs
+/// in `Ctype.equal` (compiler/ml/ctype.ml:3358): none of the bodies open
+/// at the check, and the pairs of each body entered after it, which
+/// `enter_poly` puts in front of the emptied list (ctype.ml:1656-1672).
+struct ForgottenUnivars {
+    /// The binders of the left side of each body entered since the first
+    /// check, innermost last.
+    bound: Vec<TypeExprRef>,
+    /// `Some(n)`: only `bound[n..]` still pair; `None`: the check is not in
+    /// force here (the bodies open at it were left).
+    below: Option<usize>,
 }
 
 impl ManifestWalk {
     fn new() -> Self {
         ManifestWalk {
             pairs: HashSet::new(),
-            univars_forgotten: false,
+            forgotten: None,
         }
+    }
+
+    /// Whether the universal variable `ty` of the left side still pairs.
+    /// O(1) before any check; after one, a scan of the binders of the
+    /// bodies entered since.
+    fn univar_pairs(&self, ty: TypeExprRef) -> bool {
+        match self.forgotten.as_deref() {
+            Some(ForgottenUnivars {
+                bound,
+                below: Some(below),
+            }) => bound[*below..].contains(&ty),
+            _ => true,
+        }
+    }
+
+    /// The inclusion check of two packages compared an item. O(1).
+    fn forget_univars(&mut self) {
+        let forgotten = self.forgotten.get_or_insert_with(|| {
+            Box::new(ForgottenUnivars {
+                bound: Vec::new(),
+                below: None,
+            })
+        });
+        forgotten.below = Some(forgotten.bound.len());
     }
 }
 
@@ -4524,7 +4559,7 @@ fn type_exprs_equal_for_inclusion_inner(
     match (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty)) {
         (TypeDesc::Tvar(impl_name), TypeDesc::Tvar(sig_name)) => impl_name == sig_name,
         (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => {
-            !seen.univars_forgotten && impl_name == sig_name
+            impl_name == sig_name && seen.univar_pairs(impl_ty)
         }
         (
             TypeDesc::Tarrow {
@@ -4594,19 +4629,48 @@ fn type_exprs_equal_for_inclusion_inner(
         (_, TypeDesc::Tlink(sig_next)) | (_, TypeDesc::Tsubst(sig_next)) => {
             type_exprs_equal_for_inclusion_inner(type_ctx, env, param_map, impl_ty, *sig_next, seen)
         }
+        // ctype.ml:3262-3263: a body without binders is no scope.
         (
             TypeDesc::Tpoly {
-                body: impl_body, ..
+                body: impl_body,
+                vars: impl_vars,
+            },
+            TypeDesc::Tpoly {
+                body: sig_body,
+                vars: sig_vars,
+            },
+        ) if impl_vars.is_empty() && sig_vars.is_empty() => type_exprs_equal_for_inclusion_inner(
+            type_ctx, env, param_map, *impl_body, *sig_body, seen,
+        ),
+        (
+            TypeDesc::Tpoly {
+                body: impl_body,
+                vars: impl_vars,
             },
             TypeDesc::Tpoly { body: sig_body, .. },
         ) => {
-            // ctype.ml:1675-1678: the exit of the body puts back what an
-            // inclusion check of two packages in it made the walk forget.
-            let forgotten = seen.univars_forgotten;
+            // ctype.ml:3264-3265, 1656-1678 (`enter_poly`): after a check the body's
+            // own binders pair, and its exit puts back what the walk had.
+            let saved = seen.forgotten.as_deref_mut().map(|forgotten| {
+                let saved = (forgotten.below, forgotten.bound.len());
+                if forgotten.below.is_some() {
+                    forgotten.bound.extend(
+                        type_ctx
+                            .type_list(impl_vars)
+                            .iter()
+                            .map(|var| type_ctx.repr(var)),
+                    );
+                }
+                saved
+            });
             let equal = type_exprs_equal_for_inclusion_inner(
                 type_ctx, env, param_map, *impl_body, *sig_body, seen,
             );
-            seen.univars_forgotten = forgotten;
+            if let Some(forgotten) = seen.forgotten.as_deref_mut() {
+                let (below, len) = saved.unwrap_or((None, 0));
+                forgotten.below = below;
+                forgotten.bound.truncate(len);
+            }
             equal
         }
         (
@@ -4656,7 +4720,9 @@ fn type_exprs_equal_for_inclusion_inner(
                     }
                 },
             );
-            seen.univars_forgotten |= compared;
+            if compared {
+                seen.forget_univars();
+            }
             result.is_some_and(|result| result.is_ok())
         }
         (TypeDesc::Tvariant(impl_row), TypeDesc::Tvariant(sig_row)) => {
