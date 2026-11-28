@@ -1832,3 +1832,854 @@ mod walks {
         assert_eq!(reads[1] - 4, 10 * (reads[0] - 4));
     }
 }
+
+/// What the naming replay reads of a statement and takes out of it
+/// (THREE_TREES 11.4, "T6r: the naming replay behind the interface", slice
+/// T6r-c).
+mod replay {
+    use super::*;
+    use crate::lambda::lam_compat::LetKind;
+
+    /// A statement with the row `row`: the readers of a statement in hand
+    /// read the row alone, and the builder has no constructor yet for the
+    /// kinds T6d adds.
+    fn with_row<'a>(b: &Builder<'a>, kind: Kind, aux: u8, payload: u32) -> S<'a> {
+        S { stmt: Statement::new_debugger_statement(SPAN, &b.ast), row: Row { flags: 0, kind, aux, payload } }
+    }
+
+    #[test]
+    fn the_binder_of_a_statement_is_the_variable_in_its_row() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // The one binding statement the builder constructs.
+        let one = b.int(1);
+        let declaration = b.declare(4, 0, Some(one));
+        let bare = b.declare(5, 0, None);
+        let steps = b.steps;
+        assert_eq!(b.binder(&declaration), Some(4));
+        assert_eq!(b.binder(&bare), Some(5));
+        // The kinds a constructor of T6d writes: the row as `Kind` says.
+        for kind in [Kind::Rest, Kind::ForRange, Kind::ForOf, Kind::ForAwaitOf] {
+            assert_eq!(b.binder(&with_row(&b, kind, 0, 7)), Some(7), "{kind:?}");
+        }
+        assert_eq!(b.binder(&with_row(&b, Kind::Try, 0, 8)), Some(7));
+        assert_eq!(b.binder(&with_row(&b, Kind::Try, 0, 0)), None);
+        assert_eq!(b.binder(&with_row(&b, Kind::ForRangeExisting, 0, 8)), None);
+        // No other statement binds.
+        let value = b.reference(4, 0);
+        let effect = b.exp(value);
+        let value = b.reference(4, 0);
+        let returned = b.return_(value);
+        let steps_after = b.steps;
+        assert_eq!(b.binder(&effect), None);
+        assert_eq!(b.binder(&returned), None);
+        assert_eq!(b.steps, steps_after);
+        assert!(steps_after > steps);
+    }
+
+    #[test]
+    fn the_status_of_a_declaration_is_the_bits_of_its_row_above_the_kind() {
+        use crate::js_ir::op::UsedStats;
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        for status in [UsedStats::DeadPure, UsedStats::DeadNonPure, UsedStats::Used] {
+            let one = b.int(1);
+            let declaration = b.declare(4, LetKind::Alias as u8 | (status as u8) << 2, Some(one));
+            let steps = b.steps;
+            assert_eq!(b.status(&declaration), status as u8);
+            // The kind is the low two bits, as the lowering's `stmt_aux`
+            // reads them.
+            assert_eq!(declaration.row.aux & 0b11, LetKind::Alias as u8);
+            assert_eq!(b.steps, steps);
+            assert_eq!(b.status(&with_row(&b, Kind::Rest, (status as u8) << 2 | 1, 4)), status as u8);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "not a declaration")]
+    fn the_status_of_a_statement_that_declares_nothing_is_not_read() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let value = b.int(1);
+        let statement = b.exp(value);
+        b.status(&statement);
+    }
+
+    #[test]
+    fn a_range_loop_gives_its_variable_and_the_kind_of_its_bound_from_its_row() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // Every kind a bound can have is told by its number.
+        for bound in [Kind::Number, Kind::Var, Kind::Qualified, Kind::Dot, Kind::Call] {
+            let own = with_row(&b, Kind::ForRange, bound as u8, 6);
+            assert_eq!(b.range_of(&own), Some((Some(6), bound)));
+            let existing = with_row(&b, Kind::ForRangeExisting, bound as u8, 7);
+            assert_eq!(b.range_of(&existing), Some((Some(6), bound)));
+            let target = with_row(&b, Kind::ForRangeExisting, bound as u8, 0);
+            assert_eq!(b.range_of(&target), Some((None, bound)));
+        }
+        // The number of a kind is its place in `Kind::ALL`.
+        for (place, kind) in Kind::ALL.into_iter().enumerate() {
+            assert_eq!(kind as usize, place);
+        }
+        // No other statement is a range loop, and nothing counts a step.
+        let one = b.int(1);
+        let declaration = b.declare(4, 0, Some(one));
+        let steps = b.steps;
+        assert_eq!(b.range_of(&declaration), None);
+        assert_eq!(b.range_of(&with_row(&b, Kind::ForOf, 0, 6)), None);
+        assert_eq!(b.steps, steps);
+    }
+
+    /// The list of `len` statements `v0;`.
+    fn effects<'a>(b: &mut Builder<'a>, len: usize) -> List {
+        let mark = b.stage_mark();
+        for _ in 0..len {
+            let value = b.reference(0, 0);
+            let statement = b.exp(value);
+            b.stage(statement);
+        }
+        b.list(mark)
+    }
+
+    #[test]
+    fn a_statement_says_how_many_lists_it_holds() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let list = effects(&mut b, 3);
+        let block = b.block(list);
+        let (test, then, otherwise) = (b.reference(0, 0), effects(&mut b, 1), effects(&mut b, 0));
+        let conditional = b.if_(test, then, otherwise);
+        let (test, list) = (b.reference(0, 0), effects(&mut b, 2));
+        let looped = b.while_(None, test, list);
+        let (test, list) = (b.reference(0, 0), effects(&mut b, 2));
+        let labelled = b.while_(Some("l"), test, list);
+        let value = b.reference(0, 0);
+        let effect = b.exp(value);
+        let value = b.reference(0, 0);
+        let declaration = b.declare(1, 0, Some(value));
+        let stop = b.break_(None);
+        let steps = b.steps;
+        let counts = [&block, &conditional, &looped, &labelled, &effect, &declaration, &stop].map(|s| b.bodies(s));
+        assert_eq!(counts, [1, 2, 1, 1, 0, 0, 0]);
+        assert_eq!(b.steps, steps, "a reader counts no step");
+    }
+
+    /// The ids of the statements of list `index` of `statement`, read in
+    /// the node.
+    fn listed<'a>(statement: &mut S<'a>, index: usize) -> Vec<usize> {
+        Builder::list_of(&mut statement.stmt, index).iter().map(|stmt| stmt.node_id().index()).collect()
+    }
+
+    /// Take list `index` of `statement`, take each statement of it, list
+    /// them again and put the list back, as the replay does. Returns the
+    /// ids of the statements taken, in order.
+    fn walk<'a>(b: &mut Builder<'a>, statement: &mut S<'a>, index: usize) -> Vec<usize> {
+        let list = b.take_body(statement, index);
+        let mark = b.stage_mark();
+        let mut ids = Vec::new();
+        for at in 0..list.len() {
+            let taken = b.take(list, at);
+            // The row a statement is taken with is the one it was built
+            // with.
+            assert_eq!(taken.row, b.statement_row(&taken.stmt));
+            ids.push(taken.stmt.node_id().index());
+            b.stage(taken);
+        }
+        let rebuilt = b.list(mark);
+        b.set_body(statement, index, rebuilt);
+        ids
+    }
+
+    #[test]
+    fn the_lists_of_a_statement_are_taken_and_put_back_by_their_index() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let list = effects(&mut b, 3);
+        let block = b.block(list);
+        let (test, then, otherwise) = (b.reference(0, 0), effects(&mut b, 2), effects(&mut b, 0));
+        let conditional = b.if_(test, then, otherwise);
+        let (test, list) = (b.reference(0, 0), effects(&mut b, 2));
+        let looped = b.while_(None, test, list);
+        let (test, list) = (b.reference(0, 0), effects(&mut b, 4));
+        let labelled = b.while_(Some("l"), test, list);
+        for mut statement in [block, conditional, looped, labelled] {
+            let (row, id) = (statement.row, statement.stmt.node_id());
+            for index in 0..b.bodies(&statement) as usize {
+                let before = listed(&mut statement, index);
+                let steps = b.steps;
+                let ids = walk(&mut b, &mut statement, index);
+                assert_eq!(ids, before, "{:?}: the statements in order", row.kind);
+                assert_eq!(listed(&mut statement, index), before, "{:?}: the list put back", row.kind);
+                // One step to take the list and one to put it back, and a
+                // step a statement for each of the three moves.
+                assert_eq!(b.steps - steps, 2 + 3 * before.len() as u64);
+            }
+            assert_eq!((statement.row, statement.stmt.node_id()), (row, id));
+        }
+    }
+
+    /// A list taken and put back costs one step and one move a statement
+    /// in each direction, ten times as many at ten times the width. Each
+    /// take appends the statements to the pool of lists in flight, which
+    /// is cleared a unit and not before: with room for them there
+    /// (`reserve_statements`) a round allocates nothing outside the
+    /// arena, and nothing in it either (the node keeps its vector).
+    #[test]
+    fn a_list_taken_and_put_back_costs_two_steps_a_statement_at_any_width() {
+        let mut steps = Vec::new();
+        for width in [1_000usize, 10_000] {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let list = effects(&mut b, width);
+            let mut block = b.block(list);
+            let before = b.steps;
+            let list = b.take_body(&mut block, 0);
+            assert_eq!(list.len(), width);
+            assert_eq!(b.block_len(&block), 0);
+            b.set_body(&mut block, 0, list);
+            steps.push(b.steps - before);
+            assert_eq!(b.block_len(&block), width);
+            let slots = b.pool.len();
+            assert_eq!(slots, 2 * width, "the list as built and as taken");
+            b.reserve_statements(width, 0);
+            let arena = allocator.used_bytes();
+            let allocations = allocation_counter::measure(|| {
+                let list = b.take_body(&mut block, 0);
+                b.set_body(&mut block, 0, list);
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+            assert_eq!(allocator.used_bytes(), arena);
+            assert_eq!(b.pool.len(), slots + width);
+        }
+        assert_eq!(steps[0], 2 + 2 * 1_000);
+        assert_eq!(steps[1] - 2, 10 * (steps[0] - 2));
+    }
+
+    #[test]
+    #[should_panic(expected = "statement list 1 of a statement that has no such list")]
+    fn a_list_a_statement_does_not_hold_is_not_taken() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let list = effects(&mut b, 1);
+        let mut block = b.block(list);
+        b.take_body(&mut block, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "a statement list put back that was not taken")]
+    fn a_list_is_put_back_only_where_one_was_taken() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let list = effects(&mut b, 1);
+        let mut block = b.block(list);
+        let other = effects(&mut b, 1);
+        b.set_body(&mut block, 0, other);
+    }
+
+    /// Operands for [`built_over`]: operand number `at` of a run is the
+    /// special one, every other is a reference to a local variable.
+    struct Operands<'a> {
+        special: fn(&mut Builder<'a>) -> J<'a>,
+        at: u32,
+        next: u32,
+    }
+
+    impl<'a> Operands<'a> {
+        fn next(&mut self, b: &mut Builder<'a>) -> J<'a> {
+            self.next += 1;
+            if self.next - 1 == self.at { (self.special)(b) } else { b.reference(1, 0) }
+        }
+        fn list(&mut self, b: &mut Builder<'a>, len: usize) -> List {
+            let mark = b.stage_mark();
+            for _ in 0..len {
+                let value = self.next(b);
+                let statement = b.exp(value);
+                b.stage(statement);
+            }
+            b.list(mark)
+        }
+    }
+
+    /// One node or statement from every constructor of the builder that
+    /// takes an operand or a list, its operands drawn from `operands`:
+    /// the name of the constructor, the flags of the row it wrote, and
+    /// whether the special operand went into it.
+    fn built_over<'a>(b: &mut Builder<'a>, o: &mut Operands<'a>) -> Vec<(&'static str, u16, bool)> {
+        let mut made = Vec::new();
+        macro_rules! expression {
+            ($name:literal, $build:expr) => {{
+                let from = o.next;
+                let node: J<'a> = $build;
+                assert_eq!(b.row(&node.expr), node.row, "{}: the table row is the handle's", $name);
+                made.push(($name, node.row.flags, (from..o.next).contains(&o.at)));
+            }};
+        }
+        macro_rules! statement {
+            ($name:literal, $build:expr) => {{
+                let from = o.next;
+                let node: S<'a> = $build;
+                assert_eq!(b.statement_row(&node.stmt), node.row, "{}: the table row is the handle's", $name);
+                made.push(($name, node.row.flags, (from..o.next).contains(&o.at)));
+            }};
+        }
+        expression!("not", { let v = o.next(b); b.not(v) });
+        expression!("bnot", { let v = o.next(b); b.bnot(v) });
+        expression!("typeof", { let v = o.next(b); b.typeof_(v) });
+        expression!("is_nullish", { let v = o.next(b); b.is_nullish(v) });
+        expression!("in", { let (l, r) = (o.next(b), o.next(b)); b.in_(l, r) });
+        expression!("str_append", { let (l, r) = (o.next(b), o.next(b)); b.str_append(l, r) });
+        for op in [BinOp::Plus, BinOp::And, BinOp::Or, BinOp::Bor, BinOp::Div, BinOp::EqEqEq] {
+            expression!("bin", { let (l, r) = (o.next(b), o.next(b)); b.bin(op, l, r).unwrap() });
+        }
+        // `0 - x` is written as a negation, and an assignment over a
+        // member as an assignment.
+        expression!("negation", { let (l, r) = (b.int(0), o.next(b)); b.bin(BinOp::Minus, l, r).unwrap() });
+        expression!("assignment", {
+            let (object, r) = (o.next(b), o.next(b));
+            let l = b.dot(object, "f", None, false);
+            b.bin(BinOp::Eq, l, r).unwrap()
+        });
+        expression!("cond", { let (c, x, y) = (o.next(b), o.next(b), o.next(b)); b.cond(c, x, y) });
+        expression!("seq", { let (l, r) = (o.next(b), o.next(b)); b.seq(l, r) });
+        expression!("dot", { let v = o.next(b); b.dot(v, "f", Some(0), false) });
+        expression!("length", { let v = o.next(b); b.length(v) });
+        expression!("index", { let (l, r) = (o.next(b), o.next(b)); b.index(l, r) });
+        expression!("call", {
+            let callee = o.next(b);
+            let mark = b.mark();
+            for _ in 0..2 {
+                let argument = o.next(b);
+                b.push(argument);
+            }
+            b.call(callee, mark, 0, false)
+        });
+        expression!("new", {
+            let callee = o.next(b);
+            let mark = b.mark();
+            let argument = o.next(b);
+            b.push(argument);
+            b.new_(callee, mark)
+        });
+        statement!("exp", { let v = o.next(b); b.exp(v) });
+        statement!("return", { let v = o.next(b); b.return_(v) });
+        statement!("throw", { let v = o.next(b); b.throw(v) });
+        statement!("declare", { let v = o.next(b); b.declare(2, 0, Some(v)) });
+        statement!("if", {
+            let test = o.next(b);
+            let (then, otherwise) = (o.list(b, 2), o.list(b, 1));
+            b.if_(test, then, otherwise)
+        });
+        statement!("block", { let list = o.list(b, 2); b.block(list) });
+        statement!("while", { let test = o.next(b); let list = o.list(b, 2); b.while_(Some("l"), test, list) });
+        made
+    }
+
+    /// Every constructor of the builder gives its row `flag` exactly when
+    /// the operand `special` makes went into it, whichever of its operands
+    /// or of its lists' statements that is. Returns the operands drawn.
+    fn inherited_by_every_constructor(special: for<'a> fn(&mut Builder<'a>) -> J<'a>, flag: u16) -> u32 {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let mut count = Operands { special, at: u32::MAX, next: 0 };
+        for (name, flags, _) in built_over(&mut b, &mut count) {
+            assert_eq!(flags & flag, 0, "{name}: without the operand");
+        }
+        for at in 0..count.next {
+            let mut operands = Operands { special, at, next: 0 };
+            let made = built_over(&mut b, &mut operands);
+            assert_eq!(made.iter().filter(|(_, _, holds)| *holds).count(), 1);
+            for (name, flags, holds) in made {
+                assert_eq!(flags & flag != 0, holds, "{name}: operand {at}");
+            }
+        }
+        count.next
+    }
+
+    #[test]
+    fn a_reference_to_a_global_marks_every_node_and_statement_built_over_it() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // Where the flag starts: a reference the caller knows as a global.
+        assert!(b.reference(3, var::GLOBAL).row.has(flag::HAS_GLOBAL));
+        assert!(b.reference(3, var::GLOBAL | var::ASSIGNED).row.has(flag::HAS_GLOBAL));
+        assert!(!b.reference(3, 0).row.has(flag::HAS_GLOBAL));
+        assert!(!b.reference(3, var::ASSIGNED).row.has(flag::HAS_GLOBAL));
+        // A name the unit does not bind has no variable to decide: no flag.
+        assert!(!b.named("window", true).row.has(flag::HAS_GLOBAL));
+        // A copy of a leaf and of a chain of member reads over one.
+        let global = b.reference(3, var::GLOBAL);
+        assert!(b.copy_leaf(&global.expr).row.has(flag::HAS_GLOBAL));
+        let chain = b.dot(global, "a", None, false);
+        let chain = b.dot(chain, "b", Some(1), false);
+        assert!(b.copy_members(&chain.expr, |_| {}).row.has(flag::HAS_GLOBAL));
+        // Every constructor, with the reference as each of its operands.
+        let operands = inherited_by_every_constructor(|b| b.reference(3, var::GLOBAL), flag::HAS_GLOBAL);
+        assert_eq!(operands, 50);
+    }
+
+    /// The ids of the statements of `list`, read in the pool.
+    fn ids<'a>(b: &Builder<'a>, list: List) -> Vec<usize> {
+        (0..list.len()).map(|at| b.statement_at(list, at).stmt.node_id().index()).collect()
+    }
+
+    #[test]
+    fn a_function_literal_keeps_its_body_as_a_list_by_its_header() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        b.reserve_literals(8);
+        // Two literals, the headers out of order: a header names its own.
+        let (long, short) = (effects(&mut b, 3), effects(&mut b, 1));
+        let (long_ids, short_ids) = (ids(&b, long), ids(&b, short));
+        let steps = b.steps;
+        let first = b.function(7, long);
+        assert_eq!(b.steps - steps, 1, "the list is adopted, not read");
+        let second = b.function(2, short);
+        for (literal, header) in [(&first, 7), (&second, 2)] {
+            assert_eq!((literal.row.kind, literal.row.payload), (Kind::Fun, header));
+            // Strictly pure and delay-safe whatever the body is; not a
+            // subexpression and not duplicable (`bir/j/facts.rs`, `JFun`).
+            assert_eq!(literal.row.flags, flag::PURE | flag::STRICT | flag::DELAY_SAFE | flag::HAS_FUN);
+            assert_eq!(b.row(&literal.expr), literal.row);
+        }
+        // The body is taken by the header, walked and put back, in O(1)
+        // for the taking and the putting back.
+        for (header, expected) in [(2, &short_ids), (7, &long_ids)] {
+            let steps = b.steps;
+            let list = b.literal_body(header);
+            assert_eq!(b.steps - steps, 1);
+            assert_eq!(&ids(&b, list), expected);
+            let mark = b.stage_mark();
+            for at in 0..list.len() {
+                let statement = b.take(list, at);
+                b.stage(statement);
+            }
+            let rebuilt = b.list(mark);
+            let steps = b.steps;
+            b.set_literal_body(header, rebuilt);
+            assert_eq!(b.steps - steps, 1);
+            // What is there now is the rebuilt list, the same statements.
+            let again = b.literal_body(header);
+            assert_eq!((again, &ids(&b, again)), (rebuilt, expected));
+            b.set_literal_body(header, again);
+        }
+        // A new unit has no literal.
+        b.clear();
+        assert!(b.literals.is_empty());
+    }
+
+    /// Taking the body of a literal and putting it back is O(1): two steps
+    /// at 1,000 and at 10,000 statements, no statement moved, nothing
+    /// allocated.
+    #[test]
+    fn the_body_of_a_function_literal_costs_two_steps_at_any_width() {
+        let mut steps = Vec::new();
+        for width in [1_000usize, 10_000] {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let list = effects(&mut b, width);
+            let _literal = b.function(0, list);
+            let (before, slots, arena) = (b.steps, b.pool.len(), allocator.used_bytes());
+            let allocations = allocation_counter::measure(|| {
+                let body = b.literal_body(0);
+                assert_eq!(body.len(), width);
+                b.set_literal_body(0, body);
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+            assert_eq!((b.pool.len(), allocator.used_bytes()), (slots, arena));
+            steps.push(b.steps - before);
+        }
+        assert_eq!(steps, [2, 2]);
+    }
+
+    #[test]
+    fn a_function_literal_marks_every_node_and_statement_built_over_it() {
+        fn literal<'a>(b: &mut Builder<'a>) -> J<'a> {
+            let header = b.literals.len() as u32;
+            let body = effects(b, 1);
+            b.function(header, body)
+        }
+        inherited_by_every_constructor(literal, flag::HAS_FUN);
+        // A global reference in the body of a literal does not mark the
+        // literal: the body is not below its node.
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let mark = b.stage_mark();
+        let global = b.reference(3, var::GLOBAL);
+        let statement = b.exp(global);
+        assert!(statement.row.has(flag::HAS_GLOBAL));
+        b.stage(statement);
+        let body = b.list(mark);
+        assert!(!b.function(0, body).row.has(flag::HAS_GLOBAL));
+    }
+
+    /// `Builder::references` gives a function literal by its header and
+    /// does not enter it: the arm the builder could not reach before it
+    /// had a literal.
+    #[test]
+    fn the_references_of_an_expression_give_a_function_literal_by_its_header() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // `v1(function 4 { v9; v9; }, v2)`.
+        let mark = b.stage_mark();
+        for _ in 0..2 {
+            let inner = b.reference(9, 0);
+            let statement = b.exp(inner);
+            b.stage(statement);
+        }
+        let body = b.list(mark);
+        let callee = b.reference(1, 0);
+        let arguments = b.mark();
+        let literal = b.function(4, body);
+        b.push(literal);
+        let argument = b.reference(2, 0);
+        b.push(argument);
+        let call = b.call(callee, arguments, 0, false);
+        let mut found = Vec::new();
+        let read = b.references(&call, |_, reference| found.push(reference));
+        found.sort_by_key(|reference| match *reference {
+            Reference::Var { variable, .. } => variable,
+            Reference::Named { .. } => u32::MAX - 1,
+            Reference::Function(header) => u32::MAX - header,
+        });
+        assert!(matches!(
+            found[..],
+            [Reference::Var { variable: 1, .. }, Reference::Var { variable: 2, .. }, Reference::Function(4)]
+        ));
+        // The call, its callee and its two arguments: the body is not
+        // read.
+        assert_eq!(read, 4);
+        assert_eq!(b.literal_body(4).len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "the body of a function literal taken twice")]
+    fn the_body_of_a_function_literal_is_taken_once() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let body = effects(&mut b, 1);
+        let _literal = b.function(0, body);
+        b.literal_body(0);
+        b.literal_body(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "a function literal that is not there")]
+    fn the_body_of_a_header_without_a_literal_is_not_taken() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let body = effects(&mut b, 1);
+        let _literal = b.function(3, body);
+        b.literal_body(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "the body of a function literal put back that was not taken")]
+    fn the_body_of_a_function_literal_is_put_back_only_when_it_is_out() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let body = effects(&mut b, 1);
+        let _literal = b.function(0, body);
+        let other = effects(&mut b, 1);
+        b.set_literal_body(0, other);
+    }
+
+    #[test]
+    #[should_panic(expected = "two function literals of one header")]
+    fn a_header_has_one_function_literal() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let (first, second) = (effects(&mut b, 1), effects(&mut b, 1));
+        let _literal = b.function(0, first);
+        b.function(0, second);
+    }
+
+    #[test]
+    #[should_panic(expected = "a substitution in a statement with a function literal is not built (T6v)")]
+    fn a_substitution_does_not_pass_a_function_literal_silently() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let body = effects(&mut b, 1);
+        let literal = b.function(0, body);
+        let mut statement = b.exp(literal);
+        b.substitute(&mut statement, 0, 1, |b| b.int(1));
+    }
+
+    /// A function literal with the next free header over one `v0;`.
+    fn literal<'a>(b: &mut Builder<'a>) -> (J<'a>, u32) {
+        let header = b.literals.len() as u32;
+        let body = effects(b, 1);
+        (b.function(header, body), header)
+    }
+
+    /// `callee(...arguments)`.
+    fn call<'a>(b: &mut Builder<'a>, callee: J<'a>, arguments: Vec<J<'a>>) -> J<'a> {
+        let mark = b.mark();
+        for argument in arguments {
+            b.push(argument);
+        }
+        b.call(callee, mark, 0, false)
+    }
+
+    /// What `below` gives for `statement` with `want`, qualifying the
+    /// globals of `qualify`, and the rows it read.
+    fn found<'a>(b: &mut Builder<'a>, statement: &S<'a>, want: u16, qualify: &[u32]) -> (Vec<Below>, u32) {
+        let mut found = Vec::new();
+        let steps = b.steps;
+        let read = b.below(statement, want, |below| {
+            found.push(below);
+            matches!(below, Below::Global(variable) if qualify.contains(&variable))
+        });
+        assert_eq!(b.steps, steps, "a reader counts no step");
+        (found, read)
+    }
+
+    const BOTH: u16 = flag::HAS_FUN | flag::HAS_GLOBAL;
+
+    #[test]
+    fn the_literals_and_the_global_references_of_a_statement_are_found_in_operand_order() {
+        assert_eq!(std::mem::size_of::<Below>(), 8);
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // `v1(g8, function 0 {..}, v1 + g9, function 1 {..}).name;`
+        let callee = b.reference(1, 0);
+        let first = b.reference(8, var::GLOBAL);
+        let first_id = first.expr.node_id().index();
+        let (outer, a) = literal(&mut b);
+        let (left, right) = (b.reference(1, 0), b.reference(9, var::GLOBAL));
+        let right_id = right.expr.node_id().index();
+        let sum = b.bin(BinOp::Plus, left, right).unwrap();
+        let (inner, c) = literal(&mut b);
+        let value = call(&mut b, callee, vec![first, outer, sum, inner]);
+        let value = b.dot(value, "name", None, false);
+        let statement = b.exp(value);
+        // The dot, the call, its callee and four arguments, the two
+        // operands of the sum.
+        assert_eq!(
+            found(&mut b, &statement, BOTH, &[]),
+            (vec![Below::Global(8), Below::Function(a), Below::Global(9), Below::Function(c)], 9)
+        );
+        // With one flag wanted, an operand that has only the other is
+        // read (its row) and not entered: the sum's operands are not read
+        // for literals.
+        assert_eq!(found(&mut b, &statement, flag::HAS_FUN, &[]), (vec![Below::Function(a), Below::Function(c)], 7));
+        assert_eq!(b.rows[first_id].aux, var::GLOBAL);
+        assert_eq!(found(&mut b, &statement, flag::HAS_GLOBAL, &[9]), (vec![Below::Global(8), Below::Global(9)], 9));
+        // The reference the visitor says is shadowed is marked in its
+        // row, the other is not; nothing else of a row changes.
+        assert_eq!(b.rows[first_id].aux, var::GLOBAL);
+        assert_eq!(b.rows[right_id].aux, var::GLOBAL | var::QUALIFIED);
+        assert!(b.rows[right_id].has(flag::HAS_GLOBAL));
+        assert_eq!(found(&mut b, &statement, 0, &[]), (vec![], 0));
+    }
+
+    #[test]
+    fn the_descent_reads_the_expression_of_a_statement_and_not_its_lists() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // A list whose one statement holds a global reference and a
+        // literal.
+        fn inside<'a>(b: &mut Builder<'a>) -> List {
+            let mark = b.stage_mark();
+            let callee = b.reference(8, var::GLOBAL);
+            let (argument, _) = literal(b);
+            let value = call(b, callee, vec![argument]);
+            let statement = b.exp(value);
+            b.stage(statement);
+            b.list(mark)
+        }
+        let list = inside(&mut b);
+        let block = b.block(list);
+        let (test, then, otherwise) = (b.reference(8, var::GLOBAL), inside(&mut b), inside(&mut b));
+        let conditional = b.if_(test, then, otherwise);
+        let (test, list) = (b.reference(8, var::GLOBAL), inside(&mut b));
+        let looped = b.while_(Some("l"), test, list);
+        // A test without either: the statement has the flags of its
+        // lists, and the row of its test is all that is read.
+        let (test, list) = (b.reference(1, 0), inside(&mut b));
+        let plain = b.while_(None, test, list);
+        for (statement, own) in [(block, 0), (conditional, 1), (looped, 1), (plain, 0)] {
+            assert!(statement.row.has(BOTH), "the flags of its lists");
+            let kind = statement.row.kind;
+            let (given, read) = found(&mut b, &statement, BOTH, &[]);
+            assert_eq!(given, vec![Below::Global(8); own], "{kind:?}");
+            assert_eq!(read, u32::from(kind != Kind::Block), "{kind:?}: the row of its test");
+        }
+        let value = b.reference(8, var::GLOBAL);
+        let returned = b.return_(value);
+        let value = b.reference(8, var::GLOBAL);
+        let thrown = b.throw(value);
+        let value = b.reference(8, var::GLOBAL);
+        let declaration = b.declare(2, 0, Some(value));
+        for statement in [returned, thrown, declaration] {
+            assert_eq!(found(&mut b, &statement, BOTH, &[]), (vec![Below::Global(8)], 1));
+            // The other flag alone: the statement is not read.
+            assert_eq!(found(&mut b, &statement, flag::HAS_FUN, &[]), (vec![], 0));
+        }
+        let bare = b.declare(3, 0, None);
+        assert_eq!(found(&mut b, &bare, BOTH, &[]), (vec![], 0));
+    }
+
+    /// Statement `index` of the step test: `v1(v1, v1 + x, v1);`, where
+    /// `x` is a function literal, a reference to a global, or `v1`.
+    fn step_statement<'a>(b: &mut Builder<'a>, what: u8) -> S<'a> {
+        let callee = b.reference(1, 0);
+        let (first, left, last) = (b.reference(1, 0), b.reference(1, 0), b.reference(1, 0));
+        let right = match what {
+            0 => b.reference(1, 0),
+            1 => literal(b).0,
+            _ => b.reference(8, var::GLOBAL),
+        };
+        let sum = b.bin(BinOp::Plus, left, right).unwrap();
+        let value = call(b, callee, vec![first, sum, last]);
+        b.exp(value)
+    }
+
+    /// One descent of each of `statements`: the rows read and the finds.
+    fn round<'a>(b: &mut Builder<'a>, statements: &[S<'a>], want: u16) -> (u32, u32) {
+        let (mut read, mut found) = (0, 0);
+        for statement in statements {
+            read += b.below(statement, want, |_| {
+                found += 1;
+                false
+            });
+        }
+        (read, found)
+    }
+
+    /// The point of decision 1 on the implementation that survives the
+    /// flip: of `count` statements of which `count / 50` hold a function
+    /// literal and `count / 50` a reference to a global, the descent reads
+    /// the expressions of those and nothing of the others, at 1,000 and at
+    /// 10,000 statements. A descent that read every statement would read
+    /// seven rows of each. A second round allocates nothing.
+    #[test]
+    fn the_descent_reads_only_the_statements_that_hold_what_is_wanted() {
+        let mut reads = Vec::new();
+        for count in [1_000u32, 10_000] {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let mut statements = Vec::new();
+            for index in 0..count {
+                statements.push(step_statement(&mut b, if index % 50 == 7 { 1 } else if index % 50 == 31 { 2 } else { 0 }));
+            }
+            let holders = count / 50;
+            // The call, its callee and three arguments, the two operands
+            // of the sum: seven rows of a statement that is read.
+            const ROWS: u32 = 7;
+            assert_eq!(round(&mut b, &statements, flag::HAS_FUN), (ROWS * holders, holders));
+            assert_eq!(round(&mut b, &statements, flag::HAS_GLOBAL), (ROWS * holders, holders));
+            assert_eq!(round(&mut b, &statements, BOTH), (ROWS * 2 * holders, 2 * holders));
+            reads.push(round(&mut b, &statements, BOTH).0);
+            let allocations = allocation_counter::measure(|| {
+                round(&mut b, &statements, BOTH);
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        }
+        assert_eq!(reads[1], 10 * reads[0]);
+        assert_eq!(reads[0], 7 * 2 * 20, "20 of 1,000 statements hold a literal and 20 a global");
+    }
+
+    /// The descent enters only what has the flag: below `depth` sequences
+    /// that end in a function literal it reads two rows a sequence, and a
+    /// chain as deep without one is not read at all. No recursion; a
+    /// second descent as deep allocates nothing.
+    #[test]
+    fn the_descent_costs_two_rows_a_node_on_the_way_at_any_depth() {
+        let mut reads = Vec::new();
+        for depth in [1_000u32, 10_000] {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let mut chains = Vec::new();
+            for with in [true, false] {
+                let mut value = if with { literal(&mut b).0 } else { b.reference(1, 0) };
+                for _ in 0..depth {
+                    let first = b.reference(1, 0);
+                    value = b.seq(first, value);
+                }
+                chains.push(b.exp(value));
+            }
+            let (given, read) = found(&mut b, &chains[0], flag::HAS_FUN, &[]);
+            assert_eq!((given.len() as u32, read), (1, 2 * depth + 1));
+            assert_eq!(found(&mut b, &chains[1], BOTH, &[]), (vec![], 0));
+            reads.push(read);
+            let allocations = allocation_counter::measure(|| {
+                b.below(&chains[0], flag::HAS_FUN, |_| false);
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        }
+        assert_eq!(reads[1] - 1, 10 * (reads[0] - 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "a descent for a flag that is neither HAS_FUN nor HAS_GLOBAL")]
+    fn the_descent_is_asked_for_literals_and_globals_only() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let value = b.reference(1, 0);
+        let statement = b.exp(value);
+        b.below(&statement, flag::SEAL, |_| false);
+    }
+
+    /// A reference to a global put in the place of a moved variable by
+    /// the export fold is found by the replay's descent, which runs after
+    /// the fold: `substitute` gives the flag to every node and statement
+    /// above the reference, and to none beside it.
+    #[test]
+    fn a_global_substituted_into_a_statement_is_found_by_the_descent() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // `if (v1) { v1(v2 + 1, v1); } else { }`, and `let v3 = v2;`.
+        fn build<'a>(b: &mut Builder<'a>) -> (S<'a>, [usize; 3], usize, usize, usize) {
+            let callee = b.reference(1, 0);
+            let (moved, one, last) = (b.reference(2, 0), b.int(1), b.reference(1, 0));
+            let sum = b.bin(BinOp::Plus, moved, one).unwrap();
+            let ids = [callee.expr.node_id().index(), sum.expr.node_id().index(), last.expr.node_id().index()];
+            let value = call(b, callee, vec![sum, last]);
+            let call_id = value.expr.node_id().index();
+            let mark = b.stage_mark();
+            let inner = b.exp(value);
+            let inner_id = inner.stmt.node_id().index();
+            b.stage(inner);
+            let (test, then, otherwise) = (b.reference(1, 0), b.list(mark), effects(b, 1));
+            let test_id = test.expr.node_id().index();
+            (b.if_(test, then, otherwise), ids, call_id, inner_id, test_id)
+        }
+        // A replacement without a flag changes no row.
+        let (mut plain, ..) = build(&mut b);
+        let rows = b.rows.clone();
+        assert_eq!(b.substitute(&mut plain, 2, 1, |b| b.reference(4, 0)), 1);
+        assert_eq!(b.rows[..rows.len()], rows[..]);
+        assert!(!plain.row.has(flag::HAS_GLOBAL));
+        assert_eq!(found(&mut b, &plain, BOTH, &[]), (vec![], 0));
+        // A global: the sum, the call, the statement in the list and the
+        // `if`, in the table and in the handle; not the callee, the other
+        // argument or the test.
+        let (mut statement, [callee, sum, last], call_id, inner_id, test_id) = build(&mut b);
+        assert_eq!(b.substitute(&mut statement, 2, 1, |b| b.reference(8, var::GLOBAL)), 1);
+        for id in [sum, call_id, inner_id, statement.stmt.node_id().index()] {
+            assert!(b.rows[id].has(flag::HAS_GLOBAL), "row {id}");
+        }
+        for id in [callee, last, test_id, 0] {
+            assert!(!b.rows[id].has(flag::HAS_GLOBAL), "row {id}");
+        }
+        assert!(statement.row.has(flag::HAS_GLOBAL));
+        assert_eq!(statement.row, b.statement_row(&statement.stmt));
+        // The descent of the `if` reads its test; that of the statement
+        // in its list finds the global.
+        assert_eq!(found(&mut b, &statement, flag::HAS_GLOBAL, &[]), (vec![], 1));
+        let list = b.take_body(&mut statement, 0);
+        let inner = b.take(list, 0);
+        // The call, its callee and two arguments, the two operands of
+        // the sum.
+        assert_eq!(found(&mut b, &inner, flag::HAS_GLOBAL, &[]), (vec![Below::Global(8)], 6));
+        // The initialiser of a declaration: the declaration is above it.
+        let moved = b.reference(2, 0);
+        let mut declaration = b.declare(3, 0, Some(moved));
+        assert_eq!(b.substitute(&mut declaration, 2, 1, |b| b.reference(8, var::GLOBAL)), 1);
+        assert!(declaration.row.has(flag::HAS_GLOBAL));
+        assert_eq!(found(&mut b, &declaration, flag::HAS_GLOBAL, &[]), (vec![Below::Global(8)], 1));
+        // The walk's path and depths are left empty.
+        assert!(b.path.is_empty() && b.depths.is_empty());
+    }
+}

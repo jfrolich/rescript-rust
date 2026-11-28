@@ -99,8 +99,9 @@ pub struct Rows {
     /// allocates nothing in a warm unit.
     labels: Vec<(u32, u32)>,
     /// The statements and expressions `effect_free`, `substitute`,
-    /// `references` and `return_calls` have still to read, and the member
-    /// reads `copy_members` has still to copy. A work stack of those
+    /// `references`, `return_calls` and `below` have still to read, and
+    /// the member reads `copy_members` has still to copy. A work stack of
+    /// those
     /// walks, empty between calls and kept so
     /// that a walk allocates only when a tree is wider or deeper than any
     /// before it in the unit.
@@ -704,7 +705,7 @@ impl Js for Rows {
         self.work = spine;
         copy
     }
-    fn references(&mut self, a: &mut Pools, e: &E, mut visit: impl FnMut(&Self, &mut Pools, Found)) -> u32 {
+    fn references(&mut self, a: &Pools, e: &E, mut visit: impl FnMut(&Self, &Pools, Found)) -> u32 {
         // The stack may hold the pending nodes of a walk that is under
         // way (`JsStmt::substitute`): the reads go above them.
         let mut work = std::mem::take(&mut self.work);

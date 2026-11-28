@@ -571,3 +571,758 @@ fn the_calls_of_a_statement_that_is_no_return_are_not_read() {
     let list = r.list(&mut u.b, 1, std::iter::once(statement));
     r.return_calls(&mut u.b, list, 0, true, |_, _, _| {});
 }
+
+/// The statements of THREE_TREES 11.4, "T6r: the naming replay behind the
+/// interface", slice T6r-c: what the replay reads of a statement in hand
+/// and takes out of it.
+mod replay {
+    use super::*;
+    use crate::bir::lower::js_stmt::Range;
+
+    /// The list of one `x;`.
+    pub(super) fn body(r: &mut Rows, u: &mut Unit) -> crate::bir::ListId {
+        let x = r.var(&mut u.b, u.x);
+        let statement = r.exp(&mut u.b, x);
+        r.list(&mut u.b, 1, std::iter::once(statement))
+    }
+
+    /// A variable nothing binds yet.
+    pub(super) fn fresh(u: &mut Unit) -> VarId {
+        let order = u.b.vars.len() as u32 + 1;
+        u.b.new_var_id(Name::new("v"), order)
+    }
+
+    /// `for (let var = x; var <= end; ++var) { x; }`, or without the first
+    /// value.
+    pub(super) fn range(r: &mut Rows, u: &mut Unit, var: VarId, init: bool, end: E) -> S {
+        let init = init.then(|| r.var(&mut u.b, u.x));
+        let list = body(r, u);
+        r.for_range(&mut u.b, var, Range { init, end, direction: 0 }, list, None)
+    }
+
+    #[test]
+    fn the_binder_of_a_statement_is_the_variable_it_binds() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let steps = |r: &Rows| r.steps();
+        // A declaration, with and without a value.
+        let x = r.var(&mut u.b, u.x);
+        let declaration = r.declare(&mut u.b, LetKind::Strict, u.f, Some(x));
+        let var = fresh(&mut u);
+        let bare = r.declare(&mut u.b, LetKind::Variable, var, None);
+        let before = steps(&r);
+        assert_eq!(r.binder(&u.b, &declaration), Some(u.f));
+        assert_eq!(r.binder(&u.b, &bare), Some(var));
+        // A range loop names its variable with and without a first value.
+        for init in [true, false] {
+            let (var, end) = (fresh(&mut u), r.var(&mut u.b, u.x));
+            let looped = range(&mut r, &mut u, var, init, end);
+            assert_eq!(r.binder(&u.b, &looped), Some(var));
+        }
+        // A loop over an iterable, awaited or not.
+        for awaited in [false, true] {
+            let iterable = r.var(&mut u.b, u.x);
+            let (var, list) = (fresh(&mut u), body(&mut r, &mut u));
+            let looped = r.for_of(&mut u.b, var, iterable, list, None, awaited);
+            assert_eq!(r.binder(&u.b, &looped), Some(var));
+        }
+        // A `try`: the exception of its handler, nothing without one.
+        let (tried, handler, finaliser) = (body(&mut r, &mut u), body(&mut r, &mut u), body(&mut r, &mut u));
+        let var = fresh(&mut u);
+        let caught = r.try_(&mut u.b, tried, Some((var, handler)), Some(finaliser));
+        assert_eq!(r.binder(&u.b, &caught), Some(var));
+        let (tried, finaliser) = (body(&mut r, &mut u), body(&mut r, &mut u));
+        let uncaught = r.try_(&mut u.b, tried, None, Some(finaliser));
+        assert_eq!(r.binder(&u.b, &uncaught), None);
+        // The statements only the bridge makes: a rest declaration binds,
+        // a range loop over an existing variable does not.
+        let info = u.b.js_info(JsPayload::Rest(crate::bir::RestSpan { start: 0, len: 0 }));
+        let value = u.b.new_node(View::Var { var: u.x }, 0);
+        let var = fresh(&mut u);
+        let rest = Rows::stmt_from_node(u.b.new_node(View::SRest { var, value, info }, 0));
+        assert_eq!(r.binder(&u.b, &rest), Some(var));
+        let variable = u.b.new_node(View::Var { var: u.f }, 0);
+        let end = u.b.new_node(View::JNull, 0);
+        let list = body(&mut r, &mut u);
+        let block = Rows::stmt_node(r.block_of(&mut u.b, list));
+        let existing =
+            Rows::stmt_from_node(u.b.new_node(View::SForRangeExisting { variable, parts: &[end, block], label: None }, 0));
+        assert_eq!(r.binder(&u.b, &existing), None);
+        // Any other statement binds nothing, and no read counts a step.
+        let before_other = steps(&r);
+        let x = r.var(&mut u.b, u.x);
+        let effect = r.exp(&mut u.b, x);
+        let assigned = {
+            let x = r.var(&mut u.b, u.x);
+            r.assign(&mut u.b, u.f, x)
+        };
+        let after_other = steps(&r);
+        assert_eq!(r.binder(&u.b, &effect), None);
+        assert_eq!(r.binder(&u.b, &assigned), None);
+        assert_eq!(steps(&r), after_other);
+        assert!(before_other > before);
+    }
+
+    #[test]
+    fn the_status_of_a_declaration_is_read_apart_from_its_kind() {
+        use crate::js_ir::op::UsedStats;
+        let mut u = unit();
+        let mut r = Rows::default();
+        // The interface writes every declaration as used, with a value or
+        // without one.
+        let x = r.var(&mut u.b, u.x);
+        let declaration = r.declare(&mut u.b, LetKind::Alias, u.f, Some(x));
+        let var = fresh(&mut u);
+        let bare = r.declare(&mut u.b, LetKind::Variable, var, None);
+        let steps = r.steps();
+        assert_eq!(r.status(&u.b, &declaration), UsedStats::Used as u8);
+        assert_eq!(r.stmt_aux(&u.b, &declaration), LetKind::Alias as u8);
+        assert_eq!(r.status(&u.b, &bare), UsedStats::Used as u8);
+        // A status a pass wrote is read whatever the kind is, and a rest
+        // declaration's descriptor bit is not part of it.
+        for (kind, status) in [(LetKind::Strict, UsedStats::DeadPure), (LetKind::Variable, UsedStats::DeadNonPure)] {
+            let var = fresh(&mut u);
+            let value = u.b.new_node(View::JNull, 0);
+            let aux = kind as u16 | (status as u16) << 2;
+            let dead = Rows::stmt_from_node(u.b.new_node(View::SDecl { var, value: Some(value) }, aux));
+            assert_eq!(r.status(&u.b, &dead), status as u8);
+            assert_eq!(r.stmt_aux(&u.b, &dead), kind as u8);
+        }
+        let info = u.b.js_info(JsPayload::Rest(crate::bir::RestSpan { start: 0, len: 0 }));
+        let value = u.b.new_node(View::Var { var: u.x }, 0);
+        let var = fresh(&mut u);
+        let aux = (1 << 15) | (UsedStats::DeadNonPure as u16) << 2 | LetKind::Strict as u16;
+        let rest = Rows::stmt_from_node(u.b.new_node(View::SRest { var, value, info }, aux));
+        assert_eq!(r.status(&u.b, &rest), UsedStats::DeadNonPure as u8);
+        assert_eq!(r.steps(), steps, "a reader counts no step");
+    }
+
+    #[test]
+    #[should_panic(expected = "not a declaration")]
+    fn the_status_of_a_statement_that_declares_nothing_is_not_read() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let x = r.var(&mut u.b, u.x);
+        let statement = r.exp(&mut u.b, x);
+        r.status(&u.b, &statement);
+    }
+
+    #[test]
+    fn a_range_loop_gives_its_variable_and_the_kind_of_its_bound() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        // The bound is read with a first value before it and without one.
+        for init in [true, false] {
+            let (var, end) = (fresh(&mut u), r.int_literal(&mut u.b, 3));
+            let looped = range(&mut r, &mut u, var, init, end);
+            let steps = r.steps();
+            assert_eq!(r.range_of(&u.b, &looped), Some((Some(var), Kind::Number)));
+            assert_eq!(r.steps(), steps, "a reader counts no step");
+        }
+        let (var, end) = (fresh(&mut u), r.var(&mut u.b, u.x));
+        let looped = range(&mut r, &mut u, var, true, end);
+        assert_eq!(r.range_of(&u.b, &looped), Some((Some(var), Kind::Var)));
+        // A bound that is neither: the kind says so, the bound is not
+        // handed out.
+        let (var, object) = (fresh(&mut u), r.var(&mut u.b, u.x));
+        let end = r.dot(&mut u.b, object, u.name, crate::js_ir::arena::FieldPos::NONE, false);
+        let looped = range(&mut r, &mut u, var, false, end);
+        assert_eq!(r.range_of(&u.b, &looped), Some((Some(var), Kind::Dot)));
+        // A loop over an existing variable (the bridge's): the variable of
+        // its target when that is a reference.
+        for reference in [true, false] {
+            let variable = if reference { u.b.new_node(View::Var { var: u.f }, 0) } else { u.b.new_node(View::JNull, 0) };
+            let end = u.b.new_node(View::JNull, 0);
+            let list = body(&mut r, &mut u);
+            let block = Rows::stmt_node(r.block_of(&mut u.b, list));
+            let existing =
+                Rows::stmt_from_node(u.b.new_node(View::SForRangeExisting { variable, parts: &[end, block], label: None }, 0));
+            assert_eq!(r.range_of(&u.b, &existing), Some((reference.then_some(u.f), Kind::Null)));
+        }
+        // No other statement is a range loop.
+        let (var, iterable, list) = (fresh(&mut u), r.var(&mut u.b, u.x), body(&mut r, &mut u));
+        let looped = r.for_of(&mut u.b, var, iterable, list, None, false);
+        assert_eq!(r.range_of(&u.b, &looped), None);
+        let x = r.var(&mut u.b, u.x);
+        let statement = r.exp(&mut u.b, x);
+        assert_eq!(r.range_of(&u.b, &statement), None);
+    }
+
+    /// `switch (x) { ...actions }` of `actions` actions, each the block of
+    /// one `x;`.
+    pub(super) fn switch(r: &mut Rows, u: &mut Unit, actions: u32) -> S {
+        let mut blocks = Vec::new();
+        for _ in 0..actions {
+            let list = body(r, u);
+            blocks.push(r.block_of(&mut u.b, list));
+        }
+        let list = r.list(&mut u.b, actions, blocks.into_iter());
+        let header = u.b.switch_record(crate::bir::SwitchRecord {
+            constants: 0,
+            keys: crate::bir::KeySpan { start: 0, len: 0 },
+            clauses: crate::bir::ClauseSpan { start: 0, len: 0 },
+            has_default: false,
+            consts_full: false,
+            blocks_full: false,
+            dispatch: crate::lambda::SwitchDispatch::Direct,
+        });
+        let scrutinee = r.var(&mut u.b, u.x);
+        r.switch(&mut u.b, scrutinee, list, header, false)
+    }
+
+    /// `try { x; } catch (var) { x; } finally { x; }`, with the parts
+    /// asked for.
+    pub(super) fn tried(r: &mut Rows, u: &mut Unit, handler: bool, finaliser: bool) -> S {
+        let list = body(r, u);
+        let handler = handler.then(|| (fresh(u), body(r, u)));
+        let finaliser = finaliser.then(|| body(r, u));
+        r.try_(&mut u.b, list, handler, finaliser)
+    }
+
+    #[test]
+    fn a_statement_says_how_many_lists_it_holds() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut counts = Vec::new();
+        let mut count = |r: &Rows, u: &Unit, s: &S| {
+            let steps = r.steps();
+            counts.push(r.bodies(&u.b, s));
+            assert_eq!(r.steps(), steps, "a reader counts no step");
+        };
+        // A block, explicit or not, of any width.
+        let list = body(&mut r, &mut u);
+        let plain = r.block_of(&mut u.b, list);
+        count(&r, &u, &plain);
+        let list = r.list(&mut u.b, 0, std::iter::empty());
+        let explicit = r.explicit_block(&mut u.b, list);
+        count(&r, &u, &explicit);
+        // An `if`: both lists as the interface builds it, one without an
+        // else-block (the rules make that one).
+        let (test, yes, no) = (r.var(&mut u.b, u.x), body(&mut r, &mut u), body(&mut r, &mut u));
+        let both = r.if_plain(&mut u.b, test, yes, no);
+        count(&r, &u, &both);
+        let list = body(&mut r, &mut u);
+        let then_ = Rows::stmt_node(r.block_of(&mut u.b, list));
+        let condition = u.b.new_node(View::Var { var: u.x }, 0);
+        let guard = Rows::stmt_from_node(u.b.new_node(View::SIf { condition, then_, else_: None }, 0));
+        count(&r, &u, &guard);
+        // The loops.
+        let (condition, list) = (r.var(&mut u.b, u.x), body(&mut r, &mut u));
+        let looped = r.while_(&mut u.b, condition, list, None);
+        count(&r, &u, &looped);
+        for init in [true, false] {
+            let (var, end) = (fresh(&mut u), r.var(&mut u.b, u.x));
+            let looped = range(&mut r, &mut u, var, init, end);
+            count(&r, &u, &looped);
+        }
+        let (var, iterable, list) = (fresh(&mut u), r.var(&mut u.b, u.x), body(&mut r, &mut u));
+        let looped = r.for_of(&mut u.b, var, iterable, list, None, true);
+        count(&r, &u, &looped);
+        // A `try`: the body, and the handler and the finaliser it has.
+        for (handler, finaliser) in [(true, false), (false, true), (true, true)] {
+            let statement = tried(&mut r, &mut u, handler, finaliser);
+            count(&r, &u, &statement);
+        }
+        // A `switch`: one list an action.
+        for actions in [0, 1, 5] {
+            let statement = switch(&mut r, &mut u, actions);
+            count(&r, &u, &statement);
+        }
+        // A statement without a list.
+        let x = r.var(&mut u.b, u.x);
+        let effect = r.exp(&mut u.b, x);
+        count(&r, &u, &effect);
+        let x = r.var(&mut u.b, u.x);
+        let returned = r.return_(&mut u.b, x);
+        count(&r, &u, &returned);
+        assert_eq!(counts, [1, 1, 2, 1, 1, 1, 1, 1, 2, 2, 3, 0, 1, 5, 0, 0]);
+    }
+
+    /// Take list `index` of `s`, take each statement of it, list them
+    /// again and put the list back, as the replay does. Returns the ids of
+    /// the statements, in order.
+    fn walk(r: &mut Rows, u: &mut Unit, s: &mut S, index: u32) -> Vec<u32> {
+        let list = r.body(&mut u.b, s, index);
+        let len = r.len(&u.b, list);
+        let mut taken = Vec::new();
+        for at in 0..len {
+            taken.push(r.take_at(&mut u.b, list, at));
+        }
+        let ids: Vec<u32> = taken.iter().map(|statement| r.stmt_id(&u.b, statement)).collect();
+        let rebuilt = r.list(&mut u.b, len, taken.into_iter());
+        r.set_body(&mut u.b, s, index, rebuilt);
+        ids
+    }
+
+    /// The ids of the children of the block that is list `index` of `s`,
+    /// read from the arena.
+    fn listed(u: &Unit, s: &S, index: u32) -> Vec<u32> {
+        let View::SBlock { statements } = u.b.view(Rows::body_block(&u.b, s, index)) else { panic!("a block") };
+        statements.iter().map(|statement| statement.0).collect()
+    }
+
+    #[test]
+    fn the_lists_of_a_statement_are_taken_and_put_back_by_their_index() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut statements = Vec::new();
+        statements.push(block(&mut r, &mut u, 4));
+        let (test, yes) = (r.var(&mut u.b, u.x), body(&mut r, &mut u));
+        let no = {
+            let (x, y) = (r.var(&mut u.b, u.x), r.var(&mut u.b, u.f));
+            let (first, second) = (r.exp(&mut u.b, x), r.exp(&mut u.b, y));
+            r.list(&mut u.b, 2, [first, second].into_iter())
+        };
+        statements.push(r.if_plain(&mut u.b, test, yes, no));
+        let (condition, list) = (r.var(&mut u.b, u.x), body(&mut r, &mut u));
+        statements.push(r.while_(&mut u.b, condition, list, None));
+        for init in [true, false] {
+            let (var, end) = (fresh(&mut u), r.var(&mut u.b, u.x));
+            statements.push(range(&mut r, &mut u, var, init, end));
+        }
+        let (var, iterable, list) = (fresh(&mut u), r.var(&mut u.b, u.x), body(&mut r, &mut u));
+        statements.push(r.for_of(&mut u.b, var, iterable, list, None, false));
+        statements.push(tried(&mut r, &mut u, true, true));
+        statements.push(switch(&mut r, &mut u, 3));
+        for mut statement in statements {
+            let id = r.stmt_id(&u.b, &statement);
+            let kind = r.stmt_kind(&u.b, &statement);
+            let count = r.bodies(&u.b, &statement);
+            assert_ne!(count, 0, "{kind:?}");
+            for index in 0..count {
+                let before = listed(&u, &statement, index);
+                let steps = r.steps();
+                let ids = walk(&mut r, &mut u, &mut statement, index);
+                // One step to take the list, one to put it back, and what
+                // `take_at` and `list` count for its statements.
+                assert_eq!(r.steps() - steps, 2 + 1 + 2 * before.len() as u64, "{kind:?}");
+                assert_eq!(ids, before, "{kind:?}: the statements in order");
+                assert_eq!(listed(&u, &statement, index), before, "{kind:?}: the list put back");
+            }
+            // The statement is the same statement, and whole.
+            assert_eq!((r.stmt_id(&u.b, &statement), r.stmt_kind(&u.b, &statement)), (id, kind));
+            assert_eq!(r.bodies(&u.b, &statement), count);
+            r.release_stmt(&mut u.b, statement);
+        }
+    }
+
+    #[test]
+    fn a_block_keeps_its_braces_and_its_location_over_a_list_put_back() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let list = body(&mut r, &mut u);
+        let mut explicit = r.explicit_block(&mut u.b, list);
+        r.locate_stmt(&mut u.b, &mut explicit, LamLoc::NONE);
+        let list = body(&mut r, &mut u);
+        let mut plain = r.block_of(&mut u.b, list);
+        for (statement, aux) in [(&mut explicit, 1), (&mut plain, 0)] {
+            walk(&mut r, &mut u, statement, 0);
+            assert_eq!(r.stmt_kind(&u.b, statement), Kind::Block);
+            assert_eq!(r.stmt_aux(&u.b, statement), aux);
+        }
+        assert!(r.stmt_located(&u.b, &explicit) && !r.stmt_located(&u.b, &plain));
+    }
+
+    /// The cost of a list taken and put back does not grow with the list:
+    /// the same steps at 1,000 and at 10,000 statements when no statement
+    /// is taken, and no allocation.
+    #[test]
+    fn a_list_taken_and_put_back_untouched_costs_two_steps_at_any_width() {
+        let mut steps = Vec::new();
+        for width in [1_000u32, 10_000] {
+            let mut u = unit();
+            let mut r = Rows::default();
+            let mut b = block(&mut r, &mut u, width);
+            let before = r.steps();
+            let allocations = allocation_counter::measure(|| {
+                let list = r.body(&mut u.b, &mut b, 0);
+                assert_eq!(r.len(&u.b, list), width);
+                r.set_body(&mut u.b, &mut b, 0, list);
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+            steps.push(r.steps() - before);
+            assert_eq!(r.block_len(&u.b, &b), width);
+        }
+        assert_eq!(steps, [2, 2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "statement list 1 of a statement that has no such list")]
+    fn a_list_a_statement_does_not_hold_is_not_taken() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut b = block(&mut r, &mut u, 2);
+        r.body(&mut u.b, &mut b, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "a statement put back into a list it was not taken from")]
+    fn a_statement_of_another_list_is_not_put_back() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut b = block(&mut r, &mut u, 2);
+        r.body(&mut u.b, &mut b, 0);
+        let other = body(&mut r, &mut u);
+        r.set_body(&mut u.b, &mut b, 0, other);
+    }
+
+    #[test]
+    #[should_panic(expected = "an action of a switch that is no block")]
+    fn an_action_of_a_switch_is_a_block() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let actions = body(&mut r, &mut u);
+        let header = u.b.switch_record(crate::bir::SwitchRecord {
+            constants: 0,
+            keys: crate::bir::KeySpan { start: 0, len: 0 },
+            clauses: crate::bir::ClauseSpan { start: 0, len: 0 },
+            has_default: false,
+            consts_full: false,
+            blocks_full: false,
+            dispatch: crate::lambda::SwitchDispatch::Direct,
+        });
+        let scrutinee = r.var(&mut u.b, u.x);
+        r.switch(&mut u.b, scrutinee, actions, header, false);
+    }
+
+    /// A function literal over `width` statements `x;`, as the value of
+    /// `let var = function`, and its header.
+    pub(super) fn literal(r: &mut Rows, u: &mut Unit, width: u32) -> (S, crate::bir::FuncId) {
+        let header = u.b.function_header(crate::bir::VarSpan { start: 0, len: 0 }, Default::default(), LamLoc::NONE);
+        let mut statements = Vec::new();
+        for _ in 0..width {
+            let x = r.var(&mut u.b, u.x);
+            statements.push(r.exp(&mut u.b, x));
+        }
+        let list = r.list(&mut u.b, width, statements.into_iter());
+        let function = r.function(&mut u.b, header, list);
+        let var = fresh(u);
+        (r.declare(&mut u.b, LetKind::Strict, var, Some(function)), header)
+    }
+
+    /// The ids of the statements of the body of the literal of `header`,
+    /// read from the arena.
+    fn body_of(u: &Unit, header: crate::bir::FuncId) -> Vec<u32> {
+        let View::SBlock { statements } = u.b.view(Rows::literal_block(&u.b, header)) else { panic!("a block") };
+        statements.iter().map(|statement| statement.0).collect()
+    }
+
+    #[test]
+    fn the_body_of_a_function_literal_is_taken_and_put_back_by_its_header() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        // Two literals: a header names its own.
+        let (first, one) = literal(&mut r, &mut u, 3);
+        let (second, two) = literal(&mut r, &mut u, 2);
+        for (header, width) in [(two, 2), (one, 3)] {
+            let before = body_of(&u, header);
+            assert_eq!(before.len(), width);
+            let steps = r.steps();
+            let list = r.literal_body(&mut u.b, header);
+            assert_eq!(r.len(&u.b, list) as usize, width);
+            let taken: Vec<S> = (0..width as u32).map(|at| r.take_at(&mut u.b, list, at)).collect();
+            assert_eq!(taken.iter().map(|statement| r.stmt_id(&u.b, statement)).collect::<Vec<_>>(), before);
+            let rebuilt = r.list(&mut u.b, width as u32, taken.into_iter());
+            r.set_literal_body(&mut u.b, header, rebuilt);
+            assert_eq!(r.steps() - steps, 2 + 1 + 2 * width as u64);
+            assert_eq!(body_of(&u, header), before);
+        }
+        // The literals are where they were: the value of their statement.
+        for (statement, header) in [(&first, one), (&second, two)] {
+            let value = r.value_of(&u.b, statement).expect("a declaration with a value");
+            assert_eq!(r.function_of(&u.b, value), Some(header));
+        }
+    }
+
+    /// Taking the body of a literal and putting it back is O(1): the same
+    /// two steps at 1,000 and at 10,000 statements, and no allocation.
+    #[test]
+    fn the_body_of_a_function_literal_costs_two_steps_at_any_width() {
+        let mut steps = Vec::new();
+        for width in [1_000u32, 10_000] {
+            let mut u = unit();
+            let mut r = Rows::default();
+            let (_statement, header) = literal(&mut r, &mut u, width);
+            let before = r.steps();
+            let allocations = allocation_counter::measure(|| {
+                let list = r.literal_body(&mut u.b, header);
+                assert_eq!(r.len(&u.b, list), width);
+                r.set_literal_body(&mut u.b, header, list);
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+            steps.push(r.steps() - before);
+            assert_eq!(body_of(&u, header).len() as u32, width);
+        }
+        assert_eq!(steps, [2, 2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "a function literal that is not there")]
+    fn the_body_of_a_header_without_a_literal_is_not_taken() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let header = u.b.function_header(crate::bir::VarSpan { start: 0, len: 0 }, Default::default(), LamLoc::NONE);
+        r.literal_body(&mut u.b, header);
+    }
+
+    #[test]
+    #[should_panic(expected = "a statement put back into a list it was not taken from")]
+    fn a_statement_of_another_list_is_not_put_back_into_a_literal() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let (_statement, header) = literal(&mut r, &mut u, 2);
+        r.literal_body(&mut u.b, header);
+        let other = body(&mut r, &mut u);
+        r.set_literal_body(&mut u.b, header, other);
+    }
+
+    use crate::bir::lower::js_stmt::Below;
+    use crate::emit::row::flag;
+
+    /// A variable that is a JavaScript global.
+    fn global(u: &mut Unit) -> VarId {
+        let var = fresh(u);
+        u.b.mark_js_global(var);
+        var
+    }
+
+    /// A function literal over one `x;`, or over one `inside;`.
+    fn function(r: &mut Rows, u: &mut Unit, inside: Option<VarId>) -> (E, crate::bir::FuncId) {
+        let header = u.b.function_header(crate::bir::VarSpan { start: 0, len: 0 }, Default::default(), LamLoc::NONE);
+        let value = r.var(&mut u.b, inside.unwrap_or(u.x));
+        let statement = r.exp(&mut u.b, value);
+        let list = r.list(&mut u.b, 1, std::iter::once(statement));
+        (r.function(&mut u.b, header, list), header)
+    }
+
+    /// `callee(...arguments)`.
+    fn call(r: &mut Rows, u: &mut Unit, callee: E, arguments: Vec<E>) -> E {
+        let info = u.b.js_info(JsPayload::Call(Default::default()));
+        let mark = r.mark();
+        for argument in arguments {
+            r.push(argument);
+        }
+        r.call(&mut u.b, callee, mark, info)
+    }
+
+    /// What `below` gives for `s` with `want`, qualifying the globals of
+    /// `qualify`, and the nodes it read.
+    fn found(r: &mut Rows, u: &mut Unit, s: &mut S, want: u16, qualify: &[VarId]) -> (Vec<Below>, u32) {
+        let mut found = Vec::new();
+        let steps = r.steps();
+        let read = r.below(&mut u.b, s, want, |below| {
+            found.push(below);
+            matches!(below, Below::Global(var) if qualify.contains(&var))
+        });
+        assert_eq!(r.steps(), steps, "a reader counts no step");
+        assert!(r.work.is_empty());
+        (found, read)
+    }
+
+    #[test]
+    fn the_literals_and_the_global_references_of_a_statement_are_found_in_operand_order() {
+        assert_eq!(std::mem::size_of::<Below>(), 8);
+        let mut u = unit();
+        let mut r = Rows::default();
+        let (g, h) = (global(&mut u), global(&mut u));
+        // `x(g, function a { h; }, x + h, function b { x; }).name;`: the
+        // global inside the first literal is the literal's, not the
+        // statement's.
+        let callee = r.var(&mut u.b, u.x);
+        let first = r.var(&mut u.b, g);
+        let (outer, a) = function(&mut r, &mut u, Some(h));
+        let (left, right) = (r.var(&mut u.b, u.x), r.var(&mut u.b, h));
+        let right_id = r.id(&u.b, Rows::of(&right));
+        let sum = r.bin_plain(&mut u.b, crate::js_ir::BinOp::Plus, left, right);
+        let (inner, b) = function(&mut r, &mut u, None);
+        let first_id = r.id(&u.b, Rows::of(&first));
+        let value = call(&mut r, &mut u, callee, vec![first, outer, sum, inner]);
+        let value = r.dot(&mut u.b, value, u.name, crate::js_ir::arena::FieldPos::NONE, false);
+        let mut statement = r.exp(&mut u.b, value);
+        // The dot, the call, its callee, `g`, a literal, the sum and its
+        // two operands, a literal: every expression node outside the
+        // literals, whatever is wanted.
+        let nodes = 9;
+        let both = flag::HAS_FUN | flag::HAS_GLOBAL;
+        assert_eq!(
+            found(&mut r, &mut u, &mut statement, both, &[]),
+            (vec![Below::Global(g), Below::Function(a), Below::Global(h), Below::Function(b)], nodes)
+        );
+        assert_eq!(
+            found(&mut r, &mut u, &mut statement, flag::HAS_FUN, &[]),
+            (vec![Below::Function(a), Below::Function(b)], nodes)
+        );
+        assert!(!u.b.global_qualified(NodeId(first_id)) && !u.b.global_qualified(NodeId(right_id)));
+        // A reference the visitor says is shadowed is marked, another of
+        // the same descent is not.
+        assert_eq!(
+            found(&mut r, &mut u, &mut statement, flag::HAS_GLOBAL, &[h]),
+            (vec![Below::Global(g), Below::Global(h)], nodes)
+        );
+        assert!(!u.b.global_qualified(NodeId(first_id)) && u.b.global_qualified(NodeId(right_id)));
+        // Nothing wanted: nothing read.
+        assert_eq!(found(&mut r, &mut u, &mut statement, 0, &[]), (vec![], 0));
+    }
+
+    #[test]
+    fn the_descent_reads_the_expressions_of_a_statement_and_not_its_lists() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let g = global(&mut u);
+        let both = flag::HAS_FUN | flag::HAS_GLOBAL;
+        // A list whose one statement holds a global reference and a
+        // literal: what a statement's list holds is not the statement's.
+        let inside = |r: &mut Rows, u: &mut Unit| {
+            let callee = r.var(&mut u.b, g);
+            let (literal, _) = function(r, u, None);
+            let value = call(r, u, callee, vec![literal]);
+            let statement = r.exp(&mut u.b, value);
+            r.list(&mut u.b, 1, std::iter::once(statement))
+        };
+        let mut statements = Vec::new();
+        // Each with the expressions it has itself, a reference to `g`
+        // each.
+        let list = inside(&mut r, &mut u);
+        statements.push((r.block_of(&mut u.b, list), 0));
+        let (test, yes, no) = (r.var(&mut u.b, g), inside(&mut r, &mut u), inside(&mut r, &mut u));
+        statements.push((r.if_plain(&mut u.b, test, yes, no), 1));
+        let (condition, list) = (r.var(&mut u.b, g), inside(&mut r, &mut u));
+        statements.push((r.while_(&mut u.b, condition, list, None), 1));
+        let (var, init, end, list) = (fresh(&mut u), r.var(&mut u.b, g), r.var(&mut u.b, g), inside(&mut r, &mut u));
+        let bounds = Range { init: Some(init), end, direction: 0 };
+        statements.push((r.for_range(&mut u.b, var, bounds, list, None), 2));
+        let (var, iterable, list) = (fresh(&mut u), r.var(&mut u.b, g), inside(&mut r, &mut u));
+        statements.push((r.for_of(&mut u.b, var, iterable, list, None, false), 1));
+        let (tried, handler) = (inside(&mut r, &mut u), inside(&mut r, &mut u));
+        let var = fresh(&mut u);
+        statements.push((r.try_(&mut u.b, tried, Some((var, handler)), None), 0));
+        let value = r.var(&mut u.b, g);
+        statements.push((r.return_(&mut u.b, value), 1));
+        let value = r.var(&mut u.b, g);
+        statements.push((r.throw(&mut u.b, value), 1));
+        let (var, value) = (fresh(&mut u), r.var(&mut u.b, g));
+        statements.push((r.declare(&mut u.b, LetKind::Strict, var, Some(value)), 1));
+        let var = fresh(&mut u);
+        statements.push((r.declare(&mut u.b, LetKind::Variable, var, None), 0));
+        for (mut statement, own) in statements {
+            let kind = r.stmt_kind(&u.b, &statement);
+            let (given, read) = found(&mut r, &mut u, &mut statement, both, &[]);
+            assert_eq!(given, vec![Below::Global(g); own], "{kind:?}");
+            assert_eq!(read as usize, own, "{kind:?}: its own expressions and no statement");
+        }
+        // A `switch`: its scrutinee, and no action.
+        let mut blocks = Vec::new();
+        for _ in 0..2 {
+            let list = inside(&mut r, &mut u);
+            blocks.push(r.block_of(&mut u.b, list));
+        }
+        let actions = r.list(&mut u.b, 2, blocks.into_iter());
+        let header = u.b.switch_record(crate::bir::SwitchRecord {
+            constants: 0,
+            keys: crate::bir::KeySpan { start: 0, len: 0 },
+            clauses: crate::bir::ClauseSpan { start: 0, len: 0 },
+            has_default: false,
+            consts_full: false,
+            blocks_full: false,
+            dispatch: crate::lambda::SwitchDispatch::Direct,
+        });
+        let scrutinee = r.var(&mut u.b, g);
+        let mut statement = r.switch(&mut u.b, scrutinee, actions, header, false);
+        assert_eq!(found(&mut r, &mut u, &mut statement, both, &[]), (vec![Below::Global(g)], 1));
+    }
+
+    /// `(x, (x, ... (x, last)))`: `depth` sequences nested in their second
+    /// operand, so `2 * depth + 1` nodes.
+    fn nested(r: &mut Rows, u: &mut Unit, depth: u32, last: E) -> E {
+        let mut value = last;
+        for _ in 0..depth {
+            let first = r.var(&mut u.b, u.x);
+            value = r.seq(&mut u.b, first, value);
+        }
+        value
+    }
+
+    /// On rows the descent reads every expression node of the statement
+    /// outside its literals, with or without anything to find and
+    /// whatever is wanted (decision 1: rows keep no flag to prune by):
+    /// ten times the reads at ten times the depth, without recursion, and
+    /// a second descent as deep allocates nothing.
+    #[test]
+    fn the_descent_costs_one_read_a_node_at_any_depth_whatever_is_wanted() {
+        let mut reads = Vec::new();
+        for depth in [1_000u32, 10_000] {
+            let mut u = unit();
+            let mut r = Rows::default();
+            let g = global(&mut u);
+            for (with, want) in [(true, flag::HAS_FUN), (false, flag::HAS_FUN), (false, flag::HAS_GLOBAL)] {
+                let last = if with { function(&mut r, &mut u, Some(g)).0 } else { r.var(&mut u.b, u.x) };
+                let value = nested(&mut r, &mut u, depth, last);
+                let mut statement = r.exp(&mut u.b, value);
+                let (given, read) = found(&mut r, &mut u, &mut statement, want, &[]);
+                assert_eq!(given.len(), usize::from(with));
+                assert_eq!(read, 2 * depth + 1, "every node, with nothing to find too");
+                reads.push(read);
+                let allocations = allocation_counter::measure(|| {
+                    r.below(&mut u.b, &mut statement, want, |_| false);
+                });
+                assert_eq!(allocations.count_total, 0, "{allocations:?}");
+            }
+        }
+        assert_eq!(reads[3] - 1, 10 * (reads[0] - 1));
+    }
+
+    /// Of `count` statements of which every tenth holds a function
+    /// literal, rows read the expressions of all of them: the cost
+    /// decision 1 accepts until the flip, counted.
+    #[test]
+    fn the_descent_reads_every_statement_of_a_list_on_rows() {
+        let mut reads = Vec::new();
+        for count in [1_000u32, 10_000] {
+            let mut u = unit();
+            let mut r = Rows::default();
+            let (mut read, mut literals) = (0, 0);
+            for index in 0..count {
+                let callee = r.var(&mut u.b, u.x);
+                let argument = if index % 10 == 0 { function(&mut r, &mut u, None).0 } else { r.var(&mut u.b, u.f) };
+                let value = call(&mut r, &mut u, callee, vec![argument]);
+                let mut statement = r.exp(&mut u.b, value);
+                read += r.below(&mut u.b, &mut statement, flag::HAS_FUN, |_| {
+                    literals += 1;
+                    false
+                });
+            }
+            assert_eq!(literals, count / 10);
+            // The call, its callee and its argument, of every statement.
+            assert_eq!(read, 3 * count);
+            reads.push(read);
+        }
+        assert_eq!(reads[1], 10 * reads[0]);
+    }
+
+    #[test]
+    fn the_descent_leaves_what_the_work_stack_held() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let (literal, header) = function(&mut r, &mut u, None);
+        let value = nested(&mut r, &mut u, 3, literal);
+        let mut statement = r.exp(&mut u.b, value);
+        r.work.push(NodeId(7));
+        let mut given = Vec::new();
+        let read = r.below(&mut u.b, &mut statement, flag::HAS_FUN, |below| {
+            given.push(below);
+            false
+        });
+        assert_eq!((given, read), (vec![Below::Function(header)], 7));
+        assert_eq!(r.work, [NodeId(7)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "a descent for a flag that is neither HAS_FUN nor HAS_GLOBAL")]
+    fn the_descent_is_asked_for_literals_and_globals_only() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let x = r.var(&mut u.b, u.x);
+        let mut statement = r.exp(&mut u.b, x);
+        r.below(&mut u.b, &mut statement, flag::SEAL, |_| false);
+    }
+}

@@ -378,9 +378,12 @@ pub trait Js {
     /// pools: a reference to a variable, a
     /// reference to an imported module, the header of a function literal.
     /// A function literal is not entered. `e` is the caller's and is not
-    /// changed; `visit` may write the pools (the lowering's tables), not
-    /// the nodes. The order of the visits is the implementation's (the
-    /// caller builds a set). Returns the number of nodes read.
+    /// changed. `visit` holds the implementation and the pools by shared
+    /// reference: it reads, and it can replace no node, release none and
+    /// start no walk while the walk has nodes pending (what it writes is
+    /// its own: the caller takes the tables it fills out of the pools
+    /// before the call). The order of the visits is the implementation's
+    /// (the caller builds a set). Returns the number of nodes read.
     ///
     /// One read per node at or below `e` outside function literals:
     /// O(nodes); counts no step (a reader; the caller counts the number
@@ -391,7 +394,7 @@ pub trait Js {
     /// the expression's width and depth. (THREE_TREES 11.4, "T6r: the
     /// naming replay behind the interface", decision 5: `names::adopt`,
     /// an expression built before the scope it moves into opened.)
-    fn references(&mut self, a: &mut Pools, e: &Self::E, visit: impl FnMut(&Self, &mut Pools, Found)) -> u32;
+    fn references(&mut self, a: &Pools, e: &Self::E, visit: impl FnMut(&Self, &Pools, Found)) -> u32;
     /// `e` is not used: its references and sites are given back. One step
     /// per node released. The operand stack is not read and not changed:
     /// operands pushed before the call are there after it, in order.

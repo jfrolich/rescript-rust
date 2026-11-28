@@ -37,12 +37,15 @@
 //! | `Index` | both | no | both | both |
 //! | `Call` | exactly one argument, and it; the callee is `Array.isArray`: a `Dot` named `isArray`, without position, not a tag, on a `Named` JavaScript identifier `Array` (B:164) | no | no | no |
 //! | `New` | no | no | no | no |
+//! | `Fun` | yes (a literal runs nothing, whatever its body is) | yes | no | no |
 //!
-//! `HAS_FUN` and `SEAL` hold for a node, and for a statement, when they hold
-//! for anything it is built from. `SEAL` is set where it starts: by
-//! [`Builder::bin`] for `&&`, `||` and `|` whose right operand is a `Bin` of
-//! the same operator, and by [`Builder::seq`] when an operand is a `Seq`.
-//! A statement's row has no other flag.
+//! `HAS_FUN`, `SEAL` and `HAS_GLOBAL` hold for a node, and for a statement,
+//! when they hold for anything it is built from. `SEAL` is set where it
+//! starts: by [`Builder::bin`] for `&&`, `||` and `|` whose right operand is
+//! a `Bin` of the same operator, and by [`Builder::seq`] when an operand is
+//! a `Seq`. `HAS_GLOBAL` starts at [`Builder::reference`] of a variable the
+//! caller knows as a JavaScript global (`var::GLOBAL`). A statement's row
+//! has no other flag.
 pub(crate) use super::row::{Kind, Row, flag, num, var};
 use super::{Unsupported, literal, walk};
 use crate::js_ir::op::{BinOp, Number};
@@ -72,8 +75,9 @@ const FLOAT_ZERO_TEXT: u32 = 1;
 /// alike (except `Bin`'s `STRICT`).
 const PURITY: u16 = flag::PURE | flag::STRICT;
 
-/// `HAS_FUN` and `SEAL`: what a node holds when an operand holds it.
-const INHERITED: u16 = flag::HAS_FUN | flag::SEAL;
+/// `HAS_FUN`, `SEAL` and `HAS_GLOBAL`: what a node holds when an operand
+/// holds it.
+const INHERITED: u16 = flag::HAS_FUN | flag::SEAL | flag::HAS_GLOBAL;
 
 /// The flags of a node with one operand whose `kept` flags hold when they
 /// hold for the operand. O(1).
@@ -208,6 +212,10 @@ pub(crate) struct List {
 impl List {
     /// The list without statements. O(1).
     pub const EMPTY: List = List { start: 0, len: 0 };
+    /// In [`Builder::literals`]: no function literal has this header.
+    const NONE: List = List { start: u32::MAX, len: 0 };
+    /// In [`Builder::literals`]: the body is out ([`Builder::literal_body`]).
+    const TAKEN: List = List { start: u32::MAX, len: 1 };
     /// O(1).
     pub fn len(self) -> usize {
         self.len as usize
@@ -246,8 +254,23 @@ pub(crate) struct Builder<'a> {
     /// made: sorted by id, since ids ascend. What [`Builder::alias_at`]
     /// reads.
     aliases: Vec<(u32, u32)>,
-    /// The allocation of the work stack of [`Builder::references`] and
-    /// [`Builder::return_calls`], kept between walks. Such a stack holds
+    /// The ids of the nodes from the statement [`Builder::substitute`]
+    /// walks down to the node it has in hand, and the depth of each node
+    /// it has still to read (beside its work stack). Empty between calls
+    /// and kept: they allocate only when a statement is deeper or wider
+    /// than any before it.
+    path: Vec<u32>,
+    depths: Vec<u32>,
+    /// The body of each function literal, a list in flight, dense by the
+    /// header [`Builder::function`] is given (the lowering's `FuncId`):
+    /// the body stays a list until the print form of the literal is
+    /// written, so that the replay takes it and puts it back in O(1)
+    /// ([`Builder::literal_body`]). `List::NONE` for a header without a
+    /// literal, `List::TAKEN` while the body is out. 8 bytes a header.
+    literals: Vec<List>,
+    /// The allocation of the work stack of [`Builder::references`],
+    /// [`Builder::return_calls`] and [`Builder::below`], kept between
+    /// walks. Such a stack holds
     /// references into the tree, which borrow it for one walk, so the
     /// builder keeps the storage as words and each walk takes it as an
     /// empty vector of references ([`recycle`]). Always empty.
@@ -273,6 +296,15 @@ pub(crate) enum Reference {
     Var { variable: u32, id: u32 },
     Named { id: u32 },
     Function(u32),
+}
+
+/// What [`Builder::below`] finds among the expressions of a statement: a
+/// function literal by the header its row holds, or a reference to a
+/// JavaScript global by its variable. 8 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Below {
+    Function(u32),
+    Global(u32),
 }
 
 /// The property of a member read, taken from the read it is copied from.
@@ -303,6 +335,9 @@ impl<'a> Builder<'a> {
             float_text: String::new(),
             members: Vec::new(),
             aliases: Vec::new(),
+            path: Vec::new(),
+            depths: Vec::new(),
+            literals: Vec::new(),
             spare: Vec::new(),
         }
     }
@@ -321,6 +356,7 @@ impl<'a> Builder<'a> {
         self.staged.clear();
         self.pool.clear();
         self.aliases.clear();
+        self.literals.clear();
         self.steps = 0;
     }
 
@@ -401,7 +437,10 @@ impl<'a> Builder<'a> {
     }
 
     /// A reference to variable `var`, printed through the name table (the
-    /// reference id is the variable's index). `known` is of [`var`]. O(1).
+    /// reference id is the variable's index). `known` is of [`var`]; a
+    /// reference to a JavaScript global (`var::GLOBAL`) has `HAS_GLOBAL`,
+    /// which every node and statement built over it inherits: it is what
+    /// the replay's descent is pruned by ([`Builder::below`]). O(1).
     pub fn reference(&mut self, variable: u32, known: u8) -> J<'a> {
         let expr = Expression::new_identifier_with_reference_id(
             SPAN,
@@ -415,6 +454,8 @@ impl<'a> Builder<'a> {
         }
         if known & var::GLOBAL == 0 {
             flags |= flag::DUPLICABLE;
+        } else {
+            flags |= flag::HAS_GLOBAL;
         }
         self.attach(expr, Row { flags, kind: Kind::Var, aux: known, payload: variable })
     }
@@ -988,7 +1029,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The row of a statement of `kind` that holds what has `flags`: their
-    /// `HAS_FUN` and `SEAL`, and no other flag. O(1).
+    /// `HAS_FUN`, `SEAL` and `HAS_GLOBAL`, and no other flag. O(1).
     fn statement(kind: Kind, flags: u16) -> Row {
         Row { flags: flags & INHERITED, kind, aux: 0, payload: 0 }
     }
@@ -1078,8 +1119,10 @@ impl<'a> Builder<'a> {
     }
 
     /// `let variable = value;`, the binder printed through the name table
-    /// (the symbol id is the variable's index). `kind` is the `LetKind`.
-    /// Whether the declaration prints, and as what, is the seal's. O(1).
+    /// (the symbol id is the variable's index). `kind` is the `aux` of a
+    /// `Declare`: the `LetKind` in its low two bits and the `UsedStats`
+    /// above them ([`Builder::status`]). Whether the declaration prints,
+    /// and as what, is the seal's. O(1).
     pub fn declare(&mut self, variable: u32, kind: u8, value: Option<J<'a>>) -> S<'a> {
         let flags = value.as_ref().map_or(0, |value| value.row.flags);
         if let Some(value) = &value {
@@ -1264,18 +1307,27 @@ impl<'a> Builder<'a> {
     /// and the walk stops at the last (the lowering's
     /// `JsStmt::substitute`). Returns the number replaced. A reference is
     /// a `Var` node of exactly that variable; what replaces it is not
-    /// entered. The statement stays where it is and keeps its id. The rows
-    /// of the nodes above a replaced reference are not written again: the
-    /// lowering replaces a strictly pure reference by a strictly pure
-    /// expression after the last rule that reads them ran, and neither
-    /// has `HAS_FUN` or `SEAL`.
+    /// entered. The statement stays where it is and keeps its id. Of the
+    /// rows of the nodes above a replaced reference the facts the rules
+    /// read are not written again: the lowering replaces a strictly pure
+    /// reference by a strictly pure expression after the last rule that
+    /// reads them ran. The flags a node holds when an operand holds them
+    /// (`HAS_FUN`, `SEAL`, `HAS_GLOBAL`) are written: what replaces a
+    /// reference can be a reference to a JavaScript global, and the
+    /// replay's descent, which runs after the fold, is pruned by the flag
+    /// ([`Builder::below`]). They go into the row of every node and
+    /// statement from the reference up to `statement`, and into the
+    /// handle's row.
     ///
     /// One step per node the walk reads, until the last reference
-    /// replaced: O(nodes of the statement). The work stack is one vector
-    /// of the call (its references borrow the statement, so the builder
-    /// cannot keep it): one allocation a call that has a use to replace,
-    /// none per node. Panics on a node no constructor of the builder
-    /// makes: the slice that adds a constructor adds its arm.
+    /// replaced: O(nodes of the statement); and, for a replacement that
+    /// brings such a flag, one store per node above it (the path from the
+    /// statement to the node in hand is kept in [`Builder::path`], one
+    /// entry a level). The work stack is one vector of the call (its
+    /// references borrow the statement, so the builder cannot keep it):
+    /// one allocation a call that has a use to replace, none per node.
+    /// Panics on a node no constructor of the builder makes: the slice
+    /// that adds a constructor adds its arm.
     pub fn substitute(
         &mut self,
         statement: &mut S<'a>,
@@ -1287,12 +1339,21 @@ impl<'a> Builder<'a> {
         if uses == 0 {
             return replaced;
         }
+        let (mut path, mut depths) = (std::mem::take(&mut self.path), std::mem::take(&mut self.depths));
+        // The inherited flags the replacements brought, and the depth of
+        // what was pushed since the last pop: one below the node read.
+        let (mut added, mut below) = (0, 0);
         let mut work = vec![Pending::Statement(&mut statement.stmt)];
-        while let Some(pending) = work.pop() {
+        while !work.is_empty() {
+            depths.resize(work.len(), below);
+            let (pending, depth) = (work.pop().expect("a pending node"), depths.pop().expect("its depth") as usize);
+            below = depth as u32 + 1;
+            path.truncate(depth);
             self.steps += 1;
             let expr = match pending {
                 Pending::Statement(statement) => {
                     let id = statement.node_id().index() as u32;
+                    path.push(id);
                     match statement {
                         Statement::ExpressionStatement(node) => work.push(Pending::Expression(&mut node.expression)),
                         Statement::ReturnStatement(node) => {
@@ -1307,6 +1368,8 @@ impl<'a> Builder<'a> {
                                 if self.is_reference(init, variable) {
                                     let copy = make(self);
                                     self.realias(id, copy.row);
+                                    // The declaration is above it too.
+                                    added |= self.inherit(&path, copy.row);
                                     *init = copy.expr;
                                     replaced += 1;
                                 } else {
@@ -1341,13 +1404,16 @@ impl<'a> Builder<'a> {
                 Pending::Expression(expr) => expr,
             };
             if self.is_reference(expr, variable) {
-                *expr = make(self).expr;
+                let copy = make(self);
+                added |= self.inherit(&path, copy.row);
+                *expr = copy.expr;
                 replaced += 1;
                 if replaced == uses {
                     break;
                 }
                 continue;
             }
+            path.push(expr.node_id().index() as u32);
             match expr {
                 Expression::UnaryExpression(node) => work.push(Pending::Expression(&mut node.argument)),
                 Expression::BinaryExpression(node) => {
@@ -1414,10 +1480,39 @@ impl<'a> Builder<'a> {
                 | Expression::StringLiteral(_)
                 | Expression::NumericLiteral(_)
                 | Expression::BigIntLiteral(_) => {}
+                // The body of a function literal is a list by header, not
+                // below its node ([`Builder::function`]): the walk that
+                // enters it, as rows enter a `JFun`, is T6v's.
+                Expression::ArrowFunctionExpression(_) => {
+                    panic!("a substitution in a statement with a function literal is not built (T6v)")
+                }
                 _ => unreachable!("an expression no constructor of the builder makes"),
             }
         }
+        drop(work);
+        statement.row.flags |= added;
+        path.clear();
+        depths.clear();
+        (self.path, self.depths) = (path, depths);
         replaced
+    }
+
+    /// Give the rows of the nodes of `path` the flags a node holds when
+    /// an operand holds them, of the row `brought` of an expression put
+    /// below them ([`Builder::substitute`]); returns those flags. A node
+    /// of a printed form without a row of its own (id 0) is passed. O(1)
+    /// when the expression has none of the flags; else one store per
+    /// node of the path.
+    fn inherit(&mut self, path: &[u32], brought: Row) -> u16 {
+        let flags = brought.flags & INHERITED;
+        if flags != 0 {
+            for &id in path {
+                if id != 0 {
+                    self.rows[id as usize].flags |= flags;
+                }
+            }
+        }
+        flags
     }
 
     /// The operands of `expr`, pushed on `out` in order: what a walk that
@@ -1458,12 +1553,15 @@ impl<'a> Builder<'a> {
                     argument.as_expression().expect("an argument that is an expression")
                 }));
             }
+            // A function literal has no operand: its body is a list by
+            // header ([`Builder::function`]).
             Expression::Identifier(_)
             | Expression::NullLiteral(_)
             | Expression::BooleanLiteral(_)
             | Expression::StringLiteral(_)
             | Expression::NumericLiteral(_)
-            | Expression::BigIntLiteral(_) => {}
+            | Expression::BigIntLiteral(_)
+            | Expression::ArrowFunctionExpression(_) => {}
             _ => unreachable!("an expression no constructor of the builder makes"),
         }
     }
@@ -1551,6 +1649,305 @@ impl<'a> Builder<'a> {
     fn is_reference(&self, expr: &Expression<'a>, variable: u32) -> bool {
         let row = self.row(expr);
         row.kind == Kind::Var && row.payload == variable
+    }
+}
+
+/// What the lowering's naming replay reads of a statement and takes out
+/// of it (THREE_TREES 11.4, "T6r: the naming replay behind the
+/// interface", decisions 1, 2, 7 and 12 to 16; slice T6r-c).
+///
+/// The readers of a statement in hand answer from its row alone
+/// ([`S::row`]): a constructor writes the row as [`Kind`] says for its
+/// kind, and the builder has no constructor yet for a loop over a range or
+/// an iterable, a `try`, a `switch` and a rest declaration (T6d adds
+/// them, each with the row these readers read).
+impl<'a> Builder<'a> {
+    /// The variable the statement binds (the lowering's `JsStmt::binder`):
+    /// the payload of a `Declare`, a `Rest`, a `ForRange`, a `ForOf` and a
+    /// `ForAwaitOf`; the exception variable of a `Try` that has a handler
+    /// (its payload less one). `None` for every other statement. O(1): the
+    /// row in the handle, no node; counts no step.
+    pub fn binder(&self, statement: &S<'a>) -> Option<u32> {
+        let row = statement.row;
+        match row.kind {
+            Kind::Declare | Kind::Rest | Kind::ForRange | Kind::ForOf | Kind::ForAwaitOf => Some(row.payload),
+            Kind::Try => row.payload.checked_sub(1),
+            _ => None,
+        }
+    }
+
+    /// The status of a `Declare` or a `Rest` (the lowering's
+    /// `JsStmt::status`): the bits of the row's `aux` above the two of the
+    /// `LetKind`. O(1): the row in the handle; counts no step. Panics on a
+    /// statement that is neither.
+    pub fn status(&self, statement: &S<'a>) -> u8 {
+        let row = statement.row;
+        assert!(matches!(row.kind, Kind::Declare | Kind::Rest), "not a declaration");
+        row.aux >> 2
+    }
+
+    /// Of a range loop, the variable it runs over and the kind of its
+    /// bound (the lowering's `JsStmt::range_of`): of a `ForRange` the
+    /// payload, of a `ForRangeExisting` the payload less one (`None` when
+    /// its target is no reference), with the kind whose number the row's
+    /// `aux` holds. `None` for every other statement. O(1): the row in the
+    /// handle; counts no step.
+    pub fn range_of(&self, statement: &S<'a>) -> Option<(Option<u32>, Kind)> {
+        let row = statement.row;
+        let variable = match row.kind {
+            Kind::ForRange => Some(row.payload),
+            Kind::ForRangeExisting => row.payload.checked_sub(1),
+            _ => return None,
+        };
+        Some((variable, Kind::ALL[row.aux as usize]))
+    }
+
+    /// The number of statement lists the statement holds (the lowering's
+    /// `JsStmt::bodies`): one for a block and a `while`, labelled or not;
+    /// one or two for an `if` (the builder writes both blocks, so two);
+    /// none for a statement without a list. O(1): the node and, for a
+    /// labelled statement, the node below the label; counts no step.
+    /// Panics on a statement no constructor of the builder makes: the
+    /// slice that adds a constructor adds its arm.
+    pub fn bodies(&self, statement: &S<'a>) -> u32 {
+        let mut stmt = &statement.stmt;
+        if let Statement::LabeledStatement(node) = stmt {
+            stmt = &node.body;
+        }
+        match stmt {
+            Statement::BlockStatement(_) | Statement::WhileStatement(_) => 1,
+            Statement::IfStatement(node) => 1 + u32::from(node.alternate.is_some()),
+            Statement::ExpressionStatement(_)
+            | Statement::ReturnStatement(_)
+            | Statement::ThrowStatement(_)
+            | Statement::VariableDeclaration(_)
+            | Statement::BreakStatement(_)
+            | Statement::ContinueStatement(_)
+            | Statement::DebuggerStatement(_) => 0,
+            _ => unreachable!("a statement no constructor of the builder makes"),
+        }
+    }
+
+    /// The statements of list `index` of the statement `stmt`
+    /// ([`Builder::bodies`]), in the node that holds them. O(1). Panics
+    /// when the statement has no such list.
+    fn list_of<'s>(stmt: &'s mut Statement<'a>, index: usize) -> &'s mut ArenaVec<'a, Statement<'a>> {
+        let mut stmt = stmt;
+        if let Statement::LabeledStatement(node) = stmt {
+            stmt = &mut node.body;
+        }
+        let block = match (stmt, index) {
+            (block @ Statement::BlockStatement(_), 0) => Some(block),
+            (Statement::IfStatement(node), 0) => Some(&mut node.consequent),
+            (Statement::IfStatement(node), 1) => node.alternate.as_mut(),
+            (Statement::WhileStatement(node), 0) => Some(&mut node.body),
+            _ => None,
+        };
+        match block {
+            Some(Statement::BlockStatement(node)) => &mut node.body,
+            _ => panic!("statement list {index} of a statement that has no such list"),
+        }
+    }
+
+    /// List `index` of the statement `statement` taken out of it as a
+    /// list in flight (the lowering's `JsStmt::body`): its statements are
+    /// moved from the node into the pool, each with its row from the
+    /// table, and the node keeps an empty vector with its capacity, which
+    /// [`Builder::set_body`] fills again. One step, and one step and one
+    /// move of 16 bytes per statement: the builder keeps a compound
+    /// statement as a node (T6b). The statements are appended to the pool
+    /// of lists in flight, which is cleared a unit and not before: a list
+    /// taken k times in a unit leaves k times its length there, and the
+    /// pool allocates when it grows. Panics when the statement has no
+    /// such list. (Named
+    /// `take_body`: `Builder::body` is the reader of a block's statements.)
+    pub fn take_body(&mut self, statement: &mut S<'a>, index: usize) -> List {
+        let Self { rows, pool, .. } = self;
+        let body = Self::list_of(&mut statement.stmt, index);
+        let (start, len) = (pool.len() as u32, body.len() as u32);
+        pool.extend(body.drain(..).map(|stmt| {
+            let row = rows[stmt.node_id().index()];
+            Some(S { stmt, row })
+        }));
+        self.steps += 1 + u64::from(len);
+        List { start, len }
+    }
+
+    /// `list` becomes list `index` of the statement `statement`, in place
+    /// of the one [`Builder::take_body`] took (the lowering's
+    /// `JsStmt::set_body`); the list is consumed. The statements are moved
+    /// into the vector the taken ones came from: nothing is allocated in
+    /// the arena when the list is no longer than that one. The row of
+    /// `statement` is not written again. One step, and one step and one
+    /// move of 24 bytes per statement. Panics when the statement has no
+    /// such list, when that list was not taken, and on a statement of
+    /// `list` taken before.
+    pub fn set_body(&mut self, statement: &mut S<'a>, index: usize, list: List) {
+        let body = Self::list_of(&mut statement.stmt, index);
+        assert!(body.is_empty(), "a statement list put back that was not taken");
+        let start = list.start as usize;
+        body.extend(self.pool[start..start + list.len()].iter_mut().map(|slot| slot.take().expect("a statement taken twice").stmt));
+        self.steps += 1 + list.len() as u64;
+    }
+
+    /// The function literal of `header` with `body` (the lowering's
+    /// `JsStmt::function`). The node is an arrow function without
+    /// parameters and with an empty body: the print form (the parameters,
+    /// an arrow or a method, a body of statements or of one expression) is
+    /// the seal's, which reads the header in the lowering's pools. Until
+    /// then the body stays the list in flight it was given as, in
+    /// [`Builder::literals`] by header, so that the naming replay takes it
+    /// and puts it back in O(1). The row is `Fun` with the header as its
+    /// payload, strictly pure and delay-safe whatever the body is, with
+    /// `HAS_FUN`; it has none of the body's flags (the body is not below
+    /// the node: who walks it takes it by header and reads its
+    /// statements' rows).
+    ///
+    /// O(1): one node; the list is adopted, not read. The table grows to
+    /// the largest header seen, 8 bytes a header: an allocation only when
+    /// it grows ([`Builder::reserve_literals`]). Panics on a header that
+    /// has a literal.
+    pub fn function(&mut self, header: u32, body: List) -> J<'a> {
+        let at = header as usize;
+        if self.literals.len() <= at {
+            self.literals.resize(at + 1, List::NONE);
+        }
+        assert!(self.literals[at] == List::NONE, "two function literals of one header");
+        self.literals[at] = body;
+        let parameters = FormalParameters::new(
+            SPAN,
+            FormalParameterKind::FormalParameter,
+            ArenaVec::new_in(&self.ast),
+            None,
+            &self.ast,
+        );
+        let empty = FunctionBody::new(SPAN, ArenaVec::new_in(&self.ast), ArenaVec::new_in(&self.ast), &self.ast);
+        let expr = Expression::new_arrow_function_expression(
+            SPAN,
+            false,
+            None,
+            oxc_allocator::Box::new_in(parameters, &self.ast),
+            None,
+            ArrowFunctionBody::FunctionBody(oxc_allocator::Box::new_in(empty, &self.ast)),
+            &self.ast,
+        );
+        let flags = PURITY | flag::DELAY_SAFE | flag::HAS_FUN;
+        self.attach(expr, Row { flags, kind: Kind::Fun, aux: 0, payload: header })
+    }
+
+    /// Room for the bodies of the function literals with a header below
+    /// `headers`: at most one allocation, none when the capacity is there.
+    pub fn reserve_literals(&mut self, headers: usize) {
+        self.literals.reserve(headers.saturating_sub(self.literals.len()));
+    }
+
+    /// The body of the function literal of `header`, taken out as a list
+    /// in flight (the lowering's `JsStmt::literal_body`). One step; O(1):
+    /// one indexed read and one store. Panics when no literal has the
+    /// header and when its body is out.
+    pub fn literal_body(&mut self, header: u32) -> List {
+        let slot = self.literals.get_mut(header as usize).expect("a function literal that is not there");
+        assert!(*slot != List::NONE, "a function literal that is not there");
+        assert!(*slot != List::TAKEN, "the body of a function literal taken twice");
+        self.steps += 1;
+        std::mem::replace(slot, List::TAKEN)
+    }
+
+    /// `body` becomes the body of the function literal of `header`, in
+    /// place of the one [`Builder::literal_body`] took (the lowering's
+    /// `JsStmt::set_literal_body`). One step; O(1). Panics when the body
+    /// of that literal is not out.
+    pub fn set_literal_body(&mut self, header: u32, body: List) {
+        let slot = self.literals.get_mut(header as usize).expect("a function literal that is not there");
+        assert!(*slot == List::TAKEN, "the body of a function literal put back that was not taken");
+        self.steps += 1;
+        *slot = body;
+    }
+
+    /// The expression of the statement `stmt` itself, as apart from the
+    /// statements of its lists: the value of an expression statement, a
+    /// `return`, a `throw` and a declaration that has one; the test of an
+    /// `if` and of a `while`, labelled or not. O(1). Panics on a statement
+    /// no constructor of the builder makes: the slice that adds a
+    /// constructor adds its arm (a range loop has two).
+    fn own<'s>(stmt: &'s Statement<'a>) -> Option<&'s Expression<'a>> {
+        let mut stmt = stmt;
+        if let Statement::LabeledStatement(node) = stmt {
+            stmt = &node.body;
+        }
+        match stmt {
+            Statement::ExpressionStatement(node) => Some(&node.expression),
+            Statement::ReturnStatement(node) => node.argument.as_ref(),
+            Statement::ThrowStatement(node) => Some(&node.argument),
+            Statement::VariableDeclaration(node) => node.declarations.first()?.init.as_ref(),
+            Statement::IfStatement(node) => Some(&node.test),
+            Statement::WhileStatement(node) => Some(&node.test),
+            Statement::BlockStatement(_)
+            | Statement::BreakStatement(_)
+            | Statement::ContinueStatement(_)
+            | Statement::DebuggerStatement(_) => None,
+            _ => unreachable!("a statement no constructor of the builder makes"),
+        }
+    }
+
+    /// The function literals and the references to JavaScript globals
+    /// among the expressions of `statement` itself, in operand order (the
+    /// lowering's `JsStmt::below`): `want` is `flag::HAS_FUN`,
+    /// `flag::HAS_GLOBAL` or both. The statements of its lists are not
+    /// read and a function literal is not entered (its body is a list by
+    /// header). For a global reference `visit` returns whether it prints
+    /// as `globalThis.name`, which is then written into the reference's
+    /// row (`var::QUALIFIED`); what it returns for a function literal is
+    /// not read. `visit` is given no builder: it can start no walk.
+    /// Returns the number of rows read.
+    ///
+    /// Pruned by the flags: a statement whose row has none of the flags
+    /// wanted is not read at all, and that is O(1): the row is in the
+    /// handle. Of any other, the row of its expression and of each
+    /// operand of each node that has a flag wanted; an operand without
+    /// one is not entered. So one call costs the operands of the nodes on
+    /// the way to what it finds, not the size of the statement. Counts no
+    /// step. The work stack is the builder's kept storage ([`recycle`]):
+    /// nothing is allocated once it has held an expression as wide and as
+    /// deep. Panics when `want` has another flag.
+    pub fn below(&mut self, statement: &S<'a>, want: u16, mut visit: impl FnMut(Below) -> bool) -> u32 {
+        assert!(want & !(flag::HAS_FUN | flag::HAS_GLOBAL) == 0, "a descent for a flag that is neither HAS_FUN nor HAS_GLOBAL");
+        if statement.row.flags & want == 0 {
+            return 0;
+        }
+        let Some(own) = Self::own(&statement.stmt) else { return 0 };
+        let mut work: Vec<&Expression<'a>> = recycle(std::mem::take(&mut self.spare));
+        let mut read = 0;
+        work.push(own);
+        while let Some(expr) = work.pop() {
+            read += 1;
+            // A node of a printed form without a row of its own has the
+            // unused row 0, which has no flag.
+            let id = expr.node_id().index();
+            let row = self.rows[id];
+            if row.flags & want == 0 {
+                continue;
+            }
+            match row.kind {
+                Kind::Fun => {
+                    visit(Below::Function(row.payload));
+                }
+                Kind::Var => {
+                    if visit(Below::Global(row.payload)) {
+                        self.rows[id].aux |= var::QUALIFIED;
+                    }
+                }
+                _ => {
+                    // The last operand is popped first: turn the run
+                    // around so that the operands are read in order.
+                    let from = work.len();
+                    Self::operands_into(expr, &mut work);
+                    work[from..].reverse();
+                }
+            }
+        }
+        self.spare = recycle(work);
+        read
     }
 }
 

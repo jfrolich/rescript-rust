@@ -94,6 +94,16 @@ pub struct IfHead<S, R> {
     pub tail: R,
 }
 
+/// What [`JsStmt::below`] finds among the expressions of a statement. 8
+/// bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Below {
+    /// A function literal, by its header; it is not entered.
+    Function(FuncId),
+    /// A reference to a variable that is a JavaScript global.
+    Global(VarId),
+}
+
 /// The statement half of the interface.
 pub trait JsStmt: Js {
     /// A statement in flight. Not `Copy`.
@@ -212,8 +222,10 @@ pub trait JsStmt: Js {
         awaited: bool,
     ) -> Self::S;
     /// `switch (scrutinee) { ...actions }` as given (not J-S4): `actions`
-    /// holds one statement per clause of `header`, the default last;
-    /// `string` says the keys are strings. One step per action.
+    /// holds one statement per clause of `header`, the default last, each
+    /// a block ([`JsStmt::block_of`]: a debug build of rows checks it, and
+    /// [`JsStmt::body`] takes the list of each); `string` says the keys
+    /// are strings. One step per action.
     fn switch(&mut self, a: &mut Pools, scrutinee: Self::E, actions: Self::L, header: SwitchId, string: bool) -> Self::S;
     /// `try { body } catch (exception) { handler } finally { finaliser }`:
     /// a handler with its exception variable, a finaliser, or both.
@@ -394,6 +406,161 @@ pub trait JsStmt: Js {
         last: bool,
         visit: impl FnMut(&mut Pools, VarId, u32),
     ) -> u32;
+    /// The variable the statement binds: that of a `Declare` or a `Rest`,
+    /// the variable of a range loop (with or without a first value: the
+    /// loop names it) and of a loop over an iterable, the exception of a
+    /// `Try` that has a handler. `None` for every other statement, a range
+    /// loop over an existing variable too (it binds nothing). O(1): on
+    /// rows one read of the row; on an implementation that owns its nodes
+    /// the statement's row of facts (`emit::row::Row::payload`), no node.
+    /// Counts no step. (THREE_TREES 11.4, "T6r: the naming replay behind
+    /// the interface", decision 7: `names.rs`, `Replay::statement`, the
+    /// binder a statement names before its literals and lists, and the
+    /// catch variable `Replay::child` names between the body and the
+    /// handler of a `try`.)
+    fn binder(&self, a: &Pools, s: &Self::S) -> Option<VarId>;
+    /// The status a `Declare` or a `Rest` carries: its `UsedStats` as a
+    /// number (`js_ir::op::UsedStats`), which says whether the printer
+    /// omits the declaration, writes its value alone or writes it with its
+    /// binder. It is not part of [`JsStmt::stmt_aux`], which gives the
+    /// `LetKind` alone. O(1): on rows the bits of the row's `aux` above
+    /// the kind; on an implementation that owns its nodes the same bits of
+    /// the statement's row of facts. Counts no step. Panics on a statement
+    /// that is neither. (THREE_TREES 11.4, "T6r: the naming replay behind
+    /// the interface", decision 7: `names.rs`, `Replay::declaration`.)
+    fn status(&self, a: &Pools, s: &Self::S) -> u8;
+    /// Of a range loop: the variable it runs over and the kind of its
+    /// bound. The variable is the loop's own ([`JsStmt::binder`]) for a
+    /// `ForRange`; for a `ForRangeExisting` it is the variable of its
+    /// target when that is a reference, `None` otherwise. `None` for a
+    /// statement that is no range loop. The bound is not handed out: the
+    /// caller asks only whether it is a number or a reference. O(1): on
+    /// rows the row and the operation of its bound; on an implementation
+    /// that owns its nodes the statement's row of facts, which holds
+    /// both. Counts no step. (THREE_TREES 11.4, "T6r: the naming replay
+    /// behind the interface", decision 7: `names.rs`, `Replay::finish`,
+    /// the cached bound of a range loop.)
+    fn range_of(&self, a: &Pools, s: &Self::S) -> Option<(Option<VarId>, Kind)>;
+    /// The number of statement lists the statement holds, in print order:
+    /// one for a `Block` (its statements), a `While` and each loop (the
+    /// body); one or two for an `If` (the then-list, and the else-list
+    /// when it has one); two or three for a `Try` (the body, the handler
+    /// when it has one, the finaliser when it has one); one per action for
+    /// a `Switch`, the default last. Zero for every other statement. They
+    /// are the indexes [`JsStmt::body`] and [`JsStmt::set_body`] take.
+    /// O(1): one read of the statement; counts no step. (THREE_TREES 11.4,
+    /// "T6r: the naming replay behind the interface", decision 7 and the
+    /// cut's row of T6r-c: `names.rs`, `Replay::child`, which reads the
+    /// lists of a statement by their index in the J row today.)
+    fn bodies(&self, a: &Pools, s: &Self::S) -> u32;
+    /// List `index` of the statement `s` ([`JsStmt::bodies`]), taken out
+    /// of it as a list in flight: the caller takes its statements
+    /// ([`JsStmt::take_at`]), makes a list of them again ([`JsStmt::list`])
+    /// and puts that back with [`JsStmt::set_body`]. Until then `s` is
+    /// given to no other function than [`JsStmt::body`] and
+    /// [`JsStmt::set_body`] for its lists and the readers of a statement
+    /// in hand. `s` stays the caller's and keeps its id.
+    ///
+    /// One step. On rows O(1): the pool list of the block that is the
+    /// list, and the statements stay the block's (rows take nothing
+    /// apart). On an implementation that owns its nodes one move per
+    /// statement of the list while it keeps a compound statement as a
+    /// node (the statements go from the node to the lists in flight), and
+    /// one step per statement; O(1) once it keeps the lists of a compound
+    /// statement as lists until its print form is written (T6v decides,
+    /// as decision 2 does for a function literal). Allocates nothing once
+    /// the implementation's list storage has its capacity. Panics when
+    /// `index` is not below [`JsStmt::bodies`], and on rows on an action
+    /// of a `Switch` that is no block (the lowering makes none).
+    /// (THREE_TREES 11.4, "T6r: the naming replay behind the interface",
+    /// the cut's row of T6r-c: `names.rs`, `Replay::child`, and decision
+    /// 8, the root block `State::finish` holds.)
+    fn body(&mut self, a: &mut Pools, s: &mut Self::S, index: u32) -> Self::L;
+    /// `body` becomes list `index` of the statement `s`, in place of the
+    /// one [`JsStmt::body`] took: a list of the statements that call gave,
+    /// each taken and listed again (on rows a statement keeps its owner
+    /// while it is out, so no other statement can be put back; a debug
+    /// build checks it). The list is consumed. The facts `s` has of its
+    /// lists are not computed again: the caller puts back what it took.
+    ///
+    /// One step. On rows O(1): the block is written over the new pool
+    /// list with its flags and its `aux` (an explicit block stays one); a
+    /// debug build reads each statement's owner. On an implementation
+    /// that owns its nodes one move and one step per statement, into the
+    /// vector the statements came from: no allocation when the list is no
+    /// longer than the one taken. Panics when `index` is not below
+    /// [`JsStmt::bodies`]. (`names.rs`, `Replay::statements`: the rebuilt
+    /// list of a frame.)
+    fn set_body(&mut self, a: &mut Pools, s: &mut Self::S, index: u32, body: Self::L);
+    /// The body of the function literal of `header`, taken out of it as a
+    /// list in flight: the caller takes its statements, lists them again
+    /// and puts the list back with [`JsStmt::set_literal_body`]. The
+    /// literal is addressed by its header, a key: a literal has one header
+    /// and a copy gets its own, and no index of a literal in its statement
+    /// exists. The literal stays where it is, inside a statement the
+    /// caller holds or in a list it walks; its node is not handed out.
+    ///
+    /// One step; O(1) on both implementations. On rows the literal is
+    /// found in the arena's table of literals by header and its body is
+    /// the pool list of its block; an implementation that owns its nodes
+    /// keeps the body of a function literal as a list by header from
+    /// [`JsStmt::function`] until its print form is written, in a table
+    /// indexed by header. Allocates nothing. Panics when no literal of
+    /// `header` is live, and where a body can be absent (the builder) when
+    /// it was taken before. (THREE_TREES 11.4, "T6r: the naming replay
+    /// behind the interface", decision 2: `names.rs`, `Replay::literal`,
+    /// which reads the body from the `JFun` row today.)
+    fn literal_body(&mut self, a: &mut Pools, header: FuncId) -> Self::L;
+    /// `body` becomes the body of the function literal of `header`, in
+    /// place of the one [`JsStmt::literal_body`] took: a list of the
+    /// statements that call gave, as for [`JsStmt::set_body`]. The list is
+    /// consumed. One step; O(1) on both implementations (on rows the
+    /// literal's block is written over the new pool list, and a debug
+    /// build reads each statement's owner). Panics when no literal of
+    /// `header` is live, and on the builder when its body was not taken.
+    /// (Decision 2: `names.rs`, `Replay::statements`, the rebuilt list of
+    /// a literal's frame.)
+    fn set_literal_body(&mut self, a: &mut Pools, header: FuncId, body: Self::L);
+    /// The function literals and the references to JavaScript globals
+    /// among the expressions of the statement `s`, in one descent: `want`
+    /// is `flag::HAS_FUN`, `flag::HAS_GLOBAL` (`emit::row::flag`) or both,
+    /// and `visit` is given what is wanted, in operand order (the order of
+    /// print). The expressions are the statement's own: its value, its
+    /// test, its scrutinee, the bounds of a range loop, the iterable of a
+    /// loop. The statements of its lists are not read (the caller walks
+    /// them: [`JsStmt::body`]), and a function literal is given by its
+    /// header and not entered (the caller walks its body:
+    /// [`JsStmt::literal_body`]).
+    ///
+    /// For a reference to a global, `visit` returns whether it prints as
+    /// `globalThis.name`, and the implementation marks the reference when
+    /// it does; what `visit` returns for a function literal is not read. A
+    /// reference is to a global when its variable was one where the
+    /// reference was built (the arena's `VarFlags::JS_GLOBAL`; on an
+    /// implementation that owns its nodes what [`Js::var`] wrote into the
+    /// reference's row). `visit` is given neither the implementation nor
+    /// the pools, which the descent holds: it can call no function of the
+    /// interface, so it can start no walk and replace no node. Returns the
+    /// number of nodes read.
+    ///
+    /// Cost. On an implementation that keeps `HAS_FUN` and `HAS_GLOBAL`
+    /// with every node and statement: nothing is read of a statement that
+    /// has none of the flags wanted; of one that has, the row of each
+    /// operand of each node on the way to what is wanted, and an operand
+    /// without the flag is not entered. On rows, which keep neither flag
+    /// (decision 1): one read per expression node of the statement
+    /// outside function literals, whatever `want` is, until the flip.
+    /// Counts no step (a reader; the caller counts the number returned).
+    /// The walk is the implementation's, over its own work stack, above
+    /// what that stack holds: no recursion on the depth of an expression,
+    /// and nothing allocated once the stack has held an expression as wide
+    /// and as deep. Panics when `want` has another flag. (THREE_TREES
+    /// 11.4, "T6r: the naming replay behind the interface", decisions 1
+    /// and 2: `names.rs`, the literals of a statement, which
+    /// `Replay::prelude` finds by climbing from each literal today (slice
+    /// T6r-e), and `globals.rs`, the references `decide` finds through
+    /// the sites of each global (slice T6r-f).)
+    fn below(&mut self, a: &mut Pools, s: &mut Self::S, want: u16, visit: impl FnMut(Below) -> bool) -> u32;
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code
     /// that can be observed. An expression statement and a `return` are
     /// free when their value is strictly pure (E:15); a block, an `if`, a
