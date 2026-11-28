@@ -129,6 +129,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(s) for the saved preludes and (only for statement-valued while
     /// conditions) the body's immediate statements; never walks subtrees.
+    /// A range loop adds one write: the use of its variable.
     pub(super) fn finish_loop(&mut self, cx: Cx, frame: Loop) -> Probed<B> {
         let plan = &mut self.loops[frame.0 as usize];
         let start = plan.start;
@@ -183,6 +184,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             } else {
                 Some(init)
             };
+            // The loop reads and writes its variable whether its body reads
+            // it or not: one use, as the legacy passes count the loop's
+            // variable (`for_ident`, js_record_iter.ml:171-176). A held start
+            // declares the variable before the loop, and this use keeps it.
+            self.arena.js_scope.as_mut().expect("lowering scope").occurrence(var, true);
             self.push_loop_list(blocks[0].unwrap());
             let range = Range { init, end, direction };
             self.js.for_range(&mut self.arena, var, range, blocks[2].unwrap(), label)
@@ -375,5 +381,34 @@ mod tests {
         let body = a.const_(Constant::JsUndefined { is_unit: true });
         let root = a.for_(Ident::new("i", 1, IdentFlags::NONE), start, end, DirectionFlag::Upto, body);
         super::super::oracle_tests::compare(a, root);
+    }
+
+    /// `c => for i in start() to { other := 10; 10 } { eff() }`: the start
+    /// is declared before the bound's statement and the loop reads and
+    /// writes that declaration though its body does not read `i`.
+    #[test]
+    fn a_held_start_is_used_by_its_loop() {
+        use crate::js_ir::op::UsedStats;
+        use crate::lambda::{ApInfo, ApplyStatus};
+        let mut a = LamArena::new();
+        let var = Ident::new("i", 1, IdentFlags::NONE);
+        let info = || ApInfo { status: ApplyStatus::InferFull, loc: LamLoc::NONE };
+        let callee = a.var(Ident::new("start", 2, IdentFlags::NONE));
+        let start = a.apply_raw(callee, &[], info());
+        let ten = a.const_(Constant::int(10));
+        let assign = a.assign(Ident::new("other", 3, IdentFlags::NONE), ten);
+        let end = a.seq_raw(assign, ten);
+        let callee = a.var(Ident::new("eff", 4, IdentFlags::NONE));
+        let body = a.apply_raw(callee, &[], info());
+        let range = a.for_(var, start, end, DirectionFlag::Upto, body);
+        let root = a.function_(1, &[Ident::new("c", 5, IdentFlags::NONE)], range, Default::default(), LamLoc::NONE);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let source_root = input.root;
+        let mut state = State::new(input);
+        let probed = state.probe(Cx::value(), source_root).unwrap();
+        let lowered = state.complete(Cx::value(), probed);
+        let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+        let decision = scope.decisions.iter().find(|d| lowered.program.idents[d.var.index()].same(&var)).copied().unwrap();
+        assert_eq!((decision.status(), decision.built()), (UsedStats::Used as u32, 1));
     }
 }
