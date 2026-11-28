@@ -56,6 +56,41 @@ pub type Pools = Bir;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mark(pub(crate) u32);
 
+/// What [`Js::references`] finds below an expression: a reference to a
+/// variable or to an imported module with the id of its node (a key: what
+/// [`Js::owner`] climbs from), or a function literal, which is not
+/// entered. 12 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// A reference to a variable.
+    Var {
+        /// The variable.
+        var: VarId,
+        /// The id of the reference.
+        id: u32,
+    },
+    /// A reference to an imported module or to a member of one.
+    Module {
+        /// The module.
+        module: ImportId,
+        /// The id of the reference.
+        id: u32,
+    },
+    /// A function literal, by its header.
+    Function(FuncId),
+}
+
+/// Which of the two leading operands of a JSX element a node is
+/// ([`Js::jsx_head`]). One byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JsxHead {
+    /// The runtime function the element calls when it is not printed as
+    /// JSX.
+    Callee,
+    /// The tag.
+    Tag,
+}
+
 /// The expression half of the interface.
 pub trait Js {
     /// An expression in flight. Not `Copy`.
@@ -147,6 +182,18 @@ pub trait Js {
     /// call, of a `new` or of a flat call, or the tag of a tagged
     /// template. O(1): one read of the owner, no scan of its operands.
     fn is_callee(&self, a: &Pools, id: u32) -> bool;
+    /// When the node `id` is the runtime callee or the tag of a JSX element
+    /// (its first or its second operand): which of the two, and the
+    /// element's information. `None` for any other node, an operand of a
+    /// JSX element after its second too. `id` is a key ([`Js::id`], the top
+    /// of a climb with [`Js::owner`]); the element is not handed out. O(1):
+    /// one read of the owner and two comparisons, no scan of its operands;
+    /// counts no step. An implementation that owns its nodes writes the
+    /// fact beside the owner where the element is built. (THREE_TREES
+    /// 11.4, "T6r: the naming replay behind the interface", decision 4:
+    /// `names.rs`, `Log::unprinted`, the top of the climb from a reference
+    /// in a unit that preserves JSX.)
+    fn jsx_head(&self, a: &Pools, id: u32) -> Option<(JsxHead, JsId)>;
     /// One above the largest id a node of the unit has now: the size of a
     /// table indexed by id. O(1). (T6q: `export.rs::row_of`.)
     fn id_bound(&self, a: &Pools) -> u32;
@@ -325,6 +372,24 @@ pub trait Js {
     /// its rows are", decision 2: `jsx.rs::duplicate_jsx_key` and
     /// `export.rs::copy_replacement`.)
     fn copy_members(&mut self, a: &mut Pools, r: Self::Ref<'_>, made: impl FnMut(u32)) -> Self::E;
+    /// Every reference and every function literal at or below `e`, each
+    /// given to `visit` once with the pools: a reference to a variable, a
+    /// reference to an imported module, the header of a function literal.
+    /// A function literal is not entered. `e` is the caller's and is not
+    /// changed; `visit` may write the pools (the lowering's tables), not
+    /// the nodes. The order of the visits is the implementation's (the
+    /// caller builds a set). Returns the number of nodes read.
+    ///
+    /// One read per node at or below `e` outside function literals:
+    /// O(nodes); counts no step (a reader; the caller counts the number
+    /// returned). The walk is the implementation's, over its own work
+    /// stack, because a reference taken with [`Js::operand`] borrows the
+    /// pools and cannot be kept across calls of `visit`: no recursion on
+    /// the depth of the expression. Allocates nothing once that stack has
+    /// the expression's width and depth. (THREE_TREES 11.4, "T6r: the
+    /// naming replay behind the interface", decision 5: `names::adopt`,
+    /// an expression built before the scope it moves into opened.)
+    fn references(&mut self, a: &mut Pools, e: &Self::E, visit: impl FnMut(&mut Pools, Found)) -> u32;
     /// `e` is not used: its references and sites are given back. One step
     /// per node released. The operand stack is not read and not changed:
     /// operands pushed before the call are there after it, in order.

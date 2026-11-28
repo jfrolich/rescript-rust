@@ -246,6 +246,33 @@ pub(crate) struct Builder<'a> {
     /// made: sorted by id, since ids ascend. What [`Builder::alias_at`]
     /// reads.
     aliases: Vec<(u32, u32)>,
+    /// The allocation of the work stack of [`Builder::references`] and
+    /// [`Builder::return_calls`], kept between walks. Such a stack holds
+    /// references into the tree, which borrow it for one walk, so the
+    /// builder keeps the storage as words and each walk takes it as an
+    /// empty vector of references ([`recycle`]). Always empty.
+    spare: Vec<usize>,
+}
+
+/// An empty vector of `U` over the allocation of `from`, which is cleared:
+/// how a walk keeps the storage of a stack of references whose lifetime
+/// ends with it. No allocation when `T` and `U` have one size and one
+/// alignment (the standard library collects a mapped `Vec` iterator into
+/// the vector it came from); with other types the result is a new, empty
+/// vector. O(1).
+fn recycle<T, U>(mut from: Vec<T>) -> Vec<U> {
+    from.clear();
+    from.into_iter().map(|_| unreachable!("the vector is empty")).collect()
+}
+
+/// What [`Builder::references`] finds: a reference to a variable or a name
+/// the unit does not bind, with the `node_id` of the reference, or a
+/// function literal by the header its row holds. 12 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reference {
+    Var { variable: u32, id: u32 },
+    Named { id: u32 },
+    Function(u32),
 }
 
 /// The property of a member read, taken from the read it is copied from.
@@ -276,6 +303,7 @@ impl<'a> Builder<'a> {
             float_text: String::new(),
             members: Vec::new(),
             aliases: Vec::new(),
+            spare: Vec::new(),
         }
     }
 
@@ -1390,6 +1418,132 @@ impl<'a> Builder<'a> {
             }
         }
         replaced
+    }
+
+    /// The operands of `expr`, pushed on `out` in order: what a walk that
+    /// reads an expression enters. Nothing for a leaf. O(arity). Panics on
+    /// a node no constructor of the builder makes: the slice that adds a
+    /// constructor adds its arm.
+    fn operands_into<'s>(expr: &'s Expression<'a>, out: &mut Vec<&'s Expression<'a>>) {
+        match expr {
+            Expression::UnaryExpression(node) => out.push(&node.argument),
+            Expression::BinaryExpression(node) => out.extend([&node.left, &node.right]),
+            Expression::LogicalExpression(node) => out.extend([&node.left, &node.right]),
+            Expression::ConditionalExpression(node) => {
+                out.extend([&node.test, &node.consequent, &node.alternate])
+            }
+            Expression::SequenceExpression(node) => out.extend(node.expressions.iter()),
+            Expression::StaticMemberExpression(node) => out.push(&node.object),
+            Expression::ComputedMemberExpression(node) => out.extend([&node.object, &node.expression]),
+            Expression::AssignmentExpression(node) => {
+                match &node.left {
+                    AssignmentTarget::StaticMemberExpression(target) => out.push(&target.object),
+                    AssignmentTarget::ComputedMemberExpression(target) => {
+                        out.extend([&target.object, &target.expression])
+                    }
+                    AssignmentTarget::AssignmentTargetIdentifier(_) => {}
+                    _ => unreachable!("an assignment target no constructor of the builder makes"),
+                }
+                out.push(&node.right);
+            }
+            Expression::CallExpression(node) => {
+                out.push(&node.callee);
+                out.extend(node.arguments.iter().map(|argument| {
+                    argument.as_expression().expect("an argument that is an expression")
+                }));
+            }
+            Expression::NewExpression(node) => {
+                out.push(&node.callee);
+                out.extend(node.arguments.iter().map(|argument| {
+                    argument.as_expression().expect("an argument that is an expression")
+                }));
+            }
+            Expression::Identifier(_)
+            | Expression::NullLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BigIntLiteral(_) => {}
+            _ => unreachable!("an expression no constructor of the builder makes"),
+        }
+    }
+
+    /// Every reference and every function literal at or below `e`, each
+    /// given to `visit` once (the lowering's `Js::references`); a function
+    /// literal is not entered. `e` is the caller's and is not changed.
+    /// Returns the number of nodes read. One read per node at or below `e`
+    /// outside function literals, a node of a printed form without a row
+    /// of its own (the operand of a negative literal) counted: O(nodes);
+    /// counts no step. The work stack is the builder's kept storage
+    /// ([`recycle`]): nothing is allocated once it has held an expression
+    /// as wide and as deep.
+    pub fn references(&mut self, e: &J<'a>, mut visit: impl FnMut(Reference)) -> u32 {
+        let mut work: Vec<&Expression<'a>> = recycle(std::mem::take(&mut self.spare));
+        let mut read = 0;
+        work.push(&e.expr);
+        while let Some(expr) = work.pop() {
+            read += 1;
+            let id = expr.node_id().index() as u32;
+            let row = self.rows[id as usize];
+            match row.kind {
+                Kind::Var => visit(Reference::Var { variable: row.payload, id }),
+                Kind::Named => visit(Reference::Named { id }),
+                Kind::Fun => visit(Reference::Function(row.payload)),
+                _ => Self::operands_into(expr, &mut work),
+            }
+        }
+        self.spare = recycle(work);
+        read
+    }
+
+    /// The calls the `return` that is statement `index` of `list` ends in
+    /// once the flatten pass has split its value (the lowering's
+    /// `JsStmt::return_calls`): both branches of a conditional, the last
+    /// operand of a sequence, a call whose callee is a reference to a
+    /// variable. `visit` is given the variable and the `node_id` of the
+    /// call, a then-branch before its else-branch; `last` says the
+    /// `return` ends its list, and a call that is the whole value or the
+    /// end of a sequence that is, is given only then. Returns the number
+    /// of nodes read: one per conditional and sequence between the value
+    /// and its calls and one per node they end in; a test, the head of a
+    /// sequence and the arguments of a call are not read. Counts no step.
+    /// The work stack is the builder's kept storage ([`recycle`]): nothing
+    /// is allocated once it has held a value whose conditionals nest as
+    /// deep. Panics on a statement that is not a `return`, and on one
+    /// taken out of the list.
+    pub fn return_calls(&mut self, list: List, index: usize, last: bool, mut visit: impl FnMut(u32, u32)) -> u32 {
+        let mut work: Vec<&Expression<'a>> = recycle(std::mem::take(&mut self.spare));
+        let Statement::ReturnStatement(statement) = &self.statement_at(list, index).stmt else {
+            panic!("not a return statement")
+        };
+        let mut read = 0;
+        let mut expr = statement.argument.as_ref().expect("a return with its value");
+        let mut site = last;
+        loop {
+            read += 1;
+            match (self.row(expr).kind, expr) {
+                (Kind::Cond, Expression::ConditionalExpression(node)) => {
+                    work.push(&node.alternate);
+                    work.push(&node.consequent);
+                }
+                (Kind::Seq, Expression::SequenceExpression(node)) => {
+                    expr = node.expressions.last().expect("a sequence of two");
+                    continue;
+                }
+                (Kind::Call, Expression::CallExpression(node)) if site => {
+                    let callee = self.row(&node.callee);
+                    if callee.kind == Kind::Var {
+                        visit(callee.payload, expr.node_id().index() as u32);
+                    }
+                }
+                _ => {}
+            }
+            let Some(next) = work.pop() else { break };
+            expr = next;
+            site = true;
+        }
+        self.spare = recycle(work);
+        read
     }
 
     /// Whether `expr` is a reference to `variable`: a `Var` row of that

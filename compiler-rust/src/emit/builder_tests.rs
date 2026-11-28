@@ -1609,3 +1609,220 @@ mod statements {
         assert!(statement.value().is_none());
     }
 }
+
+/// The walks the naming log's close and the close of a list read an
+/// expression with (THREE_TREES 11.4, "T6r: the naming replay behind the
+/// interface", decision 5): the lowering's `Js::references` and
+/// `JsStmt::return_calls` on the builder.
+mod walks {
+    use super::*;
+
+    /// `callee()`.
+    fn call_of<'a>(b: &mut Builder<'a>, callee: J<'a>) -> J<'a> {
+        let mark = b.mark();
+        b.call(callee, mark, 0, false)
+    }
+
+    /// `return value` as the one statement of a list in flight.
+    fn returning<'a>(b: &mut Builder<'a>, value: J<'a>) -> List {
+        let mark = b.stage_mark();
+        let statement = b.return_(value);
+        b.stage(statement);
+        b.list(mark)
+    }
+
+    /// The calls `Builder::return_calls` gives for `value`, by variable,
+    /// and the nodes it read.
+    fn calls<'a>(b: &mut Builder<'a>, value: J<'a>, last: bool) -> (Vec<u32>, u32) {
+        let list = returning(b, value);
+        let mut found = Vec::new();
+        let before = b.steps;
+        let read = b.return_calls(list, 0, last, |variable, call| {
+            assert_ne!(call, 0);
+            found.push(variable)
+        });
+        assert_eq!(b.steps, before, "a reader counts no step");
+        // The statement stays in its list.
+        assert_eq!(b.row_at(list, 0).kind, Kind::Return);
+        (found, read)
+    }
+
+    #[test]
+    fn the_calls_a_return_ends_in_are_read_through_conditionals_and_sequences() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // `return v1()`: a site only when the `return` ends its list.
+        for (last, expected) in [(true, vec![1]), (false, vec![])] {
+            let callee = b.reference(1, 0);
+            let call = call_of(&mut b, callee);
+            assert_eq!(calls(&mut b, call, last), (expected, 1));
+        }
+        // `return (v0, v1())`: the last operand, as its sequence.
+        for (last, expected) in [(true, vec![1]), (false, vec![])] {
+            let first = b.reference(0, 0);
+            let callee = b.reference(1, 0);
+            let second = call_of(&mut b, callee);
+            let value = b.seq(first, second);
+            assert_eq!(calls(&mut b, value, last), (expected, 2));
+        }
+        // `return v0() ? v1() : (v1(), v0())`: both branches whatever
+        // `last` is, the then-branch first; the test is not read.
+        for last in [true, false] {
+            let test = b.reference(0, 0);
+            let test = call_of(&mut b, test);
+            let then = b.reference(1, 0);
+            let then = call_of(&mut b, then);
+            let first = b.reference(1, 0);
+            let first = call_of(&mut b, first);
+            let second = b.reference(0, 0);
+            let second = call_of(&mut b, second);
+            let otherwise = b.seq(first, second);
+            let value = b.cond(test, then, otherwise);
+            assert_eq!(calls(&mut b, value, last), (vec![1, 0], 4));
+        }
+        // A call of something that is no variable, and a value that is no
+        // call, give nothing.
+        let callee = b.named("f", false);
+        let call = call_of(&mut b, callee);
+        assert_eq!(calls(&mut b, call, true), (vec![], 1));
+        let value = b.reference(0, 0);
+        assert_eq!(calls(&mut b, value, true), (vec![], 1));
+    }
+
+    /// `v0 ? (v0 ? ... v1() ... : v0()) : v0()`, the conditionals nested
+    /// `depth` deep in their then-branches.
+    fn nested_conditionals<'a>(b: &mut Builder<'a>, depth: u32) -> J<'a> {
+        let callee = b.reference(1, 0);
+        let mut value = call_of(b, callee);
+        for _ in 0..depth {
+            let test = b.reference(0, 0);
+            let callee = b.reference(0, 0);
+            let otherwise = call_of(b, callee);
+            value = b.cond(test, value, otherwise);
+        }
+        value
+    }
+
+    #[test]
+    fn the_calls_of_a_return_cost_two_reads_a_conditional_at_any_depth() {
+        let mut reads = Vec::new();
+        for depth in [1_000, 10_000] {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let value = nested_conditionals(&mut b, depth);
+            let (found, read) = calls(&mut b, value, false);
+            // Each conditional and its else-branch, and the innermost call.
+            assert_eq!(read, 2 * depth + 1);
+            assert_eq!(found.len() as u32, depth + 1);
+            assert_eq!(found[0], 1, "the innermost then-branch is read first");
+            reads.push(read);
+            // A second walk of a value as deep allocates nothing: the
+            // stack of references is taken from the builder's storage and
+            // given back.
+            let again = nested_conditionals(&mut b, depth);
+            let list = returning(&mut b, again);
+            let allocations = allocation_counter::measure(|| {
+                b.return_calls(list, 0, false, |_, _| {});
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        }
+        assert_eq!(reads[1] - 1, 10 * (reads[0] - 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "not a return statement")]
+    fn the_calls_of_a_statement_that_is_no_return_are_not_read() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let mark = b.stage_mark();
+        let value = b.reference(0, 0);
+        let statement = b.exp(value);
+        b.stage(statement);
+        let list = b.list(mark);
+        b.return_calls(list, 0, true, |_, _| {});
+    }
+
+    #[test]
+    fn the_references_below_an_expression_are_found() {
+        assert_eq!(std::mem::size_of::<Reference>(), 12);
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // `v1(v0, f.name, -1, v0 + v2)`.
+        let callee = b.reference(1, 0);
+        let mark = b.mark();
+        let first = b.reference(0, 0);
+        b.push(first);
+        let object = b.named("f", false);
+        let member = b.dot(object, "name", None, false);
+        b.push(member);
+        let negative = b.int(-1);
+        b.push(negative);
+        let (left, right) = (b.reference(0, 0), b.reference(2, 0));
+        let sum = b.bin(BinOp::Plus, left, right).unwrap();
+        b.push(sum);
+        let call = b.call(callee, mark, 0, false);
+        let mut found = Vec::new();
+        let before = b.steps;
+        let read = b.references(&call, |reference| found.push(reference));
+        assert_eq!(b.steps, before, "a reader counts no step");
+        let mut variables: Vec<u32> = found
+            .iter()
+            .filter_map(|reference| match reference {
+                Reference::Var { variable, id } => {
+                    assert_ne!(*id, 0);
+                    Some(*variable)
+                }
+                _ => None,
+            })
+            .collect();
+        variables.sort();
+        assert_eq!(variables, [0, 0, 1, 2]);
+        assert_eq!(found.iter().filter(|reference| matches!(reference, Reference::Named { .. })).count(), 1);
+        // The call, its callee, `v0`, the member and its object, the
+        // negative literal and the digit it is printed over, the sum and
+        // its two operands.
+        assert_eq!(read, 10);
+        // The expression is the caller's still.
+        assert_eq!(call.row.kind, Kind::Call);
+    }
+
+    /// `size` deep: `v0, (v0, (v0, ...))`; `size` wide: `v1(v0, ...)`.
+    fn deep_and_wide<'a>(b: &mut Builder<'a>, size: u32) -> J<'a> {
+        let mut deep = b.reference(0, 0);
+        for _ in 0..size {
+            let first = b.reference(0, 0);
+            deep = b.seq(first, deep);
+        }
+        let callee = b.reference(1, 0);
+        let mark = b.mark();
+        for _ in 0..size {
+            let value = b.reference(0, 0);
+            b.push(value);
+        }
+        let wide = b.call(callee, mark, 0, false);
+        b.seq(deep, wide)
+    }
+
+    #[test]
+    fn the_references_of_an_expression_cost_one_read_a_node_at_any_depth_and_width() {
+        let mut reads = Vec::new();
+        for size in [1_000u32, 10_000] {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let value = deep_and_wide(&mut b, size);
+            let mut references = 0;
+            let read = b.references(&value, |_| references += 1);
+            assert_eq!(references, 2 * size + 2);
+            // The sequences, their operands, the call, its callee and its
+            // arguments.
+            assert_eq!(read, 3 * size + 4);
+            reads.push(read);
+            let again = deep_and_wide(&mut b, size);
+            let allocations = allocation_counter::measure(|| {
+                b.references(&again, |_| {});
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        }
+        assert_eq!(reads[1] - 4, 10 * (reads[0] - 4));
+    }
+}
