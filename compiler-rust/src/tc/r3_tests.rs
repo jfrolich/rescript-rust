@@ -9242,6 +9242,10 @@ enum Runs {
     Equal,
     /// `Checker::equal`, without renaming, of the two types.
     EqualPair(Ty, Ty),
+    /// `Checker::equal` WITH renaming of the two (different) variables,
+    /// as `Includecore` compares the parameters of two declarations
+    /// (includecore.ml:92-157).
+    EqualRenaming(Ty, Ty),
 }
 
 /// A supplier whose two module types (7 and 8) are different paths and
@@ -9263,6 +9267,7 @@ impl Relating {
             }
             Runs::Equal => assert!(c.equal(false, &[], &[])),
             Runs::EqualPair(left, right) => assert!(!c.equal(false, &[left], &[right])),
+            Runs::EqualRenaming(left, right) => assert!(c.equal(true, &[left], &[right])),
         }
         true
     }
@@ -9325,8 +9330,9 @@ fn package_and_univar(c: &mut Checker, package: usize, int: bool) -> ([Ty; 2], [
 /// Witnesses, each the shape of a source program of 8.13 that OCaml
 /// refuses or accepts, with a supplier whose inclusion check does what
 /// the entry of a relation does to the scopes ([`Runs::Empties`]; the
-/// test with the relation itself is
-/// `an_inclusion_check_that_runs_a_relation_empties_the_scopes`):
+/// tests with the relation itself are
+/// `an_inclusion_check_that_runs_a_relation_empties_the_scopes` and
+/// `a_coercion_whose_inclusion_check_runs_a_relation`):
 /// - UPkgFirst, `'a. (module(S), 'a)` against `'a. (module(T), 'a)`:
 ///   REFUSED. The package pair is unified first, the check empties the
 ///   scopes, the pair of the two variables clashes.
@@ -9505,36 +9511,44 @@ fn the_pairs_of_a_coercion_are_not_those_of_a_relation_run_inside_it() {
     assert_eq!(pairs(&mut c, &out), [[x, y]]);
 }
 
-/// The same four structures with a supplier that calls the kernel's own
+/// The same structures with a supplier that calls the kernel's own
 /// relation on the checker it is handed, as the real one will
-/// ([`Runs::Equal`], [`Runs::EqualPair`]). It needs the bodies of R3i
-/// AND the first commit of the R3j builder (the entries of `moregen`
-/// and `equal` call `Checker::empty_scopes` and
-/// `Checker::enter_relation`; CHECKER_REWRITE 8.4, the prompt of R3j):
-/// R3i's bodies were not on the branch that wrote it, so it was run on
-/// a scratch merge of that branch, the built R3i (pull request 403),
-/// the prototype of R3j and that first commit: it passed, and was seen
-/// to fail with `equal` not emptying the scopes (the first witness is
-/// accepted), with `equal` shelving no table (the last assertion) and
-/// with `subtype_pair` reading `Checker::related` (no constraint).
+/// ([`Runs::Equal`], [`Runs::EqualPair`], [`Runs::EqualRenaming`]):
+/// the entries of `moregen` and `equal` call `Checker::empty_scopes`
+/// (compiler/ml/ctype.ml:3089, 3358) and `Checker::enter_relation`
+/// (CHECKER_REWRITE 8.6, decisions 127 and 128).
 ///
 /// - Unification (programs UPkgFirst, UVarFirst, UEmptyFirst of 8.13):
 ///   `'a. (module(S), 'a)` is REFUSED when the check runs `equal`,
 ///   `'a. ('a, module(S))` accepted, and the first accepted when the
 ///   check runs nothing.
-/// - Subtyping (PkgNoCstr): the constraint `(u, v)` is under no scope
-///   and forcing REFUSES.
-/// - The table of subtyping: the check runs `equal` on `(x, y)`, which
-///   enters the pair in ITS table and answers `false`; the walk's
-///   constraint `(x, y)` is still collected.
-/// - A relation inside a relation: `equal` of `(module(S), x)` and
-///   `(module(T), y)` where the check runs `equal` on `(x, y)`: the
-///   outer `equal` answers `false` (with one shared table the inner
-///   pair is found and `x` against `y` is skipped).
+/// - A relation inside a relation, the table: `equal` of `(module(S),
+///   x)` and `(module(T), y)` where the check runs `equal` on `(x,
+///   y)`: the outer `equal` answers `false` (with one shared table the
+///   inner pair is found and `x` against `y` is skipped).
+/// - A relation inside a relation, the renaming (`subst` is a list a
+///   call, ctype.ml:3370): `equal` with renaming of `(a, module(S), a)`
+///   and `(b, module(T), c)`, where the check runs `equal` with
+///   renaming on two other variables, answers `false`: `a` is renamed
+///   to `b` before the check and is still renamed to `b` after it.
+///   And `(a, module(S), a)` against `(b, module(T), b)` answers
+///   `true`, also when the check renames `a` itself to another
+///   variable (the inner row of `a` is not the outer one's).
 ///
-/// Reaches: R3g, R3i, R3j.
+/// - `'a. ('b. ('b, module(S)), 'a)` against the same with `T`, by
+///   `equal` and by unification: accepted; the exit of the inner type
+///   puts the scopes back for the pair of `'a`.
+///
+/// Seen to fail with `equal` not emptying the scopes (the first witness
+/// is accepted), with `enter_relation` shelving nothing (the table
+/// witness answers `true`), with the table shelved and the renaming
+/// not, and with `unshelve_related` not writing the outer renaming
+/// again (the renaming witness: `a` against `b` a second time is
+/// refused), and with `relate_frames` cutting the scopes without
+/// putting the floor back (the nested witness is refused by `equal`),
+/// and with `relate_run` not calling `leave_scopes` on a failure (the
+/// floor is 1 after a refused `equal`).
 #[test]
-#[ignore = "R3j build"]
 fn an_inclusion_check_that_runs_a_relation_empties_the_scopes() {
     for (package, runs, accepted) in [(0, Runs::Equal, false), (1, Runs::Equal, true), (0, Runs::Nothing, true)] {
         let mut c = relating(Mode::Success, runs);
@@ -9543,6 +9557,67 @@ fn an_inclusion_check_that_runs_a_relation_empties_the_scopes() {
         assert!(c.scopes.is_empty() && c.frames.is_empty() && c.scope_floor == 0 && c.relating == 0);
     }
 
+    let mut c = checker(Mode::Success);
+    let (x, y) = (var(&mut c), var(&mut c));
+    c.packages = Some(Box::new(Relating { runs: Runs::EqualPair(x, y) }));
+    let (p1, p2) = (package_at(&mut c, 2, 7, 0, &[]), package_at(&mut c, 2, 8, 0, &[]));
+    let (left, right) = (tuple(&mut c, &[p1, x]), tuple(&mut c, &[p2, y]));
+    assert!(!c.equal(false, &[left], &[right]));
+    assert!(c.related_shelf.is_empty() && c.relating == 0);
+
+    // A relation that fails inside a polymorphic type after the check
+    // emptied the scopes leaves the floor where its entry put it.
+    let mut c = relating(Mode::Success, Runs::Equal);
+    let ([left, right], _) = package_and_univar(&mut c, 0, false);
+    assert!(!c.equal(false, &[left], &[right]));
+    assert!(c.scopes.is_empty() && c.scope_floor == 0 && c.frames.is_empty());
+
+    // `'a. ('b. ('b, module(S)), 'a)`: the check empties the scopes
+    // inside the inner type, whose exit puts them back for `'a`.
+    for (relation, unified) in [(true, false), (false, true)] {
+        let mut c = relating(Mode::Success, Runs::Equal);
+        let ([l1, r1], _) = package_and_univar(&mut c, 1, false);
+        let (a1, a2) = (univar_at(&mut c, 2), univar_at(&mut c, 2));
+        let (t1, t2) = (tuple(&mut c, &[l1, a1]), tuple(&mut c, &[r1, a2]));
+        let (left, right) = (poly_of(&mut c, 2, t1, &[a1]), poly_of(&mut c, 2, t2, &[a2]));
+        assert!(!relation || c.equal(false, &[left], &[right]));
+        assert!(!unified || c.unify(left, right).is_ok());
+        assert!(c.scopes.is_empty() && c.scope_floor == 0);
+    }
+
+    for inner_renames_a in [false, true] {
+        let mut c = checker(Mode::Success);
+        let [a, b, d, p, q] = [(); 5].map(|()| var(&mut c));
+        let runs = if inner_renames_a { Runs::EqualRenaming(a, q) } else { Runs::EqualRenaming(p, q) };
+        c.packages = Some(Box::new(Relating { runs }));
+        let (p1, p2) = (package_at(&mut c, 2, 7, 0, &[]), package_at(&mut c, 2, 8, 0, &[]));
+        let left = tuple(&mut c, &[a, p1, a]);
+        let (same, other) = (tuple(&mut c, &[b, p2, b]), tuple(&mut c, &[b, p2, d]));
+        assert!(c.equal(true, &[left], &[same]), "the inner relation renames a: {inner_renames_a}");
+        assert!(!c.equal(true, &[left], &[other]), "the inner relation renames a: {inner_renames_a}");
+        assert!(c.related_shelf.is_empty() && c.relating == 0);
+    }
+}
+
+/// The package arm of `subtype_rec` with a supplier that calls the
+/// kernel's own relation (compiler/ml/ctype.ml:4089-4098; CHECKER_REWRITE
+/// 8.6, decisions 127 and 128).
+///
+/// - PkgNoCstr of 8.13, `'a. (module(S), 'a)` with no completed pair:
+///   the check runs `equal`, whose entry empties the scopes; the
+///   constraint `(u, v)` is under no scope and forcing REFUSES.
+/// - The table of subtyping: the check runs `equal` on `(x, y)`, which
+///   enters the pair in ITS table and answers `false`; the walk's
+///   constraint `(x, y)` is still collected.
+///
+/// Passed against the prototype; seen to fail there with `equal` not
+/// emptying the scopes (the constraint is under scope 0) and with
+/// `subtype_pair` reading `Checker::related` (no constraint).
+///
+/// Reaches: R3g, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn a_coercion_whose_inclusion_check_runs_a_relation() {
     let mut out = Coercion::default();
     let mut c = relating(Mode::Success, Runs::Equal);
     let ([left, right], [u, v]) = package_and_univar(&mut c, 0, false);
@@ -9559,7 +9634,4 @@ fn an_inclusion_check_that_runs_a_relation_empties_the_scopes() {
     c.subtype(left, right, &mut out).unwrap();
     assert_subtype_left(&c, &out);
     assert_eq!(pairs(&mut c, &out), [[x, y]]);
-
-    assert!(!c.equal(false, &[left], &[right]));
-    assert!(c.related_shelf.is_empty() && c.relating == 0);
 }

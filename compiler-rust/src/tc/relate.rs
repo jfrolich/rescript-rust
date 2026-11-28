@@ -266,23 +266,30 @@ impl Checker {
     /// _ -> false`: whether the instance `pattern` can be instantiated to
     /// `subject`, linking the variables [`may_instantiate`] allows. For a
     /// caller that made the two instances itself (from two templates).
-    /// [`Checker::related`] is cleared; the pair goes on
-    /// [`Checker::frames`] and [`Checker::relate_frames`] runs; on a
-    /// failure the frames, `saved`, the scopes of universal variables
-    /// and the trace are cut back to what they were at the entry. OCaml
-    /// EMPTIES its list of scopes at this entry (`current_univar_pairs ()
-    /// := []`, ctype.ml:3093) and does not put the old value back, which
-    /// is the same only when no scope is open: the body asserts it in
-    /// debug builds, and no caller may enter with one open. What
+    /// The scopes of universal variables are EMPTIED first
+    /// ([`Checker::empty_scopes`]: `current_univar_pairs () := []`,
+    /// ctype.ml:3089) and nothing puts them back when the relation
+    /// returns: a relation the inclusion check of two packages runs
+    /// inside a polymorphic type leaves the rest of that type without
+    /// scopes, as OCaml does (CHECKER_REWRITE 8.6, decision 127). The
+    /// relation has a table of pairs of its own
+    /// ([`Checker::enter_relation`], decision 128), cleared; the pair
+    /// goes on [`Checker::frames`] and [`Checker::relate_frames`] runs;
+    /// on a failure the frames, `saved`, the scopes entered inside
+    /// (with the floor the lowest of them found) and the trace are cut
+    /// back to what they were at the entry. What
     /// was linked stays, on either answer. Cost: O(pairs visited), each
     /// one [`Checker::moregen_pair`]; one hash insertion a pair that is
     /// not decided at its first test. (R3i)
     pub fn moregen(&mut self, inst_nongen: bool, pattern: Ty, subject: Ty) -> bool {
-        debug_assert!(self.scopes.is_empty(), "a relation entered with a scope of universal variables open");
+        self.empty_scopes();
+        self.enter_relation();
         self.related.keys.clear();
         let base = self.frames.len();
         self.push_pair(pattern, subject);
-        self.relate_run(Relation::Moregen { inst_nongen }, base)
+        let result = self.relate_run(Relation::Moregen { inst_nongen }, base);
+        self.leave_relation();
+        result
     }
 
     /// `equal env rename tyl1 tyl2` (compiler/ml/ctype.ml:3372-3376) with
@@ -305,10 +312,12 @@ impl Checker {
     /// Lists of different lengths: `false`, nothing opened
     /// (`if List.length tl1 <> List.length tl2 then raise (Unify [])`,
     /// ctype.ml:3277, inside the snapshot, which then has nothing to
-    /// undo). No scope of universal variables is open at the entry
-    /// (asserted in debug builds: OCaml empties its list there, 3363, and
-    /// the kernel only cuts `scopes` back to its length at the entry).
-    /// Otherwise one speculation, [`Checker::related`] cleared,
+    /// undo). The scopes of universal variables are emptied at the entry,
+    /// before that test ([`Checker::empty_scopes`]; OCaml at
+    /// ctype.ml:3358), and stay emptied when `equal` returns
+    /// (CHECKER_REWRITE 8.6, decision 127).
+    /// Otherwise one speculation, a table of pairs of its own
+    /// ([`Checker::enter_relation`], left after the restore), cleared,
     /// with `rename` a new generation of [`Checker::renaming`], the pairs
     /// pushed last first, [`Checker::relate_frames`], and
     /// [`Checker::restore`] on either answer: nothing `equal` wrote stays
@@ -318,11 +327,12 @@ impl Checker {
     /// one hash insertion a pair not decided at its first test, plus the
     /// restore (one step a write). (R3i)
     pub fn equal(&mut self, rename: bool, left: &[Ty], right: &[Ty]) -> bool {
-        debug_assert!(self.scopes.is_empty(), "a relation entered with a scope of universal variables open");
+        self.empty_scopes();
         if left.len() != right.len() {
             return false;
         }
         let token = self.g.speculate();
+        self.enter_relation();
         self.related.keys.clear();
         if rename {
             self.renamed.clear();
@@ -335,6 +345,7 @@ impl Checker {
         }
         let result = self.relate_run(Relation::Equal { rename }, base);
         self.restore(token);
+        self.leave_relation();
         result
     }
 
@@ -386,6 +397,11 @@ impl Checker {
     fn relate_run(&mut self, relation: Relation, base: usize) -> bool {
         let (saved, scopes, trace) = (self.saved.len(), self.scopes.len(), self.trace.len());
         let result = self.relate_frames(relation, base).is_ok();
+        if !result && self.scopes.len() != scopes {
+            // `univar_pairs := old_univars; raise exn` (ctype.ml:
+            // 1677-1679): the floor of the lowest scope entered too.
+            self.leave_scopes(base);
+        }
         self.frames.truncate(base);
         self.saved.truncate(saved);
         self.scopes.truncate(scopes);
@@ -401,7 +417,8 @@ impl Checker {
     ///   are one node (`if t1 == t2 then ()`, compiler/ml/ctype.ml:2926,
     ///   2930, 3201, 3205), otherwise [`Checker::moregen_pair`] or
     ///   [`Checker::eqtype_pair`].
-    /// - A [`FrameKind::LeavePoly`] frame: `scopes` is cut to the frame's `extra`
+    /// - A [`FrameKind::LeavePoly`] frame: [`Checker::leave_poly`]: `scopes` is
+    ///   cut to the frame's `extra` and the floor is the frame's `left`
     ///   (`univar_pairs := old_univars`, ctype.ml:1675).
     /// - A [`FrameKind::PackageEnd`] frame: [`Checker::package_end`]; a clash is
     ///   the relation's (`with Not_found -> raise (Unify [])`,
@@ -430,7 +447,7 @@ impl Checker {
                         Relation::Equal { rename } => self.eqtype_pair(rename, left, right)?,
                     }
                 }
-                FrameKind::LeavePoly => self.scopes.truncate(frame.extra as usize),
+                FrameKind::LeavePoly => self.leave_poly(frame),
                 FrameKind::PackageEnd => self.package_end(frame)?,
                 FrameKind::Field => self.relate_field(frame)?,
                 FrameKind::RowField => {
@@ -2407,17 +2424,19 @@ impl Checker {
         todo!("R3j")
     }
 
-    /// The table of pairs of a relation that starts
+    /// The table of pairs and the renaming of a relation that starts
     /// (`Type_pairs.create`, compiler/ml/ctype.ml:3115 for `moregeneral`
-    /// and 3370 for `equal`: a table a call). The entries of `moregen`
-    /// and `equal` call it before they clear [`Checker::related`], and
+    /// and 3370 for `equal`, and `ref []` for the renaming of `equal`,
+    /// 3370: a table and a list a call). `moregen` and `equal` call it
+    /// before they clear [`Checker::related`], and
     /// [`Checker::leave_relation`] on every way out. The first relation
     /// (no other is running) moves nothing: one load, one branch, one
     /// store. A relation entered while another runs (the inclusion
-    /// check of two packages, from `unify_package`: the supplier is
-    /// handed this checker) puts the running one's table on
-    /// [`Checker::related_shelf`] and takes an empty one from
-    /// [`Checker::related_spare`], or a new one that has allocated
+    /// check of two packages, from `package_end`: the supplier is
+    /// handed this checker) puts the running one's table, its list
+    /// [`Checker::renamed`] and its `renaming_trail` on
+    /// [`Checker::related_shelf`] and takes emptied ones from
+    /// [`Checker::related_spare`], or new ones that have allocated
     /// nothing. Subtyping has [`Checker::subtyped`] and unification no
     /// table, so only a relation inside a relation moves one.
     /// (CHECKER_REWRITE 8.6, decision 128)
@@ -2429,10 +2448,13 @@ impl Checker {
         self.relating += 1;
     }
 
-    /// The end of a relation [`Checker::enter_relation`] started: when
-    /// it ran inside another, its table is emptied and kept for the
-    /// next one, and the outer relation has its own again. O(1) for the
-    /// first relation; for a nested one the clear of its table.
+    /// The end of a relation [`Checker::enter_relation`] started; call
+    /// it after the relation's speculation is restored. When it ran
+    /// inside another, its table and list are emptied and kept for the
+    /// next one, and the outer relation has its own again, its renaming
+    /// written under a new generation. O(1) for the first relation; for
+    /// a nested one the clear of its table and one step a pair of the
+    /// outer renaming.
     #[inline]
     pub fn leave_relation(&mut self) {
         self.relating -= 1;
@@ -2446,19 +2468,58 @@ impl Checker {
     #[inline(never)]
     fn shelve_related(&mut self) {
         let inner = self.related_spare.pop().unwrap_or_default();
-        self.related_shelf.push(std::mem::replace(&mut self.related, inner));
+        self.related_shelf.push(Shelved {
+            related: std::mem::replace(&mut self.related, inner.related),
+            renamed: std::mem::replace(&mut self.renamed, inner.renamed),
+            trail: self.renaming_trail,
+        });
     }
 
-    /// The nested case of [`Checker::leave_relation`]: O(capacity of the
-    /// inner table) for its clear.
+    /// The nested case of [`Checker::leave_relation`]. The rows of
+    /// [`Checker::renaming`] are live by generation and the inner
+    /// relation may have taken generations and written rows of nodes
+    /// the outer one had renamed: the outer list is put back and every
+    /// pair of it is written again under a NEW generation, as it stands
+    /// (not normalized: `renaming_trail` is the outer one's again, so
+    /// `normalize_renaming` still sees what the outer relation has not
+    /// seen). O(capacity of the inner table + pairs of the outer
+    /// renaming), one step a pair.
     #[cold]
     #[inline(never)]
     fn unshelve_related(&mut self) {
-        let outer = self.related_shelf.pop().expect("the table of the outer relation");
-        let mut inner = std::mem::replace(&mut self.related, outer);
-        inner.keys.clear();
+        let outer = self.related_shelf.pop().expect("the state of the outer relation");
+        let mut inner = Shelved {
+            related: std::mem::replace(&mut self.related, outer.related),
+            renamed: std::mem::replace(&mut self.renamed, outer.renamed),
+            trail: 0,
+        };
+        inner.related.keys.clear();
+        inner.renamed.clear();
         self.related_spare.push(inner);
+        self.renaming_trail = outer.trail;
+        let generation = self.next_renaming_generation();
+        for at in 0..self.renamed.len() {
+            #[cfg(test)]
+            super::steps::tick();
+            let [a, b] = self.renamed[at];
+            self.renaming_covers(a.0.max(b.0));
+            let row = &mut self.renaming[a.0 as usize];
+            (row.left, row.partner) = (generation, b.0);
+            self.renaming[b.0 as usize].right = generation;
+        }
     }
+}
+
+/// What a relation that waits for a relation entered inside it has put
+/// aside (`Checker::related_shelf`): its table of pairs, the pairs of
+/// its renaming in the order they were added, and the length of the
+/// trail when they were last normalized. (CHECKER_REWRITE 8.6, decision
+/// 128)
+#[derive(Default)]
+pub struct Shelved {
+    pub related: super::unify::PairSet,
+    pub renamed: Vec<[Ty; 2]>,
+    pub trail: usize,
 }
 
 /// The end of a row in `Checker::subtype_row`, beside the tags `VAR`

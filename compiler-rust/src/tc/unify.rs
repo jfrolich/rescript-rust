@@ -380,14 +380,14 @@ pub struct Checker {
     /// [`Checker::enter_relation`] and [`Checker::leave_relation`].
     /// (CHECKER_REWRITE 8.6, decision 128)
     pub relating: u32,
-    /// The tables of the relations that are waiting for a relation
-    /// entered inside them (through the inclusion check of two
+    /// The tables and renamings of the relations that are waiting for a
+    /// relation entered inside them (through the inclusion check of two
     /// packages), outermost first; empty unless a relation runs inside
     /// a relation.
-    pub related_shelf: Vec<PairSet>,
-    /// The tables nested relations used, emptied, for the next ones: at
-    /// most as many as relations were ever nested.
-    pub related_spare: Vec<PairSet>,
+    pub related_shelf: Vec<super::relate::Shelved>,
+    /// What nested relations used, emptied, for the next ones: at most
+    /// as many as relations were ever nested.
+    pub related_spare: Vec<super::relate::Shelved>,
     /// The renaming of `equal` with `rename` (`subst`, compiler/ml/
     /// ctype.ml:3200-3215): one row a node, live by
     /// `renaming_generation`. Empty until a unit calls `equal` with
