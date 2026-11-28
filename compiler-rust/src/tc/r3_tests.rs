@@ -8986,3 +8986,241 @@ fn the_enlarged_type_of_a_coercion_without_a_source() {
     assert_eq!(c.g.nodes[slot(&c, new_field, 1).0 as usize].tag(), VAR);
     let _ = (Change::Unchanged, Enlarged { ty: int, change: Change::Equiv });
 }
+
+/// The step relations of `subtype` and `force_subtype`, each between n
+/// = 1,000 and n = 10,000 (a linear walk reads at most eleven times the
+/// steps; the two shapes that sort names at most fourteen times), and a
+/// shared type that only the table of pairs keeps linear. Each loop of
+/// the slice's bodies with the shape that runs it n times:
+///
+/// 0. `subtype` of two tuples of n variables: the loop of
+///    `subtype_frames` and of `subtype_pair`'s tuple arm; n
+///    constraints.
+/// 1. `force_subtype` of those n constraints: its loop.
+/// 2. `subtype` of two chains n deep (`chain`): no machine stack.
+/// 3. two arrows of n parameters: the two loops of the arrow arm.
+/// 4. two constructors of a covariant type with n parameters: the loop
+///    of `subtype_constr`.
+/// 5. an invariant parameter nested n deep (`inv<inv<...x>>`): the
+///    `Invariant`, `Back` and `Close` frames, n quiet regions open at
+///    once, one constraint.
+/// 6. two closed objects of n fields in opposite orders, the types
+///    variables: the merge of `subtype_fields`; n constraints.
+/// 7. a closed object of no field against one of n: the chain of n
+///    built fields (`build_fields`).
+/// 8. two closed rows of n typed tags: the classification of
+///    `subtype_row` and its n pairs.
+/// 9. two tuples of different lengths below n tuples, in
+///    `Mode::Explain`: the loop of `read_subtype_trace` (n pairs).
+/// 10. `force_subtype` of n constraints made under 1 to n nested
+///    scopes of universal variables: `open_scopes` opens ONE scope
+///    between two constraints, where making the stack again from each
+///    constraint's chain is n squared over two. (The walk that collects
+///    them is not counted: `enter_poly` marks every bound variable of
+///    the open scopes at each entry, as OCaml does, ctype.ml:1658-1662.)
+///
+/// Then sharing: `d(40)` against a copy, `d(k) = (d(k-1), d(k-1))`: 41
+/// pairs with the table (`Type_pairs`, ctype.ml:3648-3652), 2^40
+/// without: at most 500 steps.
+///
+/// Loops no shape runs wide: the names of two packages
+/// (`subtype_package`), the spellings of `expands`, the nodes of
+/// `object_row` beyond the fields shape 6 walks.
+///
+/// Reaches: R3e, R3f, R3g, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn subtyping_at_ten_thousand() {
+    use super::expand::{MAY_NEG, MAY_POS};
+    let labels = |prefix: &str, n: u32| -> Vec<String> { (0..n).map(|at| format!("{prefix}{at:05}")).collect() };
+    let run = |n: u32| -> [u64; 11] {
+        let mut c = checker(Mode::Success);
+        let mut out = Coercion::default();
+        let wide = |c: &mut Checker| {
+            let vars: Vec<Ty> = (0..n).map(|_| var(c)).collect();
+            tuple(c, &vars)
+        };
+        let (l, r) = (wide(&mut c), wide(&mut c));
+        let collected = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        assert_eq!(out.constraints.len(), n as usize);
+        let forced = steps::scope(|| c.force_subtype(&out).unwrap());
+        let (l, r) = (chain(&mut c, n), chain(&mut c, n));
+        let deep = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        let function = |c: &mut Checker| {
+            let params: Vec<Ty> = (0..n).map(|_| var(c)).collect();
+            let result = var(c);
+            arrow(c, &params, result)
+        };
+        let (l, r) = (function(&mut c), function(&mut c));
+        let arrows = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        assert_eq!(out.constraints.len(), n as usize + 1);
+        let co = declared(&mut c, &vec![MAY_POS; n as usize]);
+        let applied = |c: &mut Checker| {
+            let arguments: Vec<Ty> = (0..n).map(|_| var(c)).collect();
+            constr(c, co, &arguments)
+        };
+        let (l, r) = (applied(&mut c), applied(&mut c));
+        let arguments = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        assert_eq!(out.constraints.len(), n as usize);
+        let inv = declared(&mut c, &[MAY_POS | MAY_NEG]);
+        let nested = |c: &mut Checker| {
+            let mut ty = var(c);
+            for _ in 0..n {
+                ty = constr(c, inv, &[ty]);
+            }
+            ty
+        };
+        let (l, r) = (nested(&mut c), nested(&mut c));
+        let invariant = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        assert_eq!(out.constraints.len(), 1);
+
+        let names = labels("f", n);
+        let object = |c: &mut Checker, reversed: bool| {
+            let mut fields: Vec<(&str, bool, Ty)> = names.iter().map(|label| (label.as_str(), false, var(c))).collect();
+            if reversed {
+                fields.reverse();
+            }
+            let nil = nil_at(c, 2);
+            obj(c, &fields, nil).0
+        };
+        let (l, r) = (object(&mut c, true), object(&mut c, false));
+        let fields = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        assert_eq!(out.constraints.len(), n as usize);
+        let nil = nil_at(&mut c, 2);
+        let (empty, _) = obj(&mut c, &[], nil);
+        let nodes = c.g.nodes.len();
+        let built = steps::scope(|| c.subtype(empty, r, &mut out).unwrap());
+        assert_eq!((out.constraints.len(), c.g.nodes.len()), (1, nodes + n as usize + 1));
+
+        let tags = labels("T", n);
+        let row = |c: &mut Checker, reversed: bool| {
+            let mut list: Vec<(&str, Tag)> = tags.iter().map(|label| (label.as_str(), Tag::Present(Some(var(c))))).collect();
+            if reversed {
+                list.reverse();
+            }
+            let nil = nil_at(c, 2);
+            variant_at(c, 2, &list, nil, true, NONE)
+        };
+        let (l, r) = (row(&mut c, true), row(&mut c, false));
+        let rows = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        assert_eq!(out.constraints.len(), n as usize);
+
+        let mut e = checker(Mode::Explain);
+        let ints = [(); 5].map(|()| constr(&mut e, INT, &[]));
+        let (mut l, mut r) = (tuple(&mut e, &ints[..2]), tuple(&mut e, &ints[2..]));
+        for _ in 0..n {
+            (l, r) = (tuple(&mut e, &[l]), tuple(&mut e, &[r]));
+        }
+        let trace = steps::scope(|| assert!(e.subtype(l, r, &mut out).is_err()));
+        assert_eq!(e.subtype_trace.len(), n as usize + 1);
+
+        let mut c = checker(Mode::Success);
+        let scoped = |c: &mut Checker| {
+            let mut ty = constr(c, INT, &[]);
+            for _ in 0..n {
+                let u = univar_at(c, 2);
+                let body = tuple(c, &[u, ty]);
+                ty = poly_of(c, 2, body, &[u]);
+            }
+            ty
+        };
+        let (l, r) = (scoped(&mut c), scoped(&mut c));
+        c.subtype(l, r, &mut out).unwrap();
+        assert_eq!((out.constraints.len(), out.scopes.len()), (n as usize, n as usize));
+        let scopes = steps::scope(|| c.force_subtype(&out).unwrap());
+        [collected, forced, deep, arrows, arguments, invariant, fields, built, rows, trace, scopes]
+    };
+    let (small, large) = (run(1_000), run(10_000));
+    for (at, (s, l)) in small.iter().zip(large).enumerate() {
+        let factor = if at == 6 || at == 8 { 14 } else { 11 };
+        assert!(l <= s * factor, "shape {at}: {s} steps at 1,000, {l} at 10,000");
+        assert!(*s >= 1_000, "shape {at} is vacuous: {s}");
+    }
+    let mut c = checker(Mode::Success);
+    let shared = |c: &mut Checker| {
+        let mut ty = constr(c, INT, &[]);
+        for _ in 0..40 {
+            ty = tuple(c, &[ty, ty]);
+        }
+        ty
+    };
+    let (l, r) = (shared(&mut c), shared(&mut c));
+    let mut out = Coercion::default();
+    let count = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+    assert!(count <= 500 && out.constraints.is_empty(), "{count}");
+    let _ = MAY_NEG;
+}
+
+/// The step relations of `enlarge_type`, each between n = 1,000 and n =
+/// 10,000 (at most eleven times the steps; fourteen where a row is
+/// flattened). Each loop of its bodies with the shape that runs it n
+/// times:
+///
+/// 0. a tuple of n closed objects: the loop of `enlarge_type`, the
+///    children of the tuple arm and the results of `enlarge_leave`.
+/// 1. a closed object under n arrows (each the result of the one
+///    above): no machine stack; n nodes rebuilt on the way up.
+/// 2. a closed object of n fields: a frame a field, n new fields.
+/// 3. a static row of n typed tags: the three loops of
+///    `enlarge_visit`'s variant arm and of `enlarge_variant`.
+/// 4. a covariant constructor of n arguments, each a closed object.
+/// 5. n arrows, then a tuple of n closed objects: every object cuts
+///    the path of n + 1 nodes above it (`filter_visited`,
+///    ctype.ml:3404-3408), which is one store here (`enter_row`) and a
+///    scan of n entries in OCaml; and every object asks `on_path`,
+///    which is one load here and `List.memq` there.
+///
+/// Reaches: R3e, R3f, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn enlarging_at_ten_thousand() {
+    use super::expand::MAY_POS;
+    let labels = |prefix: &str, n: u32| -> Vec<String> { (0..n).map(|at| format!("{prefix}{at:05}")).collect() };
+    let small_object = |c: &mut Checker| {
+        let (int, nil) = (constr(c, INT, &[]), nil_at(c, 2));
+        obj(c, &[("a", false, int)], nil).0
+    };
+    let run = |n: u32| -> [u64; 6] {
+        let mut c = checker(Mode::Success);
+        let objects: Vec<Ty> = (0..n).map(|_| small_object(&mut c)).collect();
+        let wide_tuple = tuple(&mut c, &objects);
+        let wide = steps::scope(|| assert_ne!(c.enlarge_type(wide_tuple).0, wide_tuple));
+        let unit = constr(&mut c, UNIT, &[]);
+        let mut function = small_object(&mut c);
+        for _ in 0..n {
+            function = arrow(&mut c, &[unit], function);
+        }
+        let nodes = c.g.nodes.len();
+        let deep = steps::scope(|| assert_ne!(c.enlarge_type(function).0, function));
+        assert!(c.g.nodes.len() >= nodes + n as usize);
+        let names = labels("f", n);
+        let int = constr(&mut c, INT, &[]);
+        let list: Vec<(&str, bool, Ty)> = names.iter().map(|label| (label.as_str(), false, int)).collect();
+        let nil = nil_at(&mut c, 2);
+        let (object, _) = obj(&mut c, &list, nil);
+        let fields = steps::scope(|| assert_ne!(c.enlarge_type(object).0, object));
+        let tags = labels("T", n);
+        let list: Vec<(&str, Tag)> = tags.iter().map(|label| (label.as_str(), Tag::Present(Some(int)))).collect();
+        let nil = nil_at(&mut c, 2);
+        let row = variant_at(&mut c, 2, &list, nil, true, NONE);
+        let rows = steps::scope(|| assert_ne!(c.enlarge_type(row).0, row));
+        let co = declared(&mut c, &vec![MAY_POS; n as usize]);
+        let objects: Vec<Ty> = (0..n).map(|_| small_object(&mut c)).collect();
+        let applied = constr(&mut c, co, &objects);
+        let arguments = steps::scope(|| assert_ne!(c.enlarge_type(applied).0, applied));
+        let objects: Vec<Ty> = (0..n).map(|_| small_object(&mut c)).collect();
+        let mut below = tuple(&mut c, &objects);
+        for _ in 0..n {
+            below = arrow(&mut c, &[unit], below);
+        }
+        let path = steps::scope(|| assert_ne!(c.enlarge_type(below).0, below));
+        assert!(c.enlarging.is_empty() && c.enlarged.is_empty());
+        [wide, deep, fields, rows, arguments, path]
+    };
+    let (small, large) = (run(1_000), run(10_000));
+    for (at, (s, l)) in small.iter().zip(large).enumerate() {
+        let factor = if at == 3 { 14 } else { 11 };
+        assert!(l <= s * factor, "shape {at}: {s} steps at 1,000, {l} at 10,000");
+        assert!(*s >= 1_000, "shape {at} is vacuous: {s}");
+    }
+}
