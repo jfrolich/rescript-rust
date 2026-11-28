@@ -288,6 +288,29 @@ fn the_references_below_an_expression_are_found_and_a_function_is_not_entered() 
     done(call);
 }
 
+/// The walk of `references` runs above what `Rows::work` holds, as the walk of
+/// a returned value does (THREE_TREES 11.4, "T6r: the naming replay behind
+/// the interface", decision 5).
+#[test]
+fn the_walk_of_references_leaves_what_the_work_stack_held() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let a = &mut u.b;
+    // `[f, x]`.
+    let mark = r.mark();
+    let first = r.var(a, u.f);
+    r.push(first);
+    let second = r.var(a, u.x);
+    r.push(second);
+    let array = r.array(a, mark, 0);
+    r.work.push(NodeId(7));
+    let mut references = 0;
+    let read = r.references(a, &array, |_, _, _| references += 1);
+    assert_eq!((references, read), (2, 3));
+    assert_eq!(r.work, [NodeId(7)]);
+    done(array);
+}
+
 #[test]
 fn the_references_of_an_expression_cost_one_read_a_node_at_any_depth_and_width() {
     assert_eq!(std::mem::size_of::<crate::bir::lower::js::Found>(), 12);
