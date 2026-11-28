@@ -110,5 +110,60 @@
     "title": "Building the value in the law",
     "summary": "Take what the value is built from, and a condition as part of the law.",
     "checks": true
+  },
+  {
+    "id": "spec-first",
+    "title": "A spec",
+    "summary": "Every state a request can get into.",
+    "checks": true
+  },
+  {
+    "id": "spec-always",
+    "title": "always",
+    "summary": "Two presses of Pay, two charges.",
+    "checks": true,
+    "failing": [
+      "chargedOnce"
+    ]
+  },
+  {
+    "id": "spec-eventually",
+    "title": "eventually",
+    "summary": "A retry that is not counted goes round forever.",
+    "checks": true,
+    "failing": [
+      "settles"
+    ]
+  },
+  {
+    "id": "spec-reachable",
+    "title": "reachable",
+    "summary": "A dialog with a state there is no way out of.",
+    "checks": true,
+    "failing": [
+      "canBeClosed"
+    ]
+  },
+  {
+    "id": "spec-actions",
+    "title": "Saying which actions can happen",
+    "summary": "An action type with no end of values.",
+    "checks": true
+  },
+  {
+    "id": "spec-unlisted",
+    "title": "Actions that cannot be listed",
+    "summary": "Deposit holds an int.",
+    "fails": true,
+    "report": "The actions of the spec `neverOverdrawn` cannot be listed",
+    "expected": "Without `actions`, every value of the action type is tried in every state, and an operation holds an int."
+  },
+  {
+    "id": "spec-impure",
+    "title": "A reducer that changes its state",
+    "summary": "The check of @pure, without writing @pure.",
+    "fails": true,
+    "report": "This changes a value that `update` did not create itself",
+    "expected": "update pushes onto the cart it was given. Going through the states of such a reducer would mean nothing: each step would change the states before it."
   }
 ]

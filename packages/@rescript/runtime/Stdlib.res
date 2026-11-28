@@ -27,6 +27,7 @@ module Pair = Stdlib_Pair
 module Promise = Stdlib_Promise
 module RegExp = Stdlib_RegExp
 module Result = Stdlib_Result
+module Spec = Stdlib_Spec
 module String = Stdlib_String
 module Symbol = Stdlib_Symbol
 module TaggedTemplate = Stdlib_TaggedTemplate

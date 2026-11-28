@@ -1,4 +1,4 @@
-//! Checks beyond types (docs/verify): purity and laws.
+//! Checks beyond types (docs/verify): purity, laws and specs.
 //!
 //! The parser records whether a file has an attribute these checks read, so
 //! a file without one pays nothing.
@@ -6,6 +6,7 @@
 pub mod laws;
 pub mod purity;
 pub mod shape;
+pub mod specs;
 
 use std::sync::{Arc, Mutex};
 
@@ -14,10 +15,10 @@ pub fn is_verify_attribute(name: &str) -> bool {
     purity::is_effect_attribute(name) || is_check_attribute(name)
 }
 
-/// Whether an attribute name marks a binding as a check (`@law`): a
-/// statement about the program that is no part of it.
+/// Whether an attribute name marks a binding as a check (`@law`, `@spec`):
+/// a statement about the program that is no part of it.
 pub fn is_check_attribute(name: &str) -> bool {
-    name == laws::LAW
+    name == laws::LAW || name == specs::SPEC
 }
 
 /// What a compile does with the checks of a file.

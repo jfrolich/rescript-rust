@@ -1,7 +1,7 @@
 //! Describes a type's values the way they are at run time (docs/verify/law.md).
 //!
-//! `rescript verify` makes values of a law's parameter types, and prints the
-//! ones that break the law. Both need to know, for each type, which values
+//! `rescript verify` makes values of a law's parameter types and of a spec's
+//! actions, and prints the ones that break a check. Both need to know, for each type, which values
 //! it has and what each is in JavaScript: a constructor's tag, a field's
 //! name. A shape is that description as JSON, read by the runner
 //! (rewatch/src/verify/runner.mjs).
@@ -13,6 +13,8 @@
 //! - `{"k":"option","of":S}`, and likewise `array`, `list`, `dict`;
 //! - `{"k":"tuple","of":[S]}`;
 //! - `{"k":"poly","cases":[{"n":name,"arg":S?}]}` for a polymorphic variant;
+//! - `{"k":"opaque"}` for a part of a type that is only printed
+//!   ([`for_printing`]) and has no shape;
 //! - `{"k":"named","id":id}` for a record or variant, whose definition is in
 //!   the table under `id` (so a recursive type refers to itself):
 //!   `{"k":"record","name","repr","fields":[{"n","js","opt","s"}]}` or
@@ -56,6 +58,94 @@ impl Definitions {
     fn position(&self, id: &str) -> Option<usize> {
         self.defs.iter().position(|(known, _)| known == id)
     }
+
+    /// How many values a shape has, or `None` when there are more than
+    /// `limit` (numbers, text, collections and recursive types have no
+    /// bound). Cost: one visit of each shape node the shape reaches.
+    pub fn count(&self, shape: &Value, limit: u64) -> Option<u64> {
+        self.count_in(shape, limit, &mut Vec::new())
+    }
+
+    fn count_in(&self, shape: &Value, limit: u64, open: &mut Vec<String>) -> Option<u64> {
+        let within = |n: u64| (n <= limit).then_some(n);
+        match shape["k"].as_str()? {
+            "bool" => Some(2),
+            "unit" => Some(1),
+            "option" => within(1 + self.count_in(&shape["of"], limit, open)?),
+            "tuple" => self.count_product(parts(&shape["of"]), limit, open),
+            "poly" => {
+                let mut total = 0u64;
+                for case in parts(&shape["cases"]) {
+                    total = within(match case.get("arg") {
+                        Some(arg) => total + self.count_in(arg, limit, open)?,
+                        None => total + 1,
+                    })?;
+                }
+                Some(total)
+            }
+            "named" => {
+                let id = shape["id"].as_str()?;
+                if open.iter().any(|entered| entered == id) {
+                    return None;
+                }
+                let definition = self.defs[self.position(id)?].1.as_ref()?;
+                open.push(id.to_string());
+                let total = self.count_definition(definition, limit, open);
+                open.pop();
+                total
+            }
+            _ => None,
+        }
+    }
+
+    fn count_product<'v>(
+        &self,
+        shapes: impl Iterator<Item = &'v Value>,
+        limit: u64,
+        open: &mut Vec<String>,
+    ) -> Option<u64> {
+        let mut total = 1u64;
+        for shape in shapes {
+            total = total.checked_mul(self.count_in(shape, limit, open)?)?;
+            if total > limit {
+                return None;
+            }
+        }
+        Some(total)
+    }
+
+    fn count_definition(
+        &self,
+        definition: &Value,
+        limit: u64,
+        open: &mut Vec<String>,
+    ) -> Option<u64> {
+        let fields = |fields: &Value, open: &mut Vec<String>| {
+            self.count_product(parts(fields).map(|field| &field["s"]), limit, open)
+        };
+        if definition["k"] == "record" {
+            return fields(&definition["fields"], open);
+        }
+        let mut total = 0u64;
+        for case in parts(&definition["cases"]) {
+            total += if let Some(args) = case.get("args") {
+                self.count_product(parts(args), limit, open)?
+            } else if let Some(record) = case.get("fields") {
+                fields(record, open)?
+            } else {
+                1
+            };
+            if total > limit {
+                return None;
+            }
+        }
+        Some(total)
+    }
+}
+
+/// The items of a JSON array.
+fn parts(value: &Value) -> impl Iterator<Item = &Value> {
+    value.as_array().into_iter().flatten()
 }
 
 /// Why values of a type cannot be made.
@@ -74,14 +164,35 @@ pub fn of_type(
         ctx,
         env,
         definitions,
+        printing: false,
     }
     .ty(ty, &HashMap::new())
+}
+
+/// The shape of a type whose values are only printed, never made: a part
+/// that has no shape (an abstract type, a function) is `{"k":"opaque"}`.
+pub fn for_printing(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    definitions: &mut Definitions,
+) -> Value {
+    Walk {
+        ctx,
+        env,
+        definitions,
+        printing: true,
+    }
+    .ty(ty, &HashMap::new())
+    .unwrap_or_else(|_| scalar("opaque"))
 }
 
 struct Walk<'a> {
     ctx: &'a TypeContext,
     env: &'a Env,
     definitions: &'a mut Definitions,
+    /// Whether a part without a shape is opaque, not an error.
+    printing: bool,
 }
 
 /// The shapes a declaration's parameters stand for where it is used.
@@ -93,6 +204,17 @@ fn scalar(kind: &str) -> Value {
 
 impl Walk<'_> {
     fn ty(&mut self, ty: TypeExprRef, parameters: &Parameters) -> Result<Value, Unsupported> {
+        match self.described(ty, parameters) {
+            Err(_) if self.printing => Ok(scalar("opaque")),
+            result => result,
+        }
+    }
+
+    fn described(
+        &mut self,
+        ty: TypeExprRef,
+        parameters: &Parameters,
+    ) -> Result<Value, Unsupported> {
         let ctx = self.ctx;
         let ty = ctx.repr(ty);
         let (path, args) = match &*ctx.borrow_desc(ty) {
