@@ -354,6 +354,9 @@ pub struct UnifyState {
     /// entries point to (OCaml's `type_expr option ref`).
     univar_pairs: Vec<UnivarPairEntry>,
     univar_slots: Vec<Option<TypeExprRef>>,
+    /// OCaml's `univar_pairs` are the entries from this index on: see
+    /// [`forget_univar_pairs`].
+    univar_floor: usize,
 }
 
 /// Multiplicative hash for the packed type-pair keys of `UnifiedPairSet`.
@@ -477,6 +480,7 @@ impl UnifyState {
             newtype_level: None,
             univar_pairs: Vec::new(),
             univar_slots: Vec::new(),
+            univar_floor: 0,
         }
     }
 
@@ -492,6 +496,7 @@ impl UnifyState {
             newtype_level: None,
             univar_pairs: Vec::new(),
             univar_slots: Vec::new(),
+            univar_floor: 0,
         }
     }
 
@@ -1205,6 +1210,22 @@ fn push_univar_scope(
     saved
 }
 
+/// An inclusion check of two packages that compared a value, type or
+/// extension constructor pair ran `Ctype.moregeneral` or `Ctype.equal`, and
+/// the subtyping trial of two packages runs the public `Ctype.unify`; each
+/// sets OCaml's one global `univar_pairs` to `[]` (compiler/ml/ctype.ml:2770,
+/// 3089, 3358), and only the exit of the polymorphic body open there puts
+/// back the list it saved at its entry (ctype.ml:1675, 1678). The walk that
+/// asked forgets its pairs the same way: the entries below `floor` are not
+/// OCaml's list; a body entered later sees none of them and its exit
+/// restores the floor it saw at its entry. O(1).
+// Out of line: only packages of different module types reach it.
+#[cold]
+#[inline(never)]
+fn forget_univar_pairs(pairs: &[UnivarPairEntry], floor: &mut usize) {
+    *floor = pairs.len();
+}
+
 /// OCaml `univar_pairs` of one `moregen` or `eqtype` run, which both start
 /// from an empty list (compiler/ml/ctype.ml:3093, 3362), with the slots its
 /// entries share.
@@ -1212,12 +1233,15 @@ fn push_univar_scope(
 struct UnivarPairs {
     pairs: Vec<UnivarPairEntry>,
     slots: Vec<Option<TypeExprRef>>,
+    /// OCaml's list is `pairs[floor..]` (see [`forget_univar_pairs`]).
+    floor: usize,
 }
 
 /// What [`UnivarPairs::leave`] restores.
 struct UnivarScopeMark {
     pairs: usize,
     slots: usize,
+    floor: usize,
 }
 
 impl UnivarPairs {
@@ -1239,10 +1263,22 @@ impl UnivarPairs {
         body2: TypeExprRef,
         vars2: crate::types::type_expr::TypeSlice<'_>,
     ) -> Option<UnivarScopeMark> {
-        let (tl1, tl2) = enter_poly_univars(ctx, env, &self.pairs, body1, vars1, body2, vars2)?;
+        let (tl1, tl2) = enter_poly_univars(
+            ctx,
+            env,
+            &self.pairs[self.floor..],
+            body1,
+            vars1,
+            body2,
+            vars2,
+        )?;
         let slots = self.slots.len();
         let pairs = push_univar_scope(&mut self.pairs, &mut self.slots, &tl1, &tl2);
-        Some(UnivarScopeMark { pairs, slots })
+        Some(UnivarScopeMark {
+            pairs,
+            slots,
+            floor: self.floor,
+        })
     }
 
     /// Leaves the scope [`UnivarPairs::enter`] entered (OCaml restores
@@ -1250,6 +1286,12 @@ impl UnivarPairs {
     fn leave(&mut self, mark: UnivarScopeMark) {
         self.pairs.truncate(mark.pairs);
         self.slots.truncate(mark.slots);
+        self.floor = mark.floor;
+    }
+
+    /// [`forget_univar_pairs`] for this run. O(1).
+    fn forget(&mut self) {
+        forget_univar_pairs(&self.pairs, &mut self.floor);
     }
 
     /// OCaml `unify_univar t1 t2 !univar_pairs` (ctype.ml:1544-1559): whether
@@ -1260,7 +1302,13 @@ impl UnivarPairs {
     #[cold]
     #[inline(never)]
     fn unify(&mut self, ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) -> bool {
-        univars_unify(ctx, &self.pairs, &mut self.slots, t1, t2)
+        // A test counts the entries the scan may read: the ones above the
+        // floor.
+        #[cfg(test)]
+        for _ in &self.pairs[self.floor..] {
+            crate::tc::steps::tick();
+        }
+        univars_unify(ctx, &self.pairs[self.floor..], &mut self.slots, t1, t2)
     }
 }
 
@@ -1351,7 +1399,8 @@ fn unify_univar(
     t1: TypeExprRef,
     t2: TypeExprRef,
 ) -> TypeResult<()> {
-    if univars_unify(ctx, &state.univar_pairs, &mut state.univar_slots, t1, t2) {
+    let pairs = &state.univar_pairs[state.univar_floor..];
+    if univars_unify(ctx, pairs, &mut state.univar_slots, t1, t2) {
         Ok(())
     } else {
         Err(TypeError::Unify(Vec::new()))
@@ -1379,7 +1428,7 @@ fn unify_enter_poly(
         enter_poly_univars(
             ctx,
             env,
-            &state.univar_pairs,
+            &state.univar_pairs[state.univar_floor..],
             body1,
             vars1,
             body2,
@@ -1389,10 +1438,12 @@ fn unify_enter_poly(
         return Err(TypeError::Unify(Vec::new()));
     };
     let saved_slots = state.univar_slots.len();
+    let saved_floor = state.univar_floor;
     let saved = push_univar_scope(&mut state.univar_pairs, &mut state.univar_slots, &tl1, &tl2);
     let result = unify(ctx, state, body1, body2);
     state.univar_pairs.truncate(saved);
     state.univar_slots.truncate(saved_slots);
+    state.univar_floor = saved_floor;
     result
 }
 
@@ -5682,6 +5733,9 @@ struct SubtypeAcc {
     cstrs: Vec<SubtypeConstraint>,
     univar_pairs: Vec<UnivarPairEntry>,
     univar_slots: Vec<Option<TypeExprRef>>,
+    /// OCaml's global is `univar_pairs[univar_floor..]` (see
+    /// [`forget_univar_pairs`]).
+    univar_floor: usize,
 }
 
 impl SubtypeAcc {
@@ -5691,7 +5745,13 @@ impl SubtypeAcc {
             cstrs: Vec::new(),
             univar_pairs: self.univar_pairs.clone(),
             univar_slots: self.univar_slots.clone(),
+            univar_floor: self.univar_floor,
         }
+    }
+
+    /// OCaml's global `univar_pairs` at the current point.
+    fn visible_univar_pairs(&self) -> &[UnivarPairEntry] {
+        &self.univar_pairs[self.univar_floor..]
     }
 }
 
@@ -6146,7 +6206,7 @@ fn push_subtype_cstr(
     t2: TypeExprRef,
     context: Option<SubtypeContext>,
 ) {
-    let univar_pairs = cstrs.univar_pairs.clone();
+    let univar_pairs = cstrs.visible_univar_pairs().to_vec();
     cstrs.push(SubtypeConstraint {
         trace: trace.to_vec(),
         t1,
@@ -6389,6 +6449,9 @@ fn subtype_rec(
                         a2,
                         &mut forward,
                     )?;
+                    // OCaml's walks share one `univar_pairs`: what a child
+                    // forgot stays forgotten here.
+                    cstrs.univar_floor = forward.univar_floor;
                     let mut backward = cstrs.child();
                     let both_empty = forward.is_empty() && {
                         subtype_rec(
@@ -6400,6 +6463,7 @@ fn subtype_rec(
                             a1,
                             &mut backward,
                         )?;
+                        cstrs.univar_floor = backward.univar_floor;
                         backward.is_empty()
                     };
                     if !both_empty {
@@ -6586,7 +6650,12 @@ fn subtype_rec(
                 &mut row_cstrs,
             )? {
                 true => *cstrs = row_cstrs,
-                false => push_subtype_cstr(cstrs, trace, t1, t2, None),
+                // ctype.ml:4035-4038: `Exit` leaves OCaml's one global as
+                // the walk of the rows left it.
+                false => {
+                    cstrs.univar_floor = row_cstrs.univar_floor;
+                    push_subtype_cstr(cstrs, trace, t1, t2, None)
+                }
             }
             Ok(())
         }
@@ -6657,15 +6726,15 @@ fn subtype_rec(
             let (u1, u2) = (*u1, *u2);
             let tl1: Vec<_> = ctx.type_list(tl1).iter().map(|t| ctx.repr(t)).collect();
             let tl2: Vec<_> = ctx.type_list(tl2).iter().map(|t| ctx.repr(t)).collect();
-            let known: HashSet<TypeExprRef> = cstrs
-                .univar_pairs
+            let old_univars = cstrs.visible_univar_pairs();
+            let known: HashSet<TypeExprRef> = old_univars
                 .iter()
                 .flat_map(|(cl, _)| cl.iter().map(|(t, _)| ctx.repr(*t)))
                 .collect();
             if (tl1.iter().any(|t| known.contains(t))
-                && mcomp_univars_escape(ctx, env, &cstrs.univar_pairs, &tl1, u2, &tl2))
+                && mcomp_univars_escape(ctx, env, old_univars, &tl1, u2, &tl2))
                 || (tl2.iter().any(|t| known.contains(t))
-                    && mcomp_univars_escape(ctx, env, &cstrs.univar_pairs, &tl2, u1, &tl1))
+                    && mcomp_univars_escape(ctx, env, old_univars, &tl2, u1, &tl1))
             {
                 push_subtype_cstr(cstrs, trace, t1, t2, None);
                 return Ok(());
@@ -6677,10 +6746,12 @@ fn subtype_rec(
             let cl1: Vec<_> = tl1.iter().map(|&t| (t, new_slot(cstrs))).collect();
             let cl2: Vec<_> = tl2.iter().map(|&t| (t, new_slot(cstrs))).collect();
             let saved = cstrs.univar_pairs.len();
+            let saved_floor = cstrs.univar_floor;
             cstrs.univar_pairs.push((cl2.clone(), cl1.clone()));
             cstrs.univar_pairs.push((cl1, cl2));
             let result = subtype_rec(ctx, env, subtypes, trace, u1, u2, cstrs);
             cstrs.univar_pairs.truncate(saved);
+            cstrs.univar_floor = saved_floor;
             result
         }
         (
@@ -6772,33 +6843,56 @@ fn subtype_package(
             })
             .collect::<Option<Vec<_>>>()
     });
-    let accepted = completed.filter(|pairs| {
-        eq_package_path(ctx, env, &p1, &p2) || {
-            // ctype.ml:4093-4102: unify the constrained types speculatively,
-            // then ask whether the module types are included; undo both.
-            let snapshot = ctx.snapshot_type_state();
-            let included = pairs.iter().all(|&(ty1, ty2)| {
-                let mut state = UnifyState::new();
-                state.set_env(env);
-                unify(ctx, &mut state, ty1, ty2).is_ok()
-            }) && crate::types::typemod::package_subtype(
-                ctx,
-                env,
-                (&p1, &nl1, ctx.type_list(args1)),
-                (&p2, &nl2, ctx.type_list(args2)),
-            );
-            ctx.restore_type_state(snapshot);
-            included
-        }
+    let Some(pairs) = completed else {
+        return push_subtype_cstr(cstrs, trace, t1, t2, None);
+    };
+    if eq_package_path(ctx, env, &p1, &p2) {
+        return push_package_cstrs(cstrs, trace, &pairs);
+    }
+    // ctype.ml:4089-4099: unify the constrained types speculatively, then ask
+    // whether the module types are included; undo both.
+    let snapshot = ctx.snapshot_type_state();
+    let unified = pairs.iter().all(|&(ty1, ty2)| {
+        let mut state = UnifyState::new();
+        state.set_env(env);
+        unify(ctx, &mut state, ty1, ty2).is_ok()
     });
-    match accepted {
-        // `cstrs' @ cstrs`: enforced in the reverse of `ntl2`'s order.
-        Some(pairs) => {
-            for (ty1, ty2) in pairs.into_iter().rev() {
-                push_subtype_cstr(cstrs, trace, ty1, ty2, None);
-            }
-        }
-        None => push_subtype_cstr(cstrs, trace, t1, t2, None),
+    let (included, compared) = if unified {
+        crate::types::typemod::package_subtype(
+            ctx,
+            env,
+            (&p1, &nl1, ctx.type_list(args1)),
+            (&p2, &nl2, ctx.type_list(args2)),
+        )
+    } else {
+        (false, false)
+    };
+    ctx.restore_type_state(snapshot);
+    // `cstrs'` hold the pairs as they were before the trial (ctype.ml:4083);
+    // the trial's public `unify` (ctype.ml:2769-2773) and the relations of
+    // the inclusion check empty them for what follows, the constraint
+    // `(t1, t2)` of a failed trial included (ctype.ml:4100).
+    if included {
+        push_package_cstrs(cstrs, trace, &pairs);
+    }
+    if !pairs.is_empty() || compared {
+        forget_univar_pairs(&cstrs.univar_pairs, &mut cstrs.univar_floor);
+    }
+    if !included {
+        push_subtype_cstr(cstrs, trace, t1, t2, None);
+    }
+}
+
+/// `cstrs' @ cstrs` of the package arm of OCaml `subtype_rec`
+/// (ctype.ml:4080-4091): enforced in the reverse of `ntl2`'s order. One
+/// constraint per pair.
+fn push_package_cstrs(
+    cstrs: &mut SubtypeAcc,
+    trace: &[TypePair],
+    pairs: &[(TypeExprRef, TypeExprRef)],
+) {
+    for &(ty1, ty2) in pairs.iter().rev() {
+        push_subtype_cstr(cstrs, trace, ty1, ty2, None);
     }
 }
 
@@ -7167,9 +7261,14 @@ fn subtype_concrete_typedecls(
                                 tl1.reverse();
                                 tl2.reverse();
                                 let mut probe = cstrs.clone();
-                                match subtype_list(
+                                let probed = subtype_list(
                                     ctx, env, subtypes, trace, crate::types::type_expr::PoolSlice::from(&tl1), crate::types::type_expr::PoolSlice::from(&tl2), &mut probe,
-                                ) {
+                                );
+                                // ctype.ml:3900-3901: the probe walks with
+                                // OCaml's one global, which stays as the
+                                // probe left it.
+                                cstrs.univar_floor = probe.univar_floor;
+                                match probed {
                                     Ok(()) if probe.len() == cstrs.len() => {
                                         ConstructorCoercion::Coerces
                                     }
@@ -7208,7 +7307,7 @@ fn subtype_concrete_typedecls(
                     ) =>
                     {
                         let mut probe = cstrs.clone();
-                        match subtype_list(
+                        let probed = subtype_list(
                             ctx,
                             env,
                             subtypes,
@@ -7216,7 +7315,11 @@ fn subtype_concrete_typedecls(
                             tl1.into(),
                             tl2.into(),
                             &mut probe,
-                        ) {
+                        );
+                        // ctype.ml:3934-3935: the probe walks with OCaml's
+                        // one global, which stays as the probe left it.
+                        cstrs.univar_floor = probe.univar_floor;
+                        match probed {
                             Ok(()) if probe.len() == cstrs.len() => ConstructorCoercion::Coerces,
                             Ok(()) | Err(_) => ConstructorCoercion::FailsUnexplained,
                         }
@@ -8264,7 +8367,9 @@ pub(crate) type PackageSide = (
 /// completed types with `relate`, then accept the same module type, or two
 /// module types each included in the other (`Typemod.package_subtype`).
 /// `None` is OCaml's `Not_found`: a label one module type does not define
-/// as a manifest, or module types that differ. Cost: two
+/// as a manifest, or module types that differ. The flag says whether an
+/// inclusion check compared an item, after which the caller forgets its
+/// universal pairs ([`forget_univar_pairs`]). Cost: two
 /// `complete_type_list` and one `relate` on the completed lists; for
 /// different paths, two path normalizations and two module inclusion checks.
 pub(crate) fn unify_package(
@@ -8273,25 +8378,37 @@ pub(crate) fn unify_package(
     (lv1, p1, lids1, args1): PackageSide,
     (lv2, p2, lids2, args2): PackageSide,
     relate: impl FnOnce(&[TypeExprRef], &[TypeExprRef]) -> TypeResult<()>,
-) -> Option<TypeResult<()>> {
+) -> (Option<TypeResult<()>>, bool) {
     let nl1 = ctx.package_lids(lids1);
     let nl2 = ctx.package_lids(lids2);
-    let ntl2 = complete_type_list(ctx, env, &nl1, (lv2, p2, &nl2, ctx.type_list(args2)), false)?;
-    let ntl1 = complete_type_list(ctx, env, &nl2, (lv1, p1, &nl1, ctx.type_list(args1)), false)?;
+    let Some(ntl2) =
+        complete_type_list(ctx, env, &nl1, (lv2, p2, &nl2, ctx.type_list(args2)), false)
+    else {
+        return (None, false);
+    };
+    let Some(ntl1) =
+        complete_type_list(ctx, env, &nl2, (lv1, p1, &nl1, ctx.type_list(args1)), false)
+    else {
+        return (None, false);
+    };
     let tl1: smallvec::SmallVec<[TypeExprRef; 4]> = ntl1.iter().map(|&(_, ty)| ty).collect();
     let tl2: smallvec::SmallVec<[TypeExprRef; 4]> = ntl2.iter().map(|&(_, ty)| ty).collect();
     if let Err(error) = relate(&tl1, &tl2) {
-        return Some(Err(error));
+        return (Some(Err(error)), false);
     }
-    let included =
-        |(pa, nla, tla): (&Path, &[crate::parser::longident::Longident], _),
-         (pb, nlb, tlb): (&Path, &[crate::parser::longident::Longident], _)| {
-            crate::types::typemod::package_subtype(ctx, env, (pa, nla, tla), (pb, nlb, tlb))
-        };
+    if eq_package_path(ctx, env, &p1, &p2) {
+        return (Some(Ok(())), false);
+    }
     let side1 = (&p1, nl1.as_slice(), ctx.type_list(args1));
     let side2 = (&p2, nl2.as_slice(), ctx.type_list(args2));
-    (eq_package_path(ctx, env, &p1, &p2) || included(side1, side2) && included(side2, side1))
-        .then_some(Ok(()))
+    let (included, compared) = crate::types::typemod::package_subtype(ctx, env, side1, side2);
+    let (included, compared) = if included {
+        let (back, compared_back) = crate::types::typemod::package_subtype(ctx, env, side2, side1);
+        (back, compared || compared_back)
+    } else {
+        (false, compared)
+    };
+    (included.then_some(Ok(())), compared)
 }
 
 /// Unify two types.
@@ -9431,7 +9548,7 @@ fn unify_types(
             link_type(ctx, t1, link_to);
 
             // ctype.ml:2416-2424.
-            let result = match unify_package(ctx, &env, side1, side2, |tl1, tl2| {
+            let (result, compared) = unify_package(ctx, &env, side1, side2, |tl1, tl2| {
                 if tl1.len() != tl2.len() {
                     return Err(TypeError::Unify(vec![]));
                 }
@@ -9439,7 +9556,11 @@ fn unify_types(
                     unify(ctx, state, a, b)?;
                 }
                 Ok(())
-            }) {
+            });
+            if compared {
+                forget_univar_pairs(&state.univar_pairs, &mut state.univar_floor);
+            }
+            let result = match result {
                 Some(result) => result,
                 None if state.mode == UnifyMode::Expression => Err(TypeError::Unify(vec![])),
                 None => ctx
@@ -10897,10 +11018,13 @@ fn moregen(
             // ctype.ml:2969-2974.
             let side1 = (ctx.get_level(t1_expanded), *path1, *lids1, *args1);
             let side2 = (ctx.get_level(t2_expanded), *path2, *lids2, *args2);
-            unify_package(ctx, env, side1, side2, |tl1, tl2| {
+            let (result, compared) = unify_package(ctx, env, side1, side2, |tl1, tl2| {
                 moregen_list(ctx, inst_nongen, state, env, tl1.into(), tl2.into())
-            })
-            .unwrap_or(Err(TypeError::Unify(vec![])))
+            });
+            if compared {
+                state.univars.forget();
+            }
+            result.unwrap_or(Err(TypeError::Unify(vec![])))
         }
         (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
             let row1 = ctx.row_desc(row1);
@@ -12103,7 +12227,7 @@ fn equal_type_exprs_without_renaming_rec(
                 *right_lids,
                 *right_args,
             );
-            unify_package(ctx, env, left, right, |left, right| {
+            let (result, compared) = unify_package(ctx, env, left, right, |left, right| {
                 equal_type_expr_lists_without_renaming(
                     ctx,
                     env,
@@ -12111,8 +12235,11 @@ fn equal_type_exprs_without_renaming_rec(
                     left.into(),
                     right.into(),
                 )
-            })
-            .unwrap_or(Err(TypeError::Unify(vec![])))
+            });
+            if compared {
+                type_pairs.univars.forget();
+            }
+            result.unwrap_or(Err(TypeError::Unify(vec![])))
         }
         (TypeDesc::Tvariant(left_row), TypeDesc::Tvariant(right_row)) => {
             let left_row = ctx.row_desc(left_row);
@@ -16415,6 +16542,90 @@ mod tests {
         assert!(ctx.trace_gadt_instances());
         ctx.reset_trace_gadt_instances(outer);
         assert!(!ctx.trace_gadt_instances());
+    }
+
+    /// After an inclusion check of two packages the pairs of the open body
+    /// are forgotten (ctype.ml:3089, 3358); a body entered then sees none
+    /// and adds its own, and the exit of the body open at the forgetting
+    /// puts its pairs back (ctype.ml:1675-1678). Forgetting is one store
+    /// whatever the number of pairs.
+    #[test]
+    fn forgotten_univar_pairs_come_back_at_the_exit_of_their_body() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let env = Env::empty();
+        let scope = |n: usize| {
+            let left: Vec<_> = (0..n).map(|_| ctx.new_univar(None)).collect();
+            let right: Vec<_> = (0..n).map(|_| ctx.new_univar(None)).collect();
+            let bodies = (ctx.new_tuple(left.clone()), ctx.new_tuple(right.clone()));
+            let vars = (ctx.new_type_list(&left), ctx.new_type_list(&right));
+            (left, right, bodies, vars)
+        };
+        let enter = |univars: &mut UnivarPairs, (b1, b2): (TypeExprRef, TypeExprRef), (v1, v2)| {
+            univars
+                .enter(&ctx, &env, b1, ctx.type_list(v1), b2, ctx.type_list(v2))
+                .expect("no binder escapes")
+        };
+        let (outer_l, outer_r, outer_bodies, outer_vars) = scope(10_000);
+        let (inner_l, inner_r, inner_bodies, inner_vars) = scope(1);
+        let mut univars = UnivarPairs::default();
+        let outer = enter(&mut univars, outer_bodies, outer_vars);
+        univars.forget();
+        assert!(!univars.unify(&ctx, outer_l[0], outer_r[0]));
+        let inner = enter(&mut univars, inner_bodies, inner_vars);
+        assert!(univars.unify(&ctx, inner_l[0], inner_r[0]));
+        assert!(!univars.unify(&ctx, outer_l[1], outer_r[1]));
+        univars.leave(inner);
+        assert!(!univars.unify(&ctx, outer_l[1], outer_r[1]));
+        univars.leave(outer);
+        assert!(univars.pairs.is_empty() && univars.floor == 0);
+        let outer = enter(&mut univars, outer_bodies, outer_vars);
+        assert!(univars.unify(&ctx, outer_l[2], outer_r[2]));
+        univars.leave(outer);
+    }
+
+    /// What a `unify_univar` after a package check may read does not
+    /// depend on how many pairs were forgotten: with 1,000 and with 10,000
+    /// bodies forgotten, a variable of a forgotten body is refused after
+    /// reading the two entries of the one body entered since.
+    #[test]
+    fn univar_lookup_after_forgetting_reads_only_later_bodies_at_ten_thousand() {
+        let steps_after_forgetting = |bodies: usize| {
+            let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+            let env = Env::empty();
+            let mut univars = UnivarPairs::default();
+            let enter = |univars: &mut UnivarPairs| {
+                let (l, r) = (ctx.new_univar(None), ctx.new_univar(None));
+                let (vl, vr) = (ctx.new_type_list(&[l]), ctx.new_type_list(&[r]));
+                univars
+                    .enter(&ctx, &env, l, ctx.type_list(vl), r, ctx.type_list(vr))
+                    .expect("no binder escapes");
+                (l, r)
+            };
+            let (first_l, first_r) = enter(&mut univars);
+            for _ in 1..bodies {
+                enter(&mut univars);
+            }
+            univars.forget();
+            let (late_l, late_r) = enter(&mut univars);
+            let mut paired = true;
+            let steps = crate::tc::steps::scope(|| paired = univars.unify(&ctx, first_l, first_r));
+            assert!(!paired);
+            assert!(univars.unify(&ctx, late_l, late_r));
+            assert_eq!(univars.pairs.len(), 2 * bodies + 2);
+            steps
+        };
+        assert_eq!(steps_after_forgetting(1_000), 2);
+        assert_eq!(steps_after_forgetting(10_000), 2);
+    }
+
+    #[test]
+    fn univar_pair_state_sizes() {
+        // The floor is one word in each state that holds universal pairs.
+        assert_eq!(std::mem::size_of::<UnivarPairs>(), 56);
+        assert_eq!(std::mem::size_of::<UnivarScopeMark>(), 24);
+        // 128 and 72 bytes on trunk.
+        assert_eq!(std::mem::size_of::<UnifyState>(), 136);
+        assert_eq!(std::mem::size_of::<SubtypeAcc>(), 80);
     }
 
     #[test]

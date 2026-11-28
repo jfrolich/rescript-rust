@@ -892,6 +892,9 @@ pub struct TypeContext {
     /// one bound variable (see [`Self::note_bound_universal`]). Only then
     /// can the inclusion of the unit in its own inferred signature fail.
     bound_universals: Cell<bool>,
+    /// How many value, type and extension constructor pairs inclusion
+    /// checks compared in this unit (see [`Self::note_inclusion_item`]).
+    inclusion_items: Cell<u32>,
     /// `Ctype.passive_variants` (ctype.ml:2060).
     passive_variants: Cell<bool>,
     /// `Ctype.rigid_variants` (ctype.ml:2013), set by `expand_head_rigid`.
@@ -1451,6 +1454,7 @@ impl TypeContext {
             gadt_state: Cell::new(0),
             gadt_instance_scopes: RefCell::new(Vec::new()),
             bound_universals: Cell::new(false),
+            inclusion_items: Cell::new(0),
             passive_variants: Cell::new(false),
             rigid_variants: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
@@ -3073,6 +3077,19 @@ impl TypeContext {
     /// load.
     pub fn has_bound_universals(&self) -> bool {
         self.bound_universals.get()
+    }
+
+    /// Record that an inclusion check compared a value, type or extension
+    /// constructor pair, which OCaml compares with `Ctype.moregeneral` or
+    /// `Ctype.equal` (compiler/ml/includecore.ml:47, 571-584, 726). One add.
+    pub(crate) fn note_inclusion_item(&self) {
+        self.inclusion_items
+            .set(self.inclusion_items.get().wrapping_add(1));
+    }
+
+    /// The count [`Self::note_inclusion_item`] keeps. One load.
+    pub(crate) fn inclusion_items(&self) -> u32 {
+        self.inclusion_items.get()
     }
 
     /// Create a polymorphic type.

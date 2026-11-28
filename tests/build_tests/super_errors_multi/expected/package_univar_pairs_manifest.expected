@@ -1,0 +1,16 @@
+We've found a bug for you!
+  /.../fixtures/package_univar_pairs_manifest/Main.res:9:1-35
+
+   7 │   let x: t
+   8 │ }
+   9 │ type u = {"f": 'a. (module(S), 'a)}
+  10 │ 
+
+  The implementation /.../fixtures/package_univar_pairs_manifest/Main.res
+  does not match the interface /.../fixtures/package_univar_pairs_manifest/Main.resi:
+  
+  Actual declaration (/.../fixtures/package_univar_pairs_manifest/Main.res:9:1-35):
+    type u = {"f": 'a. (module(S), 'a)}
+  
+  Expected declaration (/.../fixtures/package_univar_pairs_manifest/Main.resi:9:1-35):
+    type u = {"f": 'a. (module(T), 'a)}
