@@ -102,15 +102,17 @@ fn write_address_file(path: &Path, content: &str) -> std::io::Result<()> {
     file.write_all(content.as_bytes())
 }
 
-/// Start a server for the project at `project_root`. Requests arrive on the
-/// returned receiver; the watch loop answers them.
-pub fn start(project_root: &Path) -> std::io::Result<(ToolingServer, mpsc::Receiver<ToolingRequest>)> {
+/// Start a server for the project at `project_root`. Requests are sent to
+/// `requests`, as whatever the watch loop that answers them receives.
+pub fn start<T: From<ToolingRequest> + Send + 'static>(
+    project_root: &Path,
+    requests: mpsc::Sender<T>,
+) -> std::io::Result<ToolingServer> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let address = listener.local_addr()?;
     let token = random_token();
     let address_file = project_root.join("lib").join(ADDRESS_FILE);
     let address = format!("{address} {token}\n");
-    let (requests, receiver) = mpsc::channel();
     std::thread::Builder::new()
         .name("rewatch-tooling-server".to_string())
         .spawn(move || {
@@ -124,13 +126,10 @@ pub fn start(project_root: &Path) -> std::io::Result<(ToolingServer, mpsc::Recei
                     });
             }
         })?;
-    Ok((
-        ToolingServer {
-            address_file,
-            address,
-        },
-        receiver,
-    ))
+    Ok(ToolingServer {
+        address_file,
+        address,
+    })
 }
 
 fn send(stream: &mut TcpStream, status: &str, payload: &[u8]) -> std::io::Result<()> {
@@ -138,9 +137,9 @@ fn send(stream: &mut TcpStream, status: &str, payload: &[u8]) -> std::io::Result
     stream.write_all(payload)
 }
 
-fn serve_connection(
+fn serve_connection<T: From<ToolingRequest>>(
     stream: TcpStream,
-    requests: &mpsc::Sender<ToolingRequest>,
+    requests: &mpsc::Sender<T>,
     token: &str,
 ) -> std::io::Result<()> {
     let mut writer = stream.try_clone()?;
@@ -188,7 +187,7 @@ fn serve_connection(
             }
         };
         let (reply, answer) = mpsc::channel();
-        let reply = if requests.send(ToolingRequest { request, reply }).is_ok() {
+        let reply = if requests.send(ToolingRequest { request, reply }.into()).is_ok() {
             answer
                 .recv()
                 .unwrap_or(Reply::Error("the watcher stopped".to_string()))
@@ -315,7 +314,8 @@ mod tests {
     #[test]
     fn forwards_authenticated_requests_to_the_watch_loop() {
         let project = tempfile::tempdir().unwrap();
-        let (server, requests) = start(project.path()).unwrap();
+        let (sender, requests) = mpsc::channel::<ToolingRequest>();
+        let server = start(project.path(), sender).unwrap();
         server.publish().unwrap();
         std::thread::spawn(move || {
             for ToolingRequest { request, reply } in requests {

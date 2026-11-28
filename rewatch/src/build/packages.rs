@@ -1438,25 +1438,25 @@ fn unallowed_dependents_hint() -> String {
 /// An unreadable directory leaves presence unknown; the old per-file behavior
 /// remains the fallback, rather than treating a failed listing as empty.
 pub fn refresh_gentype_outputs(packages: &mut AHashMap<String, Package>) {
-    for package in packages.values_mut() {
-        if package.config.gentype_config.is_none() {
-            continue;
-        }
-        package.gentype_outputs = (|| -> std::io::Result<DirectoryEntries> {
-            let mut outputs = AHashMap::new();
-            if let Some(dirs) = &package.dirs {
-                for dir in dirs {
+    packages
+        .par_iter_mut()
+        .filter(|(_, package)| package.config.gentype_config.is_some())
+        .for_each(|(_, package)| {
+            // Directories are listed in parallel: a large package has hundreds.
+            let dirs: Vec<&PathBuf> = package.dirs.iter().flatten().collect();
+            package.gentype_outputs = dirs
+                .into_par_iter()
+                .map(|dir| {
                     let dir = package.path.join(dir);
                     let entries = fs::read_dir(&dir)?
                         .map(|entry| entry.map(|entry| entry.file_name()))
                         .collect::<std::io::Result<AHashSet<_>>>()?;
-                    outputs.insert(dir, entries);
-                }
-            }
-            Ok(outputs)
-        })()
-        .ok();
-    }
+                    Ok((dir, entries))
+                })
+                .collect::<std::io::Result<Vec<_>>>()
+                .ok()
+                .map(|outputs| outputs.into_iter().collect());
+        });
 }
 
 #[cfg(test)]

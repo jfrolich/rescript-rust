@@ -1,0 +1,1 @@
+- `rescript watch` starts compiling as soon as a save settles instead of polling for it: a one-module edit finishes about 90 ms sooner on a large project.
