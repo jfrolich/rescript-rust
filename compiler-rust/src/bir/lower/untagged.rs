@@ -1113,43 +1113,69 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         value
     }
 
-    /// V: class_constructor / is_instance_of. O(class path bytes); array tests
-    /// use the same ordinary CallInfo as the legacy constructor.
+    /// V: is_instance_of. O(class key bytes) for a class
+    /// (`class_constructor`); an array test is `Array.isArray(value)` with
+    /// the same ordinary CallInfo as the legacy constructor.
     fn untagged_instance(
         &mut self,
         value: B::E,
         metadata: &dispatch::Metadata,
         instance: dispatch::InstanceId,
     ) -> B::E {
-        let name = metadata.instance_name(instance);
-        let mut parts = name.split('.');
-        let first = parts.next().unwrap();
-        let var = self.arena.new_var_id(crate::name::Name::new(first), 0);
-        self.idents.push(Ident::create_persistent(first));
+        if metadata.is_class(instance) {
+            let class = self.class_constructor(metadata.instance_name(instance));
+            return self.js.bin(&mut self.arena, crate::js_ir::BinOp::InstanceOf, value, class);
+        }
+        let var = self.arena.new_var_id(crate::name::Name::new("Array"), 0);
+        self.idents.push(Ident::create_persistent("Array"));
         self.arena.vars.flags[var.index()].0 |=
             crate::bir::VarFlags::JS_GLOBAL | crate::bir::VarFlags::JS_IDENT;
-        let mut class = self.js.var(&mut self.arena, var);
-        for property in parts {
-            let property = self.arena.intern_text(property);
-            class = self.js.dot(&mut self.arena, class, property, crate::js_ir::arena::FieldPos::NONE, false);
+        let array = self.js.var(&mut self.arena, var);
+        let property = self.arena.intern_text("isArray");
+        let callee = self.js.dot(&mut self.arena, array, property, crate::js_ir::arena::FieldPos::NONE, false);
+        let info = self.arena.js_info(crate::bir::JsPayload::Call(
+            crate::js_ir::CallInfo::default(),
+        ));
+        let mark = self.js.mark();
+        self.js.push(value);
+        self.js.call(&mut self.arena, callee, mark, info)
+    }
+
+    /// V:225 class_constructor: the constructor of a class, read like the
+    /// value of an external (`translate_scoped_module_value`). `key` is
+    /// `ClassName::to_key`: a global path, such as `Intl.Locale`, is the
+    /// global of its first segment with the others as properties; for
+    /// `module\0path` the first segment of the path is a member of the
+    /// module's import (its default import when the segment is `default`),
+    /// the others properties. Cost: O(key bytes): one split, one global or
+    /// import registration (`global_value`, `external_module_parts`), one
+    /// member per further segment; nothing is allocated once the tables
+    /// have their capacity.
+    fn class_constructor(&mut self, key: &str) -> B::E {
+        let (module, path) = match key.rsplit_once('\0') {
+            Some((module, path)) => (Some(module), path),
+            None => (None, key),
+        };
+        let mut segments = path.split('.');
+        let head = segments.next().expect("a class path has a name");
+        let mut class = match module {
+            None => self.global_value(head),
+            Some(bundle) => {
+                let module = self.external_module_parts(
+                    bundle,
+                    &crate::lambda::lam_primitive::ModuleBindName::PhintNothing,
+                    None,
+                    head == "default",
+                    false,
+                );
+                let member = Some(self.arena.intern_text(head));
+                self.js.qualified(&mut self.arena, module, member)
+            }
+        };
+        for segment in segments {
+            class = self.member(class, segment);
         }
-        if !metadata.is_class(instance) {
-            let property = self.arena.intern_text("isArray");
-            let callee = self.js.dot(&mut self.arena, class, property, crate::js_ir::arena::FieldPos::NONE, false);
-            let info = self.arena.js_info(crate::bir::JsPayload::Call(
-                crate::js_ir::CallInfo::default(),
-            ));
-            let mark = self.js.mark();
-            self.js.push(value);
-            self.js.call(&mut self.arena, callee, mark, info)
-        } else {
-            self.js.bin(
-                &mut self.arena,
-                crate::js_ir::BinOp::InstanceOf,
-                value,
-                class,
-            )
-        }
+        class
     }
 
     /// V: compile_untagged_switch result. O(trailing empty block shells),
@@ -1307,6 +1333,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The class of an `@instanceOf` type read as the legacy
+    /// `class_constructor` reads it: a global path, an export of a module
+    /// (its default export, a scoped export) imported once per module and
+    /// import kind, and a global named like an export, in one dispatch.
+    #[test]
+    fn classes_of_modules_and_globals_match_legacy() {
+        let class = |module_: Option<&str>, path: &str| {
+            VariantBlockType::Instance(VariantInstance::Class {
+                name: crate::types::ClassName {
+                    module_: module_.map(str::to_string),
+                    path: path.to_string(),
+                },
+                ancestors: vec![],
+                blocks: crate::types::ClassBlocks::fresh(0),
+            })
+        };
+        let kinds = [
+            class(Some("./lib.mjs"), "Circle"),
+            class(Some("./lib.mjs"), "shapes.Square"),
+            class(Some("./lib.mjs"), "default"),
+            class(Some("three"), "Mesh"),
+            class(None, "Circle"),
+            class(None, "Intl.Locale"),
+            VariantBlockType::String,
+        ];
+        let mut a = LamArena::new();
+        let x = a.var(Ident::new("x", 100, crate::ident::IdentFlags::NONE));
+        let blocks: Vec<_> = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, kind)| {
+                SwitchKey::Constructor(Case::Block(VariantBlock::Untagged {
+                    tag: VariantTag {
+                        name: crate::name::Name::new(&format!("B{i}")),
+                        literal: Literal::String(format!("B{i}")),
+                    },
+                    block_type: kind.clone(),
+                }))
+            })
+            .collect();
+        let actions: Vec<_> = (0..kinds.len())
+            .map(|i| a.const_(C::Int { i: i as i32, comment: None }))
+            .collect();
+        let info = a.add_switch(
+            true,
+            [],
+            true,
+            blocks,
+            false,
+            SwitchDispatch::Variant(VariantMatchingFacts {
+                tag_name: None,
+                literal_tags: vec![],
+                block_types: kinds.to_vec(),
+            }),
+        );
+        let actions = a.add_list(&actions);
+        let root = a.switch_raw(x, actions, info);
+        oracle_tests::compare(a, root);
     }
 
     #[test]

@@ -2456,45 +2456,133 @@ impl<'g, 's> Printed<'g, 's> {
         }
     }
 
-    /// `stated_runtime_annotation` (variant_layout.rs:298): the one valid
-    /// `@notUndefined`, `@instanceOf` or `@typeOf`, as written.
+    /// `stated_runtime_annotation` (types/variant_layout.rs:463): the one
+    /// valid `@notUndefined`, `@instanceOf` or `@typeOf`, as written; an
+    /// `@instanceOf` class is read through its declaration's `@module` and
+    /// `@scope` (`class_of_attributes`, types/variant_layout.rs:228), and
+    /// prints as `runtime_annotation_to_string` (types/variant_layout.rs:155)
+    /// does. One pass over the attributes, one step each, then
+    /// O(scope properties + output) for a class; a declaration without
+    /// these attributes allocates nothing.
     fn runtime_annotation(&self, attrs: Range) -> Option<String> {
         let v = &self.g.v;
-        let mut found: Option<String> = None;
+        let mut found = None;
         let mut count = 0;
+        // The payloads of `@module` and `@scope`; a repeated one is an error.
+        let mut module = None;
+        let mut scope = None;
+        let mut repeated = false;
         for i in 0..attrs.len {
+            #[cfg(test)]
+            crate::tc::steps::tick();
             let attr = v.p.attributes[(attrs.start + i) as usize];
-            let annotation = match v.str(attr.name) {
-                "notUndefined" => "@notUndefined".to_string(),
-                "instanceOf" => match self.semantic_string(attr.payload) {
-                    Ok(Some(name)) if is_class_path(name) && supported_class(name) => {
-                        format!("@instanceOf(\"{name}\")")
-                    }
-                    _ => return None,
-                },
-                "typeOf" => match self.semantic_string(attr.payload) {
-                    Ok(Some(name))
-                        if matches!(
-                            name,
-                            "string"
-                                | "number"
-                                | "bigint"
-                                | "boolean"
-                                | "symbol"
-                                | "function"
-                                | "object"
-                        ) =>
-                    {
-                        format!("@typeOf(\"{name}\")")
-                    }
-                    _ => return None,
-                },
-                _ => continue,
-            };
-            count += 1;
-            found = Some(annotation);
+            match v.str(attr.name) {
+                "notUndefined" | "instanceOf" | "typeOf" => {
+                    count += 1;
+                    found = Some(attr);
+                }
+                "module" => {
+                    repeated |= module.replace(attr.payload).is_some();
+                }
+                "scope" => {
+                    repeated |= scope.replace(attr.payload).is_some();
+                }
+                _ => {}
+            }
         }
-        if count == 1 { found } else { None }
+        let attr = found.filter(|_| count == 1)?;
+        match v.str(attr.name) {
+            "notUndefined" => Some("@notUndefined".to_string()),
+            "typeOf" => match self.semantic_string(attr.payload) {
+                Ok(Some(
+                    name @ ("string" | "number" | "bigint" | "boolean" | "symbol" | "function"
+                    | "object"),
+                )) => Some(format!("@typeOf(\"{name}\")")),
+                _ => None,
+            },
+            _ => {
+                if repeated {
+                    return None;
+                }
+                let name = self.semantic_string(attr.payload).ok()??;
+                self.class_annotation(module, scope, name)
+            }
+        }
+    }
+
+    /// `class_of_attributes` (types/variant_layout.rs:228) with
+    /// `runtime_annotation_to_string`: the class `name` among the exports
+    /// of the `@module` payload or the globals, through the properties of
+    /// the `@scope` payload. O(scope properties + output), one String.
+    fn class_annotation(
+        &self,
+        module: Option<u32>,
+        scope: Option<u32>,
+        name: &'s str,
+    ) -> Option<String> {
+        let v = &self.g.v;
+        let module = match module {
+            None => None,
+            Some(payload) => match self.semantic_string(payload) {
+                Ok(Some(module)) if !module.is_empty() => Some(module),
+                _ => return None,
+            },
+        };
+        let mut out = String::new();
+        if let Some(module) = module {
+            if !is_export_path(name) {
+                return None;
+            }
+            out.push_str("@module(\"");
+            out.push_str(&crate::string_literal::encode_js_string(module));
+            out.push_str("\") ");
+        }
+        out.push_str("@instanceOf(\"");
+        let path_start = out.len();
+        if let Some(payload) = scope {
+            // `strings_of_payload`: a string or a tuple of strings.
+            let (properties, single) = match v.p.attribute_payloads[payload as usize] {
+                AttributePayloadRow::StrTuple(range) => (range, None),
+                _ => match self.semantic_string(payload) {
+                    Ok(Some(property)) => (Range::default(), Some(property)),
+                    Ok(None) | Err(()) => return None,
+                },
+            };
+            let property = |i: u32| match single {
+                Some(property) => property,
+                None => v.str(v.p.indices[(properties.start + i) as usize]),
+            };
+            let len = if single.is_some() { 1 } else { properties.len };
+            if len == 0 {
+                return None;
+            }
+            for i in 0..len {
+                #[cfg(test)]
+                crate::tc::steps::tick();
+                let property = property(i);
+                if !is_identifier(property) {
+                    return None;
+                }
+                // Without `@module`, the first property is a global.
+                if i == 0
+                    && module.is_none()
+                    && (property == "globalThis" || crate::js_ir::printer::is_js_keyword(property))
+                {
+                    return None;
+                }
+                out.push_str(property);
+                out.push('.');
+            }
+        }
+        out.push_str(name);
+        if module.is_none() {
+            let path = &out[path_start..];
+            if !is_class_path(path) || !supported_class(path) {
+                return None;
+            }
+        }
+        out.push_str("\")");
+        Some(out)
     }
 
     /// `tree_of_extension_constructor`, as a signature item.
@@ -2961,27 +3049,28 @@ fn trim_row(name: &str, trim: bool) -> &str {
     if trim { &name[..name.len() - 4] } else { name }
 }
 
-/// O(length): `is_class_path` (variant_layout.rs:85): dot-separated
-/// identifiers, the first not a JavaScript keyword.
-fn is_class_path(name: &str) -> bool {
+/// O(length): `is_identifier` (types/variant_layout.rs:110).
+fn is_identifier(segment: &str) -> bool {
     fn is_start(c: u8) -> bool {
         c.is_ascii_alphabetic() || c == b'_' || c == b'$'
     }
-    fn is_identifier(segment: &str) -> bool {
-        let bytes = segment.as_bytes();
-        !bytes.is_empty()
-            && is_start(bytes[0])
-            && bytes.iter().all(|c| c.is_ascii_digit() || is_start(*c))
-    }
-    let mut segments = name.split('.');
-    match segments.next() {
-        Some(global) => {
-            is_identifier(global)
-                && !crate::js_ir::printer::is_js_keyword(global)
-                && segments.all(is_identifier)
-        }
-        None => false,
-    }
+    let bytes = segment.as_bytes();
+    !bytes.is_empty()
+        && is_start(bytes[0])
+        && bytes.iter().all(|c| c.is_ascii_digit() || is_start(*c))
+}
+
+/// O(length): `is_export_path` (types/variant_layout.rs:125): properties of
+/// a module's exports, which may be named like keywords.
+fn is_export_path(name: &str) -> bool {
+    name.split('.').all(is_identifier)
+}
+
+/// O(length): `is_class_path` (types/variant_layout.rs:132): an export path
+/// whose first identifier is not a JavaScript keyword.
+fn is_class_path(name: &str) -> bool {
+    let global = name.split('.').next().unwrap_or_default();
+    is_export_path(name) && !crate::js_ir::printer::is_js_keyword(global)
 }
 
 /// O(length): `unsupported_class name = None` (variant_layout.rs:62).

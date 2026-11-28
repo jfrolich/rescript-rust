@@ -1932,6 +1932,7 @@ mod tests {
     use crate::types::decl_loc::DeclLocTable;
     use crate::types::shared_store::{SharedGraphParts, SharedGraphPayloads};
     use crate::types::type_expr::TypeRefList;
+    use std::fmt::Write as _;
 
     #[test]
     fn work_item_sizes() {
@@ -2436,6 +2437,79 @@ module Nested = {
         .expect("compiles");
         check_published(&result.pers_struct.expect("published signature"))
             .expect("constraint parameter names match");
+    }
+
+    /// The class of an `@instanceOf` type is where `@module` and `@scope`
+    /// say: the printed declaration names both, as the type printer does.
+    #[test]
+    fn an_instance_of_type_prints_its_module_and_scope() {
+        let mut mismatches = Vec::new();
+        for source in [
+            "@module(\"./x.mjs\") @instanceOf(\"C\")\ntype c\n",
+            "@scope(\"Lib\") @instanceOf(\"C\")\ntype c\n",
+            "@module(\"./x.mjs\") @scope(\"shapes\") @instanceOf(\"C\")\ntype c\n",
+            "@module(\"x\\\"y\") @scope((\"a\", \"new\")) @instanceOf(\"default\")\ntype c\n",
+            "@instanceOf(\"Date\")\ntype c\n",
+        ] {
+            let options = crate::driver::CompilerOptions {
+                nopervasives: true,
+                ..Default::default()
+            };
+            let result = crate::driver::compile_source_in_process(
+                source,
+                "Class.res",
+                "Class",
+                &options,
+                &crate::cmi::persistent_env::ModuleRegistry::new(),
+                false,
+                None,
+            )
+            .expect("compiles");
+            if let Err(error) = check_published(&result.pers_struct.expect("published signature")) {
+                mismatches.push(format!("{source}: {error}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    /// One step an attribute and one a property of `@scope`.
+    #[test]
+    fn ten_thousand_attributes_and_scope_properties_print_in_linear_steps() {
+        let mut source = String::new();
+        for i in 0..10000 {
+            let _ = write!(source, "@a{i} ");
+        }
+        source.push_str("@scope((");
+        for i in 0..10000 {
+            let _ = write!(source, "{}\"p{i}\"", if i == 0 { "" } else { ", " });
+        }
+        source.push_str(")) @instanceOf(\"C\")\ntype c\n");
+        let options = crate::driver::CompilerOptions {
+            nopervasives: true,
+            ..Default::default()
+        };
+        let result = crate::driver::compile_source_in_process(
+            &source,
+            "Class.res",
+            "Class",
+            &options,
+            &crate::cmi::persistent_env::ModuleRegistry::new(),
+            false,
+            None,
+        )
+        .expect("compiles");
+        let unit = result.pers_struct.expect("published signature");
+        check_published(&unit).expect("both printers agree");
+        let ctx = crate::types::context::TypeContext::new(std::sync::Arc::new(
+            crate::context::IdGenerator::new(),
+        ));
+        let segment = published_segment(&unit, &ctx).expect("converts");
+        let mut text = String::new();
+        let steps =
+            crate::tc::steps::scope(|| text = crate::tc::canonical::canonical_signature(&segment));
+        assert!(text.contains("p9998.p9999.C\")"), "{}", &text[..200]);
+        // 10,001 attributes and 10,000 properties, plus the printers' own.
+        assert!(steps <= 20001 + 16, "{steps}");
     }
 
     #[test]

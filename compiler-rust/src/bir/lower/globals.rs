@@ -61,6 +61,15 @@ pub(crate) struct Globals {
     /// (`js_ir::arena::is_raw_js_name`), written by step 1: the raw names
     /// of the naming replay (`names::Program::raw`). May repeat a name.
     pub(crate) raw: Vec<Name>,
+    /// The referenced global names that hold an underscore, with their
+    /// rows: the only names a variable of the substitution pass
+    /// (`<binder>_<suffix>`, `element_bindings`) can print with. Empty in
+    /// almost every unit, which then reads no block declaration.
+    underscored: Vec<(Name, u32)>,
+    /// The spelling of a substitution variable and its printed form, kept
+    /// so that spelling one allocates nothing once they have capacity.
+    spelled: String,
+    printed: String,
 }
 
 /// `is_js_global` of the legacy pass.
@@ -69,12 +78,16 @@ fn is_js_global(ident: &Ident) -> bool {
 }
 
 impl Globals {
-    /// The row of `name`, added when new. One lookup.
+    /// The row of `name`, added when new. Cost: one lookup; O(name bytes)
+    /// for a new row, which is read once for an underscore (`underscored`).
     fn row(&mut self, name: Name) -> u32 {
         let next = self.rows.len() as u32;
         let row = *self.names.entry(name).or_insert(next);
         if row == next {
             self.rows.push(Row { binding: 0, global: 0, imported: false });
+            if name.as_str().contains('_') {
+                self.underscored.push((name, row));
+            }
         }
         row
     }
@@ -93,7 +106,9 @@ impl Globals {
 ///
 /// Cost. A unit that references no JavaScript global: one read per variable
 /// (its site head). Otherwise also one read per variable with a binder and
-/// one lookup of its printed name, and one read per import. Only when a
+/// one lookup of its printed name, and one read per import; when a
+/// referenced global's name holds an underscore, the steps of
+/// `element_bindings` per declaration of a block. Only when a
 /// binding or a live import prints with a referenced global's name: one
 /// mark per such binding (plus one step per explicit block around a
 /// declaration), and per site of that name its ancestors up to the first
@@ -109,6 +124,7 @@ pub(crate) fn decide(bir: &mut Bir, idents: &[Ident]) {
     globals.rows.clear();
     globals.links.clear();
     globals.raw.clear();
+    globals.underscored.clear();
     let ident = |bir: &Bir, var: usize| idents.get(bir.vars.j_origin[var].index()).copied();
     let variables = bir.vars.len();
     globals.steps += variables;
@@ -138,7 +154,9 @@ pub(crate) fn decide(bir: &mut Bir, idents: &[Ident]) {
 
 /// Step 2: chain every binder that prints with a referenced global's name
 /// to its row, and flag the rows an imported module binds. Returns whether
-/// any row is bound. One step per variable with a binder and per import.
+/// any row is bound. One step per variable with a binder and per import;
+/// when a referenced global's name holds an underscore, also the steps of
+/// `element_bindings` for each declaration.
 fn bindings(bir: &Bir, scope: &super::scope::Scope, globals: &mut Globals, idents: &[Ident]) -> bool {
     use crate::js_ir::printer::convert_ident_atom;
     let mut bound = false;
@@ -154,6 +172,9 @@ fn bindings(bir: &Bir, scope: &super::scope::Scope, globals: &mut Globals, ident
             globals.rows[row as usize].binding = globals.link(head, binder.0);
             bound = true;
         }
+        if !globals.underscored.is_empty() {
+            bound |= element_bindings(bir, scope, globals, idents, VarId(var as u32), binder, ident);
+        }
     }
     for (import, module) in bir.pools.j_modules.iter().enumerate() {
         globals.steps += 1;
@@ -166,6 +187,136 @@ fn bindings(bir: &Bir, scope: &super::scope::Scope, globals: &mut Globals, ident
         }
     }
     bound
+}
+
+/// The variables the substitution pass declares for the elements of a
+/// block declaration, chained to the rows of the referenced globals they
+/// print as. The backend in use runs the external-shadow pass after that
+/// pass (lam_compile_main.ml:418-425), so they shadow a global of their
+/// name. The pass (js_pass_flatten_and_mark_dead.ml, `subst_map`; Rust
+/// `Substitute::statement`) binds `<binder>_<suffix>` before a live
+/// `Strict`, `StrictOpt` or `Alias` declaration of an immutable block of
+/// two or more elements (an alias of deep constants excepted) for each
+/// element that is not simple (`simple_element`). Its variables stand in a
+/// block statement beside the declaration, so they are in the
+/// declaration's scope: the declaration is chained. A live declaration is
+/// one the tail-call pass does not find dead: exported or built at least
+/// once (`close::decide`).
+///
+/// Cost: O(1) for a binder that is not a block declaration; otherwise one
+/// step per element (twice for an alias, whose elements are read for deep
+/// constants first, one step per node of an element) and, per element that
+/// is not simple, O(binder name + suffix bytes) to spell its name into the
+/// kept buffers and one string comparison per underscored row. Nothing is
+/// allocated once the buffers have their capacity.
+fn element_bindings(
+    bir: &Bir,
+    scope: &super::scope::Scope,
+    globals: &mut Globals,
+    idents: &[Ident],
+    var: VarId,
+    binder: NodeId,
+    ident: &Ident,
+) -> bool {
+    use crate::lambda::TagInfo;
+    use crate::lambda::lam_compat::LetKind;
+    let View::SDecl { value: Some(value), .. } = bir.view(binder) else { return false };
+    // The low two bits: the `LetKind` (`JsStmt::stmt_aux`).
+    let kind = bir.node(binder).aux() & 0b11;
+    let alias = kind == LetKind::Alias as u16;
+    if !(alias || kind == LetKind::Strict as u16 || kind == LetKind::StrictOpt as u16) {
+        return false;
+    }
+    // `aux` 0: an immutable block (`bridge_j::mutable`).
+    let View::JBlockLit { values, info } = bir.view(value) else { return false };
+    if bir.node(value).aux() != 0 {
+        return false;
+    }
+    let origin = bir.vars.j_origin[var.index()];
+    let exported = scope.facts.get(origin.index()).is_some_and(|facts| facts.state & super::scope::VarFacts::EXPORTED != 0);
+    if !exported && scope.uses[var.index()].built == 0 {
+        return false;
+    }
+    let tag = bir.block_tag(info);
+    let count = match tag {
+        TagInfo::Record(_) | TagInfo::RecordInlined(_) => tag.logical_field_count(),
+        _ => values.len(),
+    };
+    if count < 2 {
+        return false;
+    }
+    if alias && values.iter().all(|&item| deep_constant(bir, item, &mut globals.steps)) {
+        return false;
+    }
+    let mut bound = false;
+    for (index, &item) in values.iter().enumerate() {
+        globals.steps += 1;
+        if simple_element(bir, idents, item) {
+            continue;
+        }
+        let mut spelled = std::mem::take(&mut globals.spelled);
+        spelled.clear();
+        spelled.push_str(ident.name());
+        spelled.push('_');
+        let field = match tag {
+            TagInfo::Module(fields) => fields.get(index).map(String::as_str),
+            TagInfo::Record(record) => record.fields.get(index).map(|(field, _)| field.as_str()),
+            _ => None,
+        };
+        match field {
+            Some(field) => spelled.push_str(field),
+            None => {
+                use std::fmt::Write;
+                write!(spelled, "{index}").expect("writing to a string");
+            }
+        }
+        let mut printed = std::mem::take(&mut globals.printed);
+        crate::js_ir::printer::convert_ident_into(&spelled, &mut printed);
+        for at in 0..globals.underscored.len() {
+            let (name, row) = globals.underscored[at];
+            if name.as_str() == printed {
+                let head = globals.rows[row as usize].binding;
+                globals.rows[row as usize].binding = globals.link(head, binder.0);
+                bound = true;
+            }
+        }
+        globals.spelled = spelled;
+        globals.printed = printed;
+    }
+    bound
+}
+
+/// `is_simple_block_binding_item` of the substitution pass on a lowered
+/// element: a variable that no assignment or JavaScript code may change
+/// (`var_may_change`: not `ASSIGNED`, not a JavaScript global), a module
+/// member, a number, a string, a template without holes, a boolean or
+/// `undefined`. O(1).
+fn simple_element(bir: &Bir, idents: &[Ident], item: NodeId) -> bool {
+    match bir.view(item) {
+        View::Var { var } => {
+            !bir.vars.flags(var).contains(crate::bir::VarFlags::ASSIGNED)
+                && !idents.get(bir.vars.j_origin[var.index()].index()).is_some_and(is_js_global)
+        }
+        // `aux` 1: a template without holes (`bridge_j`).
+        View::JTemplate { .. } => bir.node(item).aux() == 1,
+        View::JQualified { .. } | View::JNumber { .. } | View::JStr { .. } | View::JBool | View::JUndefined => true,
+        _ => false,
+    }
+}
+
+/// `is_deep_constant_block_binding_item` of the substitution pass: a
+/// constant, or an optional or an immutable block of them. One step per
+/// node of the element it reads; a recursion as deep as the element's
+/// nesting of blocks and options.
+fn deep_constant(bir: &Bir, item: NodeId, steps: &mut usize) -> bool {
+    *steps += 1;
+    match bir.view(item) {
+        View::JTemplate { .. } => bir.node(item).aux() == 1,
+        View::JNumber { .. } | View::JStr { .. } | View::JBool | View::JUndefined => true,
+        View::JOptional { value } => deep_constant(bir, value, steps),
+        View::JBlockLit { values, .. } => bir.node(item).aux() == 0 && values.iter().all(|&value| deep_constant(bir, value, steps)),
+        _ => false,
+    }
 }
 
 /// Steps 3 and 4, one name at a time: mark the scope of each binding, then
@@ -443,6 +594,37 @@ mod tests {
         assert!(qualified(&b, inside));
         assert!(!qualified(&b, outside) && !qualified(&b, variable));
         assert_eq!(b.js_scope.as_ref().unwrap().globals.qualified, 1);
+    }
+
+    #[test]
+    fn ten_thousand_block_declarations_cost_one_step_per_element() {
+        // `{ let t = [null, null]; ... (10,000 times); t_0' }` with the
+        // global `t_0`: the substitution pass would bind both elements of
+        // each block (`t_0`, `t_1`), so each declaration shadows `t_0`.
+        let mut b = Bir::default();
+        b.begin_bulk();
+        b.js_scope = Some(Scope::new(0));
+        b.new_var_id(Name::new("t_0"), 0);
+        let mut idents = vec![Ident::create_persistent("t_0")];
+        let mut statements = Vec::new();
+        for _ in 0..10_000 {
+            let var = local(&mut b, &mut idents, "t");
+            b.js_scope.as_mut().unwrap().uses[var.index()].built = 1;
+            let elements = [(); 2].map(|()| b.new_node(View::JNull, 0));
+            let info = b.js_info(crate::bir::JsPayload::Block(crate::lambda::TagInfo::Tuple));
+            let value = b.new_node(View::JBlockLit { values: &elements, info }, 0);
+            statements.push(b.new_node(View::SDecl { var, value: Some(value) }, LetKind::Strict as u16));
+        }
+        let site = read(&mut b);
+        statements.push(effect(&mut b, site));
+        block(&mut b, &statements);
+        decide(&mut b, &idents);
+        assert!(qualified(&b, site));
+        // 10,001 variables, 10,000 binders, 20,000 elements, 10,000 marks;
+        // the site: three reads up to the marked block and two marks.
+        assert_eq!(steps(&b), 10_001 + 10_000 + 20_000 + 10_000 + 5);
+        let allocations = allocation_counter::measure(|| decide(&mut b, &idents));
+        assert_eq!(allocations.count_total, 0, "{allocations:?}");
     }
 
     #[test]
