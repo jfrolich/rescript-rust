@@ -883,6 +883,12 @@ fn cross_module_inline_of_a_body_that_holds_a_function() {
 /// 4 record rest, 5 substitution and dead marks, 6 shake), printed. For the T4
 /// ordering findings below.
 fn legacy_text(build: impl Fn(&mut LamArena) -> Lam, order: &[u8]) -> String {
+    legacy_text_assigning(build, order, &Default::default())
+}
+
+/// `legacy_text` with `assignable`, the variables the module assigns, given
+/// to P3 and P5 as the backend in use gives them (`LambdaCompiler::assignable`).
+fn legacy_text_assigning(build: impl Fn(&mut LamArena) -> Lam, order: &[u8], assignable: &ahash::AHashSet<Ident>) -> String {
     use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass as flatten;
     use crate::lambda::js_shake::apply_js_shake_pass as shake;
     let mut a = LamArena::new();
@@ -895,9 +901,9 @@ fn legacy_text(build: impl Fn(&mut LamArena) -> Lam, order: &[u8]) -> String {
         program = match pass {
             1 => flatten(program),
             2 => crate::lambda::js_pass_external_shadow::apply_external_shadow_pass(program),
-            3 => inline(program),
+            3 => crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass(program, assignable),
             4 => crate::lambda::js_pass_record_rest::apply_js_record_rest_pass(program),
-            5 => dead(program, false),
+            5 => crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_and_mark_dead_pass(program, assignable, false),
             6 => shake(program),
             _ => unreachable!("pass number"),
         };
@@ -1588,6 +1594,12 @@ fn cached_external_templates_keep_fresh_binders_and_import_once() {
 /// names (as `legacy_text`), printed. `order` never holds pass 2 here: the
 /// new side runs no external-shadow pass (THREE_TREES 11.4, "T5 design").
 fn new_text(build: impl Fn(&mut LamArena) -> Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, order: &[u8]) -> (String, usize) {
+    new_text_assigning(build, resolver, order, &Default::default())
+}
+
+/// `new_text` with `assignable` given to P3 and P5, as check mode gives the
+/// new side the backend in use's set (`finish_flattened_output`).
+fn new_text_assigning(build: impl Fn(&mut LamArena) -> Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, order: &[u8], assignable: &ahash::AHashSet<Ident>) -> (String, usize) {
     use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass as flatten;
     let mut a = LamArena::new();
     let root = build(&mut a);
@@ -1612,9 +1624,9 @@ fn new_text(build: impl Fn(&mut LamArena) -> Lam, resolver: Option<&crate::js_ir
     for pass in order {
         program = match pass {
             1 => flatten(program),
-            3 => inline(program),
+            3 => crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass(program, assignable),
             4 => crate::lambda::js_pass_record_rest::apply_js_record_rest_pass(program),
-            5 => dead(program, false),
+            5 => crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_and_mark_dead_pass(program, assignable, false),
             6 => crate::lambda::js_shake::apply_js_shake_pass(program),
             _ => unreachable!("pass number"),
         };
@@ -2400,4 +2412,126 @@ fn the_naming_log_agrees_on_a_closure_dropped_before_the_function_around_it_clos
     let end = a.var(f);
     let root = a.let_(LetKind::Strict, f, function, end);
     names_agree(a, root, None, false);
+}
+
+/// The new side, lowered and run through P1, P3, P4, P5 and P6, against the
+/// backend in use, which runs P2 after P5 (`finish_flattened_output`:
+/// P1, P3, P4, P5, P2, P6). Returns the text.
+fn shadow_after_substitution(build: impl Fn(&mut LamArena) -> Lam + Copy) -> String {
+    let (text, _) = new_text(build, None, &[1, 3, 4, 5, 6]);
+    assert_eq!(text, legacy_text(build, &[1, 3, 4, 5, 2, 6]));
+    text
+}
+
+/// `let t = [element, second]; return ext(t[0], <global global>)`, in `run`.
+fn block_then_global(a: &mut LamArena, tag: crate::lambda::TagInfo, kind: LetKind, element: Lam, second: Lam, global: &str, read: bool) -> Lam {
+    use crate::lambda::LamLoc;
+    use crate::lambda::lam_compat::FieldDbgInfo;
+    use crate::lambda::lam_primitive::{Mutable, Primitive};
+    let t = Ident::new("t", 10, IdentFlags::NONE);
+    let block = a.prim_raw(Primitive::Pmakeblock(tag, Mutable::Immutable), &[element, second], LamLoc::NONE);
+    let reference = js_global(a, global);
+    let body = if read {
+        let target = a.var(t);
+        let field = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Tuple), &[target], LamLoc::NONE);
+        ext_call(a, &[field, reference])
+    } else {
+        ext_call(a, &[reference])
+    };
+    let inner = a.let_(kind, t, block, body);
+    a.function_(0, &[], inner, Default::default(), LamLoc::NONE)
+}
+
+#[test]
+fn an_element_the_substitution_pass_binds_shadows_the_global_it_reads() {
+    // `run = () => { let t = [<global t_0>, "b"]; return ext(t[0], <global t_0>) }`.
+    // P5 binds the global element to `t_0`, which P2, after it, sees around
+    // both references.
+    use crate::lambda::TagInfo;
+    let build = |a: &mut LamArena| {
+        let element = js_global(a, "t_0");
+        let second = a.const_(C::String("b".into()));
+        block_then_global(a, TagInfo::Tuple, LetKind::Strict, element, second, "t_0", true)
+    };
+    let text = shadow_after_substitution(build);
+    assert!(text.contains("  let t_0 = globalThis.t_0;
+"), "{text}");
+    assert!(text.contains("ext(t_0, globalThis.t_0)"), "{text}");
+}
+
+#[test]
+fn an_assigned_element_the_substitution_pass_binds_shadows_the_global() {
+    // `run = () => { let x = 1; let t = [x, "b"]; x = 2; return ext(t[0], <global t_0>) }`:
+    // P5 binds the element `x`, which an assignment changes, to `t_0`.
+    use crate::lambda::{LamLoc, TagInfo};
+    use crate::lambda::lam_compat::FieldDbgInfo;
+    use crate::lambda::lam_primitive::{Mutable, Primitive};
+    let x = Ident::new("x", 20, IdentFlags::NONE);
+    let build = |a: &mut LamArena| {
+        let t = Ident::new("t", 10, IdentFlags::NONE);
+        let read = a.var(x);
+        let second = a.const_(C::String("b".into()));
+        let block = a.prim_raw(Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable), &[read, second], LamLoc::NONE);
+        let two = a.const_(C::Int { i: 2, comment: None });
+        let assign = a.assign(x, two);
+        let target = a.var(t);
+        let field = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Tuple), &[target], LamLoc::NONE);
+        let reference = js_global(a, "t_0");
+        let result = ext_call(a, &[field, reference]);
+        let body = a.seq_raw(assign, result);
+        let declared = a.let_(LetKind::Strict, t, block, body);
+        let one = a.const_(C::Int { i: 1, comment: None });
+        let variable = a.let_(LetKind::Variable, x, one, declared);
+        a.function_(0, &[], variable, Default::default(), LamLoc::NONE)
+    };
+    let assignable = std::iter::once(x).collect();
+    let (text, _) = new_text_assigning(build, None, &[1, 3, 4, 5, 6], &assignable);
+    assert_eq!(text, legacy_text_assigning(build, &[1, 3, 4, 5, 2, 6], &assignable));
+    assert!(text.contains("  let t_0 = x;\n"), "{text}");
+    assert!(text.contains("ext(t_0, globalThis.t_0)"), "{text}");
+}
+
+#[test]
+fn a_record_element_the_substitution_pass_binds_takes_the_field_name() {
+    // `let t = {a: ext(), b: 1}` with the global `t_a`: P5 binds the call to
+    // `t_a`; a global `t_0` is not shadowed.
+    use crate::lambda::TagInfo;
+    for (global, qualified) in [("t_a", true), ("t_0", false)] {
+        let build = |a: &mut LamArena| {
+            let element = ext_call(a, &[]);
+            let second = a.const_(C::Int { i: 1, comment: None });
+            let tag = TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
+                fields: vec![("a".into(), false), ("b".into(), false)],
+                logical_field_count: None,
+                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                array: false,
+            }));
+            block_then_global(a, tag, LetKind::Strict, element, second, global, true)
+        };
+        let text = shadow_after_substitution(build);
+        assert_eq!(text.contains(&format!("globalThis.{global}")), qualified, "{text}");
+    }
+}
+
+#[test]
+fn a_dead_block_or_an_alias_of_constants_binds_no_element() {
+    // A block that is never read becomes its effect, and an alias of deep
+    // constants keeps its nested block inline: no `t_0` shadows the
+    // global. Bound strictly, the nested block gets `t_0`.
+    use crate::lambda::TagInfo;
+    use crate::lambda::lam_primitive::{Mutable, Primitive};
+    use crate::lambda::LamLoc;
+    let nested = |a: &mut LamArena| {
+        let (one, two) = (a.const_(C::Int { i: 1, comment: None }), a.const_(C::Int { i: 2, comment: None }));
+        a.prim_raw(Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable), &[one, two], LamLoc::NONE)
+    };
+    for (kind, read, qualified) in [(LetKind::Strict, false, false), (LetKind::Alias, true, false), (LetKind::Strict, true, true)] {
+        let build = |a: &mut LamArena| {
+            let element = if read { nested(a) } else { ext_call(a, &[]) };
+            let second = a.const_(C::Int { i: 3, comment: None });
+            block_then_global(a, TagInfo::Tuple, kind, element, second, "t_0", read)
+        };
+        let text = shadow_after_substitution(build);
+        assert_eq!(text.contains("globalThis.t_0"), qualified, "{kind:?} {read}: {text}");
+    }
 }
