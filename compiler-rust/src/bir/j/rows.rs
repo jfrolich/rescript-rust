@@ -704,7 +704,7 @@ impl Js for Rows {
         self.work = spine;
         copy
     }
-    fn references(&mut self, a: &mut Pools, e: &E, mut visit: impl FnMut(&mut Pools, Found)) -> u32 {
+    fn references(&mut self, a: &mut Pools, e: &E, mut visit: impl FnMut(&Self, &mut Pools, Found)) -> u32 {
         // The stack may hold the pending nodes of a walk that is under
         // way (`JsStmt::substitute`): the reads go above them.
         let mut work = std::mem::take(&mut self.work);
@@ -715,9 +715,9 @@ impl Js for Rows {
             let node = work.pop().expect("a pending node");
             read += 1;
             match a.view(node) {
-                View::Var { var } => visit(a, Found::Var { var, id: node.0 }),
-                View::JQualified { module, .. } => visit(a, Found::Module { module, id: node.0 }),
-                View::JFun { header, .. } => visit(a, Found::Function(header)),
+                View::Var { var } => visit(self, a, Found::Var { var, id: node.0 }),
+                View::JQualified { module, .. } => visit(self, a, Found::Module { module, id: node.0 }),
+                View::JFun { header, .. } => visit(self, a, Found::Function(header)),
                 view => view.children_into(&mut work),
             }
         }

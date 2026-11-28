@@ -373,7 +373,9 @@ pub trait Js {
     /// `export.rs::copy_replacement`.)
     fn copy_members(&mut self, a: &mut Pools, r: Self::Ref<'_>, made: impl FnMut(u32)) -> Self::E;
     /// Every reference and every function literal at or below `e`, each
-    /// given to `visit` once with the pools: a reference to a variable, a
+    /// given to `visit` once with the implementation, to read by key
+    /// ([`Js::owner`], [`Js::kind_of`], [`Js::jsx_head`]), and with the
+    /// pools: a reference to a variable, a
     /// reference to an imported module, the header of a function literal.
     /// A function literal is not entered. `e` is the caller's and is not
     /// changed; `visit` may write the pools (the lowering's tables), not
@@ -389,7 +391,7 @@ pub trait Js {
     /// the expression's width and depth. (THREE_TREES 11.4, "T6r: the
     /// naming replay behind the interface", decision 5: `names::adopt`,
     /// an expression built before the scope it moves into opened.)
-    fn references(&mut self, a: &mut Pools, e: &Self::E, visit: impl FnMut(&mut Pools, Found)) -> u32;
+    fn references(&mut self, a: &mut Pools, e: &Self::E, visit: impl FnMut(&Self, &mut Pools, Found)) -> u32;
     /// `e` is not used: its references and sites are given back. One step
     /// per node released. The operand stack is not read and not changed:
     /// operands pushed before the call are there after it, in order.

@@ -1469,15 +1469,15 @@ impl<'a> Builder<'a> {
     }
 
     /// Every reference and every function literal at or below `e`, each
-    /// given to `visit` once (the lowering's `Js::references`); a function
-    /// literal is not entered. `e` is the caller's and is not changed.
+    /// given to `visit` once with the builder, to read a row by id (the
+    /// lowering's `Js::references`); a function literal is not entered. `e` is the caller's and is not changed.
     /// Returns the number of nodes read. One read per node at or below `e`
     /// outside function literals, a node of a printed form without a row
     /// of its own (the operand of a negative literal) counted: O(nodes);
     /// counts no step. The work stack is the builder's kept storage
     /// ([`recycle`]): nothing is allocated once it has held an expression
     /// as wide and as deep.
-    pub fn references(&mut self, e: &J<'a>, mut visit: impl FnMut(Reference)) -> u32 {
+    pub fn references(&mut self, e: &J<'a>, mut visit: impl FnMut(&Self, Reference)) -> u32 {
         let mut work: Vec<&Expression<'a>> = recycle(std::mem::take(&mut self.spare));
         let mut read = 0;
         work.push(&e.expr);
@@ -1486,9 +1486,9 @@ impl<'a> Builder<'a> {
             let id = expr.node_id().index() as u32;
             let row = self.rows[id as usize];
             match row.kind {
-                Kind::Var => visit(Reference::Var { variable: row.payload, id }),
-                Kind::Named => visit(Reference::Named { id }),
-                Kind::Fun => visit(Reference::Function(row.payload)),
+                Kind::Var => visit(self, Reference::Var { variable: row.payload, id }),
+                Kind::Named => visit(self, Reference::Named { id }),
+                Kind::Fun => visit(self, Reference::Function(row.payload)),
                 _ => Self::operands_into(expr, &mut work),
             }
         }

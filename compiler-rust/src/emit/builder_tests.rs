@@ -1763,7 +1763,13 @@ mod walks {
         let call = b.call(callee, mark, 0, false);
         let mut found = Vec::new();
         let before = b.steps;
-        let read = b.references(&call, |reference| found.push(reference));
+        let read = b.references(&call, |b, reference| {
+            // The implementation is lent: a row is read by the id given.
+            if let Reference::Var { variable, id } = reference {
+                assert_eq!(b.rows[id as usize].payload, variable);
+            }
+            found.push(reference)
+        });
         assert_eq!(b.steps, before, "a reader counts no step");
         let mut variables: Vec<u32> = found
             .iter()
@@ -1811,7 +1817,7 @@ mod walks {
             let mut b = Builder::new(&allocator);
             let value = deep_and_wide(&mut b, size);
             let mut references = 0;
-            let read = b.references(&value, |_| references += 1);
+            let read = b.references(&value, |_, _| references += 1);
             assert_eq!(references, 2 * size + 2);
             // The sequences, their operands, the call, its callee and its
             // arguments.
@@ -1819,7 +1825,7 @@ mod walks {
             reads.push(read);
             let again = deep_and_wide(&mut b, size);
             let allocations = allocation_counter::measure(|| {
-                b.references(&again, |_| {});
+                b.references(&again, |_, _| {});
             });
             assert_eq!(allocations.count_total, 0, "{allocations:?}");
         }

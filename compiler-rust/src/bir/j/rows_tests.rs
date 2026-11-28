@@ -232,7 +232,7 @@ fn module(a: &mut Bir) -> crate::bir::ImportId {
 fn found(r: &mut Rows, a: &mut Bir, e: &E) -> (Vec<String>, u32) {
     let mut found = Vec::new();
     let before = r.steps();
-    let read = r.references(a, e, |_, reference| found.push(format!("{reference:?}")));
+    let read = r.references(a, e, |_, _, reference| found.push(format!("{reference:?}")));
     assert_eq!(r.steps(), before, "a reader counts no step");
     assert!(r.work.is_empty());
     found.sort();
@@ -314,14 +314,14 @@ fn the_references_of_an_expression_cost_one_read_a_node_at_any_depth_and_width()
         };
         let value = build(&mut r, a);
         let mut references = 0;
-        let read = r.references(a, &value, |_, _| references += 1);
+        let read = r.references(a, &value, |_, _, _| references += 1);
         assert_eq!(references, 2 * size + 1);
         // The sequences, their operands, the array and its elements.
         assert_eq!(read, 3 * size + 3);
         reads.push(read);
         let again = build(&mut r, a);
         let allocations = allocation_counter::measure(|| {
-            r.references(a, &again, |_, _| {});
+            r.references(a, &again, |_, _, _| {});
         });
         assert_eq!(allocations.count_total, 0, "{allocations:?}");
         done(value);
