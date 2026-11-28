@@ -218,6 +218,43 @@ fn run_main(telemetry: &telemetry::TelemetryGuard) -> Result<i32> {
                 }
             }
         }
+        cli::Command::Verify { folder, seed, cases } => {
+            configure_rayon_for_in_process();
+            let built = run_with_in_process_stack(|| {
+                build::build(
+                    &None,
+                    Path::new(&folder as &str),
+                    show_progress,
+                    /* no_timing */ true,
+                    plain_output,
+                    /* warn_error */ None,
+                    /* prod */ false,
+                    /* features */ None,
+                    /* dump */ None,
+                    /* check_only */ false,
+                )
+            })?;
+            let seed = seed.unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.subsec_nanos() ^ elapsed.as_secs() as u32)
+                    .unwrap_or(0)
+            });
+            // The build wrote the JavaScript the checks run against.
+            std::mem::forget(built);
+            let code = run_with_in_process_stack(|| {
+                build::verify::verify(
+                    Path::new(&folder as &str),
+                    plain_output,
+                    &build::verify::Options {
+                        seed,
+                        cases,
+                        color: !plain_output,
+                    },
+                )
+            })?;
+            Ok(code)
+        }
         cli::Command::Watch(watch_args) => {
             let features = watch_args.features.parsed();
             configure_rayon_for_in_process();
