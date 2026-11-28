@@ -2183,7 +2183,7 @@ it stops and reports a reproduction.
 | R3q | `instance_poly` and `instance_label`: the copy that goes through free universal variables without sharing (`copy_sep`), and the fixed-row rule of `copy_row` only it reaches (8.6, decision 47; 8.10). Merged (pull request 370; `tc::` 324 passed, none ignored) | `rows.rs` | R3n, R3g | R3h, R3i, R3j | 500 |
 | R3s | The ambiguity of GADT instances: tracing, the instance sets and the three places of the kernel that read them; a nullary constructor's own memo while tracing (8.6, decisions 72 and 97 to 112; 8.11). Merged (pull request 382; `tc::` 341 passed, none ignored) | `unify.rs`, `expand.rs`, three lines of `rows.rs` | R3r | R3i, R3j | 350 |
 | R3i | `moregeneral`, `equal`, `matches`: one loop for `moregen` and `eqtype` on the frames of unification, `rigidify`, the renaming as a table (8.6, decisions 113 to 118; 8.12). Issued in the tenth skeleton turn: 23 bodies, 9 ignored tests, a prompt in 8.4 | `relate.rs` | R3s | nothing | 900 |
-| R3j | Subtyping without the declaration-directed coercions: `subtype` and `force_subtype` as a loop of its own with a collection the caller owns, `enlarge_type` with the visited list as a dense table (8.6, decisions 119 to 126; 8.13). Issued in the eleventh skeleton turn and corrected after its first-pass review (decisions 127, 128: the scopes are emptied as OCaml empties them; subtyping has a table of pairs of its own): 27 bodies, 14 ignored tests, a prompt in 8.4 whose first commit is five edits in bodies of R3i; its harness operations are not made | `relate.rs` | R3s, R3i | nothing | 1,020 (the prototype: 927) |
+| R3j | Subtyping without the declaration-directed coercions: `subtype` and `force_subtype` as a loop of its own with a collection the caller owns, `enlarge_type` with the visited list as a dense table (8.6, decisions 119 to 126; 8.13). Issued in the eleventh skeleton turn and corrected after its first-pass review (decisions 127, 128: the scopes are emptied as OCaml empties them; subtyping has a table of pairs of its own): 27 bodies, 14 ignored tests, a prompt in 8.4; its harness operations are not made | `relate.rs` | R3s, R3i | nothing | 1,020 (the prototype: 927) |
 | K2 | The hot paths of unification, no behaviour change (8.7) | `unify.rs` | R3c | every slice above | 150 |
 
 State after the second skeleton turn (kept for the record; the third
@@ -3773,14 +3773,16 @@ inside bodies included).
 
 The prompt of R3j, written in the eleventh skeleton turn and rewritten
 in the correction turn after its first-pass review (decisions 127 and
-128). The searches were run on the head that holds the corrected
-skeleton and print what the prompt says.
+128), then brought up to trunk with the built R3i merged (the five
+edits inside bodies of R3i that it first gave the builder as a first
+commit are made, in pull request 404). The searches were run on that
+head and print what the prompt says.
 
 ```text
 R3j. Precondition: R3i is merged. From the repository root,
   grep -c 'todo!("R3i")' compiler-rust/src/tc/*.rs | grep -v ':0$'
-prints nothing (on the head that wrote this prompt it prints
-compiler-rust/src/tc/relate.rs:23). If it prints a line, stop.
+prints nothing, as it does on the head that wrote this prompt. If it
+prints a line, stop.
 
 Read section 8.13 and section 8.6, decisions 119 to 128;
 compiler/ml/ctype.ml 96, 314-397 (flatten_fields, associate_fields,
@@ -3802,13 +3804,10 @@ unify_univar, instance_poly, unify_package, merge_packages},
 PackageDecls, Completion, PolyScope, cell_repr, cell_mutable,
 cell_node, field_repr, published_slots.
 
-A prototype of this slice was written in the design turns and thirteen
-of the fourteen tests of the slice passed against it on the branch
-that wrote it; the fourteenth
-(an_inclusion_check_that_runs_a_relation_empties_the_scopes) passed on
-a scratch merge with the built R3i and commit 1 below. It is not in
-the repository; it is the comment
-https://github.com/jfrolich/rescript-rust/pull/404#issuecomment-7236521765
+A prototype of this slice was written in the design turns and the
+fourteen tests of the slice passed against it. It is not in the
+repository; it is the comment
+https://github.com/jfrolich/rescript-rust/pull/404#issuecomment-7236764267
 (one fenced diff against the skeleton, each body under a line
 `// R3J-PROTOTYPE`; if a later comment of that pull request starts
 with `// R3J-PROTOTYPE`, take the last such comment). You MAY read it.
@@ -3828,18 +3827,14 @@ subtype_pair, expands, object_row, subtype_constr, subtype_fields,
 fresh_var, subtype_row, subtype_poly, subtype_package,
 read_subtype_trace, on_path, enter_path, enter_row, has_constr_row,
 enlarge_visit, enlarge_leave, enlarge_expansion, enlarge_variant};
-(b) the five edits of commit 1 inside four bodies of R3i, exactly as
-written there, and the sentences of their doc comments that those
-edits make false (the debug assertion; "`scopes` is cut to the
-frame's `extra`");
-(c) the fourteen `#[ignore = "R3j build"]` lines of r3_tests.rs;
-(d) the `#[allow(...)]` line directly above `pub mod relate;` in
+(b) the fourteen `#[ignore = "R3j build"]` lines of r3_tests.rs;
+(c) the `#[allow(...)]` line directly above `pub mod relate;` in
 mod.rs.
-Not yours: every other line of a body of R3i, every type, constant,
+Not yours: every line of a body of R3i, every type, constant,
 signature and built function of relate.rs (enter_relation,
 leave_relation, shelve_related, unshelve_related, ordered and the
 functions of R3i), the doc comments of the 27 bodies, the tests, and
-everything else under src/tc. You remove no item: see commit 5. If a
+everything else under src/tc. You remove no item: see commit 4. If a
 function you must call is not visible from relate.rs, stop and report
 it.
 
@@ -3852,44 +3847,18 @@ prints compiler-rust/src/tc/r3_tests.rs:14;
 prints two lines, the first `#[allow(dead_code, unused_variables,
 unused_imports, unused_mut, clippy::ptr_arg)]`;
   grep -c 'debug_assert!(self.scopes.is_empty()' compiler-rust/src/tc/relate.rs
-prints 2 (the entries of moregen and equal). When you end, the first
-two print nothing, the third prints `pub mod expand;` and
-`pub mod relate;` (or the reduced allowance of commit 5), and the
-fourth prints 0.
+prints 0 (the entries of moregen and equal empty the scopes: they do
+not assert). When you end, the first two print nothing, the third
+prints `pub mod expand;` and `pub mod relate;` (or the reduced
+allowance of commit 4), and the fourth prints 0.
 
 Commits, in this order, each pushed:
-1. The entries of the two relations empty the scopes and take a table
-   of their own (decisions 127, 128). Five edits, nothing else:
-   - in moregen: the line `debug_assert!(self.scopes.is_empty(), ...);`
-     becomes `self.empty_scopes();` followed by
-     `self.enter_relation();`, and the last expression becomes
-       let result = self.relate_run(Relation::Moregen { inst_nongen }, base);
-       self.leave_relation();
-       result
-   - in equal: the line `debug_assert!(self.scopes.is_empty(), ...);`
-     becomes `self.empty_scopes();` (it stays the first statement,
-     before the test of the two lengths); `self.enter_relation();`
-     goes directly before `self.related.keys.clear();`; and
-     `self.leave_relation();` goes directly after the statement
-     `let result = self.relate_run(Relation::Equal { rename }, base);`
-   - in relate_run: directly after
-     `let result = self.relate_frames(relation, base).is_ok();` add
-       if !result {
-           self.leave_scopes(base);
-       }
-     (before `self.frames.truncate(base);`);
-   - in relate_frames: the arm of FrameKind::LeavePoly becomes
-     `FrameKind::LeavePoly => self.leave_poly(frame),`.
-   If one of these lines is not in the merged R3i as quoted, stop and
-   report what is there. Run every test of tc::r3_tests and
-   tc::differential whose name holds `relation`, `equal`, `moregen` or
-   `matches`: they pass as before.
-2. The 18 bodies of subtype and force_subtype: subtype, force_subtype,
+1. The 18 bodies of subtype and force_subtype: subtype, force_subtype,
    open_scopes, subtype_frames, subtype_link, push_subtype, constrain,
    subtype_close, subtype_pair, expands, object_row, subtype_constr,
    subtype_fields, fresh_var, subtype_row, subtype_poly,
    subtype_package, read_subtype_trace (enlarge_type stands between
-   two of them in the file and is commit 3's). Run, each by name with
+   two of them in the file and is commit 2's). Run, each by name with
    `-- --include-ignored`: a_coercion_collects_its_constraints_and_forcing_unifies_them_in_order,
    a_tuple_of_another_length_and_a_forced_clash_are_the_two_errors,
    the_arguments_of_a_constructor_follow_its_variance,
@@ -3899,9 +3868,9 @@ Commits, in this order, each pushed:
    packages_are_completed_and_tried,
    a_trial_of_two_packages_empties_the_scopes_of_the_body_it_is_in,
    the_pairs_of_a_coercion_are_not_those_of_a_relation_run_inside_it,
-   an_inclusion_check_that_runs_a_relation_empties_the_scopes,
+   a_coercion_whose_inclusion_check_runs_a_relation,
    subtyping_at_ten_thousand: all twelve pass.
-3. The 9 bodies of enlarge_type (enlarge_type, on_path, enter_path,
+2. The 9 bodies of enlarge_type (enlarge_type, on_path, enter_path,
    enter_row, has_constr_row, enlarge_visit, enlarge_leave,
    enlarge_expansion, enlarge_variant). the_enlarged_type_of_a_coercion_without_a_source
    and enlarging_at_ten_thousand pass. Then the whole filter in the
@@ -3910,9 +3879,9 @@ Commits, in this order, each pushed:
    tc:: -- --include-ignored` reads N + 14 passed, 0 failed, 0
    ignored, where N is what the same command reads before your first
    edit. Never report a count you did not see.
-4. The fourteen `#[ignore = "R3j build"]` lines removed; nothing else
+3. The fourteen `#[ignore = "R3j build"]` lines removed; nothing else
    in a test changed.
-5. The `#[allow(...)]` line directly above `pub mod relate;` in mod.rs
+4. The `#[allow(...)]` line directly above `pub mod relate;` in mod.rs
    removed, and the comment above `pub mod expand;` brought up to
    date. If the compiler or clippy then reports an item of relate.rs
    that is not one of your 27 bodies, you do NOT remove or change the
@@ -3920,7 +3889,7 @@ Commits, in this order, each pushed:
    report, and name each reported item in your report. The same
    command without `-- --include-ignored` reads N + 14 passed, 0
    failed, 0 ignored.
-End your turn after the fifth commit is pushed.
+End your turn after the fourth commit is pushed.
 
 Steps (`#[cfg(test)] super::steps::tick()`): one a frame
 subtype_frames pops; one a constraint force_subtype unifies; one a
@@ -3992,7 +3961,7 @@ enlarged field, or copied by a built field of subtype_fields (the
 first is new, the second shared); an arm of R6e built (int to float,
 records, variants); a trace built in `Mode::Success`; a change of a
 signature, of a doc comment's stated cost, of a test, of a line of
-R3i outside commit 1, or under src/types. At most 1,020 lines of code
+R3i, or under src/types. At most 1,020 lines of code
 added outside doc comments in your 27 bodies (the prototype's part is
 927, comments inside bodies not counted).
 ```
@@ -6685,8 +6654,7 @@ after the first-pass review of R3j; trunk `873e23ca70`).
        1657-1669), keeps the floor it found in the `left` of its
        `LeavePoly` frame, and `Checker::leave_poly` puts floor and
        length back where the frame is popped (`run_frames`,
-       `mcomp_frames`, and `relate_frames` once the builder's first
-       commit is in) and on a failure (`leave_scopes`: the lowest
+       `mcomp_frames`, `relate_frames`) and on a failure (`leave_scopes`: the lowest
        frame above the base). `unify_univar` and `univars_escape` read
        from the floor.
      - *Subtyping.* The chain of `HeldScope` under `Coercion::held` is
@@ -6705,11 +6673,11 @@ after the first-pass review of R3j; trunk `873e23ca70`).
        read off the floor after the call.
      - *The assertion of the tenth turn*
        (`debug_assert!(self.scopes.is_empty(), ...)` at the entry of
-       `moregen` and `equal`) becomes `self.empty_scopes()`. Those two
-       bodies are R3i's and were not on the branch: the change is the
-       first commit of the R3j builder, as code (8.4), and
+       `moregen` and `equal`) became `self.empty_scopes()`, in the
+       same pull request once R3i was merged; `relate_frames` calls
+       `leave_poly` and `relate_run` calls `leave_scopes` on a failure.
        `an_inclusion_check_that_runs_a_relation_empties_the_scopes`
-       is its test. `Checker::unify` is OCaml's INNER `unify` and
+       is the test. `Checker::unify` is OCaml's INNER `unify` and
        empties nothing; the typer's entry (R6) calls `empty_scopes`
        and then `unify`.
      - *Cost.* One load where a scope is entered (the floor), one
@@ -6740,23 +6708,26 @@ after the first-pass review of R3j; trunk `873e23ca70`).
      - A relation inside a relation (`compatible` from `package_end`
        inside `relate_frames`): `Checker::enter_relation` and
        `Checker::leave_relation`, built, around the body of `moregen`
-       and of `equal` (the builder's first commit). The first relation
-       moves nothing (one load, one branch, one store); a nested one
-       puts the outer table on `Checker::related_shelf` and takes an
-       emptied one from `Checker::related_spare`. No table is made a
-       relation.
+       and of `equal`. The first relation moves nothing (one load, one
+       branch, one store); a nested one puts the outer table, the
+       outer list of renamed pairs (`subst`, a `ref []` a call, 3370)
+       and its trail length on `Checker::related_shelf` and takes
+       emptied ones from `Checker::related_spare`; when it ends the
+       outer renaming is written again under a new generation, because
+       the dense rows are live by generation and the inner relation
+       took generations. No table is made a relation.
      - A relation inside a unification needs nothing: unification has
        no table of pairs outside pattern mode (`pairs`, `compatible`).
      - The other structures a walk holds across the three supplier
-       calls are in the table of 8.13. Two are NOT corrected and are
-       owed, each with the test that shows it: the renaming of
-       `equal` under a nested `equal` with renaming, and the supplier
-       being absent (`Checker::packages` is taken out for the call)
-       when the relation it runs meets two packages itself.
+       calls are in the table of 8.13. One is NOT corrected and is
+       owed, with the test that shows it: the supplier is absent
+       (`Checker::packages` is taken out for the call) when the
+       relation it runs meets two packages itself.
 
-State at the end of that turn: the prototype is posted again against
-the corrected skeleton; fourteen tests of R3j are ignored, thirteen
-passed against it and one needs R3i's bodies as well.
+State at the end of that turn: R3i is merged and the changes inside
+its bodies are made; the prototype is posted again against the
+corrected skeleton; fourteen tests of R3j are ignored and all passed
+against it.
 
 
 ### 8.7 The hot paths of unification (K2)
@@ -9033,7 +9004,8 @@ beside its OCaml function, then the final review).
    "The scopes after an inclusion check"). The entries of `moregen`
    and `equal` empty the scopes (`Checker::empty_scopes`; on trunk the
    lines are 3089 and 3358) instead of asserting; the change inside
-   the two built bodies is the first commit of the R3j builder (8.4).
+   the two built bodies was made in pull request 404 after R3i was
+   merged.
 3. Made, in the prompt: the loops no step shape runs wide name the
    walk of `moregen_occur` (every shape calls it at the generic
    level, which skips it) and the common tags of `moregen_row`; the
@@ -9388,7 +9360,7 @@ through an expansion, `unify` on the checker it is handed.
 |---|---|---|---|
 | `Checker::related` | an outer relation: its pairs | cleared and filled at the entry of a relation | corrected: `enter_relation` shelves the outer table (decision 128); `a_relation_inside_a_relation_has_a_table_of_its_own` |
 | `Checker::subtyped` | `subtype_frames` | nothing: no relation and no unification reads it | corrected (it was `related`); `the_pairs_of_a_coercion_are_not_those_of_a_relation_run_inside_it` |
-| the renaming of `equal`: `renaming`, `renaming_generation`, `renamed`, `renaming_trail` | an outer `equal` with renaming | an inner `equal` with renaming takes a new generation, clears `renamed` and moves the trail: the outer's rows are stale afterwards, so a variable the outer had paired can be paired again with another | **OWED**, in R3i's bodies. `Includecore` calls `Ctype.equal env true` on the parameters of two declarations (includecore.ml:92-157). The test: `equal(true, [(a, module(S), a)], [(b, module(T), c)])` with a check that runs `equal(true, [p], [q])` on two fresh variables must answer `false` |
+| the renaming of `equal`: `renaming`, `renaming_generation`, `renamed`, `renaming_trail` | an outer `equal` with renaming | an inner `equal` with renaming takes a new generation, clears `renamed` and moves the trail | corrected: the list and the trail are shelved with the table, and the outer rows are written again under a new generation (decision 128); `an_inclusion_check_that_runs_a_relation_empties_the_scopes` (`Includecore` calls `Ctype.equal env true`, includecore.ml:92-157) |
 | `Checker::packages` | taken OUT for each of the three calls, so that the supplier can be handed the checker | an inner walk that meets two packages finds no supplier and refuses the pair (`unify_package`: `Err`), where OCaml's inclusion check recurses | **OWED**, in built code of R3g (`unify_package`, `package_end`). The test: a check that runs `c.unify` of two packages of two module types answers `Err` with a supplier that says they are compatible |
 | `Checker::rigid_vars` | `matches`, across its unification | nothing: only `matches` and `subtype_poly` use it, and no inclusion check calls either | holds |
 | `Checker::frames` | every walk, below the length an inner call finds | pushed and cut above that length | holds |
@@ -9461,8 +9433,10 @@ tests: `emptied_scopes_come_back_when_the_polymorphic_type_is_left`
 (10, 12, 14, with a check that does what the entry of a relation
 does), `a_trial_of_two_packages_empties_the_scopes_of_the_body_it_is_in`
 (1, 6, 9, 3) and
-`an_inclusion_check_that_runs_a_relation_empties_the_scopes` (10, 12,
-14 and 3 with a check that runs `equal`). No program was found for
+`an_inclusion_check_that_runs_a_relation_empties_the_scopes` (10, 12
+and 14 with a check that runs `equal`) and
+`a_coercion_whose_inclusion_check_runs_a_relation` (3, the same
+check). No program was found for
 the package arms of `moregen` and `eqtype` themselves (a signature
 item or a manifest, compared by a relation, whose type holds such a
 polymorphic object): they call `unify_package` with their own list
