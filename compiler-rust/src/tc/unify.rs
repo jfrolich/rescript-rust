@@ -66,7 +66,14 @@ pub enum FrameKind {
     /// Leave a scope of universal variables: [`Checker::scopes`] is cut
     /// back to `extra` entries (`univar_pairs := old_univars`,
     /// compiler/ml/ctype.ml:1675). Pushed by [`Checker::enter_poly`] below
-    /// the pair of the two bodies; `left` and `right` are `NONE`. It
+    /// the pair of the two bodies; `left` is the floor of the scopes the
+    /// entry found ([`Checker::scope_floor`], which `Checker::leave_poly`
+    /// puts back) and `right` is `NONE`. The frames of this kind that
+    /// `copy_sep` pushes are another use of the kind: their `left` is the
+    /// polymorphic node, which `sep_conflicts` reads. The two never meet:
+    /// `copy_sep` runs its frames to the end before it returns, and the
+    /// scopes are cut back only on a failure of a unification or of a
+    /// relation. It
     /// carries no trace pair and no swap: the pair of the two polymorphic
     /// types is the [`FrameKind::Linked`] frame below it, which is what
     /// reverses the entries of a failure in the bodies. When a frame above
@@ -406,7 +413,7 @@ pub struct Checker {
     /// 3643-4101): not `frames`, whose kinds are unification's. Empty
     /// between calls of [`Checker::subtype`]. (R3j; CHECKER_REWRITE 8.13)
     pub subtyping: Vec<super::relate::SubFrame>,
-    /// `subtypes ()` (compiler/ml/ctype.ml:3641, cleared at 4213 and
+    /// `subtypes ()` (compiler/ml/ctype.ml:3611-3612, cleared at 4213 and
     /// 4217): the pairs [`Checker::subtype`] has met, ordered keys. A
     /// table of its own and not [`Checker::related`]: the inclusion
     /// check of two packages runs `equal` and `moregeneral` on this

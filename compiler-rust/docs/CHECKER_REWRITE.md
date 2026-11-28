@@ -3878,7 +3878,8 @@ Commits, in this order, each pushed:
    it): `cargo test --manifest-path compiler-rust/Cargo.toml --lib
    tc:: -- --include-ignored` reads N + 14 passed, 0 failed, 0
    ignored, where N is what the same command reads before your first
-   edit. Never report a count you did not see.
+   edit (359 on the skeleton of the eleventh turn; more if trunk gained
+   tests under src/tc since). Never report a count you did not see.
 3. The fourteen `#[ignore = "R3j build"]` lines removed; nothing else
    in a test changed.
 4. The `#[allow(...)]` line directly above `pub mod relate;` in mod.rs
@@ -3954,8 +3955,9 @@ is dropped there, so they are not made; the nodes that `expand_once`,
 subtype_fields make inside a quiet region are made as OCaml makes
 them and are NOT this shortcut); the scopes of every constraint made
 again from its chain in force_subtype; a word from the supplier about
-what it ran (the floor is read after the call); `scopes.clear()`
-anywhere; the visited list as a list that is scanned, or as marks that
+what it ran (the floor is read after the call); `self.scopes.clear()`
+(the checker's `Checker::scopes`; the `scopes` of a `Coercion` are
+cleared as the prototype clears them) anywhere; the visited list as a list that is scanned, or as marks that
 stay for the walk, or in `Checker::marks`; a field's cell shared by an
 enlarged field, or copied by a built field of subtype_fields (the
 first is new, the second shared); an arm of R6e built (int to float,
@@ -6667,7 +6669,9 @@ after the first-pass review of R3j; trunk `873e23ca70`).
        back. `force_subtype` pushes each constraint's chain above the
        length it finds and writes the floor before each unification.
      - *Who empties.* `subtype` and `unify_pattern` at their entry;
-       the trial; and the entries of `moregen` and `equal`. The
+       the trial; the entries of `moregen` and `equal`; and `matches`
+       before its unification (OCaml's `matches`, 3163-3174, calls the
+       typer's `unify`; added in the review). The
        supplier is handed `&mut Checker` and calls the kernel's own
        relations, so it says nothing about what it ran: `held` is
        read off the floor after the call.
@@ -6686,17 +6690,20 @@ after the first-pass review of R3j; trunk `873e23ca70`).
        one load and one store at the entry of a relation, of
        `subtype` and of `unify_pattern`. Nothing in `unify_pair` or
        at a popped pair.
-     - *Not decided, owed:* five arms of `subtype_rec` make a
-       constraint after a walk (`subtype_fields`, 4114-4134 and
-       4152-4172; the row arm). The kernel reads `held` when the
-       `Constrain` frame is popped, after the walk. Whether OCaml
-       reads `!(current_univar_pairs ())` before or after that walk
-       is the evaluation order of `x :: f ()` in each arm; the two
-       differ only when the walk holds a trial of packages inside the
-       same polymorphic type. Not put to OCaml as a program.
+     - *Decided in the review, from the text:* five arms of
+       `subtype_rec` make a constraint beside a walk (the invariant
+       argument, 3687-3698; the row arm, 4035-4038; `subtype_fields`,
+       4114-4124, 4126-4134 and 4152-4172). In each the tuple that
+       reads `!(current_univar_pairs ())` is consed onto `cstrs`, a
+       value bound before it by a `let`, an `if` or a `try`, never
+       onto a call: no answer depends on the order in which OCaml
+       evaluates the two operands of `::`. The read is after the walk
+       for the invariant argument and for the row arm (its handler),
+       and before the fold over the fields in `subtype_fields`; the
+       prototype pops its `Constrain` frames at the same points.
 
 128. **A table of pairs a walk, as OCaml has.** `subtypes ()` is one
-     global for subtyping (3641; cleared at 4213 and 4217);
+     global for subtyping (3611-3612; cleared at 4213 and 4217);
      `moregeneral` and `equal` make a table a call (`Type_pairs.create`,
      3115, 3370). The kernel had ONE table, `Checker::related`, cleared
      at the entry of every relation and of `subtype`, and the supplier
@@ -6722,7 +6729,11 @@ after the first-pass review of R3j; trunk `873e23ca70`).
        calls are in the table of 8.13. One is NOT corrected and is
        owed, with the test that shows it: the supplier is absent
        (`Checker::packages` is taken out for the call) when the
-       relation it runs meets two packages itself.
+       relation it runs meets two packages itself. The review adds:
+       `unify_package` takes the supplier before it compares a path,
+       so ANY pair of packages met there is refused, two packages of
+       one path included, which OCaml accepts without a check
+       (`eq_package_path`, 2177).
 
 State at the end of that turn: R3i is merged and the changes inside
 its bodies are made; the prototype is posted again against the
@@ -8854,7 +8865,7 @@ a list out of the graph's pools: the walk writes them).
 | Speculation | none (decision 114) | one, restored on either answer | one, opened before `rigidify`, restored on either answer |
 | Writes that stay | links of the pattern's weak variables with `inst_nongen`; the memo of constructors without arguments | none (the memos: decision 115) | none (the memos are cleaned before the unification, ctype.ml:3170) |
 | Expansion | `ExpandMode::Safe` (`expand_head`, 2940-2941) | `ExpandMode::Rigid` (3218-3219; decision 113) | unification's own, then `Safe` for each variable (3160) |
-| Universal variables | `enter_poly` and `unify_univar` on `Checker::scopes`, cut back to the length at the entry, which a debug assertion holds at zero (OCaml empties the list and does not put the old value back: `current_univar_pairs () := []`, 3093, 3363) | the same | unification's |
+| Universal variables | `enter_poly` and `unify_univar` on `Checker::scopes`, read from `Checker::scope_floor`, which the entry raises to the length (`empty_scopes`: OCaml empties the list there and does not put the old value back, `current_univar_pairs () := []`, 3089, 3358; decision 127 replaced the debug assertion of the tenth turn) | the same | unification's, after `empty_scopes` (the typer's `unify`, 2770) |
 | Packages | `unify_package` with the relation's loop popping its pairs; `package_end` (`PackageDecls`); no supplier: a clash | the same | unification's |
 | Pair table | `Checker::related`, cleared at the entry (decision 116) | the same | none: OCaml's `matches` has none |
 | Trace | none; cut back to the entry's length | the same | the same |
@@ -9361,7 +9372,7 @@ through an expansion, `unify` on the checker it is handed.
 | `Checker::related` | an outer relation: its pairs | cleared and filled at the entry of a relation | corrected: `enter_relation` shelves the outer table (decision 128); `a_relation_inside_a_relation_has_a_table_of_its_own` |
 | `Checker::subtyped` | `subtype_frames` | nothing: no relation and no unification reads it | corrected (it was `related`); `the_pairs_of_a_coercion_are_not_those_of_a_relation_run_inside_it` |
 | the renaming of `equal`: `renaming`, `renaming_generation`, `renamed`, `renaming_trail` | an outer `equal` with renaming | an inner `equal` with renaming takes a new generation, clears `renamed` and moves the trail | corrected: the list and the trail are shelved with the table, and the outer rows are written again under a new generation (decision 128); `an_inclusion_check_that_runs_a_relation_empties_the_scopes` (`Includecore` calls `Ctype.equal env true`, includecore.ml:92-157) |
-| `Checker::packages` | taken OUT for each of the three calls, so that the supplier can be handed the checker | an inner walk that meets two packages finds no supplier and refuses the pair (`unify_package`: `Err`), where OCaml's inclusion check recurses | **OWED**, in built code of R3g (`unify_package`, `package_end`). The test: a check that runs `c.unify` of two packages of two module types answers `Err` with a supplier that says they are compatible |
+| `Checker::packages` | taken OUT for each of the three calls, so that the supplier can be handed the checker | an inner walk that meets two packages finds no supplier and refuses the pair (`unify_package`: `Err`), also a pair of one path, where OCaml accepts equal paths (2177) and recurses for the others | **OWED**, in built code of R3g (`unify_package`, `package_end`). The test: a check that runs `c.unify` of two packages of two module types answers `Err` with a supplier that says they are compatible |
 | `Checker::rigid_vars` | `matches`, across its unification | nothing: only `matches` and `subtype_poly` use it, and no inclusion check calls either | holds |
 | `Checker::frames` | every walk, below the length an inner call finds | pushed and cut above that length | holds |
 | `Checker::saved`, `Checker::trace` | a unification: the pairs for its links, the trace it is building | cut back to the length the inner call found | holds |
@@ -9535,6 +9546,86 @@ the coercion without a source annotation gives `x` the ENLARGED target
 `{.."a": int}`: `Tnil` in a positive position became a variable
 (3576-3579), which `the_enlarged_type_of_a_coercion_without_a_source`
 expects of a closed object.
+
+**Corrections after the review of the eleventh turn** (pull request 404:
+first passes 7236251477, of the first turn, and 7237444591, of the
+correction turn; the review put the first turn's package arm to OCaml
+as the fourteen programs of "The scopes after an inclusion check").
+
+1. Made, in the correction turn: decisions 127 and 128 replace the
+   first departure of decision 123 and item 2 of the tenth turn's
+   list; the changes inside the bodies of R3i; six tests; the
+   prototype posted again (comment 7236764267); the prompt.
+2. Made, in the reviewer's commit: `matches` empties the scopes before
+   its unification (one store; decision 127, "Who empties"); the
+   citation of `subtypes ()` (3611-3612, three places); the doc
+   comments of `FrameKind::LeavePoly` (its `left` is the floor; the
+   frames of `copy_sep` use the kind with another `left`),
+   `SubKind::Leave` and `Coercion::held`; the row "Universal
+   variables" of the table of 8.12; the shortcut of the prompt that
+   named `scopes.clear()`; the count the builder starts from; the
+   point decision 127 left undecided, decided from the text. The
+   prompt of R3i in 8.4 is history: its paragraph on the assertion at
+   the entry of a relation describes what pull request 403 built and
+   decision 127 replaced.
+3. OWED, built code of R3g, before a supplier that runs a relation
+   exists (R5, R6) and before the gate of R5c: `Checker::packages` is
+   taken out while the supplier runs, so a walk the supplier starts
+   refuses every pair of packages, equal paths included (decision
+   128). A form in which an inner walk finds the supplier, with the
+   test of 8.13 and one for two packages of one path.
+4. OWED, tests, each seen to fail without what it guards: a second
+   polymorphic type entered INSIDE an emptied body that holds a known
+   variable (`enter_poly` and `univars_escape` read from the floor);
+   a supplier that runs `moregeneral` (the shapes of programs 1 and
+   6, and the outer table after it); the inner `Leave` putting back
+   the FLOOR (a second trial after the inner type); `unshelve_related`
+   putting back `renamed` and `renaming_trail` (a link made inside the
+   inner relation); `force_subtype` with two constraints under
+   different scopes; `recover` and `mcomp` after an emptying;
+   `matches` with a scope open.
+5. OWED, cost: the five unification figures of `tc_kernel` before and
+   after the floor (the builder of R3j reports them where its sandbox
+   can measure; otherwise at R5c); `unshelve_related` writes again
+   every pair of `Checker::renamed`, which holds the pairs of an
+   earlier `equal` when the outer relation is `moregen` or an `equal`
+   without renaming: clear the list where it stops being read, or
+   state the cost.
+6. OWED, document: the table of 8.13 has no row for `compatible` and
+   `pairs` (pattern mode) across the three supplier calls.
+7. OWED, to R6e, which builds the coercions that read a declaration:
+   OCaml's coercion between two variant or two record types probes
+   the arguments with `subtype_list` on the walk's own list of pairs
+   (3900-3904, 3934-3939), so an emptying inside the probe is seen
+   after it. Programs: `type a = A(module(S))`, `type b =
+   A(module(T))` and `(o: {"f": 'a. (a, 'a)}) => (o :> {"f": 'a. (b,
+   'a)})` is refused by OCaml (found while the same fault of today's
+   checker was reviewed, pull request 405).
+8. Still owed from before, unchanged: the harness of subtyping
+   (`Op::Subtype`, `Op::Enlarge`, generated cases; the posted
+   prototype is its oracle); every item the lists of 8.9, 8.11 and
+   8.12 mark as owed (item 6 of the tenth turn's list is due now that
+   R3i is merged); and one commit that renumbers the citations of
+   ctype.ml above line 2478 written before 28 November (four too high
+   since an upstream merge: the doc comments of R3i and earlier
+   slices, 3093 and 3363 in 8.12 and in the prompt of R3i), with the
+   three citations the builder of R3i reported (`relate_children`
+   2978 and 3261 are 2976 and 3259; `all_distinct_vars` 1251-1256 is
+   1259-1264; subst.ml 191-203 is 191-207) and the doc comment of
+   `moregen_row`, which names `drop_name_children` where the body
+   rightly calls `forget_name_children`.
+9. Accepted: decisions 119 to 128; `#[inline]` on `TypeTable::upper`,
+   `enlarge_state`, `empty_scopes`, `leave_poly`, `enter_relation`,
+   `leave_relation` and `#[cold] #[inline(never)]` on the two shelf
+   functions; the `Instruction count` of +0.05% on code no default
+   build reaches (the functions that moved are allocator and lookup
+   functions).
+10. Not rerun in the review: the prototype (it was applied with
+    `patch`, not built), the tests on the host, the sixteen programs
+    through the released compiler (the first fourteen were run by the
+    reviewer through a compiler built from trunk and through today's
+    Rust checker, which accepted all fourteen before pull request
+    405).
 
 ## 9. R4 as designed
 

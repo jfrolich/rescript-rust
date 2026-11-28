@@ -9484,7 +9484,7 @@ fn a_trial_of_two_packages_empties_the_scopes_of_the_body_it_is_in() {
 }
 
 /// The table of pairs of `subtype_rec` is its own (`subtypes ()`,
-/// compiler/ml/ctype.ml:3641, one global cleared at 4213 and 4217),
+/// compiler/ml/ctype.ml:3611-3612, one global cleared at 4213 and 4217),
 /// and a relation the inclusion check of two packages runs inside the
 /// walk has another (`Type_pairs.create`, 3115, 3370): CHECKER_REWRITE
 /// 8.6, decision 128.

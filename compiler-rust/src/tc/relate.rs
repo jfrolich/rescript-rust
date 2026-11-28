@@ -368,7 +368,11 @@ impl Checker {
     /// ```
     ///
     /// One speculation opened BEFORE [`Checker::rigidify`] (it links row
-    /// variables), [`Checker::cleanup_abbrev`], [`Checker::unify`],
+    /// variables), [`Checker::cleanup_abbrev`], the scopes of universal
+    /// variables emptied ([`Checker::empty_scopes`]: the `unify` this
+    /// function calls in OCaml is the typer's, which starts with
+    /// `univar_pairs := []`, compiler/ml/ctype.ml:2770 by 2773),
+    /// [`Checker::unify`],
     /// [`Checker::all_distinct_vars`], the trace cut back to its length
     /// at the entry, [`Checker::restore`] on either answer. The
     /// unification runs inside the speculation, so a failure in
@@ -381,6 +385,7 @@ impl Checker {
         self.rigid_vars.clear();
         self.rigidify(ty);
         self.cleanup_abbrev();
+        self.empty_scopes();
         let result = self.unify(ty, pattern).is_ok() && self.all_distinct_vars();
         self.rigid_vars.clear();
         self.trace.truncate(trace);
@@ -2549,7 +2554,10 @@ pub struct Coercion {
     /// constraints are counted and dropped (`subtype_rec ... [] = []`,
     /// ctype.ml:3689-3690), or the tags of a row before its `Exit`.
     pub quiet: u32,
-    /// The innermost scope open: an index of `scopes`, or `NONE`.
+    /// The innermost scope open: an index of `scopes`, or `NONE`, which
+    /// also stands for "emptied" (the floor of the checker's scopes is
+    /// their length: an entry that empties OCaml's list ran inside the
+    /// polymorphic type the walk is in).
     pub held: u32,
     /// Whether the innermost quiet region has made a constraint.
     pub dirty: bool,
@@ -2597,7 +2605,8 @@ pub enum SubKind {
     /// above it are popped.
     Constrain,
     /// Leave the innermost scope of universal variables; `left` is the
-    /// `Coercion::held` to put back.
+    /// `Coercion::held` to put back and `right` the floor of the scopes
+    /// to put back ([`Checker::scope_floor`] as `enter_poly` found it).
     Leave,
     /// An invariant argument, before its first direction.
     Invariant,
