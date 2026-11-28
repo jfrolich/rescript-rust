@@ -746,6 +746,9 @@ pub(crate) enum LookupEvent {
     OpenSlot(OpenSlotEvent),
     /// `report_deprecated ?loc p deprecated` (env.ml:989-994).
     ModuleDeprecated(ModuleDeprecation),
+    /// A warning a check prints at `loc` while it runs, such as the
+    /// deprecation of an included item (builtin_attributes.ml:122-125).
+    Warning(crate::parse_arena::LocIdx, Box<crate::diagnostics::Warning>),
 }
 
 #[derive(Debug, Clone)]
@@ -3492,6 +3495,18 @@ impl TypeContext {
         );
     }
 
+    /// Record a warning a check prints while it runs.
+    pub(crate) fn record_warning(
+        &self,
+        loc: crate::parse_arena::LocIdx,
+        warning: crate::diagnostics::Warning,
+    ) {
+        self.assert_no_store_build("a warning");
+        self.open_slot_events
+            .borrow_mut()
+            .push(LookupEvent::Warning(loc, Box::new(warning)));
+    }
+
     /// Record a `report_deprecated` call of a module lookup.
     pub(crate) fn record_module_deprecation(&self, deprecation: ModuleDeprecation) {
         self.assert_no_store_build("a module deprecation");
@@ -3592,6 +3607,21 @@ impl TypeContext {
     /// The usage tables of OCaml `Env` (env.ml:27-53).
     pub(crate) fn usage(&self) -> std::cell::RefMut<'_, super::usage::UsageTables> {
         self.usage.borrow_mut()
+    }
+
+    /// The warnings recorded since the typer last drained its events.
+    pub(crate) fn take_recorded_warnings(
+        &self,
+    ) -> Vec<(crate::parse_arena::LocIdx, crate::diagnostics::Warning)> {
+        let mut warnings = Vec::new();
+        self.open_slot_events.borrow_mut().retain(|event| match event {
+            LookupEvent::Warning(loc, warning) => {
+                warnings.push((*loc, (**warning).clone()));
+                false
+            }
+            LookupEvent::OpenSlot(_) | LookupEvent::ModuleDeprecated(_) => true,
+        });
+        warnings
     }
 
     pub(crate) fn take_open_slot_events(&self) -> Vec<LookupEvent> {

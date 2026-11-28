@@ -9663,12 +9663,9 @@ inside a body `enter_poly` has open:
 - The two YES rows above without a program (the row walk's `Exit`, the
   non-injective arguments in pattern mode) are open: the code keeps
   OCaml's behaviour there, but no program shows it.
-- Not this mechanism, seen while checking the count: OCaml prints a
-  deprecation warning when the inclusion check of two packages compares an
-  item that is `@deprecated` on one side only (`Warning number 3 / Main.res
-  / deprecated: x`, before the type error), and the Rust compiler prints
-  none (`S` with `@deprecated("plain") let x: t`, `T` without, in program
-  10's annotation). Both refuse it with the same error otherwise.
+- Not this mechanism, seen while checking the count: the deprecation
+  warning of an item compared by the inclusion check of two packages. It is
+  fixed and recorded in W1 below.
 - `deprecated_inclusion_warning(...)?` (includemod.rs, before the count in
   `value_descriptions` and `includecore_type_declarations`) returns `Err`
   only for an invalid string template in a `@deprecated` payload; OCaml's
@@ -9678,6 +9675,138 @@ inside a body `enter_poly` has open:
   compilation (typemod.ml:1235 catches only `Includemod.Error`) where the
   Rust check reads it as "not included"; `"bad \q escape"` is accepted by
   both, and no payload that raises was found.
+
+### W1 - a package inclusion check reports the deprecation of an item
+
+Found while fixing U12: OCaml's inclusion check prints a deprecation the
+moment it compares an item that is `@deprecated` on its left side only
+(`Builtin_attributes.check_deprecated_inclusion`, builtin_attributes.ml:122-125,
+through `Location.deprecated`), whatever the check returns afterwards. Under
+`package_subtype` (typemod.ml:1224-1236) the location is `Location.none`, so
+the warning prints the file name and no code frame. The Rust compiler printed
+none of these warnings. Every program below starts with
+`module type T = { type t  let x: t }` and an `S` with the same items and
+`@deprecated("plain")` on `x`, unless it says otherwise. Commands are as in
+"Scope, calibration and reproducibility" of the second round (`bsc -w +A
+-bs-jsx 4 -color never`), and a unit with an interface follows its U6 recipe.
+Each cell compares the exit code, the JavaScript and the whole diagnostic
+text. `w` is the number of `Warning number 3` OCaml prints.
+
+| program | OCaml | w | Rust before | Rust after |
+|---|---|---|---|---|
+| `(o: {"f": 'a. (module(S), 'a)}): {"f": 'a. (module(T), 'a)} => o` | refused | 1 | no warning | same text |
+| the same, deprecated on `T` only | refused | 1 | no warning | same text |
+| the same, deprecated on both | refused | 0 | same text | same text |
+| the same, two deprecated values in `S` | refused | 2 | no warning | same text |
+| `(o: module(S)): module(T) => o` | accepted | 1 | no warning | same text |
+| `(o: module(T)): module(S) => o` | accepted | 1 | no warning | same text |
+| `(o: module(S)): module(T) => o`, `S` with one value more | refused | 3 | 0 warnings | same text |
+| `(o: {"f": module(S)}) => (o :> {"f": module(T)})` | accepted | 1 | no warning | same text |
+| `(o :> {"f": module(S)})` from `{"f": module(T)}` | accepted | 0 | same text | same text |
+| `(o :> {"f": 'a. (module(T), 'a)})` from `'a. (module(S), 'a)` | refused | 1 | no warning | same text |
+| two functions, three uses of `o` | accepted | 3 | no warning | same text |
+| an unused `let` before and after the use | accepted | 1 | no warning | same text, same order |
+| deprecated `type t` and `x` | accepted | 3 | no warning | same text |
+| deprecated constructor `A` | accepted | 1 | no warning | same text |
+| deprecated record type `t` | accepted | 1 | no warning | same text |
+| deprecated record field | accepted | 0 | same text | same text |
+| deprecated extension constructor | accepted | 0 | same text | same text |
+| deprecated `module M: I` | accepted | 1 | no warning | same text |
+| deprecated `module type I` | accepted | 1 | no warning | same text |
+| `module M: J` with a deprecated `v` in `J` against `module M: I` | accepted | 1 | no warning | same text |
+| interface: `let g: module(T) => unit` against `module(S) => unit` (`moregen`) | accepted | 1 | no warning | same text |
+| interface: manifest `type u = module(T)` against `module(S)`, and reversed (`eqtype`) | accepted | 1, 1 | no warning | same text |
+| `X with module M = N`, `N` with a deprecated `v` | accepted | 1 | no warning | same text |
+| the same, `N` without an item of `M`'s type | refused | 0 | same text | same text |
+| `let p: module(T) = module(M)`, `M: S` | accepted | 1 | same text | same text |
+| `@warning("-3")` on the first of two functions | accepted | 1 | no warning | same text |
+| `@warning("-3")` on the expression (two shapes); `@warning("+3")` on it, under `-w +A` and under `@@warning("-3")` (three shapes) | accepted | 0, 0, 1, 1, 1 | first two same text | same text |
+| `@@warning("-3")`, then `@@warning("+3")` before a second function | accepted | 1 | no warning | same text |
+| tests/tests `package_deprecated_inclusion` (.res and .resi) | accepted | 15 | no warning | same text |
+| seven programs on the usage marks below | accepted | 0 | same text | same text |
+
+41 programs in total: 15 agreed before the fix, and all 41 agree after it.
+
+Fixed:
+
+- `f1ef44dad`: the public `Includemod.modtypes` of the Rust compiler
+  collected the warnings of its check into a local list and dropped it. A
+  trace on the first program showed `deprecated_inclusion_warning` returning
+  the warning for `x` and `modtypes` returning `Ok` with one warning dropped,
+  twice. `modtypes` now takes the check's `~loc` (typemod.ml:214, 376/383 and
+  1234) and records its warnings as lookup events. The typer already drains
+  that queue in call order at each report and at each lookup that reports.
+  Its three callers are `package_subtype` (`Location.none`), `with module`
+  and the applicative-functor retyping. The last two were dropping the same
+  warnings, as the `with module` row shows.
+- `e271d3924`: an expression's type clash is reported with a coercion hint
+  that runs `Ctype.subtype` (`print_extra_type_clash_help`,
+  error_message_utils.ml:770). A trace of OCaml on the refused program with
+  one value more showed three package checks: the unification
+  (ctype.ml:2178), then the report's subtyping trial (4092) and the
+  unification of its constraint (4224). Each check prints before the error
+  text. The Rust report recorded the warnings of the last two, and nothing
+  drained them once typing had stopped. The driver's error path now prints
+  them, as it prints the parser warnings of re-parsed snippets, with the
+  warning state the report reads.
+
+What a check with no deprecated item pays: nothing new. Its warning list
+is the empty `Vec` it was before, and recording is a loop over that empty
+list. The queue is touched only when a warning exists, and the error path
+scans it once per error report.
+
+Audit (a): every `check_deprecated_inclusion` call of OCaml's inclusion
+check against its Rust site (`compiler-rust/src/types/includemod.rs`):
+
+| OCaml | Rust | reached under `package_subtype` | program |
+|---|---|---|---|
+| includecore.ml:45, values | `value_descriptions` (2636) | YES | `x` rows above |
+| includecore.ml:424, constructors | `compare_constructors` (3876) | YES | deprecated constructor `A` |
+| includecore.ml:563, type declarations | `includecore_type_declarations` (3348) | YES | deprecated `type t`; deprecated record type |
+| includemod.ml:400, module declarations | `check_paired_signature_items` (2105) | YES | deprecated `module M: I` |
+| includemod.ml:411, module type declarations | `modtype_declarations` (5162) | YES | deprecated `module type I` |
+
+Labels and extension constructors are not checked by OCaml (the three calls
+in includecore.ml are the only ones; `extension_constructors`,
+includecore.ml:711-746, has none), and the Rust check has no site for
+them. Their rows above print no warning in either
+compiler.
+
+Audit (b): the other effects of the check while it runs under
+`package_subtype`. `includecore.ml` and `includemod.ml` call
+`Location.prerr_warning` nowhere and `Builtin_attributes` only through the
+five calls above. Their `Env.mark_*` calls are:
+
+| OCaml | Rust | reached | program | result |
+|---|---|---|---|---|
+| includemod.ml:61 `mark_value_used` | 2634 | YES | inside a module with a signature, `S` and `T` with `let v: int`, used only through `f` | both: one warning 32 (`f`); a value of a module type has no usage check |
+| includemod.ml:70 `mark_type_used` | 3310 | YES | the same with `type t` | both: one warning 32 |
+| includemod.ml:403 `mark_module_used` | 2120 | YES | the same with `module M: I` | both: one warning 32 |
+| includecore.ml:639 `mark_constructor_used` | 3456, 3465 | YES | the same with `type t = A \| B`; without `f`, two warnings 34 | both: the check marks the types used (no 34) |
+| includecore.ml:716 `mark_extension_used` | 5063 | YES | the same with `type e += X` | both: one warning 32 |
+
+Audit (c): how many times and in which order. `unify_package`
+(ctype.ml:2172-2180) asks `!package_subtype` both ways with `&&`; only the
+side with the deprecated item on the left warns, and the second way runs
+only if the first holds. The subtyping trial (4089-4098) asks once.
+`moregen` and `eqtype` reach the same check through `unify_package`. The
+rows on the left, the right and both sides, success and failure, coercion
+and unification, two items, a type item and a value item each print the
+same warnings as OCaml, the same number of times, in the same order and at
+the same location.
+
+Open:
+
+- The parser warnings of snippets that an error report re-parses are
+  printed after the check warnings of the same report. OCaml prints both in
+  call order. No program was found where one report produces both.
+- The second open item of U12 (an invalid string template in a
+  `@deprecated` payload inside `package_subtype`) has a cause of its own and
+  stays open.
+- The warning state is read when the queue drains, not when the check runs
+  (OCaml reads it at `Location.prerr_warning`). The seven scope programs
+  above agree. No program was found where the queue drains after the
+  check's `warning_scope` has closed.
 
 ## Fourth round: modules, aliases and usage marks
 

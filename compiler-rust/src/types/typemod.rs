@@ -8682,7 +8682,7 @@ pub(crate) fn package_subtype(
     };
     let items = ctx.inclusion_items();
     let included = matches!(
-        crate::types::includemod::modtypes(ctx, env, &mty1, &mty2),
+        crate::types::includemod::modtypes(ctx, env, LocIdx::none(), &mty1, &mty2),
         Ok(crate::types::typedtree::ModuleCoercion::Tcoerce_none)
     );
     (included, ctx.inclusion_items() != items)
@@ -9754,6 +9754,7 @@ fn merge_constraint<'a>(
                     let inclusion = crate::types::includemod::modtypes(
                         tctx.type_ctx,
                         &env,
+                        loc,
                         &newmd.md_type,
                         &md.md_type,
                     );
@@ -9982,6 +9983,7 @@ fn check_usage_of_path_of_substituted_item(
         env: &Env,
         funct: &Path,
         arg: &Path,
+        loc: LocIdx,
     ) -> Result<(), crate::types::includemod::IncludeModError> {
         let Ok(functor_md) = env.lookup_module(funct) else {
             return Ok(());
@@ -10018,7 +10020,8 @@ fn check_usage_of_path_of_substituted_item(
             )
         };
 
-        crate::types::includemod::modtypes(tctx.type_ctx, env, &mty_arg, &mty_param).map(|_| ())
+        crate::types::includemod::modtypes(tctx.type_ctx, env, loc, &mty_arg, &mty_param)
+            .map(|_| ())
     }
 
     fn check_path(
@@ -10035,7 +10038,7 @@ fn check_usage_of_path_of_substituted_item(
                 return;
             }
             if paths.iter().any(|path| path_is_strict_prefix(path, arg)) {
-                let retyped = retype_applicative_functor_type(tctx, env, funct, arg);
+                let retyped = retype_applicative_functor_type(tctx, env, funct, arg, loc);
                 match crate::types::includemod::escaped(tctx.type_ctx, retyped) {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {
