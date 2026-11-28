@@ -376,4 +376,51 @@ mod tests {
         let root = a.for_(Ident::new("i", 1, IdentFlags::NONE), start, end, DirectionFlag::Upto, body);
         super::super::oracle_tests::compare(a, root);
     }
+
+    /// `c => for i in start() to { other := 10; 10 } { eff() }`: the start
+    /// is declared before the bound's statement and the loop reads and
+    /// writes that declaration though its body does not read `i`.
+    #[test]
+    fn a_held_start_is_used_by_its_loop() {
+        use crate::js_ir::op::UsedStats;
+        use crate::lambda::{ApInfo, ApplyStatus};
+        let mut a = LamArena::new();
+        let var = Ident::new("i", 1, IdentFlags::NONE);
+        let info = || ApInfo { status: ApplyStatus::InferFull, loc: LamLoc::NONE };
+        let callee = a.var(Ident::new("start", 2, IdentFlags::NONE));
+        let start = a.apply_raw(callee, &[], info());
+        let ten = a.const_(Constant::int(10));
+        let assign = a.assign(Ident::new("other", 3, IdentFlags::NONE), ten);
+        let end = a.seq_raw(assign, ten);
+        let callee = a.var(Ident::new("eff", 4, IdentFlags::NONE));
+        let body = a.apply_raw(callee, &[], info());
+        let range = a.for_(var, start, end, DirectionFlag::Upto, body);
+        let root = a.function_(1, &[Ident::new("c", 5, IdentFlags::NONE)], range, Default::default(), LamLoc::NONE);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let source_root = input.root;
+        let mut state = State::new(input);
+        let probed = state.probe(Cx::value(), source_root).unwrap();
+        let lowered = state.complete(Cx::value(), probed);
+        let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+        let decision = scope.decisions.iter().find(|d| lowered.program.idents[d.var.index()].same(&var)).copied().unwrap();
+        assert_eq!((decision.status(), decision.built()), (UsedStats::Used as u32, 1));
+    }
+
+    /// `catch (raise e) with (1) (for i in 0 to n { eff() })`: the body is
+    /// finished, so the lowered handler is released with its loop, and the
+    /// loop's use of `i` with it.
+    #[test]
+    fn a_released_range_loop_releases_its_use() {
+        use crate::lambda::{ApInfo, ApplyStatus};
+        let mut a = LamArena::new();
+        let start = a.const_(Constant::int(0));
+        let end = a.var(Ident::new("n", 2, IdentFlags::NONE));
+        let callee = a.var(Ident::new("eff", 3, IdentFlags::NONE));
+        let body = a.apply_raw(callee, &[], ApInfo { status: ApplyStatus::InferFull, loc: LamLoc::NONE });
+        let handler = a.for_(Ident::new("i", 1, IdentFlags::NONE), start, end, DirectionFlag::Upto, body);
+        let exception = a.var(Ident::new("e", 4, IdentFlags::NONE));
+        let raised = a.prim_raw(Primitive::Praise, &[exception], LamLoc::NONE);
+        let root = a.static_catch(raised, 1, &[], handler);
+        super::super::oracle_tests::compare(a, root);
+    }
 }

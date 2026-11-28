@@ -678,6 +678,16 @@ impl Bir {
                 }
             }
         }
+        // A range loop reads and writes its variable whether its body reads
+        // it or not, as the legacy passes count it (`for_ident`,
+        // js_record_iter.ml:171-176): a start held before the loop is a
+        // declaration that use keeps. Released with the loop.
+        if node.op() == Op::SForRange {
+            if let Some(scope) = &mut self.js_scope {
+                let View::SForRange { var, .. } = node.view(&self.lists) else { unreachable!() };
+                scope.occurrence(var, add);
+            }
+        }
         if node.op() == Op::JQualified {
             if let Some(scope) = &mut self.js_scope {
                 let View::JQualified { module, .. } = node.view(&self.lists) else { unreachable!() };

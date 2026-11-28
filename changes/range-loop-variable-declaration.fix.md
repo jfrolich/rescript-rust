@@ -1,0 +1,1 @@
+- Keep the declaration of a range loop's first value when the loop's bound needs statements and the body does not read the loop variable, instead of printing a loop over an undeclared variable.

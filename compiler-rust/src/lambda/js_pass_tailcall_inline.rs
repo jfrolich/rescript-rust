@@ -9,7 +9,7 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
 use crate::js_ir::BinOp;
 use crate::js_ir::arena::{
-    Block, Expr, ExprKind, FunInfo, IdentList, JsArena, JsDepsProgram as DepsProgram,
+    Block, Expr, ExprKind, FunInfo, IdentId, IdentList, JsArena, JsDepsProgram as DepsProgram,
     JsProgram as Program, Stmt, StmtKind, StmtList, StringClauseInfo, VarDecl,
 };
 use crate::js_ir::build::stmt as S;
@@ -402,6 +402,14 @@ impl Visitor for UseCounts {
         }
     }
 
+    /// A range loop uses its variable: when the first value is declared
+    /// before the loop, the loop reads and writes that declaration even if
+    /// its body does not (`js_pass_get_used.ml:70`, `ident` counts the
+    /// iterator's `for_ident` visit). One count per range loop.
+    fn visit_range_variable(&mut self, a: &JsArena, ident: IdentId) {
+        *self.counts.entry(a.ident(ident)).or_insert(0) += 1;
+    }
+
     fn visit_declaration(&mut self, a: &JsArena, decl: &VarDecl) {
         self.decls.insert(
             decl.ident,
@@ -787,5 +795,39 @@ mod source_loc_tests {
             panic!("expected an int switch");
         };
         assert!(a.int_switch(info).clauses[0].1.source_loc.is_some());
+    }
+
+    #[test]
+    fn a_range_loop_uses_its_held_variable() {
+        // js_pass_get_used.ml:70 counts the loop's `for_ident` visit.
+        let mut program = held_range_loop(call_f);
+        tailcall_inline_program(&mut program, &HashSet::default());
+        let StmtKind::Variable(v) = program.arena.sk(program.block[0]) else { panic!("a declaration") };
+        assert_eq!(program.arena.var(v).ident_info.used_stats, UsedStats::Used);
+    }
+
+    /// `let i = <start>; for (; i <= 3; ++i) { <effect> }`: the loop's first
+    /// value held before it, the body not reading `i`.
+    fn held_range_loop(start: impl FnOnce(&mut JsArena) -> Expr) -> Program {
+        use crate::ident::IdentFlags;
+        use crate::js_ir::ForDirection;
+        use crate::js_ir::build::{exp as E, stmt as S};
+        let mut j = JsArena::new();
+        let i = Ident::new("i", 1, IdentFlags::NONE);
+        let start = start(&mut j);
+        let declare = S::define(i, Some(start), LetKind::Variable, &mut j);
+        let end = E::int(3, &mut j);
+        let g = E::var(Ident::new("g", 2, IdentFlags::NONE), &mut j);
+        let call = E::call(g, &[], Default::default(), &mut j);
+        let effect = j.stmt(StmtKind::Exp(call));
+        let range = S::for_range(None, None, end, i, ForDirection::Upto, &[effect], &mut j);
+        Program { arena: j, block: vec![declare, range], exports: vec![], export_set: Default::default(), name_reservations: vec![] }
+    }
+
+    /// `f()`.
+    fn call_f(j: &mut JsArena) -> Expr {
+        use crate::js_ir::build::exp as E;
+        let f = E::var(Ident::new("f", 3, crate::ident::IdentFlags::NONE), j);
+        E::call(f, &[], Default::default(), j)
     }
 }

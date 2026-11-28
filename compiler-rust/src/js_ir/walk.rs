@@ -18,6 +18,11 @@ pub(crate) trait Visitor {
         false
     }
     fn visit_declaration(&mut self, _a: &JsArena, _declaration: &VarDecl) {}
+    /// The variable of a range loop, after its first value and bound and
+    /// before its body, where OCaml's iterator visits it as an identifier
+    /// (`for_ident`, compiler/core/js_record_iter.ml:171-176). Constant for
+    /// the walk: one call per range loop.
+    fn visit_range_variable(&mut self, _a: &JsArena, _ident: IdentId) {}
     /// Called for every block before its statements.
     fn visit_block(&mut self, _a: &JsArena, _block: &[Stmt]) {}
     /// Whether the walk can stop early.
@@ -68,6 +73,7 @@ fn walk_statement(visitor: &mut impl Visitor, a: &JsArena, statement: Stmt) {
                 walk_expression(visitor, a, init);
             }
             walk_expression(visitor, a, info.end);
+            visitor.visit_range_variable(a, info.ident);
             walk_list(visitor, a, info.body);
         }
         StmtKind::ForOf(info) | StmtKind::ForAwaitOf(info) => {
