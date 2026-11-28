@@ -2979,7 +2979,7 @@ mod tests {
     fn row_and_fact_sizes() {
         use std::mem::size_of;
         assert_eq!(size_of::<super::Row>(), 8);
-        assert_eq!(size_of::<crate::bir::lower::scope::Site>(), 8);
+        assert_eq!(size_of::<crate::bir::lower::scope::Site>(), 12);
         // Passed down the fold.
         assert_eq!(size_of::<super::Init>(), 12);
         assert_eq!(size_of::<super::Replacement>(), 8);

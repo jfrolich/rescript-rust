@@ -407,6 +407,14 @@ pub struct JsxHeader {
     pub multi: bool,
     /// This is a fragment.
     pub fragment: bool,
+    /// The element has a children list (the `aux` of its node), kept with
+    /// the header so that the element's printed form is read from the
+    /// pools, by the element's information alone.
+    pub has_children: bool,
+    /// JSX can name the element's tag (`lower::jsx::jsx_tag`). Written
+    /// where the element is built, in a unit that preserves JSX; false in
+    /// any other unit, which does not read it.
+    pub tag_named: bool,
 }
 /// One template segment's raw and cooked text.
 #[derive(Debug, Clone, Copy)]

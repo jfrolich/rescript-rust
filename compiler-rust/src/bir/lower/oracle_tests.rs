@@ -1483,7 +1483,7 @@ fn a_copied_function_doubles_the_legacy_count_of_the_variables_declared_inside_i
 #[test]
 fn ten_thousand_return_sites_are_read_in_two_steps_each() {
     // One `return` of 10,000 nested conditionals, each with a call of its own
-    // callee in one branch: `scope::return_sites` takes one step per
+    // callee in one branch: `JsStmt::return_calls` takes one step per
     // conditional and one per call, and records every callee's site.
     use crate::lambda::LamLoc;
     let mut a = LamArena::new();

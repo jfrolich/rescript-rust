@@ -12,7 +12,8 @@ pub(crate) struct Uses {
 }
 
 /// The position fact of one reference (THREE_TREES 11.4, "T4a as built"):
-/// its node and the next site of the same variable. The statement the
+/// its node, the next site of the same variable and what it names. 12
+/// bytes. The statement the
 /// reference is in and its parent are read from the node when the top level
 /// is complete (`lower::export`). A reference to an imported module has a
 /// site too (THREE_TREES 11.4, "T5 part B as built"): the naming log reads
@@ -27,6 +28,10 @@ pub(crate) struct Site {
     /// zero ends the chain. Zero for a module reference: no chain is kept
     /// per import (nothing reads the references of one import).
     pub(crate) next: u32,
+    /// What the reference names: its variable or its imported module. The
+    /// close of a function scope reads it beside `node` (`names.rs`,
+    /// `read_sites`) and reads no node.
+    pub(crate) entry: super::names::FreeRef,
 }
 
 /// What the close of a run reads about one variable besides its counts
@@ -179,16 +184,17 @@ impl Scope {
     pub(crate) fn site(&mut self, var: VarId, node: NodeId) -> u32 {
         let index = u32::try_from(self.sites.len()).expect("site capacity");
         let head = &mut self.site_heads[var.index()];
-        self.sites.push(Site { node, next: *head });
+        self.sites.push(Site { node, next: *head, entry: super::names::FreeRef::var(var) });
         *head = index + 1;
         index
     }
 
-    /// Record the reference `node` to an imported module where it is built.
-    /// Returns the site's index, which the node keeps. Cost: one push.
-    pub(crate) fn import_site(&mut self, node: NodeId) -> u32 {
+    /// Record the reference `node` to the imported module `module` where it
+    /// is built. Returns the site's index, which the node keeps. Cost: one
+    /// push.
+    pub(crate) fn import_site(&mut self, module: crate::bir::ImportId, node: NodeId) -> u32 {
         let index = u32::try_from(self.sites.len()).expect("site capacity");
-        self.sites.push(Site { node, next: 0 });
+        self.sites.push(Site { node, next: 0, entry: super::names::FreeRef::import(module) });
         index
     }
 
@@ -226,7 +232,7 @@ mod tests {
     #[test]
     fn count_row_size() {
         assert_eq!(std::mem::size_of::<Uses>(), 8);
-        assert_eq!(std::mem::size_of::<Site>(), 8);
+        assert_eq!(std::mem::size_of::<Site>(), 12);
         assert_eq!(std::mem::size_of::<VarFacts>(), 8);
         assert_eq!(std::mem::size_of::<Decision>(), 8);
     }

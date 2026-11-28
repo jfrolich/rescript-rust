@@ -15,22 +15,21 @@ pub(super) enum PrintedForm {
     Fragment,
 }
 
-/// The form of the JSX node `jsx` in a unit that preserves JSX
-/// (`emit::walk::jsx_form` over `js_ir::printer::jsx_printable`, on the
-/// finished node): an element when the tag is one JSX can name, every
-/// property key is a JSX attribute name and the children agree with the
-/// element's arity; a fragment when it is an empty fragment besides.
-/// Cost: one step per property key and per member of the tag's chain, and
-/// the bytes of their names, added to `steps`; nothing is allocated once
-/// `spelling` has its capacity.
-pub(super) fn printed_form(bir: &Bir, idents: &[Ident], jsx: NodeId, spelling: &mut String, steps: &mut usize) -> PrintedForm {
+/// The form of the JSX element whose information is `info`, in a unit that
+/// preserves JSX (`emit::walk::jsx_form` over
+/// `js_ir::printer::jsx_printable`): an element when the tag is one JSX can
+/// name, every property key is a JSX attribute name and the children agree
+/// with the element's arity; a fragment when it is an empty fragment
+/// besides. Read from the pools alone: the header holds what the element's
+/// node said (`has_children`, and `tag_named`, decided where the element
+/// was built). Cost: one step per property key and the bytes of their
+/// names, added to `steps`; nothing is allocated.
+pub(super) fn printed_form(bir: &Bir, info: crate::bir::JsId, steps: &mut usize) -> PrintedForm {
     use crate::js_ir::printer::{is_jsx_attribute_name, unwrap_uppercase_exotic};
-    let View::JJsx { values, info } = bir.view(jsx) else { unreachable!("a JSX node") };
     let crate::bir::JsPayload::Jsx(header) = bir.javascript(info) else { unreachable!("JSX metadata") };
     let keys = bir.property_keys(header.props);
     let fragment = header.fragment && !header.spread && keys.is_empty() && !header.key;
-    let has_children = bir.nodes[jsx.index()].aux() != 0;
-    let printable = (fragment || jsx_tag(bir, idents, values[1], spelling, steps))
+    let printable = (fragment || header.tag_named)
         && keys.iter().all(|key| {
             *steps += 1;
             match key {
@@ -38,7 +37,7 @@ pub(super) fn printed_form(bir: &Bir, idents: &[Ident], jsx: NodeId, spelling: &
                 _ => false,
             }
         })
-        && (!has_children || (header.children >= 2) == header.multi);
+        && (!header.has_children || (header.children >= 2) == header.multi);
     match (printable, fragment) {
         (false, _) => PrintedForm::Runtime,
         (true, false) => PrintedForm::Element,
@@ -48,11 +47,19 @@ pub(super) fn printed_form(bir: &Bir, idents: &[Ident], jsx: NodeId, spelling: &
 
 /// Whether JSX can name `tag` (`js_ir::printer::is_jsx_tag`): an intrinsic
 /// element name, a variable or module whose printed name starts as a
-/// component's does, or a chain of dotted members over one. Cost: one step
-/// per member of the chain, added to `steps`, and the bytes of the names.
-fn jsx_tag(bir: &Bir, idents: &[Ident], tag: NodeId, spelling: &mut String, steps: &mut usize) -> bool {
+/// component's does, or a chain of dotted members over one. Read through
+/// the interface from the tag in hand, before the element is built. Cost:
+/// one step per member of the chain, added to `steps`, and the bytes of
+/// the names; nothing is allocated once `spelling` has its capacity.
+pub(super) fn jsx_tag<'r, B: super::js::Js>(
+    js: &B,
+    bir: &'r Bir,
+    idents: &[Ident],
+    tag: B::Ref<'r>,
+    spelling: &mut String,
+    steps: &mut usize,
+) -> bool {
     use crate::js_ir::printer::{convert_ident_into, is_jsx_name_char, is_jsx_value_name, property_access_uses_dot};
-    use crate::js_ir::Kind;
     // `printed_ident_name`: a JavaScript binding prints as it is spelled.
     let mut value_name = |ident: &Ident| {
         if ident.is_js() {
@@ -62,32 +69,41 @@ fn jsx_tag(bir: &Bir, idents: &[Ident], tag: NodeId, spelling: &mut String, step
         convert_ident_into(ident.name(), spelling);
         is_jsx_value_name(spelling)
     };
-    match bir.view(tag) {
-        View::JStr { text } => match bir.text(text).as_bytes() {
+    match js.kind(bir, tag) {
+        Kind::Str => match js.text(bir, tag).expect("the text of a string").as_bytes() {
             [first, rest @ ..] => first.is_ascii_lowercase() && rest.iter().all(|c| is_jsx_name_char(*c, true)),
             [] => false,
         },
-        View::Var { var } => idents.get(bir.vars.j_origin[var.index()].index()).is_some_and(&mut value_name),
-        View::JQualified { module, member } => {
+        Kind::Var => {
+            let var = js.var_of(bir, tag).expect("the variable of a reference");
+            idents.get(bir.vars.j_origin[var.index()].index()).is_some_and(&mut value_name)
+        }
+        Kind::Qualified => {
+            let (module, member) = js.qualified_of(bir, tag).expect("the module of a reference");
             let module = &bir.pools.j_modules[module.index()];
             match member {
                 None => value_name(&module.id),
-                Some(_) if matches!(module.kind, Kind::External { default: true, .. }) => value_name(&module.id),
+                Some(_) if matches!(module.kind, crate::js_ir::Kind::External { default: true, .. }) => value_name(&module.id),
                 Some(name) => match module.kind {
-                    Kind::Ml | Kind::Runtime => true,
-                    Kind::External { .. } => property_access_uses_dot(bir.text(name)),
+                    crate::js_ir::Kind::Ml | crate::js_ir::Kind::Runtime => true,
+                    crate::js_ir::Kind::External { .. } => property_access_uses_dot(bir.text(name)),
                 },
             }
         }
-        View::JDot { .. } => {
+        Kind::Dot => {
             // `is_jsx_member_expression`: dotted members down to a
             // variable or a module.
             let mut at = tag;
             loop {
                 *steps += 1;
-                match bir.view(at) {
-                    View::Var { .. } | View::JQualified { .. } => return true,
-                    View::JDot { object, property, .. } if bir.nodes[at.index()].aux() == 0 && property_access_uses_dot(bir.text(property)) => at = object,
+                match js.kind(bir, at) {
+                    Kind::Var | Kind::Qualified => return true,
+                    Kind::Dot
+                        if js.aux(bir, at) == 0
+                            && js.member_of(bir, at).is_some_and(|(property, _)| property_access_uses_dot(bir.text(property))) =>
+                    {
+                        at = js.operand(bir, at, 0)
+                    }
                     _ => return false,
                 }
             }
@@ -161,6 +177,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         // given to `Js::jsx_element` apart from the operands pushed here.
         let mark = self.js.mark();
         let tag = args.next().expect("JSX tag");
+        let tag_named = super::names::jsx_tag_named(&self.js, &mut self.arena, &self.idents, &tag);
         self.js.push(tag);
         if jsx.jsx_spread {
             let spread = args.next().expect("JSX spread");
@@ -196,6 +213,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             key: jsx.jsx_key,
             multi: jsx.jsx_multi,
             fragment: jsx.jsx_fragment,
+            has_children: jsx.jsx_children.is_some(),
+            tag_named,
         }));
         self.js.jsx_element(&mut self.arena, callee, mark, info, jsx.jsx_children.is_some())
     }
