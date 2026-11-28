@@ -6644,7 +6644,12 @@ fn subtype_rec(
                 &mut row_cstrs,
             )? {
                 true => *cstrs = row_cstrs,
-                false => push_subtype_cstr(cstrs, trace, t1, t2, None),
+                // ctype.ml:4035-4038: `Exit` leaves OCaml's one global as
+                // the walk of the rows left it.
+                false => {
+                    cstrs.univar_floor = row_cstrs.univar_floor;
+                    push_subtype_cstr(cstrs, trace, t1, t2, None)
+                }
             }
             Ok(())
         }
@@ -7250,9 +7255,14 @@ fn subtype_concrete_typedecls(
                                 tl1.reverse();
                                 tl2.reverse();
                                 let mut probe = cstrs.clone();
-                                match subtype_list(
+                                let probed = subtype_list(
                                     ctx, env, subtypes, trace, crate::types::type_expr::PoolSlice::from(&tl1), crate::types::type_expr::PoolSlice::from(&tl2), &mut probe,
-                                ) {
+                                );
+                                // ctype.ml:3900-3901: the probe walks with
+                                // OCaml's one global, which stays as the
+                                // probe left it.
+                                cstrs.univar_floor = probe.univar_floor;
+                                match probed {
                                     Ok(()) if probe.len() == cstrs.len() => {
                                         ConstructorCoercion::Coerces
                                     }
@@ -7291,7 +7301,7 @@ fn subtype_concrete_typedecls(
                     ) =>
                     {
                         let mut probe = cstrs.clone();
-                        match subtype_list(
+                        let probed = subtype_list(
                             ctx,
                             env,
                             subtypes,
@@ -7299,7 +7309,11 @@ fn subtype_concrete_typedecls(
                             tl1.into(),
                             tl2.into(),
                             &mut probe,
-                        ) {
+                        );
+                        // ctype.ml:3934-3935: the probe walks with OCaml's
+                        // one global, which stays as the probe left it.
+                        cstrs.univar_floor = probe.univar_floor;
+                        match probed {
                             Ok(()) if probe.len() == cstrs.len() => ConstructorCoercion::Coerces,
                             Ok(()) | Err(_) => ConstructorCoercion::FailsUnexplained,
                         }
