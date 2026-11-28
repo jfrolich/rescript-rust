@@ -1078,8 +1078,10 @@ impl<'a> Builder<'a> {
     }
 
     /// `let variable = value;`, the binder printed through the name table
-    /// (the symbol id is the variable's index). `kind` is the `LetKind`.
-    /// Whether the declaration prints, and as what, is the seal's. O(1).
+    /// (the symbol id is the variable's index). `kind` is the `aux` of a
+    /// `Declare`: the `LetKind` in its low two bits and the `UsedStats`
+    /// above them ([`Builder::status`]). Whether the declaration prints,
+    /// and as what, is the seal's. O(1).
     pub fn declare(&mut self, variable: u32, kind: u8, value: Option<J<'a>>) -> S<'a> {
         let flags = value.as_ref().map_or(0, |value| value.row.flags);
         if let Some(value) = &value {
@@ -1576,6 +1578,16 @@ impl<'a> Builder<'a> {
             Kind::Try => row.payload.checked_sub(1),
             _ => None,
         }
+    }
+
+    /// The status of a `Declare` or a `Rest` (the lowering's
+    /// `JsStmt::status`): the bits of the row's `aux` above the two of the
+    /// `LetKind`. O(1): the row in the handle; counts no step. Panics on a
+    /// statement that is neither.
+    pub fn status(&self, statement: &S<'a>) -> u8 {
+        let row = statement.row;
+        assert!(matches!(row.kind, Kind::Declare | Kind::Rest), "not a declaration");
+        row.aux >> 2
     }
 }
 

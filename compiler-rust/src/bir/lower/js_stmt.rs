@@ -407,6 +407,16 @@ pub trait JsStmt: Js {
     /// catch variable `Replay::child` names between the body and the
     /// handler of a `try`.)
     fn binder(&self, a: &Pools, s: &Self::S) -> Option<VarId>;
+    /// The status a `Declare` or a `Rest` carries: its `UsedStats` as a
+    /// number (`js_ir::op::UsedStats`), which says whether the printer
+    /// omits the declaration, writes its value alone or writes it with its
+    /// binder. It is not part of [`JsStmt::stmt_aux`], which gives the
+    /// `LetKind` alone. O(1): on rows the bits of the row's `aux` above
+    /// the kind; on an implementation that owns its nodes the same bits of
+    /// the statement's row of facts. Counts no step. Panics on a statement
+    /// that is neither. (THREE_TREES 11.4, "T6r: the naming replay behind
+    /// the interface", decision 7: `names.rs`, `Replay::declaration`.)
+    fn status(&self, a: &Pools, s: &Self::S) -> u8;
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code
     /// that can be observed. An expression statement and a `return` are
     /// free when their value is strictly pure (E:15); a block, an `if`, a

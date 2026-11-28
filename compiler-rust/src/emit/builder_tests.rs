@@ -1838,6 +1838,7 @@ mod walks {
 /// T6r-c).
 mod replay {
     use super::*;
+    use crate::lambda::lam_compat::LetKind;
 
     /// A statement with the row `row`: the readers of a statement in hand
     /// read the row alone, and the builder has no constructor yet for the
@@ -1874,5 +1875,33 @@ mod replay {
         assert_eq!(b.binder(&returned), None);
         assert_eq!(b.steps, steps_after);
         assert!(steps_after > steps);
+    }
+
+    #[test]
+    fn the_status_of_a_declaration_is_the_bits_of_its_row_above_the_kind() {
+        use crate::js_ir::op::UsedStats;
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        for status in [UsedStats::DeadPure, UsedStats::DeadNonPure, UsedStats::Used] {
+            let one = b.int(1);
+            let declaration = b.declare(4, LetKind::Alias as u8 | (status as u8) << 2, Some(one));
+            let steps = b.steps;
+            assert_eq!(b.status(&declaration), status as u8);
+            // The kind is the low two bits, as the lowering's `stmt_aux`
+            // reads them.
+            assert_eq!(declaration.row.aux & 0b11, LetKind::Alias as u8);
+            assert_eq!(b.steps, steps);
+            assert_eq!(b.status(&with_row(&b, Kind::Rest, (status as u8) << 2 | 1, 4)), status as u8);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "not a declaration")]
+    fn the_status_of_a_statement_that_declares_nothing_is_not_read() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let value = b.int(1);
+        let statement = b.exp(value);
+        b.status(&statement);
     }
 }

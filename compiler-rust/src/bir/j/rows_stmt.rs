@@ -62,6 +62,7 @@
 //! | `alias_at` | T6x-e | the `var` of the `Var` that is the `value` of the `SDecl` `id`; `None` otherwise |
 //! | `return_calls` | T6r | `return_calls_of` of the `value` of the `SReturn` that is entry `index` of the pool list, on `Rows::work`: a `JCond` pushes its else-branch and its then-branch, a `JSeq` is followed to its `second`, a `JCall` of a `Var` that is a site is given to `visit` with its row id |
 //! | `binder` | T6r | the `var` of `SDecl`, `SRest`, `SForRange`, `SForOf` and `SForAwaitOf`; the `exception` of `STry`; `None` otherwise |
+//! | `status` | T6r | of an `SDecl` or an `SRest`: the bits of `aux` above the two of the `LetKind`, bit 15 apart (an `SRest` keeps it for its descriptor); a panic for any other |
 //! | `effect_free` | T6q | the read `export.rs::has_toplevel_effect` made of a statement that is not a declaration row: a work stack (`Rows::work`) of the node's children for a compound statement, the `STRICT` flag of the value of `SExp` and `SReturn` and of every expression below a compound statement, `false` at `SThrow`, `SDebugger`, a jump, `SDecl`, `SRest`, `SForOf`, `SForAwaitOf`; one step per node read |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
@@ -404,6 +405,14 @@ impl JsStmt for Rows {
             View::STry { exception, .. } => exception,
             _ => None,
         }
+    }
+    #[inline]
+    fn status(&self, a: &Pools, s: &S) -> u8 {
+        let node = a.node(s.0);
+        assert!(matches!(node.op(), crate::bir::Op::SDecl | crate::bir::Op::SRest), "not a declaration");
+        // `SDecl` packs the `LetKind` in two bits and the status above;
+        // `SRest` keeps bit 15 for its descriptor.
+        ((node.aux() & 0x7fff) >> 2) as u8
     }
     fn effect_free(&mut self, a: &Pools, s: &S) -> bool {
         let mut work = std::mem::take(&mut self.work);

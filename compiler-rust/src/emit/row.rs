@@ -109,7 +109,8 @@ pub enum Kind {
     Return,
     /// `throw value`.
     Throw,
-    /// `payload` is the variable's index; `aux` is the `LetKind`.
+    /// `payload` is the variable's index; `aux` is the `LetKind` in its low
+    /// two bits and the `UsedStats` of the declaration above them.
     Declare,
     /// `if`, with both blocks.
     If,
@@ -176,7 +177,8 @@ pub enum Kind {
     /// `try`; `payload` is the index of the exception variable plus one,
     /// 0 without a handler.
     Try,
-    /// A declaration by a rest pattern; `payload` is the variable's index.
+    /// A declaration by a rest pattern; `payload` is the variable's index,
+    /// `aux` as for `Declare`.
     Rest,
 }
 

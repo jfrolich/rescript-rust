@@ -662,4 +662,48 @@ mod replay {
         assert_eq!(steps(&r), after_other);
         assert!(before_other > before);
     }
+
+    #[test]
+    fn the_status_of_a_declaration_is_read_apart_from_its_kind() {
+        use crate::js_ir::op::UsedStats;
+        let mut u = unit();
+        let mut r = Rows::default();
+        // The interface writes every declaration as used, with a value or
+        // without one.
+        let x = r.var(&mut u.b, u.x);
+        let declaration = r.declare(&mut u.b, LetKind::Alias, u.f, Some(x));
+        let var = fresh(&mut u);
+        let bare = r.declare(&mut u.b, LetKind::Variable, var, None);
+        let steps = r.steps();
+        assert_eq!(r.status(&u.b, &declaration), UsedStats::Used as u8);
+        assert_eq!(r.stmt_aux(&u.b, &declaration), LetKind::Alias as u8);
+        assert_eq!(r.status(&u.b, &bare), UsedStats::Used as u8);
+        // A status a pass wrote is read whatever the kind is, and a rest
+        // declaration's descriptor bit is not part of it.
+        for (kind, status) in [(LetKind::Strict, UsedStats::DeadPure), (LetKind::Variable, UsedStats::DeadNonPure)] {
+            let var = fresh(&mut u);
+            let value = u.b.new_node(View::JNull, 0);
+            let aux = kind as u16 | (status as u16) << 2;
+            let dead = Rows::stmt_from_node(u.b.new_node(View::SDecl { var, value: Some(value) }, aux));
+            assert_eq!(r.status(&u.b, &dead), status as u8);
+            assert_eq!(r.stmt_aux(&u.b, &dead), kind as u8);
+        }
+        let info = u.b.js_info(JsPayload::Rest(crate::bir::RestSpan { start: 0, len: 0 }));
+        let value = u.b.new_node(View::Var { var: u.x }, 0);
+        let var = fresh(&mut u);
+        let aux = (1 << 15) | (UsedStats::DeadNonPure as u16) << 2 | LetKind::Strict as u16;
+        let rest = Rows::stmt_from_node(u.b.new_node(View::SRest { var, value, info }, aux));
+        assert_eq!(r.status(&u.b, &rest), UsedStats::DeadNonPure as u8);
+        assert_eq!(r.steps(), steps, "a reader counts no step");
+    }
+
+    #[test]
+    #[should_panic(expected = "not a declaration")]
+    fn the_status_of_a_statement_that_declares_nothing_is_not_read() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let x = r.var(&mut u.b, u.x);
+        let statement = r.exp(&mut u.b, x);
+        r.status(&u.b, &statement);
+    }
 }
