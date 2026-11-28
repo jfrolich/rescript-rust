@@ -6566,10 +6566,11 @@ seconds). They are section 8.13 in short; the tables are there.
 126. **What the eleventh turn did not do.** K1 (4), the harness:
      no `Op::Subtype`, no `Op::Enlarge`, no plan bit, no vacuity test,
      no generated cases, so today's checker was not read as a judge of
-     R3j and no seed list exists for it. K1 (6) in part: no source
-     program was run through either compiler; no built OCaml compiler
-     was in the sandbox and the turn's budget went to the prototype
-     and its tests. The step shapes pin the linearity of the frames;
+     R3j and no seed list exists for it. K1 (6) in part: the twelve source
+     programs of 8.13 were run through a RELEASED OCaml-built `bsc`
+     (12.3.1), not one built from this tree, and not through the Rust
+     compiler; they were run after the tests were written, and agree
+     with them. The step shapes pin the linearity of the frames;
      of the structures only the table of pairs, `open_scopes` and
      `on_path` were broken and seen to fail a test. No hand-built test
      reaches: the package arm of `enlarge_visit`, `expands` through a
@@ -9196,10 +9197,75 @@ fields of `Checker` are empty vectors and no built function reads them.
 Per call, each doc comment states its cost; the two step tests pin
 them.
 
-**Source programs.** Not run in this turn (decision 126): the sandbox
-had no built OCaml compiler and the turn's budget went to the
-prototype. The programs the review should run through both compilers
-are listed with the open questions of the pull request.
+**Source programs**, each run through the OCaml compiler only: a
+RELEASED `bsc` (ReScript 12.3.1, the binary of the npm package the
+sandbox had, NOT built from this tree, whose `ctype.ml` may differ from
+trunk's) with `-nostdlib -nopervasives -bs-no-builtin-ppx -color
+never`. The Rust compiler was not run on them (no built binary in the
+turn). Blank lines and the source excerpt of an error are left out.
+
+```text
+obj_ok       let f = (x: {"a": int, "b": int}) => (x :> {"a": int})
+    accepted (exit 0)
+obj_bad      let f = (x: {"a": int}) => (x :> {"a": int, "b": int})
+    obj_bad.res:1:29-53
+    Type {"a": int} is not a subtype of {"a": int, "b": int}
+    (exit 2)
+var_ok       let f = (x: [#A | #B(int)]) => (x :> [#A | #B(int) | #C])
+    accepted (exit 0)
+var_bad      let f = (x: [#A | #B(int) | #C]) => (x :> [#A | #B(int)])
+    var_bad.res:1:38-56
+    Type [#A | #B(int) | #C] is not a subtype of [#A | #B(int)]
+    The second polymorphic variant is closed and doesn't include the constructor: #C.
+    (exit 2)
+fun_ok       let f = (g: {"a": int} => int) => (g :> {"a": int, "b": int} => int)
+    accepted (exit 0)
+fun_bad      let f = (g: {"a": int, "b": int} => int) => (g :> {"a": int} => int)
+    fun_bad.res:1:46-67
+    Type {"a": int, "b": int} => int is not a subtype of {"a": int} => int
+    Type {"a": int} is not a subtype of {"a": int, "b": int}
+    (exit 2)
+co_ok        type co<'a> = Co('a)
+             let f = (x: co<{"a": int, "b": int}>) => (x :> co<{"a": int}>)
+    accepted (exit 0)
+contra_ok    type contra<'a> = Contra('a => int)
+             let f = (x: contra<{"a": int}>) => (x :> contra<{"a": int, "b": int}>)
+    accepted (exit 0)
+inv_bad      type inv<'a> = Inv('a => 'a)
+             let f = (x: inv<{"a": int, "b": int}>) => (x :> inv<{"a": int}>)
+    inv_bad.res:2:44-63
+    Type inv<{"a": int, "b": int}> is not a subtype of inv<{"a": int}>
+    The second object is expected to have a field "b" of type int, but it does not.
+    (exit 2)
+priv_ok      module M: { type t = private int; let v: t } = { type t = int; let v = 1 }
+             let x = (M.v :> int)
+    accepted (exit 0)
+priv_bad     module M: { type t = private int } = { type t = int }
+             let x = (1 :> M.t)
+    priv_bad.res:6:10-17
+    Type int is not a subtype of M.t
+    (exit 2)
+enlarge      let f = x => (x :> {"a": int})
+             let y = f(1)
+    enlarge_probe.res:2:11
+    This has type: int
+    But this function argument is expecting: {.."a": int}
+    (exit 2)
+```
+
+They agree with the tables: an object may lose fields and not gain
+them; a closed row may gain tags and not lose them; the arrow arm
+swaps the sides, and the second line of `fun_bad` is the pair of the
+two PARAMETERS, right one first (3663-3665), the trace
+`a_coercion_collects_its_constraints_and_forcing_unifies_them_in_order`
+expects; a covariant and a contravariant parameter are followed and an
+invariant one is refused through the constraint of the two one-element
+tuples (the message of `inv_bad` is a unification's: the two objects
+must be one); a private abbreviation is expanded on the left only; and
+the coercion without a source annotation gives `x` the ENLARGED target
+`{.."a": int}`: `Tnil` in a positive position became a variable
+(3576-3579), which `the_enlarged_type_of_a_coercion_without_a_source`
+expects of a closed object.
 
 ## 9. R4 as designed
 
