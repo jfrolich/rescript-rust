@@ -837,4 +837,151 @@ mod replay {
         count(&r, &u, &returned);
         assert_eq!(counts, [1, 1, 2, 1, 1, 1, 1, 1, 2, 2, 3, 0, 1, 5, 0, 0]);
     }
+
+    /// Take list `index` of `s`, take each statement of it, list them
+    /// again and put the list back, as the replay does. Returns the ids of
+    /// the statements, in order.
+    fn walk(r: &mut Rows, u: &mut Unit, s: &mut S, index: u32) -> Vec<u32> {
+        let list = r.body(&mut u.b, s, index);
+        let len = r.len(&u.b, list);
+        let mut taken = Vec::new();
+        for at in 0..len {
+            taken.push(r.take_at(&mut u.b, list, at));
+        }
+        let ids: Vec<u32> = taken.iter().map(|statement| r.stmt_id(&u.b, statement)).collect();
+        let rebuilt = r.list(&mut u.b, len, taken.into_iter());
+        r.set_body(&mut u.b, s, index, rebuilt);
+        ids
+    }
+
+    /// The ids of the children of the block that is list `index` of `s`,
+    /// read from the arena.
+    fn listed(u: &Unit, s: &S, index: u32) -> Vec<u32> {
+        let View::SBlock { statements } = u.b.view(Rows::body_block(&u.b, s, index)) else { panic!("a block") };
+        statements.iter().map(|statement| statement.0).collect()
+    }
+
+    #[test]
+    fn the_lists_of_a_statement_are_taken_and_put_back_by_their_index() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut statements = Vec::new();
+        statements.push(block(&mut r, &mut u, 4));
+        let (test, yes) = (r.var(&mut u.b, u.x), body(&mut r, &mut u));
+        let no = {
+            let (x, y) = (r.var(&mut u.b, u.x), r.var(&mut u.b, u.f));
+            let (first, second) = (r.exp(&mut u.b, x), r.exp(&mut u.b, y));
+            r.list(&mut u.b, 2, [first, second].into_iter())
+        };
+        statements.push(r.if_plain(&mut u.b, test, yes, no));
+        let (condition, list) = (r.var(&mut u.b, u.x), body(&mut r, &mut u));
+        statements.push(r.while_(&mut u.b, condition, list, None));
+        for init in [true, false] {
+            let (var, end) = (fresh(&mut u), r.var(&mut u.b, u.x));
+            statements.push(range(&mut r, &mut u, var, init, end));
+        }
+        let (var, iterable, list) = (fresh(&mut u), r.var(&mut u.b, u.x), body(&mut r, &mut u));
+        statements.push(r.for_of(&mut u.b, var, iterable, list, None, false));
+        statements.push(tried(&mut r, &mut u, true, true));
+        statements.push(switch(&mut r, &mut u, 3));
+        for mut statement in statements {
+            let id = r.stmt_id(&u.b, &statement);
+            let kind = r.stmt_kind(&u.b, &statement);
+            let count = r.bodies(&u.b, &statement);
+            assert_ne!(count, 0, "{kind:?}");
+            for index in 0..count {
+                let before = listed(&u, &statement, index);
+                let steps = r.steps();
+                let ids = walk(&mut r, &mut u, &mut statement, index);
+                // One step to take the list, one to put it back, and what
+                // `take_at` and `list` count for its statements.
+                assert_eq!(r.steps() - steps, 2 + 1 + 2 * before.len() as u64, "{kind:?}");
+                assert_eq!(ids, before, "{kind:?}: the statements in order");
+                assert_eq!(listed(&u, &statement, index), before, "{kind:?}: the list put back");
+            }
+            // The statement is the same statement, and whole.
+            assert_eq!((r.stmt_id(&u.b, &statement), r.stmt_kind(&u.b, &statement)), (id, kind));
+            assert_eq!(r.bodies(&u.b, &statement), count);
+            r.release_stmt(&mut u.b, statement);
+        }
+    }
+
+    #[test]
+    fn a_block_keeps_its_braces_and_its_location_over_a_list_put_back() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let list = body(&mut r, &mut u);
+        let mut explicit = r.explicit_block(&mut u.b, list);
+        r.locate_stmt(&mut u.b, &mut explicit, LamLoc::NONE);
+        let list = body(&mut r, &mut u);
+        let mut plain = r.block_of(&mut u.b, list);
+        for (statement, aux) in [(&mut explicit, 1), (&mut plain, 0)] {
+            walk(&mut r, &mut u, statement, 0);
+            assert_eq!(r.stmt_kind(&u.b, statement), Kind::Block);
+            assert_eq!(r.stmt_aux(&u.b, statement), aux);
+        }
+        assert!(r.stmt_located(&u.b, &explicit) && !r.stmt_located(&u.b, &plain));
+    }
+
+    /// The cost of a list taken and put back does not grow with the list:
+    /// the same steps at 1,000 and at 10,000 statements when no statement
+    /// is taken, and no allocation.
+    #[test]
+    fn a_list_taken_and_put_back_untouched_costs_two_steps_at_any_width() {
+        let mut steps = Vec::new();
+        for width in [1_000u32, 10_000] {
+            let mut u = unit();
+            let mut r = Rows::default();
+            let mut b = block(&mut r, &mut u, width);
+            let before = r.steps();
+            let allocations = allocation_counter::measure(|| {
+                let list = r.body(&mut u.b, &mut b, 0);
+                assert_eq!(r.len(&u.b, list), width);
+                r.set_body(&mut u.b, &mut b, 0, list);
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+            steps.push(r.steps() - before);
+            assert_eq!(r.block_len(&u.b, &b), width);
+        }
+        assert_eq!(steps, [2, 2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "statement list 1 of a statement that has no such list")]
+    fn a_list_a_statement_does_not_hold_is_not_taken() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut b = block(&mut r, &mut u, 2);
+        r.body(&mut u.b, &mut b, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "a statement put back into a list it was not taken from")]
+    fn a_statement_of_another_list_is_not_put_back() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut b = block(&mut r, &mut u, 2);
+        r.body(&mut u.b, &mut b, 0);
+        let other = body(&mut r, &mut u);
+        r.set_body(&mut u.b, &mut b, 0, other);
+    }
+
+    #[test]
+    #[should_panic(expected = "an action of a switch that is no block")]
+    fn an_action_of_a_switch_is_a_block() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let actions = body(&mut r, &mut u);
+        let header = u.b.switch_record(crate::bir::SwitchRecord {
+            constants: 0,
+            keys: crate::bir::KeySpan { start: 0, len: 0 },
+            clauses: crate::bir::ClauseSpan { start: 0, len: 0 },
+            has_default: false,
+            consts_full: false,
+            blocks_full: false,
+            dispatch: crate::lambda::SwitchDispatch::Direct,
+        });
+        let scrutinee = r.var(&mut u.b, u.x);
+        r.switch(&mut u.b, scrutinee, actions, header, false);
+    }
 }

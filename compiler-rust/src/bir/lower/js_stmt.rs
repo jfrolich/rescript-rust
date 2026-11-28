@@ -212,8 +212,10 @@ pub trait JsStmt: Js {
         awaited: bool,
     ) -> Self::S;
     /// `switch (scrutinee) { ...actions }` as given (not J-S4): `actions`
-    /// holds one statement per clause of `header`, the default last;
-    /// `string` says the keys are strings. One step per action.
+    /// holds one statement per clause of `header`, the default last, each
+    /// a block ([`JsStmt::block_of`]: a debug build of rows checks it, and
+    /// [`JsStmt::body`] takes the list of each); `string` says the keys
+    /// are strings. One step per action.
     fn switch(&mut self, a: &mut Pools, scrutinee: Self::E, actions: Self::L, header: SwitchId, string: bool) -> Self::S;
     /// `try { body } catch (exception) { handler } finally { finaliser }`:
     /// a handler with its exception variable, a finaliser, or both.
@@ -441,6 +443,45 @@ pub trait JsStmt: Js {
     /// cut's row of T6r-c: `names.rs`, `Replay::child`, which reads the
     /// lists of a statement by their index in the J row today.)
     fn bodies(&self, a: &Pools, s: &Self::S) -> u32;
+    /// List `index` of the statement `s` ([`JsStmt::bodies`]), taken out
+    /// of it as a list in flight: the caller takes its statements
+    /// ([`JsStmt::take_at`]), makes a list of them again ([`JsStmt::list`])
+    /// and puts that back with [`JsStmt::set_body`]. Until then `s` is
+    /// given to no other function than [`JsStmt::body`] and
+    /// [`JsStmt::set_body`] for its lists and the readers of a statement
+    /// in hand. `s` stays the caller's and keeps its id.
+    ///
+    /// One step. On rows O(1): the pool list of the block that is the
+    /// list, and the statements stay the block's (rows take nothing
+    /// apart). On an implementation that owns its nodes one move per
+    /// statement of the list while it keeps a compound statement as a
+    /// node (the statements go from the node to the lists in flight), and
+    /// one step per statement; O(1) once it keeps the lists of a compound
+    /// statement as lists until its print form is written (T6v decides,
+    /// as decision 2 does for a function literal). Allocates nothing once
+    /// the implementation's list storage has its capacity. Panics when
+    /// `index` is not below [`JsStmt::bodies`], and on rows on an action
+    /// of a `Switch` that is no block (the lowering makes none).
+    /// (THREE_TREES 11.4, "T6r: the naming replay behind the interface",
+    /// the cut's row of T6r-c: `names.rs`, `Replay::child`, and decision
+    /// 8, the root block `State::finish` holds.)
+    fn body(&mut self, a: &mut Pools, s: &mut Self::S, index: u32) -> Self::L;
+    /// `body` becomes list `index` of the statement `s`, in place of the
+    /// one [`JsStmt::body`] took: a list of the statements that call gave,
+    /// each taken and listed again (on rows a statement keeps its owner
+    /// while it is out, so no other statement can be put back; a debug
+    /// build checks it). The list is consumed. The facts `s` has of its
+    /// lists are not computed again: the caller puts back what it took.
+    ///
+    /// One step. On rows O(1): the block is written over the new pool
+    /// list with its flags and its `aux` (an explicit block stays one); a
+    /// debug build reads each statement's owner. On an implementation
+    /// that owns its nodes one move and one step per statement, into the
+    /// vector the statements came from: no allocation when the list is no
+    /// longer than the one taken. Panics when `index` is not below
+    /// [`JsStmt::bodies`]. (`names.rs`, `Replay::statements`: the rebuilt
+    /// list of a frame.)
+    fn set_body(&mut self, a: &mut Pools, s: &mut Self::S, index: u32, body: Self::L);
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code
     /// that can be observed. An expression statement and a `return` are
     /// free when their value is strictly pure (E:15); a block, an `if`, a

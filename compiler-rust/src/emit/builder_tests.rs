@@ -1964,4 +1964,116 @@ mod replay {
         assert_eq!(counts, [1, 2, 1, 1, 0, 0, 0]);
         assert_eq!(b.steps, steps, "a reader counts no step");
     }
+
+    /// The ids of the statements of list `index` of `statement`, read in
+    /// the node.
+    fn listed<'a>(statement: &mut S<'a>, index: usize) -> Vec<usize> {
+        Builder::list_of(&mut statement.stmt, index).iter().map(|stmt| stmt.node_id().index()).collect()
+    }
+
+    /// Take list `index` of `statement`, take each statement of it, list
+    /// them again and put the list back, as the replay does. Returns the
+    /// ids of the statements taken, in order.
+    fn walk<'a>(b: &mut Builder<'a>, statement: &mut S<'a>, index: usize) -> Vec<usize> {
+        let list = b.take_body(statement, index);
+        let mark = b.stage_mark();
+        let mut ids = Vec::new();
+        for at in 0..list.len() {
+            let taken = b.take(list, at);
+            // The row a statement is taken with is the one it was built
+            // with.
+            assert_eq!(taken.row, b.statement_row(&taken.stmt));
+            ids.push(taken.stmt.node_id().index());
+            b.stage(taken);
+        }
+        let rebuilt = b.list(mark);
+        b.set_body(statement, index, rebuilt);
+        ids
+    }
+
+    #[test]
+    fn the_lists_of_a_statement_are_taken_and_put_back_by_their_index() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let list = effects(&mut b, 3);
+        let block = b.block(list);
+        let (test, then, otherwise) = (b.reference(0, 0), effects(&mut b, 2), effects(&mut b, 0));
+        let conditional = b.if_(test, then, otherwise);
+        let (test, list) = (b.reference(0, 0), effects(&mut b, 2));
+        let looped = b.while_(None, test, list);
+        let (test, list) = (b.reference(0, 0), effects(&mut b, 4));
+        let labelled = b.while_(Some("l"), test, list);
+        for mut statement in [block, conditional, looped, labelled] {
+            let (row, id) = (statement.row, statement.stmt.node_id());
+            for index in 0..b.bodies(&statement) as usize {
+                let before = listed(&mut statement, index);
+                let steps = b.steps;
+                let ids = walk(&mut b, &mut statement, index);
+                assert_eq!(ids, before, "{:?}: the statements in order", row.kind);
+                assert_eq!(listed(&mut statement, index), before, "{:?}: the list put back", row.kind);
+                // One step to take the list and one to put it back, and a
+                // step a statement for each of the three moves.
+                assert_eq!(b.steps - steps, 2 + 3 * before.len() as u64);
+            }
+            assert_eq!((statement.row, statement.stmt.node_id()), (row, id));
+        }
+    }
+
+    /// A list taken and put back costs one step and one move a statement
+    /// in each direction, ten times as many at ten times the width. Each
+    /// take appends the statements to the pool of lists in flight, which
+    /// is cleared a unit and not before: with room for them there
+    /// (`reserve_statements`) a round allocates nothing outside the
+    /// arena, and nothing in it either (the node keeps its vector).
+    #[test]
+    fn a_list_taken_and_put_back_costs_two_steps_a_statement_at_any_width() {
+        let mut steps = Vec::new();
+        for width in [1_000usize, 10_000] {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let list = effects(&mut b, width);
+            let mut block = b.block(list);
+            let before = b.steps;
+            let list = b.take_body(&mut block, 0);
+            assert_eq!(list.len(), width);
+            assert_eq!(b.block_len(&block), 0);
+            b.set_body(&mut block, 0, list);
+            steps.push(b.steps - before);
+            assert_eq!(b.block_len(&block), width);
+            let slots = b.pool.len();
+            assert_eq!(slots, 2 * width, "the list as built and as taken");
+            b.reserve_statements(width, 0);
+            let arena = allocator.used_bytes();
+            let allocations = allocation_counter::measure(|| {
+                let list = b.take_body(&mut block, 0);
+                b.set_body(&mut block, 0, list);
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+            assert_eq!(allocator.used_bytes(), arena);
+            assert_eq!(b.pool.len(), slots + width);
+        }
+        assert_eq!(steps[0], 2 + 2 * 1_000);
+        assert_eq!(steps[1] - 2, 10 * (steps[0] - 2));
+    }
+
+    #[test]
+    #[should_panic(expected = "statement list 1 of a statement that has no such list")]
+    fn a_list_a_statement_does_not_hold_is_not_taken() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let list = effects(&mut b, 1);
+        let mut block = b.block(list);
+        b.take_body(&mut block, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "a statement list put back that was not taken")]
+    fn a_list_is_put_back_only_where_one_was_taken() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let list = effects(&mut b, 1);
+        let mut block = b.block(list);
+        let other = effects(&mut b, 1);
+        b.set_body(&mut block, 0, other);
+    }
 }

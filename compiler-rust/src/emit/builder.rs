@@ -1631,6 +1631,68 @@ impl<'a> Builder<'a> {
             _ => unreachable!("a statement no constructor of the builder makes"),
         }
     }
+
+    /// The statements of list `index` of the statement `stmt`
+    /// ([`Builder::bodies`]), in the node that holds them. O(1). Panics
+    /// when the statement has no such list.
+    fn list_of<'s>(stmt: &'s mut Statement<'a>, index: usize) -> &'s mut ArenaVec<'a, Statement<'a>> {
+        let mut stmt = stmt;
+        if let Statement::LabeledStatement(node) = stmt {
+            stmt = &mut node.body;
+        }
+        let block = match (stmt, index) {
+            (block @ Statement::BlockStatement(_), 0) => Some(block),
+            (Statement::IfStatement(node), 0) => Some(&mut node.consequent),
+            (Statement::IfStatement(node), 1) => node.alternate.as_mut(),
+            (Statement::WhileStatement(node), 0) => Some(&mut node.body),
+            _ => None,
+        };
+        match block {
+            Some(Statement::BlockStatement(node)) => &mut node.body,
+            _ => panic!("statement list {index} of a statement that has no such list"),
+        }
+    }
+
+    /// List `index` of the statement `statement` taken out of it as a
+    /// list in flight (the lowering's `JsStmt::body`): its statements are
+    /// moved from the node into the pool, each with its row from the
+    /// table, and the node keeps an empty vector with its capacity, which
+    /// [`Builder::set_body`] fills again. One step, and one step and one
+    /// move of 16 bytes per statement: the builder keeps a compound
+    /// statement as a node (T6b). The statements are appended to the pool
+    /// of lists in flight, which is cleared a unit and not before: a list
+    /// taken k times in a unit leaves k times its length there, and the
+    /// pool allocates when it grows. Panics when the statement has no
+    /// such list. (Named
+    /// `take_body`: `Builder::body` is the reader of a block's statements.)
+    pub fn take_body(&mut self, statement: &mut S<'a>, index: usize) -> List {
+        let Self { rows, pool, .. } = self;
+        let body = Self::list_of(&mut statement.stmt, index);
+        let (start, len) = (pool.len() as u32, body.len() as u32);
+        pool.extend(body.drain(..).map(|stmt| {
+            let row = rows[stmt.node_id().index()];
+            Some(S { stmt, row })
+        }));
+        self.steps += 1 + u64::from(len);
+        List { start, len }
+    }
+
+    /// `list` becomes list `index` of the statement `statement`, in place
+    /// of the one [`Builder::take_body`] took (the lowering's
+    /// `JsStmt::set_body`); the list is consumed. The statements are moved
+    /// into the vector the taken ones came from: nothing is allocated in
+    /// the arena when the list is no longer than that one. The row of
+    /// `statement` is not written again. One step, and one step and one
+    /// move of 24 bytes per statement. Panics when the statement has no
+    /// such list, when that list was not taken, and on a statement of
+    /// `list` taken before.
+    pub fn set_body(&mut self, statement: &mut S<'a>, index: usize, list: List) {
+        let body = Self::list_of(&mut statement.stmt, index);
+        assert!(body.is_empty(), "a statement list put back that was not taken");
+        let start = list.start as usize;
+        body.extend(self.pool[start..start + list.len()].iter_mut().map(|slot| slot.take().expect("a statement taken twice").stmt));
+        self.steps += 1 + list.len() as u64;
+    }
 }
 
 #[cfg(test)]

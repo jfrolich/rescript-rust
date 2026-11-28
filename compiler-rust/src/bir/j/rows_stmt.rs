@@ -65,6 +65,8 @@
 //! | `status` | T6r | of an `SDecl` or an `SRest`: the bits of `aux` above the two of the `LetKind`, bit 15 apart (an `SRest` keeps it for its descriptor); a panic for any other |
 //! | `range_of` | T6r | of an `SForRange` its `var`, of an `SForRangeExisting` the `var` of its `variable` when that is a `Var`; with `rows::kind_of` of the operation of the part before the body (the bound); `None` for any other statement |
 //! | `bodies` | T6r | 1 for an `SBlock`, an `SWhile` and the four loops; 1 or 2 for an `SIf` (its `else_`); the length of the `parts` of an `STry` and of the `actions` of an `SSwitch`; 0 otherwise |
+//! | `body` | T6r | the pool list of the `SBlock` that is list `index` (`body_block`): the block itself, the `then_` or `else_` of an `SIf`, the `body` of an `SWhile`, the last part of a loop, part `index` of an `STry`, action `index` of an `SSwitch`; the statements stay the block's; one step |
+//! | `set_body` | T6r | that block written again over the pool list given, with its flags and its `aux`; one step |
 //! | `effect_free` | T6q | the read `export.rs::has_toplevel_effect` made of a statement that is not a declaration row: a work stack (`Rows::work`) of the node's children for a compound statement, the `STRICT` flag of the value of `SExp` and `SReturn` and of every expression below a compound statement, `false` at `SThrow`, `SDebugger`, a jump, `SDecl`, `SRest`, `SForOf`, `SForAwaitOf`; one step per node read |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
@@ -240,6 +242,10 @@ impl JsStmt for Rows {
         ))
     }
     fn switch(&mut self, a: &mut Pools, scrutinee: E, actions: ListId, header: SwitchId, string: bool) -> S {
+        debug_assert!(
+            a.lists.get(actions).iter().all(|&action| a.node(action).op() == crate::bir::Op::SBlock),
+            "an action of a switch that is no block"
+        );
         self.steps += 1 + self.len(a, actions) as u64;
         S(a.switch_from_list(scrutinee.0, actions, header, u16::from(string)))
     }
@@ -442,6 +448,27 @@ impl JsStmt for Rows {
             View::SSwitch { actions, .. } => actions.len() as u32,
             _ => 0,
         }
+    }
+    #[inline]
+    fn body(&mut self, a: &mut Pools, s: &mut S, index: u32) -> ListId {
+        self.steps += 1;
+        let block = Self::body_block(a, s, index);
+        a.node(block).block_list_id().expect("a statement list of a statement is a block")
+    }
+    fn set_body(&mut self, a: &mut Pools, s: &mut S, index: u32, body: ListId) {
+        self.steps += 1;
+        let block = Self::body_block(a, s, index);
+        debug_assert!(
+            a.lists.get(body).iter().all(|statement| a.parents[statement.index()] == Some(block)),
+            "a statement put back into a list it was not taken from"
+        );
+        let node = a.node(block);
+        assert!(node.block_list_id().is_some(), "a statement list of a statement is a block");
+        // The block keeps its row: its flags and whether it is explicit.
+        let mut written =
+            if node.aux() != 0 { crate::bir::Node::explicit_block_list(body) } else { crate::bir::Node::block_list(body) };
+        written.set_flags(node.flags());
+        a.nodes[block.index()] = written;
     }
     fn effect_free(&mut self, a: &Pools, s: &S) -> bool {
         let mut work = std::mem::take(&mut self.work);
@@ -647,6 +674,31 @@ impl Rows {
 }
 
 impl Rows {
+    /// The block that is statement list `index` of the statement `s`
+    /// ([`JsStmt::bodies`]): the row of a statement the caller holds, or
+    /// of an operand of it. O(1). Panics when `index` is not below
+    /// `bodies`.
+    fn body_block(a: &Pools, s: &S, index: u32) -> NodeId {
+        let at = index as usize;
+        let block = match a.view(s.0) {
+            View::SBlock { .. } if at == 0 => Some(s.0),
+            View::SIf { then_, .. } if at == 0 => Some(then_),
+            View::SIf { else_, .. } if at == 1 => else_,
+            View::SWhile { body, .. } if at == 0 => Some(body),
+            View::SForRange { parts, .. }
+            | View::SForRangeExisting { parts, .. }
+            | View::SForOf { parts, .. }
+            | View::SForAwaitOf { parts, .. }
+                if at == 0 =>
+            {
+                parts.last().copied()
+            }
+            View::STry { parts, .. } => parts.get(at).copied(),
+            View::SSwitch { actions, .. } => actions.get(at).copied(),
+            _ => None,
+        };
+        block.unwrap_or_else(|| panic!("statement list {index} of a statement that has no such list"))
+    }
     /// Entry `index` of the `statements` of the `SBlock` `block`. O(1).
     /// Panics on a statement that is not a block, on an index outside it
     /// and on an entry the block no longer holds (a hole).
