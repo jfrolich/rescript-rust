@@ -2217,4 +2217,191 @@ mod replay {
         let operands = inherited_by_every_constructor(|b| b.reference(3, var::GLOBAL), flag::HAS_GLOBAL);
         assert_eq!(operands, 50);
     }
+
+    /// The ids of the statements of `list`, read in the pool.
+    fn ids<'a>(b: &Builder<'a>, list: List) -> Vec<usize> {
+        (0..list.len()).map(|at| b.statement_at(list, at).stmt.node_id().index()).collect()
+    }
+
+    #[test]
+    fn a_function_literal_keeps_its_body_as_a_list_by_its_header() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        b.reserve_literals(8);
+        // Two literals, the headers out of order: a header names its own.
+        let (long, short) = (effects(&mut b, 3), effects(&mut b, 1));
+        let (long_ids, short_ids) = (ids(&b, long), ids(&b, short));
+        let steps = b.steps;
+        let first = b.function(7, long);
+        assert_eq!(b.steps - steps, 1, "the list is adopted, not read");
+        let second = b.function(2, short);
+        for (literal, header) in [(&first, 7), (&second, 2)] {
+            assert_eq!((literal.row.kind, literal.row.payload), (Kind::Fun, header));
+            // Strictly pure and delay-safe whatever the body is; not a
+            // subexpression and not duplicable (`bir/j/facts.rs`, `JFun`).
+            assert_eq!(literal.row.flags, flag::PURE | flag::STRICT | flag::DELAY_SAFE | flag::HAS_FUN);
+            assert_eq!(b.row(&literal.expr), literal.row);
+        }
+        // The body is taken by the header, walked and put back, in O(1)
+        // for the taking and the putting back.
+        for (header, expected) in [(2, &short_ids), (7, &long_ids)] {
+            let steps = b.steps;
+            let list = b.literal_body(header);
+            assert_eq!(b.steps - steps, 1);
+            assert_eq!(&ids(&b, list), expected);
+            let mark = b.stage_mark();
+            for at in 0..list.len() {
+                let statement = b.take(list, at);
+                b.stage(statement);
+            }
+            let rebuilt = b.list(mark);
+            let steps = b.steps;
+            b.set_literal_body(header, rebuilt);
+            assert_eq!(b.steps - steps, 1);
+            // What is there now is the rebuilt list, the same statements.
+            let again = b.literal_body(header);
+            assert_eq!((again, &ids(&b, again)), (rebuilt, expected));
+            b.set_literal_body(header, again);
+        }
+        // A new unit has no literal.
+        b.clear();
+        assert!(b.literals.is_empty());
+    }
+
+    /// Taking the body of a literal and putting it back is O(1): two steps
+    /// at 1,000 and at 10,000 statements, no statement moved, nothing
+    /// allocated.
+    #[test]
+    fn the_body_of_a_function_literal_costs_two_steps_at_any_width() {
+        let mut steps = Vec::new();
+        for width in [1_000usize, 10_000] {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let list = effects(&mut b, width);
+            let _literal = b.function(0, list);
+            let (before, slots, arena) = (b.steps, b.pool.len(), allocator.used_bytes());
+            let allocations = allocation_counter::measure(|| {
+                let body = b.literal_body(0);
+                assert_eq!(body.len(), width);
+                b.set_literal_body(0, body);
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+            assert_eq!((b.pool.len(), allocator.used_bytes()), (slots, arena));
+            steps.push(b.steps - before);
+        }
+        assert_eq!(steps, [2, 2]);
+    }
+
+    #[test]
+    fn a_function_literal_marks_every_node_and_statement_built_over_it() {
+        fn literal<'a>(b: &mut Builder<'a>) -> J<'a> {
+            let header = b.literals.len() as u32;
+            let body = effects(b, 1);
+            b.function(header, body)
+        }
+        inherited_by_every_constructor(literal, flag::HAS_FUN);
+        // A global reference in the body of a literal does not mark the
+        // literal: the body is not below its node.
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let mark = b.stage_mark();
+        let global = b.reference(3, var::GLOBAL);
+        let statement = b.exp(global);
+        assert!(statement.row.has(flag::HAS_GLOBAL));
+        b.stage(statement);
+        let body = b.list(mark);
+        assert!(!b.function(0, body).row.has(flag::HAS_GLOBAL));
+    }
+
+    /// `Builder::references` gives a function literal by its header and
+    /// does not enter it: the arm the builder could not reach before it
+    /// had a literal.
+    #[test]
+    fn the_references_of_an_expression_give_a_function_literal_by_its_header() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // `v1(function 4 { v9; v9; }, v2)`.
+        let mark = b.stage_mark();
+        for _ in 0..2 {
+            let inner = b.reference(9, 0);
+            let statement = b.exp(inner);
+            b.stage(statement);
+        }
+        let body = b.list(mark);
+        let callee = b.reference(1, 0);
+        let arguments = b.mark();
+        let literal = b.function(4, body);
+        b.push(literal);
+        let argument = b.reference(2, 0);
+        b.push(argument);
+        let call = b.call(callee, arguments, 0, false);
+        let mut found = Vec::new();
+        let read = b.references(&call, |_, reference| found.push(reference));
+        found.sort_by_key(|reference| match *reference {
+            Reference::Var { variable, .. } => variable,
+            Reference::Named { .. } => u32::MAX - 1,
+            Reference::Function(header) => u32::MAX - header,
+        });
+        assert!(matches!(
+            found[..],
+            [Reference::Var { variable: 1, .. }, Reference::Var { variable: 2, .. }, Reference::Function(4)]
+        ));
+        // The call, its callee and its two arguments: the body is not
+        // read.
+        assert_eq!(read, 4);
+        assert_eq!(b.literal_body(4).len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "the body of a function literal taken twice")]
+    fn the_body_of_a_function_literal_is_taken_once() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let body = effects(&mut b, 1);
+        let _literal = b.function(0, body);
+        b.literal_body(0);
+        b.literal_body(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "a function literal that is not there")]
+    fn the_body_of_a_header_without_a_literal_is_not_taken() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let body = effects(&mut b, 1);
+        let _literal = b.function(3, body);
+        b.literal_body(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "the body of a function literal put back that was not taken")]
+    fn the_body_of_a_function_literal_is_put_back_only_when_it_is_out() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let body = effects(&mut b, 1);
+        let _literal = b.function(0, body);
+        let other = effects(&mut b, 1);
+        b.set_literal_body(0, other);
+    }
+
+    #[test]
+    #[should_panic(expected = "two function literals of one header")]
+    fn a_header_has_one_function_literal() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let (first, second) = (effects(&mut b, 1), effects(&mut b, 1));
+        let _literal = b.function(0, first);
+        b.function(0, second);
+    }
+
+    #[test]
+    #[should_panic(expected = "a substitution in a statement with a function literal is not built (T6v)")]
+    fn a_substitution_does_not_pass_a_function_literal_silently() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let body = effects(&mut b, 1);
+        let literal = b.function(0, body);
+        let mut statement = b.exp(literal);
+        b.substitute(&mut statement, 0, 1, |b| b.int(1));
+    }
 }

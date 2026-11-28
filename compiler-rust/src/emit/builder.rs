@@ -37,6 +37,7 @@
 //! | `Index` | both | no | both | both |
 //! | `Call` | exactly one argument, and it; the callee is `Array.isArray`: a `Dot` named `isArray`, without position, not a tag, on a `Named` JavaScript identifier `Array` (B:164) | no | no | no |
 //! | `New` | no | no | no | no |
+//! | `Fun` | yes (a literal runs nothing, whatever its body is) | yes | no | no |
 //!
 //! `HAS_FUN`, `SEAL` and `HAS_GLOBAL` hold for a node, and for a statement,
 //! when they hold for anything it is built from. `SEAL` is set where it
@@ -211,6 +212,10 @@ pub(crate) struct List {
 impl List {
     /// The list without statements. O(1).
     pub const EMPTY: List = List { start: 0, len: 0 };
+    /// In [`Builder::literals`]: no function literal has this header.
+    const NONE: List = List { start: u32::MAX, len: 0 };
+    /// In [`Builder::literals`]: the body is out ([`Builder::literal_body`]).
+    const TAKEN: List = List { start: u32::MAX, len: 1 };
     /// O(1).
     pub fn len(self) -> usize {
         self.len as usize
@@ -249,6 +254,13 @@ pub(crate) struct Builder<'a> {
     /// made: sorted by id, since ids ascend. What [`Builder::alias_at`]
     /// reads.
     aliases: Vec<(u32, u32)>,
+    /// The body of each function literal, a list in flight, dense by the
+    /// header [`Builder::function`] is given (the lowering's `FuncId`):
+    /// the body stays a list until the print form of the literal is
+    /// written, so that the replay takes it and puts it back in O(1)
+    /// ([`Builder::literal_body`]). `List::NONE` for a header without a
+    /// literal, `List::TAKEN` while the body is out. 8 bytes a header.
+    literals: Vec<List>,
     /// The allocation of the work stack of [`Builder::references`] and
     /// [`Builder::return_calls`], kept between walks. Such a stack holds
     /// references into the tree, which borrow it for one walk, so the
@@ -306,6 +318,7 @@ impl<'a> Builder<'a> {
             float_text: String::new(),
             members: Vec::new(),
             aliases: Vec::new(),
+            literals: Vec::new(),
             spare: Vec::new(),
         }
     }
@@ -324,6 +337,7 @@ impl<'a> Builder<'a> {
         self.staged.clear();
         self.pool.clear();
         self.aliases.clear();
+        self.literals.clear();
         self.steps = 0;
     }
 
@@ -1424,6 +1438,12 @@ impl<'a> Builder<'a> {
                 | Expression::StringLiteral(_)
                 | Expression::NumericLiteral(_)
                 | Expression::BigIntLiteral(_) => {}
+                // The body of a function literal is a list by header, not
+                // below its node ([`Builder::function`]): the walk that
+                // enters it, as rows enter a `JFun`, is T6v's.
+                Expression::ArrowFunctionExpression(_) => {
+                    panic!("a substitution in a statement with a function literal is not built (T6v)")
+                }
                 _ => unreachable!("an expression no constructor of the builder makes"),
             }
         }
@@ -1468,12 +1488,15 @@ impl<'a> Builder<'a> {
                     argument.as_expression().expect("an argument that is an expression")
                 }));
             }
+            // A function literal has no operand: its body is a list by
+            // header ([`Builder::function`]).
             Expression::Identifier(_)
             | Expression::NullLiteral(_)
             | Expression::BooleanLiteral(_)
             | Expression::StringLiteral(_)
             | Expression::NumericLiteral(_)
-            | Expression::BigIntLiteral(_) => {}
+            | Expression::BigIntLiteral(_)
+            | Expression::ArrowFunctionExpression(_) => {}
             _ => unreachable!("an expression no constructor of the builder makes"),
         }
     }
@@ -1700,6 +1723,80 @@ impl<'a> Builder<'a> {
         let start = list.start as usize;
         body.extend(self.pool[start..start + list.len()].iter_mut().map(|slot| slot.take().expect("a statement taken twice").stmt));
         self.steps += 1 + list.len() as u64;
+    }
+
+    /// The function literal of `header` with `body` (the lowering's
+    /// `JsStmt::function`). The node is an arrow function without
+    /// parameters and with an empty body: the print form (the parameters,
+    /// an arrow or a method, a body of statements or of one expression) is
+    /// the seal's, which reads the header in the lowering's pools. Until
+    /// then the body stays the list in flight it was given as, in
+    /// [`Builder::literals`] by header, so that the naming replay takes it
+    /// and puts it back in O(1). The row is `Fun` with the header as its
+    /// payload, strictly pure and delay-safe whatever the body is, with
+    /// `HAS_FUN`; it has none of the body's flags (the body is not below
+    /// the node: who walks it takes it by header and reads its
+    /// statements' rows).
+    ///
+    /// O(1): one node; the list is adopted, not read. The table grows to
+    /// the largest header seen, 8 bytes a header: an allocation only when
+    /// it grows ([`Builder::reserve_literals`]). Panics on a header that
+    /// has a literal.
+    pub fn function(&mut self, header: u32, body: List) -> J<'a> {
+        let at = header as usize;
+        if self.literals.len() <= at {
+            self.literals.resize(at + 1, List::NONE);
+        }
+        assert!(self.literals[at] == List::NONE, "two function literals of one header");
+        self.literals[at] = body;
+        let parameters = FormalParameters::new(
+            SPAN,
+            FormalParameterKind::FormalParameter,
+            ArenaVec::new_in(&self.ast),
+            None,
+            &self.ast,
+        );
+        let empty = FunctionBody::new(SPAN, ArenaVec::new_in(&self.ast), ArenaVec::new_in(&self.ast), &self.ast);
+        let expr = Expression::new_arrow_function_expression(
+            SPAN,
+            false,
+            None,
+            oxc_allocator::Box::new_in(parameters, &self.ast),
+            None,
+            ArrowFunctionBody::FunctionBody(oxc_allocator::Box::new_in(empty, &self.ast)),
+            &self.ast,
+        );
+        let flags = PURITY | flag::DELAY_SAFE | flag::HAS_FUN;
+        self.attach(expr, Row { flags, kind: Kind::Fun, aux: 0, payload: header })
+    }
+
+    /// Room for the bodies of the function literals with a header below
+    /// `headers`: at most one allocation, none when the capacity is there.
+    pub fn reserve_literals(&mut self, headers: usize) {
+        self.literals.reserve(headers.saturating_sub(self.literals.len()));
+    }
+
+    /// The body of the function literal of `header`, taken out as a list
+    /// in flight (the lowering's `JsStmt::literal_body`). One step; O(1):
+    /// one indexed read and one store. Panics when no literal has the
+    /// header and when its body is out.
+    pub fn literal_body(&mut self, header: u32) -> List {
+        let slot = self.literals.get_mut(header as usize).expect("a function literal that is not there");
+        assert!(*slot != List::NONE, "a function literal that is not there");
+        assert!(*slot != List::TAKEN, "the body of a function literal taken twice");
+        self.steps += 1;
+        std::mem::replace(slot, List::TAKEN)
+    }
+
+    /// `body` becomes the body of the function literal of `header`, in
+    /// place of the one [`Builder::literal_body`] took (the lowering's
+    /// `JsStmt::set_literal_body`). One step; O(1). Panics when the body
+    /// of that literal is not out.
+    pub fn set_literal_body(&mut self, header: u32, body: List) {
+        let slot = self.literals.get_mut(header as usize).expect("a function literal that is not there");
+        assert!(*slot == List::TAKEN, "the body of a function literal put back that was not taken");
+        self.steps += 1;
+        *slot = body;
     }
 }
 

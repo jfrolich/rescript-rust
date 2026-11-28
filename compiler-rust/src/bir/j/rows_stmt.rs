@@ -67,6 +67,8 @@
 //! | `bodies` | T6r | 1 for an `SBlock`, an `SWhile` and the four loops; 1 or 2 for an `SIf` (its `else_`); the length of the `parts` of an `STry` and of the `actions` of an `SSwitch`; 0 otherwise |
 //! | `body` | T6r | the pool list of the `SBlock` that is list `index` (`body_block`): the block itself, the `then_` or `else_` of an `SIf`, the `body` of an `SWhile`, the last part of a loop, part `index` of an `STry`, action `index` of an `SSwitch`; the statements stay the block's; one step |
 //! | `set_body` | T6r | that block written again over the pool list given, with its flags and its `aux`; one step |
+//! | `literal_body` | T6r | the pool list of the `SBlock` that is the `body` of the `JFun` `Bir::func_owners[header]` names; one step |
+//! | `set_literal_body` | T6r | that block written again over the pool list given, as `set_body`; one step |
 //! | `effect_free` | T6q | the read `export.rs::has_toplevel_effect` made of a statement that is not a declaration row: a work stack (`Rows::work`) of the node's children for a compound statement, the `STRICT` flag of the value of `SExp` and `SReturn` and of every expression below a compound statement, `false` at `SThrow`, `SDebugger`, a jump, `SDecl`, `SRest`, `SForOf`, `SForAwaitOf`; one step per node read |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
@@ -462,13 +464,21 @@ impl JsStmt for Rows {
             a.lists.get(body).iter().all(|statement| a.parents[statement.index()] == Some(block)),
             "a statement put back into a list it was not taken from"
         );
-        let node = a.node(block);
-        assert!(node.block_list_id().is_some(), "a statement list of a statement is a block");
-        // The block keeps its row: its flags and whether it is explicit.
-        let mut written =
-            if node.aux() != 0 { crate::bir::Node::explicit_block_list(body) } else { crate::bir::Node::block_list(body) };
-        written.set_flags(node.flags());
-        a.nodes[block.index()] = written;
+        Self::write_block(a, block, body);
+    }
+    #[inline]
+    fn literal_body(&mut self, a: &mut Pools, header: FuncId) -> ListId {
+        self.steps += 1;
+        a.node(Self::literal_block(a, header)).block_list_id().expect("the body of a function literal is a block")
+    }
+    fn set_literal_body(&mut self, a: &mut Pools, header: FuncId, body: ListId) {
+        self.steps += 1;
+        let block = Self::literal_block(a, header);
+        debug_assert!(
+            a.lists.get(body).iter().all(|statement| a.parents[statement.index()] == Some(block)),
+            "a statement put back into a list it was not taken from"
+        );
+        Self::write_block(a, block, body);
     }
     fn effect_free(&mut self, a: &Pools, s: &S) -> bool {
         let mut work = std::mem::take(&mut self.work);
@@ -698,6 +708,25 @@ impl Rows {
             _ => None,
         };
         block.unwrap_or_else(|| panic!("statement list {index} of a statement that has no such list"))
+    }
+    /// The block that is the body of the function literal of `header`,
+    /// found in the arena's table of literals by header. O(1). Panics
+    /// when no literal of `header` is live.
+    fn literal_block(a: &Pools, header: FuncId) -> NodeId {
+        let literal = a.func_owners.get(header.index()).copied().flatten().expect("a function literal that is not there");
+        let View::JFun { body, .. } = a.view(literal) else { unreachable!("the owner of a header is a function literal") };
+        body
+    }
+    /// The `SBlock` `block` written again over the pool list `list`: it
+    /// keeps its row, so its flags and whether it is explicit, and its
+    /// cold data (keyed by the row). O(1).
+    fn write_block(a: &mut Pools, block: NodeId, list: ListId) {
+        let node = a.node(block);
+        assert!(node.block_list_id().is_some(), "a statement list of a statement is a block");
+        let mut written =
+            if node.aux() != 0 { crate::bir::Node::explicit_block_list(list) } else { crate::bir::Node::block_list(list) };
+        written.set_flags(node.flags());
+        a.nodes[block.index()] = written;
     }
     /// Entry `index` of the `statements` of the `SBlock` `block`. O(1).
     /// Panics on a statement that is not a block, on an index outside it

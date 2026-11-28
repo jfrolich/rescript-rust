@@ -482,6 +482,35 @@ pub trait JsStmt: Js {
     /// [`JsStmt::bodies`]. (`names.rs`, `Replay::statements`: the rebuilt
     /// list of a frame.)
     fn set_body(&mut self, a: &mut Pools, s: &mut Self::S, index: u32, body: Self::L);
+    /// The body of the function literal of `header`, taken out of it as a
+    /// list in flight: the caller takes its statements, lists them again
+    /// and puts the list back with [`JsStmt::set_literal_body`]. The
+    /// literal is addressed by its header, a key: a literal has one header
+    /// and a copy gets its own, and no index of a literal in its statement
+    /// exists. The literal stays where it is, inside a statement the
+    /// caller holds or in a list it walks; its node is not handed out.
+    ///
+    /// One step; O(1) on both implementations. On rows the literal is
+    /// found in the arena's table of literals by header and its body is
+    /// the pool list of its block; an implementation that owns its nodes
+    /// keeps the body of a function literal as a list by header from
+    /// [`JsStmt::function`] until its print form is written, in a table
+    /// indexed by header. Allocates nothing. Panics when no literal of
+    /// `header` is live, and where a body can be absent (the builder) when
+    /// it was taken before. (THREE_TREES 11.4, "T6r: the naming replay
+    /// behind the interface", decision 2: `names.rs`, `Replay::literal`,
+    /// which reads the body from the `JFun` row today.)
+    fn literal_body(&mut self, a: &mut Pools, header: FuncId) -> Self::L;
+    /// `body` becomes the body of the function literal of `header`, in
+    /// place of the one [`JsStmt::literal_body`] took: a list of the
+    /// statements that call gave, as for [`JsStmt::set_body`]. The list is
+    /// consumed. One step; O(1) on both implementations (on rows the
+    /// literal's block is written over the new pool list, and a debug
+    /// build reads each statement's owner). Panics when no literal of
+    /// `header` is live, and on the builder when its body was not taken.
+    /// (Decision 2: `names.rs`, `Replay::statements`, the rebuilt list of
+    /// a literal's frame.)
+    fn set_literal_body(&mut self, a: &mut Pools, header: FuncId, body: Self::L);
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code
     /// that can be observed. An expression statement and a `return` are
     /// free when their value is strictly pure (E:15); a block, an `if`, a

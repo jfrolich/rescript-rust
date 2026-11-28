@@ -984,4 +984,95 @@ mod replay {
         let scrutinee = r.var(&mut u.b, u.x);
         r.switch(&mut u.b, scrutinee, actions, header, false);
     }
+
+    /// A function literal over `width` statements `x;`, as the value of
+    /// `let var = function`, and its header.
+    pub(super) fn literal(r: &mut Rows, u: &mut Unit, width: u32) -> (S, crate::bir::FuncId) {
+        let header = u.b.function_header(crate::bir::VarSpan { start: 0, len: 0 }, Default::default(), LamLoc::NONE);
+        let mut statements = Vec::new();
+        for _ in 0..width {
+            let x = r.var(&mut u.b, u.x);
+            statements.push(r.exp(&mut u.b, x));
+        }
+        let list = r.list(&mut u.b, width, statements.into_iter());
+        let function = r.function(&mut u.b, header, list);
+        let var = fresh(u);
+        (r.declare(&mut u.b, LetKind::Strict, var, Some(function)), header)
+    }
+
+    /// The ids of the statements of the body of the literal of `header`,
+    /// read from the arena.
+    fn body_of(u: &Unit, header: crate::bir::FuncId) -> Vec<u32> {
+        let View::SBlock { statements } = u.b.view(Rows::literal_block(&u.b, header)) else { panic!("a block") };
+        statements.iter().map(|statement| statement.0).collect()
+    }
+
+    #[test]
+    fn the_body_of_a_function_literal_is_taken_and_put_back_by_its_header() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        // Two literals: a header names its own.
+        let (first, one) = literal(&mut r, &mut u, 3);
+        let (second, two) = literal(&mut r, &mut u, 2);
+        for (header, width) in [(two, 2), (one, 3)] {
+            let before = body_of(&u, header);
+            assert_eq!(before.len(), width);
+            let steps = r.steps();
+            let list = r.literal_body(&mut u.b, header);
+            assert_eq!(r.len(&u.b, list) as usize, width);
+            let taken: Vec<S> = (0..width as u32).map(|at| r.take_at(&mut u.b, list, at)).collect();
+            assert_eq!(taken.iter().map(|statement| r.stmt_id(&u.b, statement)).collect::<Vec<_>>(), before);
+            let rebuilt = r.list(&mut u.b, width as u32, taken.into_iter());
+            r.set_literal_body(&mut u.b, header, rebuilt);
+            assert_eq!(r.steps() - steps, 2 + 1 + 2 * width as u64);
+            assert_eq!(body_of(&u, header), before);
+        }
+        // The literals are where they were: the value of their statement.
+        for (statement, header) in [(&first, one), (&second, two)] {
+            let value = r.value_of(&u.b, statement).expect("a declaration with a value");
+            assert_eq!(r.function_of(&u.b, value), Some(header));
+        }
+    }
+
+    /// Taking the body of a literal and putting it back is O(1): the same
+    /// two steps at 1,000 and at 10,000 statements, and no allocation.
+    #[test]
+    fn the_body_of_a_function_literal_costs_two_steps_at_any_width() {
+        let mut steps = Vec::new();
+        for width in [1_000u32, 10_000] {
+            let mut u = unit();
+            let mut r = Rows::default();
+            let (_statement, header) = literal(&mut r, &mut u, width);
+            let before = r.steps();
+            let allocations = allocation_counter::measure(|| {
+                let list = r.literal_body(&mut u.b, header);
+                assert_eq!(r.len(&u.b, list), width);
+                r.set_literal_body(&mut u.b, header, list);
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+            steps.push(r.steps() - before);
+            assert_eq!(body_of(&u, header).len() as u32, width);
+        }
+        assert_eq!(steps, [2, 2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "a function literal that is not there")]
+    fn the_body_of_a_header_without_a_literal_is_not_taken() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let header = u.b.function_header(crate::bir::VarSpan { start: 0, len: 0 }, Default::default(), LamLoc::NONE);
+        r.literal_body(&mut u.b, header);
+    }
+
+    #[test]
+    #[should_panic(expected = "a statement put back into a list it was not taken from")]
+    fn a_statement_of_another_list_is_not_put_back_into_a_literal() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let (_statement, header) = literal(&mut r, &mut u, 2);
+        r.literal_body(&mut u.b, header);
+        let other = body(&mut r, &mut u);
+        r.set_literal_body(&mut u.b, header, other);
+    }
 }
