@@ -1302,6 +1302,12 @@ impl UnivarPairs {
     #[cold]
     #[inline(never)]
     fn unify(&mut self, ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) -> bool {
+        // A test counts the entries the scan may read: the ones above the
+        // floor.
+        #[cfg(test)]
+        for _ in &self.pairs[self.floor..] {
+            crate::tc::steps::tick();
+        }
         univars_unify(ctx, &self.pairs[self.floor..], &mut self.slots, t1, t2)
     }
 }
@@ -16563,8 +16569,7 @@ mod tests {
         let (inner_l, inner_r, inner_bodies, inner_vars) = scope(1);
         let mut univars = UnivarPairs::default();
         let outer = enter(&mut univars, outer_bodies, outer_vars);
-        let steps = crate::tc::steps::scope(|| univars.forget());
-        assert_eq!(steps, 0);
+        univars.forget();
         assert!(!univars.unify(&ctx, outer_l[0], outer_r[0]));
         let inner = enter(&mut univars, inner_bodies, inner_vars);
         assert!(univars.unify(&ctx, inner_l[0], inner_r[0]));
@@ -16578,11 +16583,49 @@ mod tests {
         univars.leave(outer);
     }
 
+    /// What a `unify_univar` after a package check may read does not
+    /// depend on how many pairs were forgotten: with 1,000 and with 10,000
+    /// bodies forgotten, a variable of a forgotten body is refused after
+    /// reading the two entries of the one body entered since.
+    #[test]
+    fn univar_lookup_after_forgetting_reads_only_later_bodies_at_ten_thousand() {
+        let steps_after_forgetting = |bodies: usize| {
+            let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+            let env = Env::empty();
+            let mut univars = UnivarPairs::default();
+            let mut enter = |univars: &mut UnivarPairs| {
+                let (l, r) = (ctx.new_univar(None), ctx.new_univar(None));
+                let (vl, vr) = (ctx.new_type_list(&[l]), ctx.new_type_list(&[r]));
+                univars
+                    .enter(&ctx, &env, l, ctx.type_list(vl), r, ctx.type_list(vr))
+                    .expect("no binder escapes");
+                (l, r)
+            };
+            let (first_l, first_r) = enter(&mut univars);
+            for _ in 1..bodies {
+                enter(&mut univars);
+            }
+            univars.forget();
+            let (late_l, late_r) = enter(&mut univars);
+            let mut paired = true;
+            let steps = crate::tc::steps::scope(|| paired = univars.unify(&ctx, first_l, first_r));
+            assert!(!paired);
+            assert!(univars.unify(&ctx, late_l, late_r));
+            assert_eq!(univars.pairs.len(), 2 * bodies + 2);
+            steps
+        };
+        assert_eq!(steps_after_forgetting(1_000), 2);
+        assert_eq!(steps_after_forgetting(10_000), 2);
+    }
+
     #[test]
     fn univar_pair_state_sizes() {
         // The floor is one word in each state that holds universal pairs.
         assert_eq!(std::mem::size_of::<UnivarPairs>(), 56);
         assert_eq!(std::mem::size_of::<UnivarScopeMark>(), 24);
+        // 128 and 72 bytes on trunk.
+        assert_eq!(std::mem::size_of::<UnifyState>(), 136);
+        assert_eq!(std::mem::size_of::<SubtypeAcc>(), 80);
     }
 
     #[test]
