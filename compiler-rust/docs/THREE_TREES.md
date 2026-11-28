@@ -6225,7 +6225,7 @@ the probe's commits, re-cut.
 | Slice | What | Files | Deletes | Lines | Tests that move | Check |
 | --- | --- | --- | --- | ---: | --- | --- |
 | T6r-a | The return arm through `return_calls`; `adopt` on the handle through `references`; the log's close without a view: `Site::entry`, `unprinted` by key, the printed form from the pools, the eta shape from the body's list | `close.rs`, `scope.rs`, `out.rs`, `mod.rs` (one line), `norm.rs`, `names.rs`, `jsx.rs`, `pools.rs`, `edit.rs`, `bridge_j.rs`, `globals.rs` (one pattern, one note), `call.rs`, `expr.rs`, `ffi_args.rs`, `import.rs`, four test files | `scope::return_sites`, `Log::pending`, the node-taking `eta_shape`, `printed_form` and `jsx_tag` | 296 added, 234 removed (built) | two `size_of` of `Site` (8 to 12); the JSX step test (three steps a member to two, renamed); test helpers of `names.rs` | **On trunk** (pull request 407): 592, 81, 46; check mode identical |
-| T6r-b | The tests of decision 11 | `names.rs` (tests), `globals.rs` (tests), `oracle_tests.rs` | the decide-only tests of `globals.rs` that T6r-f moves | about 250, tests only | as decision 11 | every test passes on trunk as it is |
+| T6r-b | The tests of decision 11 | `names.rs` (tests), `globals.rs` (tests and two comment lines), `oracle_tests.rs` | five decide-only tests of `globals.rs`; the two that count a second decision's allocations stay for T6r-f | 223 added, 146 removed (built once, design turn 11; prompt in 11.9) | as "T6r-b as built" | 593, 81, 46 on trunk before T6r-c; each rewritten test fails on a break of trunk |
 | T6r-c | The replay's interface on both sides: `below`, `literal_body`, `set_literal_body`, `bodies`, `body`, `set_body`, `binder`, `status`, `range_of` (`rest_fields` is not added: decision 12); on the builder `HAS_GLOBAL` inherited as `HAS_FUN` is, a function literal whose body is a list by header, and the flags of a substitution | `js_stmt.rs`, `js.rs`, `rows_stmt.rs`, `rows.rs`, `emit/builder.rs`, `emit/row.rs`, their tests | nothing (no caller yet) | 830 added and 43 removed, tests apart (built) | none | **On trunk** (pull request 408, design turn 11): 592, 102, 71 |
 | T6r-d | The replay walks lists: `Frame` holds a list, a compound statement is held while its lists are walked (`take_at`, `body`, `set_body`, `list`), the root is the block `finish` holds (decision 8); a literal's body by header (decision 2); the literals of a statement still found by the prelude's marks, keyed by `stmt_id` | `names.rs`, `mod.rs` (`finish`, `replay_names`, `Storage`) | the node-reading `Replay::child`, `Frame::statement`; `names.rs` reads no `View` outside the prelude | about 500 (the probe's step 4 less its literals) | the four allocation counts (decision 9: `held`, the list pool's reservation); `row_sizes` | moves equal statements on both corpora; `rg -n 'bir\.view\(' src/bir/lower/names.rs` outside tests shows the prelude only |
 | T6r-e | The literals through `below`; the prelude goes | `names.rs` | `Replay::prelude`, `Scratch::{marks, next}`, `Replayed::{ancestors, ambiguous_orders}`, `is_statement`, the five `ambiguous_orders` assertions | about 350 | the two step tests of decision 11 read `descended` | `rg -n 'ambiguous_orders\|fn prelude' src` is empty; the coordinator measures check mode here |
@@ -6532,6 +6532,46 @@ function literal (no operand). No test that existed on trunk changes,
 no pinned number moves, and no attribute is added to code the default
 build links (`#[inline]` on four bodies of `Rows`: `binder`, `status`,
 `body`, `literal_body`, which check mode alone runs).
+
+**T6r-b as built** (design turn 11, a throw-away copy of trunk at
+ab5e5a589, not on T6r-c; the diff is the comment on pull request 408
+that starts `// T6X-THROWAWAY T6r-b`; the prompt is in 11.9). Tests
+only: 223 lines added, 146 removed, in `names.rs`, `globals.rs` and
+`oracle_tests.rs`; the first filter reads 593 (five tests of
+`globals.rs` deleted, six added in `oracle_tests.rs`).
+
+| Test | What it became |
+| --- | --- |
+| `names.rs`, `the_replay_is_linear_in_statements_and_rows` | Same unit, at 1,000 and 10,000. Asserts the growth of `statements`, `scopes` and `reserved`, that what the replay read to find the literals (`found`: the steps less those three) is ten times as much and at most two a literal, and that the steps at 10,000 are ten times those at 1,000 less nine times the constant. Names no `ancestors` |
+| `names.rs`, `ten_thousand_literals_on_one_spine_read_each_ancestor_at_most_twice` | Renamed `..._are_found_in_at_most_three_reads_a_node`: `found` is at least one and at most three a node of the spine, and at 10,000 at most ten times that at 1,000 plus 8. Its `ambiguous_orders` assertion goes |
+| `names.rs`, `a_warm_replay_of_a_unit_with_functions_allocates_nothing` | Untouched |
+| `globals.rs`, five tests that call `decide` on nodes built by hand | Deleted; replaced by six tests through the lowering in `oracle_tests.rs`: an explicit block spliced into its list, a loop over a variable declared before it, and four step tests of `global_steps` at 1,000, 2,000 and 10,000 as an equality of differences (no binding of the name; references under one declaration; declarations each in its own function; references below nested conditionals) |
+| `globals.rs`, `ten_thousand_block_declarations_cost_one_step_per_element`, `a_second_decision_allocates_nothing` | Stay until T6r-f: both call `decide` twice on one arena to count the allocations of a second decision, which one lowering cannot do |
+
+Three things the build showed that decision 11 did not have:
+
+- The loop over a variable declared before it is, in the lowering, a
+  range loop without a first value whose variable `finish_loop`
+  declares in the enclosing list (decision 12). The hand-built
+  `ForRangeExisting` of the old test is a statement no unit has. The
+  declaration covers the references after the loop too, which the test
+  pins (`return ext(globalThis.location)`), where a loop that declares
+  its own variable leaves them plain.
+- A range loop whose first value must be held and whose body does not
+  read the variable prints `for (let location_finish = ...; location <=
+  location_finish; ++location)` with **no declaration of the
+  variable**: the dead-code marking turns `let location = ext()` into
+  `ext()` because it counts no use in the loop's head. Both backends
+  print it (the test's first form failed on it), so it is not a
+  difference between them; whether the OCaml compiler prints the same
+  was not checked. It is outside T6: reported, not fixed.
+- A test of "no shadowing binding" that asserts linearity alone fails
+  on no break of trunk (the walk of references is linear either way).
+  It got a bound, at most two steps a statement, and fails when the
+  decision walks references of a name nothing binds.
+
+Each of the six rewritten or added step and rule tests failed on a
+break of trunk applied once and undone; the prompt lists the breaks.
 
 ### 11.5 Worker prompt for T4b
 
@@ -11959,6 +11999,257 @@ commit of its own; never an `allow`); a function added to `Js`,
 `JsStmt`, `Rows` or the builder; an edit of `names::replay`, `Replay`,
 `Scratch`, `Storage`, the prelude, `globals::decide`, or of a test this
 task does not name.
+```
+
+
+T6r-b (with the common block of phase C and the common block of T6x-a1
+to T6x-a4; read also 11.4 "T6r: the naming replay behind the
+interface", decisions 10 and 11, and "T6r-b as built"). Written from a
+throw-away build that ran on trunk (pull request 408; its diff is the
+comment there that starts `// T6X-THROWAWAY T6r-b`).
+
+```text
+Task T6r-b: the tests the conversion of the naming replay and of the
+external-shadow decision would move are rewritten first, on trunk as it
+is. Tests only. One slice, one pull request against
+ocaml-to-rust-rewrite, titled "Three trees T6r-b: the tests of the
+replay and of the external-shadow decision, through the lowering".
+Changelog fragment: changes/three-trees-t6r-b.internal.md, one bullet.
+
+Precondition, check it first and stop with a report if it fails: `rg -n
+'fn below|fn literal_body|fn range_of'
+compiler-rust/src/bir/lower/js_stmt.rs` shows three lines (pull request
+408 is merged); `cargo test --manifest-path compiler-rust/Cargo.toml
+--lib bir::lower` reads 592 passed, `--lib bir::j` 102, `--lib
+emit::builder` 71, none ignored; from compiler-rust, `python3
+../scripts/count_lowering_ids.py --self-test` prints `32 files, 0
+transition calls`; `sed -n '/^mod tests/,$p'
+src/bir/lower/globals.rs | rg -c '#\[test\]'` prints 8.
+
+Yours: in src/bir/lower/globals.rs five tests of its test module
+(deleted) and two lines of the doc comment of `decide`; in
+src/bir/lower/names.rs two tests of its test module and one new test
+helper; in src/bir/lower/oracle_tests.rs six new tests and three new
+helpers, appended at the end of the file. Nothing else: no line of
+built code but the two comment lines, no other test, no file of
+src/bir/j or src/emit.
+
+What the slice is. T6r-d and T6r-e change what the replay reads to find
+the function literals of a statement, and T6r-f moves the
+external-shadow decision into the replay's walk and deletes
+`globals::{shadowed, binding_scope, bindings, rows}`. Tests that pin
+trunk's way (the count `ancestors`; the exact step counts of
+`globals::decide` on a hand-built arena of nodes) would be rewritten by
+those slices together with the code they test, and a test changed in
+the commit that changes its subject shows nothing. So they are
+rewritten here, to assert what stays true across the three slices, and
+each is shown to fail on a break of trunk.
+
+The design turn built this slice once. From its comment you may copy
+every test as it stands; where this task and the comment disagree, the
+task is right. Read nothing of the probe (branch
+`three-trees-t6r-probe`) for this task.
+
+Where the common blocks and this task disagree, the task wins. Known
+places: (1) "a test is edited only so that it compiles and no expected
+value changes": this task names two tests it rewrites and five it
+deletes, and nothing else moves. (2) The allocation counts are 86,
+102, 86, 155 and stay. (3) `Instruction count` is read and reported,
+not held: the slice changes no built code. (4) The check-mode figure
+is not yours to produce. (5) The line of `count_lowering_ids.py | grep
+'^| total'`: paste the self-test's line. (6) The wraps the blocks
+prescribe are deleted from the traits: wrap nothing. (7) The blocks'
+"every commit changes built code and its tests together" does not hold:
+every commit here is tests only, but for the comment in commit 2.
+
+Commits, in this order, each passing the three filters and clippy on
+its own, each pushed when made. After each, the three counts you must
+see (`--lib bir::lower`, `--lib bir::j`, `--lib emit::builder`):
+
+1. names.rs, the two step tests. 592, 102, 71.
+
+   A helper above `the_replay_is_linear_in_statements_and_rows`:
+
+           /// What the replay read to find the function literals of its
+           /// statements: its steps less the statements, the rows and the
+           /// reservations.
+           fn found(replayed: Replayed) -> usize {
+               replayed.steps() - replayed.statements - replayed.scopes - replayed.reserved
+           }
+
+   `the_replay_is_linear_in_statements_and_rows` keeps its name and its
+   unit (`functions(count)`), runs at 1,000 and 10,000 and asserts:
+   `statements` grows by 3 * 9,000, `scopes` by 9,000, `reserved` by 2
+   * 9,000; `found(large) == 10 * found(small)` and `found(large) <= 2
+   * 10,000`; with `constant = small.steps() - (large.steps() -
+   small.steps()) / 9`, `constant == 1` and `large.steps() == 10 *
+   small.steps() - 9 * constant`. It names no `ancestors`.
+
+   `ten_thousand_literals_on_one_spine_read_each_ancestor_at_most_twice`
+   is renamed
+   `ten_thousand_literals_on_one_spine_are_found_in_at_most_three_reads_a_node`,
+   keeps its unit, runs at 1,000 and 10,000 and asserts `found(large)
+   >= 10_000`, `found(large) <= 3 * 2 * 10_000` (the spine has two
+   nodes a literal), `found(large) <= 10 * found(small) + 8`, and
+   `(large.statements, large.scopes, large.reserved) == (10_001,
+   10_000, 0)`. Its assertion on `ambiguous_orders` goes (T6r-e deletes
+   the count; five others still assert it until then).
+
+   `a_warm_replay_of_a_unit_with_functions_allocates_nothing` is not
+   touched.
+
+2. The external-shadow decision through the lowering. 593, 102, 71.
+
+   Appended to oracle_tests.rs, in the form of `shadow_rule` (the new
+   side without pass 2 prints what the legacy side prints with it):
+
+   - `a_declaration_in_an_explicit_block_shadows_the_global_in_the_list_the_block_is_spliced_into`:
+     `run = x => if (let t = ext(<global location>) in ext(t, t)) 1 else
+     (let location = ext() in ext(location, location))`. One reference
+     marked; the text holds `  let t = ext(globalThis.location);` and `
+     let location = ext();`.
+   - `a_loop_over_a_variable_declared_before_it_binds_nothing_and_the_declaration_covers_what_follows`:
+     `run = () => { for location = ext() to (let t = ext() in ext(t, t))
+     { ext(location, <global location>) }; ext(<global location>) }`.
+     Two references marked; the text holds `  let location = ext();`,
+     `  for (let location_finish = ext(t, t); location <=
+     location_finish; ++location) {`, `    ext(location,
+     globalThis.location);` and `  return ext(globalThis.location);`.
+     The body must read the loop variable: a loop variable nothing
+     reads loses its declaration to the dead-code marking on both
+     sides, and the test then shows nothing. The lowering never builds
+     the statement kind `ForRangeExisting` (decision 12): the loop
+     over a variable declared before it is a range loop without a
+     first value, and that is the case to test.
+   - The helper `shadow_counts(count, build)`: the unit `let run = ext
+     => body`, lowered with `lower_for_names`; returns
+     `(globals_qualified, global_steps)` of its `switch_stats`. The
+     helper `shadow_steps_are_linear(build)`: runs it at 1,000, 2,000
+     and 10,000, asserts that the steps at 2,000 exceed those at 1,000,
+     that the steps at 10,000 less those at 1,000 are nine times the
+     steps at 2,000 less those at 1,000, and that the references
+     qualified at 10,000 are ten times those at 1,000; returns the
+     references qualified at 10,000. The helper `global_effects(a,
+     count, last)`: `ext(<global location>); ...; last`.
+   - `the_decision_on_a_function_without_a_shadowing_binding_qualifies_nothing_in_linear_steps`:
+     `let x = ext(<global location>); ext(x, x); ...`, each `x` its own
+     variable (stamps from 1,000: 900 is `run`). Linear, 0 qualified,
+     and the steps at 10,000 less those at 1,000 are at most 2 * 9,000.
+   - `ten_thousand_references_under_one_declaration_are_qualified_in_linear_steps`:
+     `let location = ext(); ext(<global location>); ...; ext(location,
+     location)`. Linear, 10,000 qualified.
+   - `ten_thousand_declarations_each_in_its_own_function_are_decided_in_linear_steps`:
+     `ext(() => { let location = ext(); return ext(location, location,
+     <global location>) }); ...`. Linear, 10,000 qualified.
+   - `ten_thousand_references_below_ten_thousand_conditionals_are_decided_in_linear_steps`:
+     `count` conditionals nested in their first branch around `count`
+     references, and `let location` in a function beside them. Linear,
+     0 qualified.
+
+   Deleted from the test module of globals.rs, in the same commit:
+   `a_unit_without_a_shadowing_binding_reads_its_variables_and_binders_only`,
+   `ten_thousand_references_under_one_binding_cost_five_steps_each`,
+   `ten_thousand_references_at_depth_ten_thousand_read_each_node_twice`,
+   `ten_thousand_bindings_cost_one_mark_each`,
+   `a_loop_over_an_existing_variable_binds_nothing_and_the_declaration_of_its_target_covers_it`
+   (it builds a `ForRangeExisting` by hand, which no unit has). Kept in
+   globals.rs, with every helper of the module (all are still used):
+   `row_sizes`, `ten_thousand_block_declarations_cost_one_step_per_element`
+   and `a_second_decision_allocates_nothing`. Those two call `decide`
+   twice on one arena to count the allocations of a second decision,
+   which one lowering cannot do: T6r-f, which moves the decision into
+   the replay, replaces them (the first through the lowering, the
+   second by the replay's warm test), and its prompt says so.
+
+   The doc comment of `decide` ends "The tests of `oracle_tests.rs`
+   assert that the steps are linear at 10,000 references and at 10,000
+   bindings." where it says "The tests in this file assert the counts
+   at 10,000 references and at 10,000 bindings."
+
+Each rewritten test must fail on a break of trunk. The design turn
+applied each break below once, alone, ran `--lib bir::lower` and undid
+it; the test named failed and, where "alone" is written, no other did.
+Do the same before you open the pull request, and paste the failing
+lines in its body. Never commit a break.
+
+- `binding_scope` no longer skips the explicit blocks around a
+  declaration (the `while` given `false &&`): the explicit-block test,
+  alone.
+- `shadowed` writes no memo (its second loop writes nothing): the test
+  of the conditionals, alone.
+- A declaration covers itself only (`binding_scope` returns `(binder,
+  SHADOWED)` for a declaration): twelve tests, among them the loop
+  test, the test of the references under one declaration and the test
+  of the declarations in their own functions.
+- The decision walks every reference whether or not a binding has its
+  name (`rows` called when nothing is bound, and its `continue` for a
+  row without a binding removed): the test of the function without a
+  shadowing binding, alone. Either half alone fails nothing.
+- The prelude does not stop at a marked expression (`if mark != 0`
+  removed): the spine test, alone.
+- `Replay` reserves each free entry twice (the call in the loop over
+  `log.free` doubled): `the_replay_is_linear_in_statements_and_rows`,
+  alone.
+
+End-state searches, from compiler-rust, with what they print on trunk
+and on the build:
+
+- The test module of each file cut off with `sed '/^mod
+  tests\|^#\[cfg(test)\]$/q'` (GNU sed; on macOS `sed -E '/^mod
+  tests|^#\[cfg\(test\)\]$/q'`), `rg -c
+  'View::J|Op::J|View::S[A-Z]|Op::S[A-Z]|parents\['`: globals.rs 19
+  and names.rs 42 on both (no built code moves).
+- `rg -c 'ambiguous_orders|fn prelude' src/bir/lower/names.rs
+  src/bir/lower/oracle_tests.rs`: 10 and 1 on trunk; 9 and 1 on the
+  build.
+- `sed -n '/^mod tests/,$p' src/bir/lower/globals.rs | rg -c
+  '#\[test\]'`: 8 on trunk, 3 on the build.
+- `rg -c 'ancestors' src/bir/lower/names.rs`: read it on trunk; on the
+  build it is three less (the two tests name it no more).
+- `python3 ../scripts/count_lowering_ids.py --self-test`: `32 files, 0
+  transition calls` on both.
+
+Counts you must see beside the three filters: the four allocation
+counts of unit.rs 86, 102, 86, 155; `size_of::<Rows>()` 416; `python3
+../scripts/check_lowering_cost_docs.py --base
+origin/ocaml-to-rust-rewrite` prints `changed/new=0; missing/generic=0;
+removed=0`.
+
+Run by the design turn, in a copy that was not pushed, on trunk at
+ab5e5a589 (before pull request 408, so the second and third filters
+read 81 and 46 there): the three filters at 593, 81, 46, clippy clean
+with warnings denied, the cost check at zero, the self-test at zero;
+223 lines added and 146 removed in three files; the six breaks above.
+Not run: `cargo doc`, a check-mode build, the parity suites,
+`Instruction count`.
+
+Every commit: `cargo clippy --manifest-path compiler-rust/Cargo.toml
+--all-targets -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc
+--manifest-path compiler-rust/Cargo.toml --no-deps`, both clean.
+
+Gates of the pull request, beside those of the common blocks: the
+three filters with the counts above; the six breaks, each with the
+line of the test that failed; CI green, `Instruction count` read and
+reported. The body of the pull request lists the five tests deleted,
+the two rewritten (one renamed) with what each asserted before and
+asserts now, the six added, the comment changed, and that no attribute
+was added.
+
+If `git push` or `gh` answers HTTP 401: commit locally, write in your
+final message exactly which commits are local, and end the turn at
+once; a new turn with a new token begins with the push.
+
+Shortcuts that count as failure, beside the common lists: a number of
+trunk's algorithm pinned in a rewritten test (`ancestors`, five steps
+a reference, a count of marks); a test of the decision that builds
+nodes by hand (`Bir::new_node`, `View::S..`) where this task says
+"through the lowering"; a `ForRangeExisting` built by hand; a step
+test at one size, or at two sizes compared by `<=` only where this
+task gives an equality; an expected text weakened to make a test pass
+(if a text differs from the one given here, stop and report); a test
+of this task that no break fails; a break left in a commit; one of the
+two tests of globals.rs that stay deleted or rewritten; an edit of
+built code beyond the two comment lines; an `allow` or an `ignore`.
 ```
 
 ## 12. Risks and what was not measured
