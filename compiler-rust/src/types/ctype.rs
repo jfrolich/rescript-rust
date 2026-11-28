@@ -6849,7 +6849,7 @@ fn subtype_package(
     if eq_package_path(ctx, env, &p1, &p2) {
         return push_package_cstrs(cstrs, trace, &pairs);
     }
-    // ctype.ml:4093-4102: unify the constrained types speculatively, then ask
+    // ctype.ml:4089-4099: unify the constrained types speculatively, then ask
     // whether the module types are included; undo both.
     let snapshot = ctx.snapshot_type_state();
     let unified = pairs.iter().all(|&(ty1, ty2)| {

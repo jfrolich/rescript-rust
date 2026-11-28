@@ -9538,16 +9538,18 @@ Module types whose only item is an extension constructor `type e += A`
 (refused by OCaml as an annotation and as a coercion; the Rust compiler
 accepted both before) agree after the fix.
 
-The subtyping walk in OCaml (`subtype_rec`'s `Tpoly` arm,
-compiler/ml/ctype.ml:4066-4071) reaches the pairs of a record field only
-when the two field types meet as types: two different record types meet in
-the `Tconstr` arm, which records `(t1, t2)` (ctype.ml:3966-4027), so the
-field types are related by `unify` at enforcement, whose `Tpoly` arm
-(`enter_poly`, 2330-2336) and package arm (2416-2424) are the ones above.
+The subtyping walk in OCaml reaches the pairs of a record field when two
+record types of the same representation meet in its `Tconstr` arm: their
+field types are walked with `subtype_list` on the walk's own constraints
+(compiler/ml/ctype.ml:3995), so a polymorphic field enters the `Tpoly` arm
+of `subtype_rec` (4067-4072) as an object's field does. The unification of
+two different record types fails at their paths and reaches no field; its
+`Tpoly` arm (`enter_poly`, 2414-2415) and package arm (2416-2424) are met
+only by types that hold the fields themselves, as in the programs above.
 
 #### Fixed
 
-- `ac8408ccc`: OCaml keeps the pairs in one global (ctype.ml:1683);
+- `ac8408ccc`: OCaml keeps the pairs in one global (ctype.ml:1682-1683);
   `enter_poly` (1656-1679) saves it at entry and restores it at exit. The
   inclusion check of two packages (`!package_subtype`, typemod.ml:1224-1236,
   from `unify_package`, ctype.ml:2172-2180, the package arms of `unify`
@@ -9590,6 +9592,53 @@ field types are related by `unify` at enforcement, whose `Tpoly` arm
   Fixtures: the super_errors_multi `package_univar_pairs_manifest` and
   `package_univar_pairs_manifest_inner_body`.
 
+- `24f95b9af` (found in review): OCaml's coercion between two variant
+  types probes each constructor's arguments with `subtype_list` on the
+  walk's own constraints (ctype.ml:3934-3935; inline records 3900-3901),
+  and a polymorphic-variant walk that raises `Exit` leaves the walk as it
+  was (4035-4038); the one global stays emptied after the probe. A trace
+  showed OCaml's list empty after the probe and the `'a` constraint
+  unified with no pairs, where the Rust probe's copy of the accumulator
+  (`probe = cstrs.clone()`, `row_cstrs`) had raised its floor and the
+  walk kept two entries. The walk now takes the floor of the copy back
+  (one store). `type a = A(module(S))`, `type b = A(module(T))` and
+  `(o :> {"f": 'a. (b, 'a)})` from `'a. (a, 'a)` are refused as by OCaml,
+  with more constructors, with the package in the second constructor and
+  with an inline record. Fixtures: the super_errors
+  `package_univar_pairs_coerce_variant_*`.
+- `841ee5c3d` (found in review): in `Ctype.equal` a body entered after the
+  emptying puts its own pairs in front of the empty list (`enter_poly`,
+  ctype.ml:1656-1672, from the arm at 3264-3265), and a `Tpoly` without
+  binders is no body (3262-3263). `ManifestWalk` kept one flag set inside
+  such a body (a trace showed `forgotten=true` at the inner `('b, 'b)`
+  where OCaml's `unify_univar` read the inner body's 2 entries), so
+  `type u = {"f": 'a. (module(S), {"g": 'b. ('b, 'b)})}` against the same
+  with `T` was refused where OCaml and trunk accept it. The walk now keeps,
+  from the first check on, the left binders of the bodies entered since
+  and the index from which they pair (`ForgottenUnivars`); its table of
+  related pairs answers first, as OCaml's `eqtype` does, so
+  `'a. (module(S), {"g": 'b. ('b, module(S), 'b)})` stays accepted. The
+  accepted manifests are in `tests/tests/src/package_univar_pairs_interface`.
+
+Every place in `compiler-rust/src/types` where a walk that holds universal
+pairs is copied, rebuilt, snapshotted or run on a state that is thrown away
+or put back:
+
+| site | what is copied or restored | OCaml | emptying inside seen after it in OCaml? | Rust now | program |
+|---|---|---|---|---|---|
+| `subtype_rec`, invariant arguments (`cstrs.child()` twice) | the accumulator, for two probes | `subtype_rec ... [] = []` both ways, ctype.ml:3687-3690 | YES: one global | child's floor handed back | `co_array_after`: refused by both |
+| `subtype_rec`, `Tvariant`/`Tvariant` (`row_cstrs = cstrs.clone()`) | the accumulator, kept on success | `try subtype_row ... with Exit`, 4035-4038 | YES: one global | whole copy kept, or its floor handed back on `Exit` (`24f95b9af`) | none: four shapes tried (an extra field, an arity clash, an open row, a row inside an argument) agree, as the constraint `(t1, t2)` recorded on `Exit` fails on its own; open |
+| `subtype_rec`, variant constructor probes (`probe = cstrs.clone()`, two sites) | the accumulator, length compared | `subtype_list ... cstrs`, 3900-3901, 3934-3935 | YES: one global | floor handed back (`24f95b9af`) | `f2a`, `f2b`, `f2c`, package in the second constructor: refused by both after, accepted by Rust before |
+| `subtype_package` trial (`UnifyState::new()`, type snapshot restored) | a fresh unifier; the type graph put back | public `unify` (2769-2773) at 4091, `Btype.backtrack` at 4093/4097 | YES: `backtrack` puts no list back | the walk's floor raised after the trial | `t01`, `t02`, `t05`, `co_cstr_univar`: refused by both |
+| `force_subtype` (`UnifyState::new()` per constraint) | a fresh unifier holding the constraint's list | `unify_pairs`, 2769-2771, per constraint (4224) | NO: each constraint sets the list (2770) before anything reads it | same | - |
+| `unify3` non-injective arguments in pattern mode (type snapshot, ctype.rs `unify_same_path_constructor_args`) | the type graph only | `let snap = snapshot () in try unify ... with Unify _ -> backtrack snap; reify`, 2369-2373 | YES: `backtrack` puts no list back | the state's floor is not in the snapshot, so it stays | none found: needs a pattern whose polymorphic type holds two packages of different module types under a non-injective constructor; open |
+| `UnifyState::snapshot_backtrack_state` / `restore_backtrack_state` (typecore's pattern backtracking and counter-examples) | unified pairs, mode, env, depth, newtype level; not the pairs or the floor | `Btype.backtrack` in typecore | NO: these wrap whole typer calls, and each public `unify` sets the list at its entry (2773); every body closes before a call returns | floor not restored, as OCaml | - |
+| `update_level` (type snapshot) | levels | `update_level` | NO: runs no relation | - | - |
+| expansion and constraint substitution (`unify_var`, `enforce_constraints`: `UnifyState::new()`) | a fresh unifier | `unify_var` (2748-2766) and `subst` (1109-1130) | NO: they link fresh variables (`Tvar` arm) and never reach a package arm | - | - |
+| `matches`, `moregeneral`, `equal` entries (fresh `UnifyState`, `MoregenState`, `EqtypeState`) | new states | 3163, 3089, 3358 set the list | NO: each starts from `[]` as OCaml's does; none is called while a walk is open except through `!package_subtype` (counted) | - | - |
+| `mcomp` (fresh `McompState`) | new state | 1959-1964 | NO: its package arm runs no check (1952) | - | - |
+| includemod `type_manifest_for_inclusion` retry (`while seen.insert(current)`) and `type_expr_lists_equal_for_inclusion` (`ManifestWalk::new()`) | a fresh walk per expansion tried | `check_super` calls `Ctype.equal` again (includecore.ml:155-160) | NO: each `Ctype.equal` starts from `[]` (3358) | same | - |
+
 Every row of OCaml's assignments of the global, and how it is reached from
 inside a body `enter_poly` has open:
 
@@ -9611,6 +9660,24 @@ inside a body `enter_poly` has open:
   floor whenever the check compared an item, included or not, as OCaml
   does, but no program reaching two packages of different module types in a
   pattern's polymorphic type was found, so this is not shown by a program.
+- The two YES rows above without a program (the row walk's `Exit`, the
+  non-injective arguments in pattern mode) are open: the code keeps
+  OCaml's behaviour there, but no program shows it.
+- Not this mechanism, seen while checking the count: OCaml prints a
+  deprecation warning when the inclusion check of two packages compares an
+  item that is `@deprecated` on one side only (`Warning number 3 / Main.res
+  / deprecated: x`, before the type error), and the Rust compiler prints
+  none (`S` with `@deprecated("plain") let x: t`, `T` without, in program
+  10's annotation). Both refuse it with the same error otherwise.
+- `deprecated_inclusion_warning(...)?` (includemod.rs, before the count in
+  `value_descriptions` and `includecore_type_declarations`) returns `Err`
+  only for an invalid string template in a `@deprecated` payload; OCaml's
+  `check_deprecated_inclusion` raises there too (builtin_attributes.ml:122-125
+  through `deprecated_of_attrs`), before `Ctype.moregeneral`, so neither
+  runs the relation. Inside `package_subtype` OCaml's error escapes the
+  compilation (typemod.ml:1235 catches only `Includemod.Error`) where the
+  Rust check reads it as "not included"; `"bad \q escape"` is accepted by
+  both, and no payload that raises was found.
 
 ## Fourth round: modules, aliases and usage marks
 

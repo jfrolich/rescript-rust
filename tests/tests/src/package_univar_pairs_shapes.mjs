@@ -49,6 +49,30 @@ function functorItem(o) {
   return o;
 }
 
+function variantVarFirst(o) {
+  return o;
+}
+
+function variantNotPolymorphic(o) {
+  return o;
+}
+
+function polyVariantVarFirst(o) {
+  return o;
+}
+
+function varPackageArray(o) {
+  return o;
+}
+
+function varPackageArrayUnify(o) {
+  return o;
+}
+
+function twoPackagesAfterVar(o) {
+  return o;
+}
+
 export {
   arrowParamBefore,
   nestedTupleBefore,
@@ -62,5 +86,11 @@ export {
   emptySubmodule,
   moduleTypeItem,
   functorItem,
+  variantVarFirst,
+  variantNotPolymorphic,
+  polyVariantVarFirst,
+  varPackageArray,
+  varPackageArrayUnify,
+  twoPackagesAfterVar,
 }
 /* No side effect */

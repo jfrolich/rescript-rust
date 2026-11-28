@@ -51,3 +51,18 @@ let constraintOnUnivar = (o: {"f": 'a. module(S with type t = 'a)}): {
 let emptySubmodule = (o: {"f": 'a. (module(SSub), 'a)}): {"f": 'a. (module(TSub), 'a)} => o
 let moduleTypeItem = (o: {"f": 'a. (module(SMty), 'a)}): {"f": 'a. (module(TMty), 'a)} => o
 let functorItem = (o: {"f": 'a. (module(SFun), 'a)}): {"f": 'a. (module(TFun), 'a)} => o
+
+type variantS = A(module(S))
+type variantT = A(module(T))
+let variantVarFirst = (o: {"f": 'a. ('a, variantS)}) => (o :> {"f": 'a. ('a, variantT)})
+let variantNotPolymorphic = (o: {"f": (variantS, int)}) => (o :> {"f": (variantT, int)})
+let polyVariantVarFirst = (o: {"f": 'a. ('a, [#A(module(S))])}) =>
+  (o :> {"f": 'a. ('a, [#A(module(T)) | #B])})
+let varPackageArray = (o: {"f": 'a. ('a, module(S), array<'a>)}) =>
+  (o :> {"f": 'a. ('a, module(T), array<'a>)})
+let varPackageArrayUnify = (o: {"f": 'a. ('a, module(S), array<'a>)}): {
+  "f": 'a. ('a, module(T), array<'a>),
+} => o
+let twoPackagesAfterVar = (o: {"f": 'a. ('a, module(S), module(S))}): {
+  "f": 'a. ('a, module(T), module(T)),
+} => o

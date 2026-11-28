@@ -16,3 +16,7 @@ let varFirst: {"f": 'a. ('a, module(S))} = Obj.magic(1)
 let emptyModuleTypes: {"f": 'a. (module(SE), 'a)} = Obj.magic(1)
 type varFirstField = {f: 'a. ('a, module(S))}
 type innerBody = {"f": 'a. ({"g": 'b. ('b, module(S))}, 'a)}
+type innerAfterPackage = {"f": 'a. (module(S), {"g": 'b. ('b, 'b)})}
+type innerAfterTwoPackages = {"f": 'a. (module(S), {"g": 'b. ('b, module(S), 'b)})}
+type threeBodies = {"f": 'a. (module(S), {"g": 'b. ({"h": 'c. ('c, 'b)}, 'b)})}
+type threeBodiesPackageInner = {"f": 'a. (module(S), {"g": 'b. ({"h": 'c. ('c, module(S))}, 'b)})}
