@@ -5200,6 +5200,13 @@ pub fn signature_modules(sig: &Signature) -> Vec<&Ident> {
 mod tests {
     use super::*;
     use crate::context::IdGenerator;
+
+    #[test]
+    fn manifest_walk_size() {
+        // Built once per manifest comparison and passed down by reference.
+        assert_eq!(std::mem::size_of::<ManifestWalk>(), 40);
+        assert_eq!(std::mem::size_of::<&mut ManifestWalk>(), 8);
+    }
     use crate::location::Location;
     use crate::types::Path;
     use crate::types::decl::{

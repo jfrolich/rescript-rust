@@ -16524,6 +16524,53 @@ mod tests {
         assert!(!ctx.trace_gadt_instances());
     }
 
+    /// After an inclusion check of two packages the pairs of the open body
+    /// are forgotten (ctype.ml:3089, 3358); a body entered then sees none
+    /// and adds its own, and the exit of the body open at the forgetting
+    /// puts its pairs back (ctype.ml:1675-1678). Forgetting is one store
+    /// whatever the number of pairs.
+    #[test]
+    fn forgotten_univar_pairs_come_back_at_the_exit_of_their_body() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let env = Env::empty();
+        let scope = |n: usize| {
+            let left: Vec<_> = (0..n).map(|_| ctx.new_univar(None)).collect();
+            let right: Vec<_> = (0..n).map(|_| ctx.new_univar(None)).collect();
+            let bodies = (ctx.new_tuple(left.clone()), ctx.new_tuple(right.clone()));
+            let vars = (ctx.new_type_list(&left), ctx.new_type_list(&right));
+            (left, right, bodies, vars)
+        };
+        let enter = |univars: &mut UnivarPairs, (b1, b2): (TypeExprRef, TypeExprRef), (v1, v2)| {
+            univars
+                .enter(&ctx, &env, b1, ctx.type_list(v1), b2, ctx.type_list(v2))
+                .expect("no binder escapes")
+        };
+        let (outer_l, outer_r, outer_bodies, outer_vars) = scope(10_000);
+        let (inner_l, inner_r, inner_bodies, inner_vars) = scope(1);
+        let mut univars = UnivarPairs::default();
+        let outer = enter(&mut univars, outer_bodies, outer_vars);
+        let steps = crate::tc::steps::scope(|| univars.forget());
+        assert_eq!(steps, 0);
+        assert!(!univars.unify(&ctx, outer_l[0], outer_r[0]));
+        let inner = enter(&mut univars, inner_bodies, inner_vars);
+        assert!(univars.unify(&ctx, inner_l[0], inner_r[0]));
+        assert!(!univars.unify(&ctx, outer_l[1], outer_r[1]));
+        univars.leave(inner);
+        assert!(!univars.unify(&ctx, outer_l[1], outer_r[1]));
+        univars.leave(outer);
+        assert!(univars.pairs.is_empty() && univars.floor == 0);
+        let outer = enter(&mut univars, outer_bodies, outer_vars);
+        assert!(univars.unify(&ctx, outer_l[2], outer_r[2]));
+        univars.leave(outer);
+    }
+
+    #[test]
+    fn univar_pair_state_sizes() {
+        // The floor is one word in each state that holds universal pairs.
+        assert_eq!(std::mem::size_of::<UnivarPairs>(), 56);
+        assert_eq!(std::mem::size_of::<UnivarScopeMark>(), 24);
+    }
+
     #[test]
     fn univar_scope_pairs_ten_thousand_binders_in_one_step_each() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
