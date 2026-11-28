@@ -8046,7 +8046,6 @@ fn assert_subtype_left(c: &Checker, out: &Coercion) {
 ///
 /// Reaches: R3j.
 #[test]
-#[ignore = "R3j build"]
 fn a_coercion_collects_its_constraints_and_forcing_unifies_them_in_order() {
     for mode in [Mode::Success, Mode::Explain] {
         let mut c = checker(mode);
@@ -8126,7 +8125,6 @@ fn a_coercion_collects_its_constraints_and_forcing_unifies_them_in_order() {
 ///
 /// Reaches: R3j.
 #[test]
-#[ignore = "R3j build"]
 fn a_tuple_of_another_length_and_a_forced_clash_are_the_two_errors() {
     for mode in [Mode::Success, Mode::Explain] {
         let mut c = checker(mode);
@@ -8201,7 +8199,6 @@ fn a_tuple_of_another_length_and_a_forced_clash_are_the_two_errors() {
 ///
 /// Reaches: R3j.
 #[test]
-#[ignore = "R3j build"]
 fn the_arguments_of_a_constructor_follow_its_variance() {
     use super::expand::{MAY_NEG, MAY_POS};
     for mode in [Mode::Success, Mode::Explain] {
@@ -8331,7 +8328,6 @@ fn the_arguments_of_a_constructor_follow_its_variance() {
 ///
 /// Reaches: R3f, R3j.
 #[test]
-#[ignore = "R3j build"]
 fn abbreviations_expand_and_what_is_left_out_is_refused() {
     for mode in [Mode::Success, Mode::Explain] {
         let mut c = checker(mode);
@@ -8423,7 +8419,6 @@ fn abbreviations_expand_and_what_is_left_out_is_refused() {
 ///
 /// Reaches: R3e, R3j.
 #[test]
-#[ignore = "R3j build"]
 fn objects_are_related_field_by_field() {
     for mode in [Mode::Success, Mode::Explain] {
         let mut c = checker(mode);
@@ -8562,7 +8557,6 @@ fn objects_are_related_field_by_field() {
 ///
 /// Reaches: R3f, R3g, R3j.
 #[test]
-#[ignore = "R3j build"]
 fn variants_are_related_tag_by_tag() {
     for mode in [Mode::Success, Mode::Explain] {
         let mut c = checker(mode);
@@ -8651,7 +8645,6 @@ fn variants_are_related_tag_by_tag() {
 ///
 /// Reaches: R3g, R3q, R3j.
 #[test]
-#[ignore = "R3j build"]
 fn a_constraint_keeps_the_scopes_it_was_made_under() {
     for mode in [Mode::Success, Mode::Explain] {
         let mut c = checker(mode);
@@ -8725,7 +8718,6 @@ fn a_constraint_keeps_the_scopes_it_was_made_under() {
 ///
 /// Reaches: R3p, R3j.
 #[test]
-#[ignore = "R3j build"]
 fn packages_are_completed_and_tried() {
     let mut c = checker(Mode::Success);
     let mut out = Coercion::default();
@@ -8820,7 +8812,6 @@ fn packages_are_completed_and_tried() {
 ///
 /// Reaches: R3e, R3f, R3j.
 #[test]
-#[ignore = "R3j build"]
 fn the_enlarged_type_of_a_coercion_without_a_source() {
     use super::expand::{MAY_NEG, MAY_POS};
     let mut c = checker(Mode::Success);
@@ -9023,7 +9014,6 @@ fn the_enlarged_type_of_a_coercion_without_a_source() {
 ///
 /// Reaches: R3e, R3f, R3g, R3j.
 #[test]
-#[ignore = "R3j build"]
 fn subtyping_at_ten_thousand() {
     use super::expand::{MAY_NEG, MAY_POS};
     let labels = |prefix: &str, n: u32| -> Vec<String> { (0..n).map(|at| format!("{prefix}{at:05}")).collect() };
@@ -9166,7 +9156,6 @@ fn subtyping_at_ten_thousand() {
 ///
 /// Reaches: R3e, R3f, R3j.
 #[test]
-#[ignore = "R3j build"]
 fn enlarging_at_ten_thousand() {
     use super::expand::MAY_POS;
     let labels = |prefix: &str, n: u32| -> Vec<String> { (0..n).map(|at| format!("{prefix}{at:05}")).collect() };
@@ -9443,7 +9432,6 @@ fn a_relation_inside_a_relation_has_a_table_of_its_own() {
 ///
 /// Reaches: R3g, R3q, R3j.
 #[test]
-#[ignore = "R3j build"]
 fn a_trial_of_two_packages_empties_the_scopes_of_the_body_it_is_in() {
     for mode in [Mode::Success, Mode::Explain] {
         let mut out = Coercion::default();
@@ -9498,7 +9486,6 @@ fn a_trial_of_two_packages_empties_the_scopes_of_the_body_it_is_in() {
 ///
 /// Reaches: R3g, R3j.
 #[test]
-#[ignore = "R3j build"]
 fn the_pairs_of_a_coercion_are_not_those_of_a_relation_run_inside_it() {
     let mut c = checker(Mode::Success);
     let (x, y) = (var(&mut c), var(&mut c));
@@ -9616,7 +9603,6 @@ fn an_inclusion_check_that_runs_a_relation_empties_the_scopes() {
 ///
 /// Reaches: R3g, R3j.
 #[test]
-#[ignore = "R3j build"]
 fn a_coercion_whose_inclusion_check_runs_a_relation() {
     let mut out = Coercion::default();
     let mut c = relating(Mode::Success, Runs::Equal);
