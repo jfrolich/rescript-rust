@@ -3674,12 +3674,12 @@ Commits, in this order, each pushed:
    compiler-rust/Cargo.toml --lib tc:: -- --include-ignored` in the
    background with its output in a file (it takes about twenty
    minutes; poll it): every test passes, the nine of this slice
-   included, and the last line reads 352 passed, 0 failed, 0 ignored
-   (the 343 that pass before your first edit and the nine). Never
+   included, and the last line reads 353 passed, 0 failed, 0 ignored
+   (the 344 that pass before your first edit and the nine). Never
    report a count you did not see.
 2. The nine `#[ignore = "R3i build"]` lines removed; nothing else in
    a test changed. The same command without `-- --include-ignored`
-   then reads 352 passed, 0 failed, 0 ignored.
+   then reads 353 passed, 0 failed, 0 ignored.
 End your turn after the second commit is pushed.
 
 Steps (`#[cfg(test)] super::steps::tick()`): one a frame
@@ -8597,6 +8597,32 @@ beside its OCaml function, then the final review).
    is read against the OCaml lines before a body is built. Even then
    the `EQUAL` class would take a new side that answers `true`
    wrongly: the lists are emptied by item 5, not trusted.
+   State: made (pull request 396). After its assertions on the set of
+   seeds, `relation_plan_agrees_on_generated_cases` makes each listed
+   seed again, runs it on both sides and asks `fits` with the class of
+   its list, collecting every refusal of a plan before it panics:
+   `Equal`, the same failure and line count and every line that
+   differs an answer of `equal` with one index, `false` old and `true`
+   new; `FreeUnivar`, the first line that differs an answer of
+   `moregeneral` with one index, `true` old and `false` new; `Nil`,
+   the same failure, every answer line equal line for line, and the
+   forms equal after `unshare_nil`, which prints every `nil` node (its
+   mark `&n[level]nil` and every reference `@n` to it) as a bare `nil`
+   without number or level, as the `nil` of an equation prints, and
+   renumbers every other mark and reference in order of first
+   appearance. The level goes because the copy can be made at another
+   level than the kept node (seed 54000224: a `nil` at level 0 by
+   reference against one at level 1). `a_listed_seed_must_fit_its_class`
+   runs today and sees each class refuse faults inside a listed seed.
+   Against the prototype the test passed: all 77 seeds fit, the four
+   `NIL` seeds not read before (69000217, 84000296, 12000099,
+   14000052) included, each differing only in `nil` nodes the old side
+   shares. Still unseen: the `Equal` class takes a new side that
+   answers `equal = true` wrongly on a listed seed, since that is what
+   the class expects there; a `FreeUnivar` seed is judged on its first
+   difference only; and a fault of the new side that makes a listed
+   seed agree is seen by the set of seeds, not by the class (a
+   `duplicate_type` that keeps `nil` failed the existing assertion).
 5. OWED, today's checker, each with a source program first (decision
    20): `equal` on a row that a unification extended
    (`equal_rows_without_renaming` expands the field `row_more` where

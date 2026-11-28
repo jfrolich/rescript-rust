@@ -1,0 +1,1 @@
+- Checker rewrite R3i: a seed listed as differing in the relation plans must differ in the way its list names, checked by a test that runs today.
