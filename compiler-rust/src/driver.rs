@@ -10372,6 +10372,12 @@ fn type_structure_two_modes<S, T, R>(
         crate::perf_counters::record_check_attempt();
         let type_ctx = fresh_type_context();
         type_ctx.set_location_namespace(&options.location_identity(filename));
+        // The unit's syntax takes the first scope of every attempt. Its arena
+        // keeps the scope it was given, and each attempt's context counts
+        // scopes from the start again: a later attempt must not give that
+        // scope to an arena it parses, such as a module checked from source.
+        let unit_scope = type_ctx.fresh_location_scope();
+        syntax.arena.declaration_location_scope(|| unit_scope);
         type_ctx.defer_attempt_counters();
         // The environment setup and type checking of this attempt, binding
         // `$tctx` and `$typed`. A macro rather than a closure, so that a build
