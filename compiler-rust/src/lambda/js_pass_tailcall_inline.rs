@@ -9,7 +9,7 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
 use crate::js_ir::BinOp;
 use crate::js_ir::arena::{
-    Block, Expr, ExprKind, FunInfo, IdentList, JsArena, JsDepsProgram as DepsProgram,
+    Block, Expr, ExprKind, FunInfo, IdentId, IdentList, JsArena, JsDepsProgram as DepsProgram,
     JsProgram as Program, Stmt, StmtKind, StmtList, StringClauseInfo, VarDecl,
 };
 use crate::js_ir::build::stmt as S;
@@ -400,6 +400,14 @@ impl Visitor for UseCounts {
         if let ExprKind::Var(id) = a.ek(e) {
             *self.counts.entry(a.ident(id)).or_insert(0) += 1;
         }
+    }
+
+    /// A range loop uses its variable: when the first value is declared
+    /// before the loop, the loop reads and writes that declaration even if
+    /// its body does not (`js_pass_get_used.ml:70`, `ident` counts the
+    /// iterator's `for_ident` visit). One count per range loop.
+    fn visit_range_variable(&mut self, a: &JsArena, ident: IdentId) {
+        *self.counts.entry(a.ident(ident)).or_insert(0) += 1;
     }
 
     fn visit_declaration(&mut self, a: &JsArena, decl: &VarDecl) {

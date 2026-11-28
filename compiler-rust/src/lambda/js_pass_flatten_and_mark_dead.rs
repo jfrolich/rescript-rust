@@ -476,6 +476,11 @@ fn collect_mark_dead_states_statement(
                 collect_mark_dead_states_expression(a, start, states);
             }
             collect_mark_dead_states_expression(a, info.end, states);
+            // The loop uses its variable, which a held first value declares
+            // before the loop (`for_ident`, js_record_iter.ml:171-176, is
+            // `ident`, which `mark_dead_code` counts as a use:
+            // js_pass_flatten_and_mark_dead.ml:44-53).
+            mark_dead_ident_use(&a.ident(info.ident), states);
             collect_mark_dead_states_list(a, info.body, export_set, states);
         }
         StmtKind::ForOf(info) | StmtKind::ForAwaitOf(info) => {
