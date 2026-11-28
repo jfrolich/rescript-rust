@@ -254,6 +254,13 @@ pub(crate) struct Builder<'a> {
     /// made: sorted by id, since ids ascend. What [`Builder::alias_at`]
     /// reads.
     aliases: Vec<(u32, u32)>,
+    /// The ids of the nodes from the statement [`Builder::substitute`]
+    /// walks down to the node it has in hand, and the depth of each node
+    /// it has still to read (beside its work stack). Empty between calls
+    /// and kept: they allocate only when a statement is deeper or wider
+    /// than any before it.
+    path: Vec<u32>,
+    depths: Vec<u32>,
     /// The body of each function literal, a list in flight, dense by the
     /// header [`Builder::function`] is given (the lowering's `FuncId`):
     /// the body stays a list until the print form of the literal is
@@ -328,6 +335,8 @@ impl<'a> Builder<'a> {
             float_text: String::new(),
             members: Vec::new(),
             aliases: Vec::new(),
+            path: Vec::new(),
+            depths: Vec::new(),
             literals: Vec::new(),
             spare: Vec::new(),
         }
@@ -1298,18 +1307,27 @@ impl<'a> Builder<'a> {
     /// and the walk stops at the last (the lowering's
     /// `JsStmt::substitute`). Returns the number replaced. A reference is
     /// a `Var` node of exactly that variable; what replaces it is not
-    /// entered. The statement stays where it is and keeps its id. The rows
-    /// of the nodes above a replaced reference are not written again: the
-    /// lowering replaces a strictly pure reference by a strictly pure
-    /// expression after the last rule that reads them ran, and neither
-    /// has `HAS_FUN` or `SEAL`.
+    /// entered. The statement stays where it is and keeps its id. Of the
+    /// rows of the nodes above a replaced reference the facts the rules
+    /// read are not written again: the lowering replaces a strictly pure
+    /// reference by a strictly pure expression after the last rule that
+    /// reads them ran. The flags a node holds when an operand holds them
+    /// (`HAS_FUN`, `SEAL`, `HAS_GLOBAL`) are written: what replaces a
+    /// reference can be a reference to a JavaScript global, and the
+    /// replay's descent, which runs after the fold, is pruned by the flag
+    /// ([`Builder::below`]). They go into the row of every node and
+    /// statement from the reference up to `statement`, and into the
+    /// handle's row.
     ///
     /// One step per node the walk reads, until the last reference
-    /// replaced: O(nodes of the statement). The work stack is one vector
-    /// of the call (its references borrow the statement, so the builder
-    /// cannot keep it): one allocation a call that has a use to replace,
-    /// none per node. Panics on a node no constructor of the builder
-    /// makes: the slice that adds a constructor adds its arm.
+    /// replaced: O(nodes of the statement); and, for a replacement that
+    /// brings such a flag, one store per node above it (the path from the
+    /// statement to the node in hand is kept in [`Builder::path`], one
+    /// entry a level). The work stack is one vector of the call (its
+    /// references borrow the statement, so the builder cannot keep it):
+    /// one allocation a call that has a use to replace, none per node.
+    /// Panics on a node no constructor of the builder makes: the slice
+    /// that adds a constructor adds its arm.
     pub fn substitute(
         &mut self,
         statement: &mut S<'a>,
@@ -1321,12 +1339,21 @@ impl<'a> Builder<'a> {
         if uses == 0 {
             return replaced;
         }
+        let (mut path, mut depths) = (std::mem::take(&mut self.path), std::mem::take(&mut self.depths));
+        // The inherited flags the replacements brought, and the depth of
+        // what was pushed since the last pop: one below the node read.
+        let (mut added, mut below) = (0, 0);
         let mut work = vec![Pending::Statement(&mut statement.stmt)];
-        while let Some(pending) = work.pop() {
+        while !work.is_empty() {
+            depths.resize(work.len(), below);
+            let (pending, depth) = (work.pop().expect("a pending node"), depths.pop().expect("its depth") as usize);
+            below = depth as u32 + 1;
+            path.truncate(depth);
             self.steps += 1;
             let expr = match pending {
                 Pending::Statement(statement) => {
                     let id = statement.node_id().index() as u32;
+                    path.push(id);
                     match statement {
                         Statement::ExpressionStatement(node) => work.push(Pending::Expression(&mut node.expression)),
                         Statement::ReturnStatement(node) => {
@@ -1341,6 +1368,8 @@ impl<'a> Builder<'a> {
                                 if self.is_reference(init, variable) {
                                     let copy = make(self);
                                     self.realias(id, copy.row);
+                                    // The declaration is above it too.
+                                    added |= self.inherit(&path, copy.row);
                                     *init = copy.expr;
                                     replaced += 1;
                                 } else {
@@ -1375,13 +1404,16 @@ impl<'a> Builder<'a> {
                 Pending::Expression(expr) => expr,
             };
             if self.is_reference(expr, variable) {
-                *expr = make(self).expr;
+                let copy = make(self);
+                added |= self.inherit(&path, copy.row);
+                *expr = copy.expr;
                 replaced += 1;
                 if replaced == uses {
                     break;
                 }
                 continue;
             }
+            path.push(expr.node_id().index() as u32);
             match expr {
                 Expression::UnaryExpression(node) => work.push(Pending::Expression(&mut node.argument)),
                 Expression::BinaryExpression(node) => {
@@ -1457,7 +1489,30 @@ impl<'a> Builder<'a> {
                 _ => unreachable!("an expression no constructor of the builder makes"),
             }
         }
+        drop(work);
+        statement.row.flags |= added;
+        path.clear();
+        depths.clear();
+        (self.path, self.depths) = (path, depths);
         replaced
+    }
+
+    /// Give the rows of the nodes of `path` the flags a node holds when
+    /// an operand holds them, of the row `brought` of an expression put
+    /// below them ([`Builder::substitute`]); returns those flags. A node
+    /// of a printed form without a row of its own (id 0) is passed. O(1)
+    /// when the expression has none of the flags; else one store per
+    /// node of the path.
+    fn inherit(&mut self, path: &[u32], brought: Row) -> u16 {
+        let flags = brought.flags & INHERITED;
+        if flags != 0 {
+            for &id in path {
+                if id != 0 {
+                    self.rows[id as usize].flags |= flags;
+                }
+            }
+        }
+        flags
     }
 
     /// The operands of `expr`, pushed on `out` in order: what a walk that

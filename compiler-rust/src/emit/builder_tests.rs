@@ -2620,4 +2620,66 @@ mod replay {
         let statement = b.exp(value);
         b.below(&statement, flag::SEAL, |_| false);
     }
+
+    /// A reference to a global put in the place of a moved variable by
+    /// the export fold is found by the replay's descent, which runs after
+    /// the fold: `substitute` gives the flag to every node and statement
+    /// above the reference, and to none beside it.
+    #[test]
+    fn a_global_substituted_into_a_statement_is_found_by_the_descent() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // `if (v1) { v1(v2 + 1, v1); } else { }`, and `let v3 = v2;`.
+        fn build<'a>(b: &mut Builder<'a>) -> (S<'a>, [usize; 3], usize, usize, usize) {
+            let callee = b.reference(1, 0);
+            let (moved, one, last) = (b.reference(2, 0), b.int(1), b.reference(1, 0));
+            let sum = b.bin(BinOp::Plus, moved, one).unwrap();
+            let ids = [callee.expr.node_id().index(), sum.expr.node_id().index(), last.expr.node_id().index()];
+            let value = call(b, callee, vec![sum, last]);
+            let call_id = value.expr.node_id().index();
+            let mark = b.stage_mark();
+            let inner = b.exp(value);
+            let inner_id = inner.stmt.node_id().index();
+            b.stage(inner);
+            let (test, then, otherwise) = (b.reference(1, 0), b.list(mark), effects(b, 1));
+            let test_id = test.expr.node_id().index();
+            (b.if_(test, then, otherwise), ids, call_id, inner_id, test_id)
+        }
+        // A replacement without a flag changes no row.
+        let (mut plain, ..) = build(&mut b);
+        let rows = b.rows.clone();
+        assert_eq!(b.substitute(&mut plain, 2, 1, |b| b.reference(4, 0)), 1);
+        assert_eq!(b.rows[..rows.len()], rows[..]);
+        assert!(!plain.row.has(flag::HAS_GLOBAL));
+        assert_eq!(found(&mut b, &plain, BOTH, &[]), (vec![], 0));
+        // A global: the sum, the call, the statement in the list and the
+        // `if`, in the table and in the handle; not the callee, the other
+        // argument or the test.
+        let (mut statement, [callee, sum, last], call_id, inner_id, test_id) = build(&mut b);
+        assert_eq!(b.substitute(&mut statement, 2, 1, |b| b.reference(8, var::GLOBAL)), 1);
+        for id in [sum, call_id, inner_id, statement.stmt.node_id().index()] {
+            assert!(b.rows[id].has(flag::HAS_GLOBAL), "row {id}");
+        }
+        for id in [callee, last, test_id, 0] {
+            assert!(!b.rows[id].has(flag::HAS_GLOBAL), "row {id}");
+        }
+        assert!(statement.row.has(flag::HAS_GLOBAL));
+        assert_eq!(statement.row, b.statement_row(&statement.stmt));
+        // The descent of the `if` reads its test; that of the statement
+        // in its list finds the global.
+        assert_eq!(found(&mut b, &statement, flag::HAS_GLOBAL, &[]), (vec![], 1));
+        let list = b.take_body(&mut statement, 0);
+        let inner = b.take(list, 0);
+        // The call, its callee and two arguments, the two operands of
+        // the sum.
+        assert_eq!(found(&mut b, &inner, flag::HAS_GLOBAL, &[]), (vec![Below::Global(8)], 6));
+        // The initialiser of a declaration: the declaration is above it.
+        let moved = b.reference(2, 0);
+        let mut declaration = b.declare(3, 0, Some(moved));
+        assert_eq!(b.substitute(&mut declaration, 2, 1, |b| b.reference(8, var::GLOBAL)), 1);
+        assert!(declaration.row.has(flag::HAS_GLOBAL));
+        assert_eq!(found(&mut b, &declaration, flag::HAS_GLOBAL, &[]), (vec![Below::Global(8)], 1));
+        // The walk's path and depths are left empty.
+        assert!(b.path.is_empty() && b.depths.is_empty());
+    }
 }
