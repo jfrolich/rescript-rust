@@ -428,13 +428,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     full_args.push(param);
                 }
                 // The callee and the arguments were built before the
-                // function's scope opened and move into it (G10). T6r:
-                // `names::adopt` takes a row, read here by its id.
-                let node = NodeId(self.js.id(&self.arena, B::of(&callee)));
-                super::names::adopt(&mut self.arena, &self.idents, node);
+                // function's scope opened and move into it (G10).
+                super::names::adopt(&mut self.js, &mut self.arena, &callee);
                 for value in &full_args[..remaining] {
-                    let node = NodeId(self.js.id(&self.arena, B::of(value)));
-                    super::names::adopt(&mut self.arena, &self.idents, node);
+                    super::names::adopt(&mut self.js, &mut self.arena, value);
                 }
                 let call = self.call_values(callee, full_args.drain(..), full);
                 self.eta_arguments = full_args;
@@ -445,8 +442,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     Default::default(),
                     crate::lambda::LamLoc::NONE,
                 );
+                let eta = super::names::eta_shape(&self.js, &self.arena, header, body);
                 let function = self.js.function(&mut self.arena, header, body);
-                super::names::close(&mut self.arena, &self.idents, header);
+                super::names::close(&self.js, &mut self.arena, &self.idents, header, eta);
                 return function;
             } else {
                 return self.call_values(callee, args, crate::js_ir::CallInfo::default());

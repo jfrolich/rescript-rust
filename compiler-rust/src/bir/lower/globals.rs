@@ -320,7 +320,11 @@ fn deep_constant(bir: &Bir, item: NodeId, steps: &mut usize) -> bool {
 }
 
 /// Steps 3 and 4, one name at a time: mark the scope of each binding, then
-/// decide each site. See `decide` for the cost.
+/// decide each site. Cost: nothing for a name without a binding or an
+/// import; otherwise one step per binding of the name (and one per
+/// explicit block around a declaration), and per live site of the name's
+/// globals its ancestors up to the first marked node, each read at most
+/// twice per name. `marks` is grown to the arena once.
 fn rows(bir: &mut Bir, scope: &super::scope::Scope, globals: &mut Globals) {
     if globals.marks.len() < bir.nodes.len() {
         globals.marks.resize(bir.nodes.len(), 0);
@@ -347,7 +351,7 @@ fn rows(bir: &mut Bir, scope: &super::scope::Scope, globals: &mut Globals) {
             at = next;
             let mut site = scope.site_heads[item as usize];
             while site != 0 {
-                let super::scope::Site { node, next } = scope.sites[site as usize - 1];
+                let super::scope::Site { node, next, .. } = scope.sites[site as usize - 1];
                 site = next;
                 if node == NodeId(u32::MAX) {
                     continue;

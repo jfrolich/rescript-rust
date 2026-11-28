@@ -626,7 +626,7 @@ impl<B: JsStmt> StatementStack<B> {
     }
     /// THREE_TREES 11.4, step A: decide the declarations of a copied list.
     /// Cost: that of `close::decide`; nothing on an arena without counts.
-    pub(super) fn close(&mut self, js: &B, a: &mut Pools, list: B::L) {
+    pub(super) fn close(&mut self, js: &mut B, a: &mut Pools, list: B::L) {
         if a.js_scope.is_some() {
             super::close::decide(js, a, list);
         }

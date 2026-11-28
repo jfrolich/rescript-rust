@@ -709,6 +709,20 @@ pub(crate) struct IfHead<H> {
     pub tail: H,
 }
 
+/// The tail-call sites of the `return` of `value` that
+/// `simplify_if_head` builds: the walk the close of a list runs through
+/// the interface (`JsStmt::return_calls`), here on the row, because this
+/// `return` passes no close. The work stack is the scope's. Nothing on an
+/// arena without counts. One read per conditional, sequence and end.
+fn tail_calls(b: &mut Bir, value: NodeId) {
+    let Some(scope) = &mut b.js_scope else { return };
+    let mut work = std::mem::take(&mut scope.spine);
+    let read = super::rows_stmt::return_calls_of(b, &mut work, value, true, crate::bir::lower::scope::tail_call);
+    let scope = b.js_scope.as_mut().expect("lowering scope");
+    scope.close_steps += read as usize;
+    scope.spine = work;
+}
+
 /// J-S3 rules 0..6, the sole implementation for pooled and in-place branches.
 /// O(consumed statements + stripped test negations), plus J-E7/J-E8 costs.
 /// A retained tail is returned by handle and is never scanned or copied here.
@@ -773,7 +787,7 @@ pub(crate) fn simplify_if_head<L: IfLists>(
             let ret = p::node(b, View::SReturn { value: n }, 0);
             // This list never passes `StatementStack::take_list`: the
             // returned value may come from a run that was not copied.
-            crate::bir::lower::scope::return_sites(b, n, true);
+            tail_calls(b, n);
             let then_ = b.lists.push(&[ret]);
             let else_ = b.lists.push(&[]);
             let statement = raw_if(b, test, then_, else_);

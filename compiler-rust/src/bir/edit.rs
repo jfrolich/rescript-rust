@@ -345,7 +345,8 @@ impl Bir {
             }
             Op::JQualified => {
                 if let Some(scope) = &mut self.js_scope {
-                    let site = scope.import_site(id);
+                    let View::JQualified { module, .. } = node.view(&self.lists) else { unreachable!() };
+                    let site = scope.import_site(module, id);
                     self.nodes[id.index()].set_site(site);
                 }
             }

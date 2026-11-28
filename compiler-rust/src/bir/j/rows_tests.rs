@@ -50,6 +50,7 @@ fn jsx(u: &mut Unit, children: u32, apart: bool) -> u64 {
         key: false,
         multi: children > 1,
         fragment: false,
+        ..Default::default()
     }));
     let mark = r.mark();
     if apart {
@@ -102,6 +103,7 @@ fn a_jsx_element_with_its_callee_apart_is_the_element_jsx_makes() {
         key: false,
         multi: false,
         fragment: false,
+        ..Default::default()
     }));
     let mark = r.mark();
     let tag = r.var(&mut u.b, u.x);
@@ -366,6 +368,7 @@ fn the_callee_and_the_tag_of_a_jsx_element_are_told_by_their_ids() {
         key: false,
         multi: false,
         fragment: false,
+        ..Default::default()
     }));
     let mark = r.mark();
     // The tag is a member of `x`: the climb from the reference ends at the
