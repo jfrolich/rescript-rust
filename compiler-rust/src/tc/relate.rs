@@ -1846,7 +1846,34 @@ impl Checker {
     /// calls it pays nothing: `path_entries` is empty until the first
     /// call, then four bytes a node. (R3j)
     pub fn enlarge_type(&mut self, ty: Ty) -> (Ty, bool) {
-        todo!("R3j")
+        // The entries of earlier walks are all at or below the clock, so a
+        // walk that starts above it sees none of them; the table is cleared
+        // once before the clock could wrap.
+        if self.path_clock >= u32::MAX / 2 {
+            self.path_entries.fill(0);
+            self.path_clock = 0;
+        }
+        let mut path = EnlargePath { base: self.path_clock, floor: self.path_clock + 1, warn: false };
+        let base = self.enlarging.len();
+        self.enlarging.push(visit_frame(ty, true, 4));
+        while self.enlarging.len() > base {
+            #[cfg(test)]
+            super::steps::tick();
+            let frame = self.enlarging.pop().unwrap();
+            match frame.state & ENLARGE_KIND {
+                ENLARGE_VISIT => self.enlarge_visit(frame, &mut path),
+                ENLARGE_LEAVE => self.enlarge_leave(frame, &mut path),
+                ENLARGE_FLOOR => path.floor = frame.a,
+                ENLARGE_KEEP => self.enlarged.push(Enlarged { ty: frame.ty, change: Change::Unchanged }),
+                ENLARGE_FRESH => {
+                    let ty = self.fresh_var();
+                    self.enlarged.push(Enlarged { ty, change: Change::Changed });
+                }
+                _ => unreachable!("a kind of EnlargeFrame"),
+            }
+        }
+        let result = self.enlarged.pop().unwrap();
+        (result.ty, path.warn)
     }
 
     /// The loop of `subtype_rec` (compiler/ml/ctype.ml:3643-4101): pop
@@ -2818,7 +2845,10 @@ impl Checker {
     /// load, one compare; OCaml scans the list. (R3j)
     #[inline]
     fn on_path(&self, path: &mut EnlargePath, ty: Ty, row: bool) -> bool {
-        todo!("R3j")
+        let entry = self.path_entries.get(ty.0 as usize).copied().unwrap_or(0);
+        let found = if row { entry >= path.floor } else { entry > path.base };
+        path.warn |= found;
+        found
     }
 
     /// `let visited = t :: visited` for a node that is not an object or
@@ -2829,7 +2859,11 @@ impl Checker {
     /// an enclosing cut has hidden is in `visited` again when the walk
     /// is back above the cut). O(1) amortized. (R3j)
     fn enter_path(&mut self, ty: Ty) -> u32 {
-        todo!("R3j")
+        if self.path_entries.len() <= ty.0 as usize {
+            self.path_entries.resize(self.g.nodes.len(), 0);
+        }
+        self.path_clock += 1;
+        std::mem::replace(&mut self.path_entries[ty.0 as usize], self.path_clock)
     }
 
     /// `t :: (if level' < level then [] else filter_visited visited)`
@@ -2844,7 +2878,13 @@ impl Checker {
     /// the `path.base` there was, for the leave frame, which the caller
     /// pushes ABOVE the floor frame. O(1). (R3j)
     fn enter_row(&mut self, path: &mut EnlargePath, ty: Ty, cut: bool) -> (u32, u32) {
-        todo!("R3j")
+        let before = self.enter_path(ty);
+        let base = std::mem::replace(&mut path.base, self.path_clock);
+        if cut {
+            self.enlarging.push(EnlargeFrame { ty, a: path.floor, b: 0, state: ENLARGE_FLOOR });
+            path.floor = self.path_clock;
+        }
+        (before, base)
     }
 
     /// `has_constr_row' env t` after the expansion
@@ -2856,7 +2896,22 @@ impl Checker {
     /// back) ends in one. O(fields) for an object or a variant, O(1)
     /// otherwise. (R3j)
     fn has_constr_row(&mut self, expansion: Ty) -> bool {
-        todo!("R3j")
+        let node = self.g.nodes[expansion.0 as usize];
+        if node.head & EXTENDED == 0 {
+            return false;
+        }
+        let end = match self.extras.descriptors[node.a as usize] {
+            ExtraDescriptor::Object => self.object_row(self.g.lists[node.b as usize]),
+            ExtraDescriptor::Variant(_) => {
+                let first = self.extras.row_scratch.len();
+                let opened = self.open_row(expansion);
+                let (_, more) = self.flatten_row(opened);
+                self.extras.row_scratch.truncate(first);
+                more
+            }
+            _ => return false,
+        };
+        self.g.nodes[end.0 as usize].tag() == CONSTR
     }
 
     /// One node of `build_subtype env visited loops posi level t`
@@ -2906,7 +2961,155 @@ impl Checker {
     ///
     /// O(children) frames; one step a field of a variant read. (R3j)
     fn enlarge_visit(&mut self, frame: EnlargeFrame, path: &mut EnlargePath) {
-        todo!("R3j")
+        use super::graph::TUPLE;
+        let t = self.g.repr(frame.ty);
+        let node = self.g.nodes[t.0 as usize];
+        let posi = frame.state & ENLARGE_POSI != 0;
+        let level = frame.state >> ENLARGE_LEVEL & 7;
+        let unchanged = Enlarged { ty: t, change: Change::Unchanged };
+        let leave = enlarge_state(ENLARGE_LEAVE, posi, level);
+        let (entered, expanded) = (leave | ENLARGE_ENTERED, leave | ENLARGE_EXPANDED);
+        if node.head & EXTENDED == 0 {
+            match node.tag() {
+                ARROW | TUPLE => {
+                    if self.on_path(path, t, false) {
+                        self.enlarged.push(unchanged);
+                        return;
+                    }
+                    let before = self.enter_path(t);
+                    self.enlarging.push(EnlargeFrame { ty: t, a: before, b: path.base, state: entered });
+                    if node.tag() == ARROW {
+                        self.enlarging.push(visit_frame(Ty(node.a), posi, level));
+                        for i in (0..node.arity()).rev() {
+                            let ty = self.g.params[(node.b + i) as usize].ty;
+                            self.enlarging.push(visit_frame(ty, !posi, level));
+                        }
+                    } else {
+                        for i in (0..node.arity()).rev() {
+                            let ty = self.g.lists[(node.b + i) as usize];
+                            self.enlarging.push(visit_frame(ty, posi, level));
+                        }
+                    }
+                }
+                CONSTR => {
+                    let public = self.expands(node.a, super::expand::ABBREV);
+                    if level > 0 && public {
+                        let expansion = self.enlarge_expansion(t);
+                        if expansion.0 != NONE {
+                            self.enlarging.push(EnlargeFrame { ty: t, a: 0, b: path.base, state: expanded });
+                            // `pred_expand level` (ctype.ml:3395), `level > 0` here.
+                            let below = if level % 2 == 0 { level - 1 } else { level };
+                            self.enlarging.push(visit_frame(expansion, posi, below));
+                            return;
+                        }
+                    }
+                    if self.on_path(path, t, false) {
+                        self.enlarged.push(unchanged);
+                        return;
+                    }
+                    if level == 0 && public && self.enlarge_expansion(t).0 != NONE {
+                        path.warn = true;
+                    }
+                    if node.arity() == 0 || self.types.upper(node.a, 0).is_none() {
+                        self.enlarged.push(unchanged);
+                        return;
+                    }
+                    let before = self.enter_path(t);
+                    self.enlarging.push(EnlargeFrame { ty: t, a: before, b: path.base, state: entered });
+                    for i in (0..node.arity()).rev() {
+                        let ty = self.g.lists[(node.b + 1 + i) as usize];
+                        let state = match self.types.upper(node.a, i) {
+                            Some((true, true)) => ENLARGE_KEEP,
+                            Some((false, true)) => enlarge_state(ENLARGE_VISIT, !posi, level),
+                            Some((true, false)) => enlarge_state(ENLARGE_VISIT, posi, level),
+                            _ => ENLARGE_FRESH,
+                        };
+                        self.enlarging.push(EnlargeFrame { ty, a: 0, b: 0, state });
+                    }
+                }
+                _ => self.enlarged.push(unchanged),
+            }
+            return;
+        }
+        match self.extras.descriptors[node.a as usize] {
+            ExtraDescriptor::Variant(_) => {
+                if self.on_path(path, t, true) {
+                    self.enlarged.push(unchanged);
+                    return;
+                }
+                let first = self.extras.row_scratch.len();
+                let opened = self.open_row(t);
+                let (last, _) = self.flatten_row(opened);
+                let end = self.extras.row_scratch.len();
+                // `static_row row` (btype.ml:205-212).
+                let mut fixed = self.last_row(last, opened).closed;
+                for at in first..end {
+                    #[cfg(test)]
+                    super::steps::tick();
+                    fixed &= !matches!(self.field_now_at(at).kind, RowFieldKind::Either { .. });
+                }
+                if !fixed {
+                    self.extras.row_scratch.truncate(first);
+                    self.enlarged.push(unchanged);
+                    return;
+                }
+                // `pred_enlarge level` (ctype.ml:3396).
+                let below = level - level % 2;
+                let (before, base) = self.enter_row(path, t, below < level);
+                self.enlarging.push(EnlargeFrame { ty: t, a: before, b: base, state: entered });
+                for at in (first..end).rev() {
+                    let field = self.field_now_at(at);
+                    if field.kind == RowFieldKind::Present && field.first.0 != NONE {
+                        self.enlarging.push(visit_frame(field.first, posi, below));
+                    }
+                }
+                self.extras.row_scratch.truncate(first);
+            }
+            ExtraDescriptor::Object => {
+                let fields = self.g.lists[node.b as usize];
+                if self.on_path(path, t, true) {
+                    self.enlarged.push(unchanged);
+                    return;
+                }
+                let end = self.object_row(fields);
+                let end = self.g.nodes[end.0 as usize];
+                let open = end.tag() == VAR
+                    || end.tag() == CONSTR
+                    || (end.head & EXTENDED != 0
+                        && matches!(self.extras.descriptors[end.a as usize], ExtraDescriptor::Univar(_)));
+                if open {
+                    self.enlarged.push(unchanged);
+                    return;
+                }
+                let below = level - level % 2;
+                let (before, base) = self.enter_row(path, t, below < level);
+                self.enlarging.push(EnlargeFrame { ty: t, a: before, b: base, state: entered });
+                self.enlarging.push(visit_frame(fields, posi, below));
+            }
+            ExtraDescriptor::Field { .. } => {
+                self.enlarging.push(EnlargeFrame { ty: t, a: 0, b: path.base, state: leave });
+                self.enlarging.push(visit_frame(self.g.lists[node.b as usize + 1], posi, level));
+                let ty = self.g.lists[node.b as usize];
+                let cell = cell_repr(&self.g, self.cell_of(t));
+                let state =
+                    if cell_mutable(&self.g, cell) { ENLARGE_KEEP } else { enlarge_state(ENLARGE_VISIT, posi, level) };
+                self.enlarging.push(EnlargeFrame { ty, a: 0, b: 0, state });
+            }
+            ExtraDescriptor::Nil if posi => {
+                let ty = self.fresh_var();
+                self.enlarged.push(Enlarged { ty, change: Change::Changed });
+            }
+            ExtraDescriptor::Nil => {
+                path.warn = true;
+                self.enlarged.push(unchanged);
+            }
+            ExtraDescriptor::Poly => {
+                self.enlarging.push(EnlargeFrame { ty: t, a: 0, b: path.base, state: leave });
+                self.enlarging.push(visit_frame(self.g.lists[node.b as usize], posi, level));
+            }
+            ExtraDescriptor::Univar(_) | ExtraDescriptor::Package(_) => self.enlarged.push(unchanged),
+            ExtraDescriptor::Substitution => unreachable!("Tsubst outside a copy"),
+        }
     }
 
     /// One node of `build_subtype` on the way up: the results of its
@@ -2936,7 +3139,87 @@ impl Checker {
     /// constructor, a field and a polymorphic type made no entry and
     /// write the base they found). O(children); one node. (R3j)
     fn enlarge_leave(&mut self, frame: EnlargeFrame, path: &mut EnlargePath) {
-        todo!("R3j")
+        use super::graph::{Param, TUPLE};
+        let t = frame.ty;
+        let node = self.g.nodes[t.0 as usize];
+        let level = self.g.level;
+        let expanded = frame.state & ENLARGE_EXPANDED != 0;
+        let descriptor = if node.head & EXTENDED != 0 { Some(self.extras.descriptors[node.a as usize]) } else { None };
+        if let Some(ExtraDescriptor::Variant(_)) = descriptor {
+            self.enlarge_variant(frame);
+        } else {
+            let children = match (node.tag(), descriptor) {
+                _ if expanded => 1,
+                (_, Some(ExtraDescriptor::Field { .. })) => 2,
+                (_, Some(_)) => 1,
+                (ARROW, _) => node.arity() as usize + 1,
+                _ => node.arity() as usize,
+            };
+            let first = self.enlarged.len() - children;
+            let mut change = Change::Unchanged;
+            for result in &self.enlarged[first..] {
+                #[cfg(test)]
+                super::steps::tick();
+                change = change.max(result.change);
+            }
+            let mut made = t;
+            if change > Change::Unchanged {
+                made = match (node.tag(), descriptor) {
+                    _ if expanded => self.enlarged[first].ty,
+                    (_, Some(ExtraDescriptor::Field { name, mutability })) => {
+                        // A new cell with the value the field's has now (3566-3567).
+                        let mutable = cell_mutable(&self.g, cell_repr(&self.g, Ty(mutability)));
+                        let cell = self.g.push(super::rows::cell_node(mutable));
+                        let a = self.extras.descriptors.len() as u32;
+                        self.extras.descriptors.push(ExtraDescriptor::Field { name, mutability: cell.0 });
+                        let b = self.g.lists.len() as u32;
+                        self.g.lists.push(self.enlarged[first].ty);
+                        self.g.lists.push(self.enlarged[first + 1].ty);
+                        self.g.push(Node { level, a, b, ..node })
+                    }
+                    // An object or a polymorphic type: slot 0 replaced.
+                    (_, Some(_)) => {
+                        let b = self.g.lists.len() as u32;
+                        self.g.lists.push(self.enlarged[first].ty);
+                        for i in 1..node.arity() {
+                            let slot = self.g.lists[(node.b + i) as usize];
+                            self.g.lists.push(slot);
+                        }
+                        self.g.push(Node { level, b, ..node })
+                    }
+                    (ARROW, _) => {
+                        let b = self.g.params.len() as u32;
+                        for i in 0..node.arity() {
+                            let param = self.g.params[(node.b + i) as usize];
+                            self.g.params.push(Param { ty: self.enlarged[first + i as usize].ty, ..param });
+                        }
+                        self.g.push(Node { level, a: self.enlarged[first + children - 1].ty.0, b, ..node })
+                    }
+                    (TUPLE, _) => {
+                        let b = self.g.lists.len() as u32;
+                        for at in first..self.enlarged.len() {
+                            self.g.lists.push(self.enlarged[at].ty);
+                        }
+                        self.g.push(Node { level, b, ..node })
+                    }
+                    // `newconstr p tl'`: an empty memo slot, then the arguments.
+                    _ => {
+                        let b = self.g.lists.len() as u32;
+                        self.g.lists.push(Ty(NONE));
+                        for at in first..self.enlarged.len() {
+                            self.g.lists.push(self.enlarged[at].ty);
+                        }
+                        self.g.push(Node { head: CONSTR | node.arity() << 8, level, a: node.a, b })
+                    }
+                };
+            }
+            self.enlarged.truncate(first);
+            self.enlarged.push(Enlarged { ty: made, change });
+        }
+        if frame.state & ENLARGE_ENTERED != 0 {
+            self.path_entries[t.0 as usize] = frame.a;
+        }
+        path.base = frame.b;
     }
 
     /// The public expansion of constructor node `ty` when
@@ -2947,7 +3230,13 @@ impl Checker {
     /// `Checker::has_constr_row`; otherwise `NONE`. The cost of the
     /// expansion (a memo hit the second time). (R3j)
     fn enlarge_expansion(&mut self, ty: Ty) -> Ty {
-        todo!("R3j")
+        match self.expand_once(ty, ExpandMode::Safe) {
+            Ok(found) if found.0 != NONE => {
+                let found = self.g.repr(found);
+                if self.has_constr_row(found) { Ty(NONE) } else { found }
+            }
+            _ => Ty(NONE),
+        }
     }
 
     /// The leave of a static variant (compiler/ml/ctype.ml:3510-3537);
@@ -2998,7 +3287,81 @@ impl Checker {
     /// the flattening and two steps a tag; one node, one variable, one
     /// descriptor row, one `VariantRow`. (R3j)
     fn enlarge_variant(&mut self, frame: EnlargeFrame) {
-        todo!("R3j")
+        use super::graph::TUPLE;
+        use super::segment::{Range, RowFieldRow};
+        let posi = frame.state & ENLARGE_POSI != 0;
+        let level = frame.state >> ENLARGE_LEVEL & 7;
+        let first = self.extras.row_scratch.len();
+        let opened = self.open_row(frame.ty);
+        let (last, _) = self.flatten_row(opened);
+        let end = self.extras.row_scratch.len();
+        let home = if last.0 == NONE { opened } else { self.g.nodes[last.0 as usize] };
+        let row = self.last_row(last, opened);
+        let (mut typed, mut kept) = (0, 0);
+        for at in first..end {
+            #[cfg(test)]
+            super::steps::tick();
+            let field = self.field_now_at(at);
+            kept += u32::from(field.kind != RowFieldKind::Absent);
+            typed += u32::from(field.kind == RowFieldKind::Present && field.first.0 != NONE);
+        }
+        let results = self.enlarged.len() - typed as usize;
+        let mut change = Change::Unchanged;
+        for result in &self.enlarged[results..] {
+            change = change.max(result.change);
+        }
+        // `row_name = if c > Unchanged then None else row.row_name`.
+        let named = change == Change::Unchanged && row.name != NONE;
+        let arguments = if named { row.name_arguments } else { Range::default() };
+        let more = self.fresh_var();
+        let published = typed + 1 + arguments.len;
+        let b = self.g.lists.len() as u32;
+        let start = self.extras.row_fields.len() as u32;
+        // Each `Either` field has a reference of its own past the slots.
+        let (mut slot, mut reference) = (0, published);
+        for at in first..end {
+            #[cfg(test)]
+            super::steps::tick();
+            let field = self.field_now_at(at);
+            if field.kind == RowFieldKind::Absent {
+                continue;
+            }
+            let name = self.extras.row_scratch[at].name;
+            let (types, either) = if field.first.0 == NONE {
+                (Range::default(), posi.then_some(true))
+            } else {
+                self.g.lists.push(self.enlarged[results + slot as usize].ty);
+                slot += 1;
+                (Range { start: slot - 1, len: 1 }, (posi && level > 0).then_some(false))
+            };
+            let (link, kind) = match either {
+                Some(constant) => {
+                    reference += 1;
+                    (reference - 1, RowFieldKind::Either { constant, matched: false })
+                }
+                None => (NONE, RowFieldKind::Present),
+            };
+            self.extras.row_fields.push(RowFieldRow { name, types, link, kind });
+        }
+        self.g.lists.push(more);
+        for i in 0..arguments.len {
+            let argument = self.g.lists[(home.b + arguments.start + i) as usize];
+            self.g.lists.push(argument);
+        }
+        self.extras.variants.push(VariantRow {
+            fields: Range { start, len: kept },
+            more: typed,
+            name: if named { row.name } else { NONE },
+            name_arguments: Range { start: typed + 1, len: arguments.len },
+            closed: posi,
+            fixed: false,
+        });
+        let a = self.extras.descriptors.len() as u32;
+        self.extras.descriptors.push(ExtraDescriptor::Variant(self.extras.variants.len() as u32 - 1));
+        let ty = self.g.push(Node { head: TUPLE | EXTENDED | published << 8, level: self.g.level, a, b });
+        self.extras.row_scratch.truncate(first);
+        self.enlarged.truncate(results);
+        self.enlarged.push(Enlarged { ty, change: Change::Changed });
     }
 
     /// The table of pairs and the renaming of a relation that starts
@@ -3261,6 +3624,13 @@ pub const ENLARGE_ENTERED: u32 = 1 << 8;
 #[inline]
 pub fn enlarge_state(kind: u32, posi: bool, level: u32) -> u32 {
     kind | if posi { ENLARGE_POSI } else { 0 } | level << ENLARGE_LEVEL
+}
+
+/// O(1): the frame of `build_subtype env visited loops posi level ty`,
+/// pending (`ENLARGE_VISIT`). (R3j)
+#[inline]
+fn visit_frame(ty: Ty, posi: bool, level: u32) -> EnlargeFrame {
+    EnlargeFrame { ty, a: 0, b: 0, state: enlarge_state(ENLARGE_VISIT, posi, level) }
 }
 
 /// `visited` and `warn` of one `build_subtype` walk
