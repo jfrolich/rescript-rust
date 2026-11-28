@@ -3609,6 +3609,21 @@ impl TypeContext {
         self.usage.borrow_mut()
     }
 
+    /// The warnings recorded since the typer last drained its events.
+    pub(crate) fn take_recorded_warnings(
+        &self,
+    ) -> Vec<(crate::parse_arena::LocIdx, crate::diagnostics::Warning)> {
+        let mut warnings = Vec::new();
+        self.open_slot_events.borrow_mut().retain(|event| match event {
+            LookupEvent::Warning(loc, warning) => {
+                warnings.push((*loc, (**warning).clone()));
+                false
+            }
+            LookupEvent::OpenSlot(_) | LookupEvent::ModuleDeprecated(_) => true,
+        });
+        warnings
+    }
+
     pub(crate) fn take_open_slot_events(&self) -> Vec<LookupEvent> {
         std::mem::take(&mut *self.open_slot_events.borrow_mut())
     }
