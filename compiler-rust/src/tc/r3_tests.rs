@@ -9518,8 +9518,12 @@ fn the_pairs_of_a_coercion_are_not_those_of_a_relation_run_inside_it() {
 /// AND the first commit of the R3j builder (the entries of `moregen`
 /// and `equal` call `Checker::empty_scopes` and
 /// `Checker::enter_relation`; CHECKER_REWRITE 8.4, the prompt of R3j):
-/// it could NOT be run in the turn that wrote it, where R3i's bodies
-/// were not on the branch, and so was not seen to fail.
+/// R3i's bodies were not on the branch that wrote it, so it was run on
+/// a scratch merge of that branch, the built R3i (pull request 403),
+/// the prototype of R3j and that first commit: it passed, and was seen
+/// to fail with `equal` not emptying the scopes (the first witness is
+/// accepted), with `equal` shelving no table (the last assertion) and
+/// with `subtype_pair` reading `Checker::related` (no constraint).
 ///
 /// - Unification (programs UPkgFirst, UVarFirst, UEmptyFirst of 8.13):
 ///   `'a. (module(S), 'a)` is REFUSED when the check runs `equal`,
