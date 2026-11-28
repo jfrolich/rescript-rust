@@ -326,6 +326,19 @@ pub struct Checker {
     /// unifications: [`FrameKind::LeavePoly`] pops a scope, a failure cuts
     /// back to the scopes it found (`Checker::leave_scopes`). (R3g)
     pub scopes: Vec<PolyScope>,
+    /// Where `univar_pairs` starts in [`Checker::scopes`]: the scopes
+    /// below this index are those OCaml's list no longer holds, because
+    /// an entry that starts with `univar_pairs := []` ran inside a
+    /// polymorphic body (compiler/ml/ctype.ml:2737, 2770 with 2773,
+    /// 3089, 3358, 4214; [`Checker::empty_scopes`]). They stay in the
+    /// vector because `enter_poly` puts its `old_univars` back at its
+    /// exit (1675, 1678): each [`FrameKind::LeavePoly`] frame holds the
+    /// floor its entry found, in `left`, and puts it back
+    /// ([`Checker::leave_poly`]). `unify_univar`, `enter_poly` and
+    /// `univars_escape` read the scopes from this index on. 0 in a unit
+    /// that never empties inside a polymorphic body. (CHECKER_REWRITE
+    /// 8.6, decision 127)
+    pub scope_floor: u32,
     /// What [`Checker::unify_package`] asks about module types; `None`
     /// until a caller that has declarations sets it (R5a). (R3p)
     pub packages: Option<Box<dyn super::rows::PackageDecls>>,
@@ -363,6 +376,18 @@ pub struct Checker {
     /// ctype.ml:3119, 3374; `TypePairs.clear subtypes`, 4217); not
     /// `pairs` or `compatible`, which pattern mode owns. (R3i, R3j)
     pub related: PairSet,
+    /// How many relations are running: 0 outside
+    /// [`Checker::enter_relation`] and [`Checker::leave_relation`].
+    /// (CHECKER_REWRITE 8.6, decision 128)
+    pub relating: u32,
+    /// The tables of the relations that are waiting for a relation
+    /// entered inside them (through the inclusion check of two
+    /// packages), outermost first; empty unless a relation runs inside
+    /// a relation.
+    pub related_shelf: Vec<PairSet>,
+    /// The tables nested relations used, emptied, for the next ones: at
+    /// most as many as relations were ever nested.
+    pub related_spare: Vec<PairSet>,
     /// The renaming of `equal` with `rename` (`subst`, compiler/ml/
     /// ctype.ml:3200-3215): one row a node, live by
     /// `renaming_generation`. Empty until a unit calls `equal` with
@@ -381,6 +406,15 @@ pub struct Checker {
     /// 3643-4101): not `frames`, whose kinds are unification's. Empty
     /// between calls of [`Checker::subtype`]. (R3j; CHECKER_REWRITE 8.13)
     pub subtyping: Vec<super::relate::SubFrame>,
+    /// `subtypes ()` (compiler/ml/ctype.ml:3641, cleared at 4213 and
+    /// 4217): the pairs [`Checker::subtype`] has met, ordered keys. A
+    /// table of its own and not [`Checker::related`]: the inclusion
+    /// check of two packages runs `equal` and `moregeneral` on this
+    /// checker INSIDE the walk, and those clear and fill `related` (in
+    /// OCaml a table of their own a call, 3115, 3370). Empty between
+    /// calls of `subtype`; a unit that never coerces never allocates it.
+    /// (R3j; CHECKER_REWRITE 8.6, decision 128)
+    pub subtyped: PairSet,
     /// After a failed [`Checker::subtype`] or
     /// [`Checker::force_subtype`] in `Mode::Explain`: the pairs
     /// `subtype_rec` went through down to the constraint that failed,
@@ -433,6 +467,7 @@ impl Checker {
             instance_mark_generation: 0,
             pairs: PairSet::default(),
             scopes: Vec::new(),
+            scope_floor: 0,
             packages: None,
             newtype_level: 0,
             equations: Vec::new(),
@@ -443,12 +478,16 @@ impl Checker {
             instance_scope: NONE,
             instance_members: Vec::new(),
             related: PairSet::default(),
+            relating: 0,
+            related_shelf: Vec::new(),
+            related_spare: Vec::new(),
             renaming: Vec::new(),
             renaming_generation: 0,
             renamed: Vec::new(),
             renaming_trail: 0,
             rigid_vars: Vec::new(),
             subtyping: Vec::new(),
+            subtyped: PairSet::default(),
             subtype_trace: Vec::new(),
             enlarging: Vec::new(),
             enlarged: Vec::new(),
@@ -750,15 +789,19 @@ impl Checker {
     /// `univar_pairs := old_univars` on a failure (compiler/ml/ctype.ml:
     /// 1677-1679): cut [`Checker::scopes`] back to what it held before the
     /// first scope entered above frame index `base`, which the lowest
-    /// [`FrameKind::LeavePoly`] frame there records. Failure path only:
-    /// O(frames above `base`), no step.
+    /// [`FrameKind::LeavePoly`] frame there records, with the floor that
+    /// frame found ([`Checker::scope_floor`]). With no such frame nothing
+    /// changes: a floor an entry raised outside every scope entered
+    /// above `base` stays raised, as no handler of OCaml puts the list
+    /// back there. Failure path only: O(frames above `base`), no step.
     #[cold]
-    fn leave_scopes(&mut self, base: usize) {
+    pub(super) fn leave_scopes(&mut self, base: usize) {
         let lowest = self.frames[base..]
             .iter()
-            .find(|frame| frame.kind == FrameKind::LeavePoly);
+            .find(|frame| frame.kind == FrameKind::LeavePoly)
+            .copied();
         if let Some(frame) = lowest {
-            self.scopes.truncate(frame.extra as usize);
+            self.leave_poly(frame);
         }
     }
 
@@ -2183,7 +2226,8 @@ impl Checker {
     /// compiler/ml/ctype.ml:2739-2750, with the two flags of
     /// `set_mode_pattern`, ctype.ml:256-273, as arguments so that a test
     /// can ask for each mode `unify3` installs, ctype.ml:2352, 2368):
-    /// 1. `scopes` must be empty (`current_univar_pairs () := []`); the
+    /// 1. [`Checker::empty_scopes`] (`current_univar_pairs () := []`,
+    ///    ctype.ml:2737: one load and one store); the
     ///    previous `umode`, `generate_equations`, `assume_injective` are
     ///    kept; `umode = Pattern`, the two flags as given, `newtype_level`
     ///    as given;
@@ -2205,7 +2249,7 @@ impl Checker {
         left: Ty,
         right: Ty,
     ) -> Result<(), Clash> {
-        debug_assert!(self.scopes.is_empty(), "no scope of universal variables is open");
+        self.empty_scopes();
         let before = (self.umode, self.generate_equations, self.assume_injective);
         self.umode = UnifyMode::Pattern;
         let pattern = self.gadt & GADT_PATTERN;
@@ -2549,6 +2593,11 @@ impl Checker {
         super::steps::tick();
         let record = self.tries.pop().expect("the last record");
         let frame = self.frames[record.frame as usize];
+        // The scopes entered inside the attempt are left as a clash
+        // leaves them (ctype.ml:1677-1679): the floor too.
+        if self.scopes.len() != record.scopes as usize {
+            self.leave_scopes(record.frame as usize);
+        }
         self.frames.truncate(record.frame as usize);
         self.restore(record.speculation);
         self.scopes.truncate(record.scopes as usize);
@@ -2618,7 +2667,7 @@ impl Checker {
                 }
                 FrameKind::Untrace => self.gadt &= !GADT_TRACING,
                 FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
-                FrameKind::LeavePoly => self.scopes.truncate(frame.extra as usize),
+                FrameKind::LeavePoly => self.leave_poly(frame),
                 FrameKind::Fields => self.saved.truncate(frame.extra as usize),
                 FrameKind::Field => self.unify_field(frame)?,
                 FrameKind::FieldEnd | FrameKind::Assumed => {}
@@ -2857,7 +2906,7 @@ impl Checker {
                         }
                     }
                     FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
-                    FrameKind::LeavePoly => self.scopes.truncate(frame.extra as usize),
+                    FrameKind::LeavePoly => self.leave_poly(frame),
                     FrameKind::Fields => self.saved.truncate(frame.extra as usize),
                     FrameKind::Field => self.unify_field(frame)?,
                     FrameKind::FieldEnd => {}

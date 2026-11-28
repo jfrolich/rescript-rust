@@ -3032,7 +3032,7 @@ impl Checker {
     /// allocation. (R3g)
     #[inline(never)]
     pub fn unify_univar(&mut self, t1: Ty, t2: Ty) -> Result<(), Clash> {
-        for at in (0..self.scopes.len()).rev() {
+        for at in (self.scope_floor as usize..self.scopes.len()).rev() {
             let scope = self.scopes[at];
             // `(cl1, cl2)`, then `(cl2, cl1)`: each list with the first
             // partner node of its own positions.
@@ -3108,6 +3108,14 @@ impl Checker {
     ///    (`f t1 t2`), so that the scope is left when the bodies are
     ///    unified.
     ///
+    /// "Open" is: at or above [`Checker::scope_floor`]. The scopes below
+    /// the floor are not in OCaml's `old_univars` (an entry emptied the
+    /// list inside the body that holds them), so steps 1 and 2 do not
+    /// read them. The frame of step 4 holds the floor in `left`, and
+    /// [`Checker::leave_poly`] puts it back with the length
+    /// (`univar_pairs := old_univars`, ctype.ml:1675): one load here and
+    /// one store there, and nothing at a popped pair.
+    ///
     /// Like [`Checker::push_children`], it pushes nothing when it fails.
     /// Cost: with no scope open, `left_len + right_len` nodes of 16 bytes,
     /// one 20-byte scope and two frames; with `s` scopes open that hold
@@ -3118,11 +3126,11 @@ impl Checker {
     #[inline(never)]
     pub fn enter_poly(&mut self, left: Node, right: Node) -> Result<(), Clash> {
         let (left_len, right_len) = (left.arity() - 1, right.arity() - 1);
-        let base = self.scopes.len();
-        if base != 0 {
+        let (base, floor) = (self.scopes.len(), self.scope_floor as usize);
+        if base != floor {
             // `known_univars` (ctype.ml:1658-1662).
             let known = self.fresh_marks();
-            for at in 0..base {
+            for at in floor..base {
                 let scope = self.scopes[at];
                 self.mark_slots(scope.left, scope.left_len, known);
                 self.mark_slots(scope.right, scope.right_len, known);
@@ -3150,10 +3158,48 @@ impl Checker {
         });
         // `f t1 t2`, then `univar_pairs := old_univars` (ctype.ml:
         // 1673-1676).
-        self.frames.push(Frame { left: Ty(NONE), right: Ty(NONE), kind: FrameKind::LeavePoly, extra: base as u32 });
+        self.frames.push(Frame {
+            left: Ty(floor as u32),
+            right: Ty(NONE),
+            kind: FrameKind::LeavePoly,
+            extra: base as u32,
+        });
         let (body1, body2) = (self.g.lists[left.b as usize], self.g.lists[right.b as usize]);
         self.push_row_pair(body1, body2);
         Ok(())
+    }
+
+    /// `current_univar_pairs () := []` where an entry of OCaml starts
+    /// with it INSIDE a walk or may be reached inside one: the outer
+    /// `moregen` (compiler/ml/ctype.ml:3089) and `eqtype_list` (3358),
+    /// which the inclusion check of two packages reaches from
+    /// `unify_package` and from the package arm of `subtype_rec`; the
+    /// typer's `unify` (2773), which that arm calls for each completed
+    /// pair (4089-4098); `unify_gadt` (2737); `subtype` (4214). The
+    /// scopes open now stay in [`Checker::scopes`] and are no longer
+    /// read: [`Checker::scope_floor`] is the length. Whoever entered the
+    /// innermost of them puts the floor back when it leaves
+    /// ([`Checker::leave_poly`]; `univar_pairs := old_univars`, 1675,
+    /// 1678), so until then every pair of universal variables of that
+    /// body clashes in `unify_univar` (`[] -> raise (Unify [])`, 1559)
+    /// and a constraint of `subtype_rec` records no scope. OCaml puts
+    /// nothing back when the entry returns, and neither does this.
+    /// O(1): one load and one store. (CHECKER_REWRITE 8.6, decision 127)
+    #[inline]
+    pub fn empty_scopes(&mut self) {
+        self.scope_floor = self.scopes.len() as u32;
+    }
+
+    /// A popped [`FrameKind::LeavePoly`] frame of [`Checker::enter_poly`]
+    /// (`univar_pairs := old_univars`, compiler/ml/ctype.ml:1675, 1678):
+    /// [`Checker::scopes`] is cut to the frame's `extra` and
+    /// [`Checker::scope_floor`] is the frame's `left` again, the floor
+    /// the entry found. O(1): one `truncate` and one store; no step.
+    /// (CHECKER_REWRITE 8.6, decision 127)
+    #[inline]
+    pub fn leave_poly(&mut self, frame: Frame) {
+        self.scopes.truncate(frame.extra as usize);
+        self.scope_floor = frame.left.0;
     }
 
     /// O(len): mark the representative of each of the `len` slots from
@@ -3212,7 +3258,7 @@ impl Checker {
         // `get_univar_family` (ctype.ml:1612-1623).
         let family = self.fresh_marks();
         self.mark_slots(binder.b + 1, binder.arity() - 1, family);
-        for at in (0..self.scopes.len()).rev() {
+        for at in (self.scope_floor as usize..self.scopes.len()).rev() {
             let scope = self.scopes[at];
             let left = (scope.left, scope.left_len);
             let right = (scope.right, scope.right_len);
@@ -4355,8 +4401,11 @@ impl Checker {
         self.push_compatible(left, right);
         let result = self.mcomp_frames(base);
         if result.is_err() {
+            // `univar_pairs := old_univars; raise exn` (ctype.ml:
+            // 1677-1679), with the floor of the lowest scope entered.
+            self.leave_scopes(base);
             self.frames.truncate(base);
-            self.scopes.truncate(scopes);
+            debug_assert_eq!(self.scopes.len(), scopes);
         }
         if !self.compatible.keys.is_empty() {
             self.compatible.keys.clear();
@@ -4384,7 +4433,7 @@ impl Checker {
         while self.frames.len() > base {
             let frame = self.frames.pop().expect("a frame above the base");
             if frame.kind == FrameKind::LeavePoly {
-                self.scopes.truncate(frame.extra as usize);
+                self.leave_poly(frame);
                 continue;
             }
             debug_assert_eq!(frame.kind, FrameKind::Pair);
