@@ -705,7 +705,7 @@ impl Js for Rows {
         self.work = spine;
         copy
     }
-    fn references(&mut self, a: &mut Pools, e: &E, mut visit: impl FnMut(&Self, &mut Pools, Found)) -> u32 {
+    fn references(&mut self, a: &Pools, e: &E, mut visit: impl FnMut(&Self, &Pools, Found)) -> u32 {
         // The stack may hold the pending nodes of a walk that is under
         // way (`JsStmt::substitute`): the reads go above them.
         let mut work = std::mem::take(&mut self.work);
