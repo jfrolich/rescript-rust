@@ -417,6 +417,18 @@ pub trait JsStmt: Js {
     /// that is neither. (THREE_TREES 11.4, "T6r: the naming replay behind
     /// the interface", decision 7: `names.rs`, `Replay::declaration`.)
     fn status(&self, a: &Pools, s: &Self::S) -> u8;
+    /// Of a range loop: the variable it runs over and the kind of its
+    /// bound. The variable is the loop's own ([`JsStmt::binder`]) for a
+    /// `ForRange`; for a `ForRangeExisting` it is the variable of its
+    /// target when that is a reference, `None` otherwise. `None` for a
+    /// statement that is no range loop. The bound is not handed out: the
+    /// caller asks only whether it is a number or a reference. O(1): on
+    /// rows the row and the operation of its bound; on an implementation
+    /// that owns its nodes the statement's row of facts, which holds
+    /// both. Counts no step. (THREE_TREES 11.4, "T6r: the naming replay
+    /// behind the interface", decision 7: `names.rs`, `Replay::finish`,
+    /// the cached bound of a range loop.)
+    fn range_of(&self, a: &Pools, s: &Self::S) -> Option<(Option<VarId>, Kind)>;
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code
     /// that can be observed. An expression statement and a `return` are
     /// free when their value is strictly pure (E:15); a block, an `if`, a

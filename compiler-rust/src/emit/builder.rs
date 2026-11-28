@@ -1589,6 +1589,22 @@ impl<'a> Builder<'a> {
         assert!(matches!(row.kind, Kind::Declare | Kind::Rest), "not a declaration");
         row.aux >> 2
     }
+
+    /// Of a range loop, the variable it runs over and the kind of its
+    /// bound (the lowering's `JsStmt::range_of`): of a `ForRange` the
+    /// payload, of a `ForRangeExisting` the payload less one (`None` when
+    /// its target is no reference), with the kind whose number the row's
+    /// `aux` holds. `None` for every other statement. O(1): the row in the
+    /// handle; counts no step.
+    pub fn range_of(&self, statement: &S<'a>) -> Option<(Option<u32>, Kind)> {
+        let row = statement.row;
+        let variable = match row.kind {
+            Kind::ForRange => Some(row.payload),
+            Kind::ForRangeExisting => row.payload.checked_sub(1),
+            _ => return None,
+        };
+        Some((variable, Kind::ALL[row.aux as usize]))
+    }
 }
 
 #[cfg(test)]

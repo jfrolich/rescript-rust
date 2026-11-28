@@ -1904,4 +1904,30 @@ mod replay {
         let statement = b.exp(value);
         b.status(&statement);
     }
+
+    #[test]
+    fn a_range_loop_gives_its_variable_and_the_kind_of_its_bound_from_its_row() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // Every kind a bound can have is told by its number.
+        for bound in [Kind::Number, Kind::Var, Kind::Qualified, Kind::Dot, Kind::Call] {
+            let own = with_row(&b, Kind::ForRange, bound as u8, 6);
+            assert_eq!(b.range_of(&own), Some((Some(6), bound)));
+            let existing = with_row(&b, Kind::ForRangeExisting, bound as u8, 7);
+            assert_eq!(b.range_of(&existing), Some((Some(6), bound)));
+            let target = with_row(&b, Kind::ForRangeExisting, bound as u8, 0);
+            assert_eq!(b.range_of(&target), Some((None, bound)));
+        }
+        // The number of a kind is its place in `Kind::ALL`.
+        for (place, kind) in Kind::ALL.into_iter().enumerate() {
+            assert_eq!(kind as usize, place);
+        }
+        // No other statement is a range loop, and nothing counts a step.
+        let one = b.int(1);
+        let declaration = b.declare(4, 0, Some(one));
+        let steps = b.steps;
+        assert_eq!(b.range_of(&declaration), None);
+        assert_eq!(b.range_of(&with_row(&b, Kind::ForOf, 0, 6)), None);
+        assert_eq!(b.steps, steps);
+    }
 }

@@ -163,9 +163,12 @@ pub enum Kind {
     /// A call whose arguments are one array expression.
     FlatCall,
     /// Statements. A range loop over a new variable; `payload` is the
-    /// variable's index.
+    /// variable's index, `aux` the number of the kind of the loop's bound
+    /// (its place in [`Kind::ALL`]).
     ForRange,
-    /// A range loop over an existing variable.
+    /// A range loop over an existing variable; `payload` is the index of
+    /// that variable plus one, 0 when the loop's target is no reference;
+    /// `aux` as for `ForRange`.
     ForRangeExisting,
     /// `payload` is the variable's index.
     ForOf,

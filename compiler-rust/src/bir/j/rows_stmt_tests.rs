@@ -706,4 +706,45 @@ mod replay {
         let statement = r.exp(&mut u.b, x);
         r.status(&u.b, &statement);
     }
+
+    #[test]
+    fn a_range_loop_gives_its_variable_and_the_kind_of_its_bound() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        // The bound is read with a first value before it and without one.
+        for init in [true, false] {
+            let (var, end) = (fresh(&mut u), r.int_literal(&mut u.b, 3));
+            let looped = range(&mut r, &mut u, var, init, end);
+            let steps = r.steps();
+            assert_eq!(r.range_of(&u.b, &looped), Some((Some(var), Kind::Number)));
+            assert_eq!(r.steps(), steps, "a reader counts no step");
+        }
+        let (var, end) = (fresh(&mut u), r.var(&mut u.b, u.x));
+        let looped = range(&mut r, &mut u, var, true, end);
+        assert_eq!(r.range_of(&u.b, &looped), Some((Some(var), Kind::Var)));
+        // A bound that is neither: the kind says so, the bound is not
+        // handed out.
+        let (var, object) = (fresh(&mut u), r.var(&mut u.b, u.x));
+        let end = r.dot(&mut u.b, object, u.name, crate::js_ir::arena::FieldPos::NONE, false);
+        let looped = range(&mut r, &mut u, var, false, end);
+        assert_eq!(r.range_of(&u.b, &looped), Some((Some(var), Kind::Dot)));
+        // A loop over an existing variable (the bridge's): the variable of
+        // its target when that is a reference.
+        for reference in [true, false] {
+            let variable = if reference { u.b.new_node(View::Var { var: u.f }, 0) } else { u.b.new_node(View::JNull, 0) };
+            let end = u.b.new_node(View::JNull, 0);
+            let list = body(&mut r, &mut u);
+            let block = Rows::stmt_node(r.block_of(&mut u.b, list));
+            let existing =
+                Rows::stmt_from_node(u.b.new_node(View::SForRangeExisting { variable, parts: &[end, block], label: None }, 0));
+            assert_eq!(r.range_of(&u.b, &existing), Some((reference.then_some(u.f), Kind::Null)));
+        }
+        // No other statement is a range loop.
+        let (var, iterable, list) = (fresh(&mut u), r.var(&mut u.b, u.x), body(&mut r, &mut u));
+        let looped = r.for_of(&mut u.b, var, iterable, list, None, false);
+        assert_eq!(r.range_of(&u.b, &looped), None);
+        let x = r.var(&mut u.b, u.x);
+        let statement = r.exp(&mut u.b, x);
+        assert_eq!(r.range_of(&u.b, &statement), None);
+    }
 }

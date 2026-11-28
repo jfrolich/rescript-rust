@@ -63,6 +63,7 @@
 //! | `return_calls` | T6r | `return_calls_of` of the `value` of the `SReturn` that is entry `index` of the pool list, on `Rows::work`: a `JCond` pushes its else-branch and its then-branch, a `JSeq` is followed to its `second`, a `JCall` of a `Var` that is a site is given to `visit` with its row id |
 //! | `binder` | T6r | the `var` of `SDecl`, `SRest`, `SForRange`, `SForOf` and `SForAwaitOf`; the `exception` of `STry`; `None` otherwise |
 //! | `status` | T6r | of an `SDecl` or an `SRest`: the bits of `aux` above the two of the `LetKind`, bit 15 apart (an `SRest` keeps it for its descriptor); a panic for any other |
+//! | `range_of` | T6r | of an `SForRange` its `var`, of an `SForRangeExisting` the `var` of its `variable` when that is a `Var`; with `rows::kind_of` of the operation of the part before the body (the bound); `None` for any other statement |
 //! | `effect_free` | T6q | the read `export.rs::has_toplevel_effect` made of a statement that is not a declaration row: a work stack (`Rows::work`) of the node's children for a compound statement, the `STRICT` flag of the value of `SExp` and `SReturn` and of every expression below a compound statement, `false` at `SThrow`, `SDebugger`, a jump, `SDecl`, `SRest`, `SForOf`, `SForAwaitOf`; one step per node read |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
@@ -413,6 +414,19 @@ impl JsStmt for Rows {
         // `SDecl` packs the `LetKind` in two bits and the status above;
         // `SRest` keeps bit 15 for its descriptor.
         ((node.aux() & 0x7fff) >> 2) as u8
+    }
+    fn range_of(&self, a: &Pools, s: &S) -> Option<(Option<VarId>, Kind)> {
+        let (var, parts) = match a.view(s.0) {
+            View::SForRange { var, parts, .. } => (Some(var), parts),
+            View::SForRangeExisting { variable, parts, .. } => match a.view(variable) {
+                View::Var { var } => (Some(var), parts),
+                _ => (None, parts),
+            },
+            _ => return None,
+        };
+        // The bound is the part before the body, with or without a first
+        // value.
+        Some((var, kind_of(a.node(parts[parts.len() - 2]).op())))
     }
     fn effect_free(&mut self, a: &Pools, s: &S) -> bool {
         let mut work = std::mem::take(&mut self.work);
