@@ -1075,4 +1075,254 @@ mod replay {
         let other = body(&mut r, &mut u);
         r.set_literal_body(&mut u.b, header, other);
     }
+
+    use crate::bir::lower::js_stmt::Below;
+    use crate::emit::row::flag;
+
+    /// A variable that is a JavaScript global.
+    fn global(u: &mut Unit) -> VarId {
+        let var = fresh(u);
+        u.b.mark_js_global(var);
+        var
+    }
+
+    /// A function literal over one `x;`, or over one `inside;`.
+    fn function(r: &mut Rows, u: &mut Unit, inside: Option<VarId>) -> (E, crate::bir::FuncId) {
+        let header = u.b.function_header(crate::bir::VarSpan { start: 0, len: 0 }, Default::default(), LamLoc::NONE);
+        let value = r.var(&mut u.b, inside.unwrap_or(u.x));
+        let statement = r.exp(&mut u.b, value);
+        let list = r.list(&mut u.b, 1, std::iter::once(statement));
+        (r.function(&mut u.b, header, list), header)
+    }
+
+    /// `callee(...arguments)`.
+    fn call(r: &mut Rows, u: &mut Unit, callee: E, arguments: Vec<E>) -> E {
+        let info = u.b.js_info(JsPayload::Call(Default::default()));
+        let mark = r.mark();
+        for argument in arguments {
+            r.push(argument);
+        }
+        r.call(&mut u.b, callee, mark, info)
+    }
+
+    /// What `below` gives for `s` with `want`, qualifying the globals of
+    /// `qualify`, and the nodes it read.
+    fn found(r: &mut Rows, u: &mut Unit, s: &mut S, want: u16, qualify: &[VarId]) -> (Vec<Below>, u32) {
+        let mut found = Vec::new();
+        let steps = r.steps();
+        let read = r.below(&mut u.b, s, want, |below| {
+            found.push(below);
+            matches!(below, Below::Global(var) if qualify.contains(&var))
+        });
+        assert_eq!(r.steps(), steps, "a reader counts no step");
+        assert!(r.work.is_empty());
+        (found, read)
+    }
+
+    #[test]
+    fn the_literals_and_the_global_references_of_a_statement_are_found_in_operand_order() {
+        assert_eq!(std::mem::size_of::<Below>(), 8);
+        let mut u = unit();
+        let mut r = Rows::default();
+        let (g, h) = (global(&mut u), global(&mut u));
+        // `x(g, function a { h; }, x + h, function b { x; }).name;`: the
+        // global inside the first literal is the literal's, not the
+        // statement's.
+        let callee = r.var(&mut u.b, u.x);
+        let first = r.var(&mut u.b, g);
+        let (outer, a) = function(&mut r, &mut u, Some(h));
+        let (left, right) = (r.var(&mut u.b, u.x), r.var(&mut u.b, h));
+        let right_id = r.id(&u.b, Rows::of(&right));
+        let sum = r.bin_plain(&mut u.b, crate::js_ir::BinOp::Plus, left, right);
+        let (inner, b) = function(&mut r, &mut u, None);
+        let first_id = r.id(&u.b, Rows::of(&first));
+        let value = call(&mut r, &mut u, callee, vec![first, outer, sum, inner]);
+        let value = r.dot(&mut u.b, value, u.name, crate::js_ir::arena::FieldPos::NONE, false);
+        let mut statement = r.exp(&mut u.b, value);
+        // The dot, the call, its callee, `g`, a literal, the sum and its
+        // two operands, a literal: every expression node outside the
+        // literals, whatever is wanted.
+        let nodes = 9;
+        let both = flag::HAS_FUN | flag::HAS_GLOBAL;
+        assert_eq!(
+            found(&mut r, &mut u, &mut statement, both, &[]),
+            (vec![Below::Global(g), Below::Function(a), Below::Global(h), Below::Function(b)], nodes)
+        );
+        assert_eq!(
+            found(&mut r, &mut u, &mut statement, flag::HAS_FUN, &[]),
+            (vec![Below::Function(a), Below::Function(b)], nodes)
+        );
+        assert!(!u.b.global_qualified(NodeId(first_id)) && !u.b.global_qualified(NodeId(right_id)));
+        // A reference the visitor says is shadowed is marked, another of
+        // the same descent is not.
+        assert_eq!(
+            found(&mut r, &mut u, &mut statement, flag::HAS_GLOBAL, &[h]),
+            (vec![Below::Global(g), Below::Global(h)], nodes)
+        );
+        assert!(!u.b.global_qualified(NodeId(first_id)) && u.b.global_qualified(NodeId(right_id)));
+        // Nothing wanted: nothing read.
+        assert_eq!(found(&mut r, &mut u, &mut statement, 0, &[]), (vec![], 0));
+    }
+
+    #[test]
+    fn the_descent_reads_the_expressions_of_a_statement_and_not_its_lists() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let g = global(&mut u);
+        let both = flag::HAS_FUN | flag::HAS_GLOBAL;
+        // A list whose one statement holds a global reference and a
+        // literal: what a statement's list holds is not the statement's.
+        let inside = |r: &mut Rows, u: &mut Unit| {
+            let callee = r.var(&mut u.b, g);
+            let (literal, _) = function(r, u, None);
+            let value = call(r, u, callee, vec![literal]);
+            let statement = r.exp(&mut u.b, value);
+            r.list(&mut u.b, 1, std::iter::once(statement))
+        };
+        let mut statements = Vec::new();
+        // Each with the expressions it has itself, a reference to `g`
+        // each.
+        let list = inside(&mut r, &mut u);
+        statements.push((r.block_of(&mut u.b, list), 0));
+        let (test, yes, no) = (r.var(&mut u.b, g), inside(&mut r, &mut u), inside(&mut r, &mut u));
+        statements.push((r.if_plain(&mut u.b, test, yes, no), 1));
+        let (condition, list) = (r.var(&mut u.b, g), inside(&mut r, &mut u));
+        statements.push((r.while_(&mut u.b, condition, list, None), 1));
+        let (var, init, end, list) = (fresh(&mut u), r.var(&mut u.b, g), r.var(&mut u.b, g), inside(&mut r, &mut u));
+        let bounds = Range { init: Some(init), end, direction: 0 };
+        statements.push((r.for_range(&mut u.b, var, bounds, list, None), 2));
+        let (var, iterable, list) = (fresh(&mut u), r.var(&mut u.b, g), inside(&mut r, &mut u));
+        statements.push((r.for_of(&mut u.b, var, iterable, list, None, false), 1));
+        let (tried, handler) = (inside(&mut r, &mut u), inside(&mut r, &mut u));
+        let var = fresh(&mut u);
+        statements.push((r.try_(&mut u.b, tried, Some((var, handler)), None), 0));
+        let value = r.var(&mut u.b, g);
+        statements.push((r.return_(&mut u.b, value), 1));
+        let value = r.var(&mut u.b, g);
+        statements.push((r.throw(&mut u.b, value), 1));
+        let (var, value) = (fresh(&mut u), r.var(&mut u.b, g));
+        statements.push((r.declare(&mut u.b, LetKind::Strict, var, Some(value)), 1));
+        let var = fresh(&mut u);
+        statements.push((r.declare(&mut u.b, LetKind::Variable, var, None), 0));
+        for (mut statement, own) in statements {
+            let kind = r.stmt_kind(&u.b, &statement);
+            let (given, read) = found(&mut r, &mut u, &mut statement, both, &[]);
+            assert_eq!(given, vec![Below::Global(g); own], "{kind:?}");
+            assert_eq!(read as usize, own, "{kind:?}: its own expressions and no statement");
+        }
+        // A `switch`: its scrutinee, and no action.
+        let mut blocks = Vec::new();
+        for _ in 0..2 {
+            let list = inside(&mut r, &mut u);
+            blocks.push(r.block_of(&mut u.b, list));
+        }
+        let actions = r.list(&mut u.b, 2, blocks.into_iter());
+        let header = u.b.switch_record(crate::bir::SwitchRecord {
+            constants: 0,
+            keys: crate::bir::KeySpan { start: 0, len: 0 },
+            clauses: crate::bir::ClauseSpan { start: 0, len: 0 },
+            has_default: false,
+            consts_full: false,
+            blocks_full: false,
+            dispatch: crate::lambda::SwitchDispatch::Direct,
+        });
+        let scrutinee = r.var(&mut u.b, g);
+        let mut statement = r.switch(&mut u.b, scrutinee, actions, header, false);
+        assert_eq!(found(&mut r, &mut u, &mut statement, both, &[]), (vec![Below::Global(g)], 1));
+    }
+
+    /// `(x, (x, ... (x, last)))`: `depth` sequences nested in their second
+    /// operand, so `2 * depth + 1` nodes.
+    fn nested(r: &mut Rows, u: &mut Unit, depth: u32, last: E) -> E {
+        let mut value = last;
+        for _ in 0..depth {
+            let first = r.var(&mut u.b, u.x);
+            value = r.seq(&mut u.b, first, value);
+        }
+        value
+    }
+
+    /// On rows the descent reads every expression node of the statement
+    /// outside its literals, with or without anything to find and
+    /// whatever is wanted (decision 1: rows keep no flag to prune by):
+    /// ten times the reads at ten times the depth, without recursion, and
+    /// a second descent as deep allocates nothing.
+    #[test]
+    fn the_descent_costs_one_read_a_node_at_any_depth_whatever_is_wanted() {
+        let mut reads = Vec::new();
+        for depth in [1_000u32, 10_000] {
+            let mut u = unit();
+            let mut r = Rows::default();
+            let g = global(&mut u);
+            for (with, want) in [(true, flag::HAS_FUN), (false, flag::HAS_FUN), (false, flag::HAS_GLOBAL)] {
+                let last = if with { function(&mut r, &mut u, Some(g)).0 } else { r.var(&mut u.b, u.x) };
+                let value = nested(&mut r, &mut u, depth, last);
+                let mut statement = r.exp(&mut u.b, value);
+                let (given, read) = found(&mut r, &mut u, &mut statement, want, &[]);
+                assert_eq!(given.len(), usize::from(with));
+                assert_eq!(read, 2 * depth + 1, "every node, with nothing to find too");
+                reads.push(read);
+                let allocations = allocation_counter::measure(|| {
+                    r.below(&mut u.b, &mut statement, want, |_| false);
+                });
+                assert_eq!(allocations.count_total, 0, "{allocations:?}");
+            }
+        }
+        assert_eq!(reads[3] - 1, 10 * (reads[0] - 1));
+    }
+
+    /// Of `count` statements of which every tenth holds a function
+    /// literal, rows read the expressions of all of them: the cost
+    /// decision 1 accepts until the flip, counted.
+    #[test]
+    fn the_descent_reads_every_statement_of_a_list_on_rows() {
+        let mut reads = Vec::new();
+        for count in [1_000u32, 10_000] {
+            let mut u = unit();
+            let mut r = Rows::default();
+            let (mut read, mut literals) = (0, 0);
+            for index in 0..count {
+                let callee = r.var(&mut u.b, u.x);
+                let argument = if index % 10 == 0 { function(&mut r, &mut u, None).0 } else { r.var(&mut u.b, u.f) };
+                let value = call(&mut r, &mut u, callee, vec![argument]);
+                let mut statement = r.exp(&mut u.b, value);
+                read += r.below(&mut u.b, &mut statement, flag::HAS_FUN, |_| {
+                    literals += 1;
+                    false
+                });
+            }
+            assert_eq!(literals, count / 10);
+            // The call, its callee and its argument, of every statement.
+            assert_eq!(read, 3 * count);
+            reads.push(read);
+        }
+        assert_eq!(reads[1], 10 * reads[0]);
+    }
+
+    #[test]
+    fn the_descent_leaves_what_the_work_stack_held() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let (literal, header) = function(&mut r, &mut u, None);
+        let value = nested(&mut r, &mut u, 3, literal);
+        let mut statement = r.exp(&mut u.b, value);
+        r.work.push(NodeId(7));
+        let mut given = Vec::new();
+        let read = r.below(&mut u.b, &mut statement, flag::HAS_FUN, |below| {
+            given.push(below);
+            false
+        });
+        assert_eq!((given, read), (vec![Below::Function(header)], 7));
+        assert_eq!(r.work, [NodeId(7)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "a descent for a flag that is neither HAS_FUN nor HAS_GLOBAL")]
+    fn the_descent_is_asked_for_literals_and_globals_only() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let x = r.var(&mut u.b, u.x);
+        let mut statement = r.exp(&mut u.b, x);
+        r.below(&mut u.b, &mut statement, flag::SEAL, |_| false);
+    }
 }

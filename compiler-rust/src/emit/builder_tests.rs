@@ -2404,4 +2404,220 @@ mod replay {
         let mut statement = b.exp(literal);
         b.substitute(&mut statement, 0, 1, |b| b.int(1));
     }
+
+    /// A function literal with the next free header over one `v0;`.
+    fn literal<'a>(b: &mut Builder<'a>) -> (J<'a>, u32) {
+        let header = b.literals.len() as u32;
+        let body = effects(b, 1);
+        (b.function(header, body), header)
+    }
+
+    /// `callee(...arguments)`.
+    fn call<'a>(b: &mut Builder<'a>, callee: J<'a>, arguments: Vec<J<'a>>) -> J<'a> {
+        let mark = b.mark();
+        for argument in arguments {
+            b.push(argument);
+        }
+        b.call(callee, mark, 0, false)
+    }
+
+    /// What `below` gives for `statement` with `want`, qualifying the
+    /// globals of `qualify`, and the rows it read.
+    fn found<'a>(b: &mut Builder<'a>, statement: &S<'a>, want: u16, qualify: &[u32]) -> (Vec<Below>, u32) {
+        let mut found = Vec::new();
+        let steps = b.steps;
+        let read = b.below(statement, want, |below| {
+            found.push(below);
+            matches!(below, Below::Global(variable) if qualify.contains(&variable))
+        });
+        assert_eq!(b.steps, steps, "a reader counts no step");
+        (found, read)
+    }
+
+    const BOTH: u16 = flag::HAS_FUN | flag::HAS_GLOBAL;
+
+    #[test]
+    fn the_literals_and_the_global_references_of_a_statement_are_found_in_operand_order() {
+        assert_eq!(std::mem::size_of::<Below>(), 8);
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // `v1(g8, function 0 {..}, v1 + g9, function 1 {..}).name;`
+        let callee = b.reference(1, 0);
+        let first = b.reference(8, var::GLOBAL);
+        let first_id = first.expr.node_id().index();
+        let (outer, a) = literal(&mut b);
+        let (left, right) = (b.reference(1, 0), b.reference(9, var::GLOBAL));
+        let right_id = right.expr.node_id().index();
+        let sum = b.bin(BinOp::Plus, left, right).unwrap();
+        let (inner, c) = literal(&mut b);
+        let value = call(&mut b, callee, vec![first, outer, sum, inner]);
+        let value = b.dot(value, "name", None, false);
+        let statement = b.exp(value);
+        // The dot, the call, its callee and four arguments, the two
+        // operands of the sum.
+        assert_eq!(
+            found(&mut b, &statement, BOTH, &[]),
+            (vec![Below::Global(8), Below::Function(a), Below::Global(9), Below::Function(c)], 9)
+        );
+        // With one flag wanted, an operand that has only the other is
+        // read (its row) and not entered: the sum's operands are not read
+        // for literals.
+        assert_eq!(found(&mut b, &statement, flag::HAS_FUN, &[]), (vec![Below::Function(a), Below::Function(c)], 7));
+        assert_eq!(b.rows[first_id].aux, var::GLOBAL);
+        assert_eq!(found(&mut b, &statement, flag::HAS_GLOBAL, &[9]), (vec![Below::Global(8), Below::Global(9)], 9));
+        // The reference the visitor says is shadowed is marked in its
+        // row, the other is not; nothing else of a row changes.
+        assert_eq!(b.rows[first_id].aux, var::GLOBAL);
+        assert_eq!(b.rows[right_id].aux, var::GLOBAL | var::QUALIFIED);
+        assert!(b.rows[right_id].has(flag::HAS_GLOBAL));
+        assert_eq!(found(&mut b, &statement, 0, &[]), (vec![], 0));
+    }
+
+    #[test]
+    fn the_descent_reads_the_expression_of_a_statement_and_not_its_lists() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // A list whose one statement holds a global reference and a
+        // literal.
+        fn inside<'a>(b: &mut Builder<'a>) -> List {
+            let mark = b.stage_mark();
+            let callee = b.reference(8, var::GLOBAL);
+            let (argument, _) = literal(b);
+            let value = call(b, callee, vec![argument]);
+            let statement = b.exp(value);
+            b.stage(statement);
+            b.list(mark)
+        }
+        let list = inside(&mut b);
+        let block = b.block(list);
+        let (test, then, otherwise) = (b.reference(8, var::GLOBAL), inside(&mut b), inside(&mut b));
+        let conditional = b.if_(test, then, otherwise);
+        let (test, list) = (b.reference(8, var::GLOBAL), inside(&mut b));
+        let looped = b.while_(Some("l"), test, list);
+        // A test without either: the statement has the flags of its
+        // lists, and the row of its test is all that is read.
+        let (test, list) = (b.reference(1, 0), inside(&mut b));
+        let plain = b.while_(None, test, list);
+        for (statement, own) in [(block, 0), (conditional, 1), (looped, 1), (plain, 0)] {
+            assert!(statement.row.has(BOTH), "the flags of its lists");
+            let kind = statement.row.kind;
+            let (given, read) = found(&mut b, &statement, BOTH, &[]);
+            assert_eq!(given, vec![Below::Global(8); own], "{kind:?}");
+            assert_eq!(read, u32::from(kind != Kind::Block), "{kind:?}: the row of its test");
+        }
+        let value = b.reference(8, var::GLOBAL);
+        let returned = b.return_(value);
+        let value = b.reference(8, var::GLOBAL);
+        let thrown = b.throw(value);
+        let value = b.reference(8, var::GLOBAL);
+        let declaration = b.declare(2, 0, Some(value));
+        for statement in [returned, thrown, declaration] {
+            assert_eq!(found(&mut b, &statement, BOTH, &[]), (vec![Below::Global(8)], 1));
+            // The other flag alone: the statement is not read.
+            assert_eq!(found(&mut b, &statement, flag::HAS_FUN, &[]), (vec![], 0));
+        }
+        let bare = b.declare(3, 0, None);
+        assert_eq!(found(&mut b, &bare, BOTH, &[]), (vec![], 0));
+    }
+
+    /// Statement `index` of the step test: `v1(v1, v1 + x, v1);`, where
+    /// `x` is a function literal, a reference to a global, or `v1`.
+    fn step_statement<'a>(b: &mut Builder<'a>, what: u8) -> S<'a> {
+        let callee = b.reference(1, 0);
+        let (first, left, last) = (b.reference(1, 0), b.reference(1, 0), b.reference(1, 0));
+        let right = match what {
+            0 => b.reference(1, 0),
+            1 => literal(b).0,
+            _ => b.reference(8, var::GLOBAL),
+        };
+        let sum = b.bin(BinOp::Plus, left, right).unwrap();
+        let value = call(b, callee, vec![first, sum, last]);
+        b.exp(value)
+    }
+
+    /// One descent of each of `statements`: the rows read and the finds.
+    fn round<'a>(b: &mut Builder<'a>, statements: &[S<'a>], want: u16) -> (u32, u32) {
+        let (mut read, mut found) = (0, 0);
+        for statement in statements {
+            read += b.below(statement, want, |_| {
+                found += 1;
+                false
+            });
+        }
+        (read, found)
+    }
+
+    /// The point of decision 1 on the implementation that survives the
+    /// flip: of `count` statements of which `count / 50` hold a function
+    /// literal and `count / 50` a reference to a global, the descent reads
+    /// the expressions of those and nothing of the others, at 1,000 and at
+    /// 10,000 statements. A descent that read every statement would read
+    /// seven rows of each. A second round allocates nothing.
+    #[test]
+    fn the_descent_reads_only_the_statements_that_hold_what_is_wanted() {
+        let mut reads = Vec::new();
+        for count in [1_000u32, 10_000] {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let mut statements = Vec::new();
+            for index in 0..count {
+                statements.push(step_statement(&mut b, if index % 50 == 7 { 1 } else if index % 50 == 31 { 2 } else { 0 }));
+            }
+            let holders = count / 50;
+            // The call, its callee and three arguments, the two operands
+            // of the sum: seven rows of a statement that is read.
+            const ROWS: u32 = 7;
+            assert_eq!(round(&mut b, &statements, flag::HAS_FUN), (ROWS * holders, holders));
+            assert_eq!(round(&mut b, &statements, flag::HAS_GLOBAL), (ROWS * holders, holders));
+            assert_eq!(round(&mut b, &statements, BOTH), (ROWS * 2 * holders, 2 * holders));
+            reads.push(round(&mut b, &statements, BOTH).0);
+            let allocations = allocation_counter::measure(|| {
+                round(&mut b, &statements, BOTH);
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        }
+        assert_eq!(reads[1], 10 * reads[0]);
+        assert_eq!(reads[0], 7 * 2 * 20, "20 of 1,000 statements hold a literal and 20 a global");
+    }
+
+    /// The descent enters only what has the flag: below `depth` sequences
+    /// that end in a function literal it reads two rows a sequence, and a
+    /// chain as deep without one is not read at all. No recursion; a
+    /// second descent as deep allocates nothing.
+    #[test]
+    fn the_descent_costs_two_rows_a_node_on_the_way_at_any_depth() {
+        let mut reads = Vec::new();
+        for depth in [1_000u32, 10_000] {
+            let allocator = Allocator::default();
+            let mut b = Builder::new(&allocator);
+            let mut chains = Vec::new();
+            for with in [true, false] {
+                let mut value = if with { literal(&mut b).0 } else { b.reference(1, 0) };
+                for _ in 0..depth {
+                    let first = b.reference(1, 0);
+                    value = b.seq(first, value);
+                }
+                chains.push(b.exp(value));
+            }
+            let (given, read) = found(&mut b, &chains[0], flag::HAS_FUN, &[]);
+            assert_eq!((given.len() as u32, read), (1, 2 * depth + 1));
+            assert_eq!(found(&mut b, &chains[1], BOTH, &[]), (vec![], 0));
+            reads.push(read);
+            let allocations = allocation_counter::measure(|| {
+                b.below(&chains[0], flag::HAS_FUN, |_| false);
+            });
+            assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        }
+        assert_eq!(reads[1] - 1, 10 * (reads[0] - 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "a descent for a flag that is neither HAS_FUN nor HAS_GLOBAL")]
+    fn the_descent_is_asked_for_literals_and_globals_only() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let value = b.reference(1, 0);
+        let statement = b.exp(value);
+        b.below(&statement, flag::SEAL, |_| false);
+    }
 }

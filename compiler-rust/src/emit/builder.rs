@@ -261,8 +261,9 @@ pub(crate) struct Builder<'a> {
     /// ([`Builder::literal_body`]). `List::NONE` for a header without a
     /// literal, `List::TAKEN` while the body is out. 8 bytes a header.
     literals: Vec<List>,
-    /// The allocation of the work stack of [`Builder::references`] and
-    /// [`Builder::return_calls`], kept between walks. Such a stack holds
+    /// The allocation of the work stack of [`Builder::references`],
+    /// [`Builder::return_calls`] and [`Builder::below`], kept between
+    /// walks. Such a stack holds
     /// references into the tree, which borrow it for one walk, so the
     /// builder keeps the storage as words and each walk takes it as an
     /// empty vector of references ([`recycle`]). Always empty.
@@ -288,6 +289,15 @@ pub(crate) enum Reference {
     Var { variable: u32, id: u32 },
     Named { id: u32 },
     Function(u32),
+}
+
+/// What [`Builder::below`] finds among the expressions of a statement: a
+/// function literal by the header its row holds, or a reference to a
+/// JavaScript global by its variable. 8 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Below {
+    Function(u32),
+    Global(u32),
 }
 
 /// The property of a member read, taken from the read it is copied from.
@@ -1797,6 +1807,92 @@ impl<'a> Builder<'a> {
         assert!(*slot == List::TAKEN, "the body of a function literal put back that was not taken");
         self.steps += 1;
         *slot = body;
+    }
+
+    /// The expression of the statement `stmt` itself, as apart from the
+    /// statements of its lists: the value of an expression statement, a
+    /// `return`, a `throw` and a declaration that has one; the test of an
+    /// `if` and of a `while`, labelled or not. O(1). Panics on a statement
+    /// no constructor of the builder makes: the slice that adds a
+    /// constructor adds its arm (a range loop has two).
+    fn own<'s>(stmt: &'s Statement<'a>) -> Option<&'s Expression<'a>> {
+        let mut stmt = stmt;
+        if let Statement::LabeledStatement(node) = stmt {
+            stmt = &node.body;
+        }
+        match stmt {
+            Statement::ExpressionStatement(node) => Some(&node.expression),
+            Statement::ReturnStatement(node) => node.argument.as_ref(),
+            Statement::ThrowStatement(node) => Some(&node.argument),
+            Statement::VariableDeclaration(node) => node.declarations.first()?.init.as_ref(),
+            Statement::IfStatement(node) => Some(&node.test),
+            Statement::WhileStatement(node) => Some(&node.test),
+            Statement::BlockStatement(_)
+            | Statement::BreakStatement(_)
+            | Statement::ContinueStatement(_)
+            | Statement::DebuggerStatement(_) => None,
+            _ => unreachable!("a statement no constructor of the builder makes"),
+        }
+    }
+
+    /// The function literals and the references to JavaScript globals
+    /// among the expressions of `statement` itself, in operand order (the
+    /// lowering's `JsStmt::below`): `want` is `flag::HAS_FUN`,
+    /// `flag::HAS_GLOBAL` or both. The statements of its lists are not
+    /// read and a function literal is not entered (its body is a list by
+    /// header). For a global reference `visit` returns whether it prints
+    /// as `globalThis.name`, which is then written into the reference's
+    /// row (`var::QUALIFIED`); what it returns for a function literal is
+    /// not read. `visit` is given no builder: it can start no walk.
+    /// Returns the number of rows read.
+    ///
+    /// Pruned by the flags: a statement whose row has none of the flags
+    /// wanted is not read at all, and that is O(1): the row is in the
+    /// handle. Of any other, the row of its expression and of each
+    /// operand of each node that has a flag wanted; an operand without
+    /// one is not entered. So one call costs the operands of the nodes on
+    /// the way to what it finds, not the size of the statement. Counts no
+    /// step. The work stack is the builder's kept storage ([`recycle`]):
+    /// nothing is allocated once it has held an expression as wide and as
+    /// deep. Panics when `want` has another flag.
+    pub fn below(&mut self, statement: &S<'a>, want: u16, mut visit: impl FnMut(Below) -> bool) -> u32 {
+        assert!(want & !(flag::HAS_FUN | flag::HAS_GLOBAL) == 0, "a descent for a flag that is neither HAS_FUN nor HAS_GLOBAL");
+        if statement.row.flags & want == 0 {
+            return 0;
+        }
+        let Some(own) = Self::own(&statement.stmt) else { return 0 };
+        let mut work: Vec<&Expression<'a>> = recycle(std::mem::take(&mut self.spare));
+        let mut read = 0;
+        work.push(own);
+        while let Some(expr) = work.pop() {
+            read += 1;
+            // A node of a printed form without a row of its own has the
+            // unused row 0, which has no flag.
+            let id = expr.node_id().index();
+            let row = self.rows[id];
+            if row.flags & want == 0 {
+                continue;
+            }
+            match row.kind {
+                Kind::Fun => {
+                    visit(Below::Function(row.payload));
+                }
+                Kind::Var => {
+                    if visit(Below::Global(row.payload)) {
+                        self.rows[id].aux |= var::QUALIFIED;
+                    }
+                }
+                _ => {
+                    // The last operand is popped first: turn the run
+                    // around so that the operands are read in order.
+                    let from = work.len();
+                    Self::operands_into(expr, &mut work);
+                    work[from..].reverse();
+                }
+            }
+        }
+        self.spare = recycle(work);
+        read
     }
 }
 

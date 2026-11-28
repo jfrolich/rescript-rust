@@ -69,6 +69,7 @@
 //! | `set_body` | T6r | that block written again over the pool list given, with its flags and its `aux`; one step |
 //! | `literal_body` | T6r | the pool list of the `SBlock` that is the `body` of the `JFun` `Bir::func_owners[header]` names; one step |
 //! | `set_literal_body` | T6r | that block written again over the pool list given, as `set_body`; one step |
+//! | `below` | T6r | a walk on `Rows::work`, above what it holds, of the children of the statement that are no statements and of everything below them: a `JFun` is given by its header and not entered, a `Var` of a variable with `VarFlags::JS_GLOBAL` is given and, when `visit` says so, `Bir::qualify_global`ed; every other node has its children pushed, the last first; every node is read, whatever `want` is |
 //! | `effect_free` | T6q | the read `export.rs::has_toplevel_effect` made of a statement that is not a declaration row: a work stack (`Rows::work`) of the node's children for a compound statement, the `STRICT` flag of the value of `SExp` and `SReturn` and of every expression below a compound statement, `false` at `SThrow`, `SDebugger`, a jump, `SDecl`, `SRest`, `SForOf`, `SForAwaitOf`; one step per node read |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
@@ -82,10 +83,10 @@
 use super::rows::{E, Rows, kind_of};
 use super::{norm, plain};
 use crate::bir::lower::js::Pools;
-use crate::bir::lower::js_stmt::{IfHead, JsStmt, Range, Runs};
+use crate::bir::lower::js_stmt::{Below, IfHead, JsStmt, Range, Runs};
 use crate::bir::{FuncId, ListId, NodeFlags, NodeId, StrId, SwitchId, VarId, View};
 use crate::lambda::LamLoc;
-use crate::emit::row::Kind;
+use crate::emit::row::{Kind, flag};
 use crate::lambda::lam_compat::LetKind;
 
 /// A statement in flight on J rows: the row's id. 4 bytes; not `Copy`.
@@ -480,6 +481,53 @@ impl JsStmt for Rows {
         );
         Self::write_block(a, block, body);
     }
+    fn below(&mut self, a: &mut Pools, s: &mut S, want: u16, mut visit: impl FnMut(Below) -> bool) -> u32 {
+        assert!(want & !(flag::HAS_FUN | flag::HAS_GLOBAL) == 0, "a descent for a flag that is neither HAS_FUN nor HAS_GLOBAL");
+        if want == 0 {
+            return 0;
+        }
+        // The stack may hold the pending nodes of a walk that is under
+        // way (`JsStmt::substitute`): the reads go above them.
+        let mut work = std::mem::take(&mut self.work);
+        let base = work.len();
+        // The statement's own expressions, the last first so that they
+        // are read in order: a child that is a statement is one of its
+        // lists.
+        let view = a.view(s.0);
+        for at in (0..view.child_count()).rev() {
+            let child = view.child_at(at);
+            if !is_statement(a.node(child).op()) {
+                work.push(child);
+            }
+        }
+        let mut read = 0;
+        while work.len() > base {
+            let node = work.pop().expect("a pending node");
+            read += 1;
+            match a.view(node) {
+                View::JFun { header, .. } => {
+                    if want & flag::HAS_FUN != 0 {
+                        visit(Below::Function(header));
+                    }
+                }
+                View::Var { var } => {
+                    if want & flag::HAS_GLOBAL != 0
+                        && a.vars.flags(var).contains(crate::bir::VarFlags::JS_GLOBAL)
+                        && visit(Below::Global(var))
+                    {
+                        a.qualify_global(node);
+                    }
+                }
+                view => {
+                    for at in (0..view.child_count()).rev() {
+                        work.push(view.child_at(at));
+                    }
+                }
+            }
+        }
+        self.work = work;
+        read
+    }
     fn effect_free(&mut self, a: &Pools, s: &S) -> bool {
         let mut work = std::mem::take(&mut self.work);
         debug_assert!(work.is_empty());
@@ -659,6 +707,33 @@ pub(crate) fn return_calls_of(
         node = work.pop().expect("a pending branch");
         site = true;
     }
+}
+
+/// Whether rows of `op` are statements: what tells an expression of a
+/// statement from a statement of one of its lists ([`JsStmt::below`]).
+/// O(1): one match.
+fn is_statement(op: crate::bir::Op) -> bool {
+    use crate::bir::Op;
+    matches!(
+        op,
+        Op::SBlock
+            | Op::SDecl
+            | Op::SExp
+            | Op::SIf
+            | Op::SWhile
+            | Op::SForRangeExisting
+            | Op::SForRange
+            | Op::SForOf
+            | Op::SForAwaitOf
+            | Op::SSwitch
+            | Op::SReturn
+            | Op::SThrow
+            | Op::STry
+            | Op::SBreak
+            | Op::SContinue
+            | Op::SDebugger
+            | Op::SRest
+    )
 }
 
 /// For the tests of rows (see the like block of `rows.rs`): a statement

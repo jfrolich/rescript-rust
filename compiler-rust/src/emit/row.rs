@@ -35,6 +35,11 @@ pub mod var {
     pub const ASSIGNED: u8 = 1 << 0;
     /// A JavaScript global.
     pub const GLOBAL: u8 = 1 << 1;
+    /// Written after the reference was built, by the naming replay's walk
+    /// (the lowering's `JsStmt::below`): the reference prints as
+    /// `globalThis.name`, because a binding around it prints with the
+    /// global's name.
+    pub const QUALIFIED: u8 = 1 << 2;
 }
 
 /// [`Row::aux`] of a [`Kind::Number`].
@@ -59,7 +64,8 @@ pub mod num {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// A reference to a variable; `payload` is the variable's index, `aux`
-    /// what the caller knew of it ([`var`]).
+    /// what the caller knew of it and whether it prints qualified
+    /// ([`var`]).
     Var,
     /// An identifier printed as written; `aux` is 1 for a JavaScript
     /// identifier.

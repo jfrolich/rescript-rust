@@ -94,6 +94,16 @@ pub struct IfHead<S, R> {
     pub tail: R,
 }
 
+/// What [`JsStmt::below`] finds among the expressions of a statement. 8
+/// bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Below {
+    /// A function literal, by its header; it is not entered.
+    Function(FuncId),
+    /// A reference to a variable that is a JavaScript global.
+    Global(VarId),
+}
+
 /// The statement half of the interface.
 pub trait JsStmt: Js {
     /// A statement in flight. Not `Copy`.
@@ -511,6 +521,46 @@ pub trait JsStmt: Js {
     /// (Decision 2: `names.rs`, `Replay::statements`, the rebuilt list of
     /// a literal's frame.)
     fn set_literal_body(&mut self, a: &mut Pools, header: FuncId, body: Self::L);
+    /// The function literals and the references to JavaScript globals
+    /// among the expressions of the statement `s`, in one descent: `want`
+    /// is `flag::HAS_FUN`, `flag::HAS_GLOBAL` (`emit::row::flag`) or both,
+    /// and `visit` is given what is wanted, in operand order (the order of
+    /// print). The expressions are the statement's own: its value, its
+    /// test, its scrutinee, the bounds of a range loop, the iterable of a
+    /// loop. The statements of its lists are not read (the caller walks
+    /// them: [`JsStmt::body`]), and a function literal is given by its
+    /// header and not entered (the caller walks its body:
+    /// [`JsStmt::literal_body`]).
+    ///
+    /// For a reference to a global, `visit` returns whether it prints as
+    /// `globalThis.name`, and the implementation marks the reference when
+    /// it does; what `visit` returns for a function literal is not read. A
+    /// reference is to a global when its variable was one where the
+    /// reference was built (the arena's `VarFlags::JS_GLOBAL`; on an
+    /// implementation that owns its nodes what [`Js::var`] wrote into the
+    /// reference's row). `visit` is given neither the implementation nor
+    /// the pools, which the descent holds: it can call no function of the
+    /// interface, so it can start no walk and replace no node. Returns the
+    /// number of nodes read.
+    ///
+    /// Cost. On an implementation that keeps `HAS_FUN` and `HAS_GLOBAL`
+    /// with every node and statement: nothing is read of a statement that
+    /// has none of the flags wanted; of one that has, the row of each
+    /// operand of each node on the way to what is wanted, and an operand
+    /// without the flag is not entered. On rows, which keep neither flag
+    /// (decision 1): one read per expression node of the statement
+    /// outside function literals, whatever `want` is, until the flip.
+    /// Counts no step (a reader; the caller counts the number returned).
+    /// The walk is the implementation's, over its own work stack, above
+    /// what that stack holds: no recursion on the depth of an expression,
+    /// and nothing allocated once the stack has held an expression as wide
+    /// and as deep. Panics when `want` has another flag. (THREE_TREES
+    /// 11.4, "T6r: the naming replay behind the interface", decisions 1
+    /// and 2: `names.rs`, the literals of a statement, which
+    /// `Replay::prelude` finds by climbing from each literal today (slice
+    /// T6r-e), and `globals.rs`, the references `decide` finds through
+    /// the sites of each global (slice T6r-f).)
+    fn below(&mut self, a: &mut Pools, s: &mut Self::S, want: u16, visit: impl FnMut(Below) -> bool) -> u32;
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code
     /// that can be observed. An expression statement and a `return` are
     /// free when their value is strictly pure (E:15); a block, an `if`, a
