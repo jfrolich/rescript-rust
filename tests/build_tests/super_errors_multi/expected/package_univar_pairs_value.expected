@@ -1,0 +1,16 @@
+We've found a bug for you!
+  /.../fixtures/package_univar_pairs_value/Main.res:9:5
+
+   7 │   let x: t
+   8 │ }
+   9 │ let v: {"f": 'a. (module(S), 'a)} = Obj.magic(1)
+  10 │ 
+
+  The implementation /.../fixtures/package_univar_pairs_value/Main.res
+  does not match the interface /.../fixtures/package_univar_pairs_value/Main.resi:
+  
+  Actual declaration (/.../fixtures/package_univar_pairs_value/Main.res:9:5):
+    let v: {"f": 'a. (module(S), 'a)}
+  
+  Expected declaration (/.../fixtures/package_univar_pairs_value/Main.resi:9:1-33):
+    let v: {"f": 'a. (module(T), 'a)}

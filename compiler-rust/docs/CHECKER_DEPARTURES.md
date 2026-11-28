@@ -9475,6 +9475,143 @@ puts locally abstract types on `Pexp_fun`), so no program reaches it.
   refused earlier by the `let module` check in both, and u02 (an existential)
   by the subtype check; no program reached it. Not changed.
 
+### U12 - the inclusion check of two packages inside a polymorphic type forgets the universal pairs
+
+Found while fixing: OCaml refuses a coercion or an annotation between two
+polymorphic types whose body holds packages of two module types with the
+same items, `S` and `T`, followed by a universal variable of the same body;
+the Rust compiler accepted them and wrote JavaScript. Every program below
+starts with `module type T = { type t  let x: t }` and the same `S` (H), with
+`type t` only (A), or with no items (E), each item on a line of its own;
+commands as in "Scope, calibration and reproducibility" of the second round,
+units with an interface as its U6 recipe says.
+
+| # | program (`L`, the right side names `T`) | OCaml | Rust before | Rust after |
+|---|---|---|---|---|
+| 1 | H `(o: {"f": L}) => (o :> {"f": R})`, `L = 'a. (module(S with type t = int), 'a)` | refused | accepted | refused, same text |
+| 2 | H coercion, `'a. (module(S with type t = int), 'a, 'a)` | refused | accepted | refused, same text |
+| 3 | H coercion, `'a. (module(S), 'a)` | refused | accepted | refused, same text |
+| 4 | A coercion, `'a. (module(S), 'a)` | refused | accepted | refused, same text |
+| 5 | A coercion, `'a. (module(S with type t = int), 'a)` | refused | accepted | refused, same text |
+| 6 | H coercion, `'a. ('a, module(S with type t = int))` | accepted | accepted | accepted |
+| 7 | H coercion, `(module(S with type t = int), int)` | accepted | accepted | accepted |
+| 8 | H coercion, `'a. 'a => module(S with type t = int)` | accepted | accepted | accepted |
+| 9 | E coercion, `'a. (module(S), 'a)` | accepted | accepted | accepted |
+| 10 | H `(o: {"f": L}): {"f": R} => o`, `'a. (module(S), 'a)` | refused | accepted | refused, same text |
+| 11 | H annotation, `'a. (module(S), 'a) => unit` | refused | accepted | refused, same text |
+| 12 | H annotation, `'a. ('a, module(S))` | accepted | accepted | accepted |
+| 13 | H annotation, `(module(S), int)` | accepted | accepted | accepted |
+| 14 | E annotation, `'a. (module(S), 'a)` | accepted | accepted | accepted |
+
+Programs 1-5, 10 and 11 differed; 6-9 and 12-14 agreed before and after. In
+10 both print the left type with `T` where the source says `S`: the package
+node was linked to the right one before the tuple failed. Fifty-six further
+programs, each run as a coercion (with `with type t = int`) and as an
+annotation, agree after the fixes: the package as an arrow's parameter, in a
+nested tuple, in `option<_>`, in an object and in `array<_>` (an invariant
+argument), each with the universal variable after it (refused; Rust accepted
+all before) and before it (accepted by both); two packages then a variable
+(refused); `('a, module(S), 'a)` (accepted); a body inside a body:
+`'a. ({"g": 'b. ('b, module(S))}, 'a)` (accepted: the exit of the inner body
+puts the outer pairs back), `'a. ({"g": 'b. (module(S), 'b)}, 'a)` and
+`'a. (module(S), {"g": 'b. ('b, 'a)})` (refused; Rust accepted before),
+`'a. (module(S), {"g": 'b. ('b, 'b)})` (accepted: a body entered after the
+emptying adds its own pairs); the same module type on both sides (no check
+runs: accepted); module types whose only item is a module with a value
+(refused) or with no item, an abstract module type item, a functor item
+(accepted: no value, type or extension constructor is compared);
+`'a. module(S with type t = 'a)` (the coercion is refused by both, as its
+trial unifies the two universal variables with no pairs; the annotation is
+accepted by both) and `'a. (module(S with type t = 'a), 'a)`; record types
+`r1 = {f: 'a. (module(S), 'a)}`, `r2` with `T`: the coercion `(o :> r2)` is
+refused by both after the fix and was accepted before, the annotation is
+refused by both and the Rust compiler printed a coercion hint OCaml does not
+print (its hint check is the same subtyping); a record type with itself
+(accepted). With an interface: a value `let v: {"f": 'a. (module(S), 'a)}`
+against `T` (`moregen`'s package arm), a record field
+`type r = {f: 'a. (module(S), 'a)}` (`Ctype.equal` from `compare_records`),
+a manifest `type u = {"f": 'a. (module(S), 'a)}` and one with the package in
+an inner body are refused by OCaml and were accepted by the Rust compiler;
+the same with the variable first, with the inner body first, with the same
+module type, and with module types without items are accepted by both.
+Module types whose only item is an extension constructor `type e += A`
+(refused by OCaml as an annotation and as a coercion; the Rust compiler
+accepted both before) agree after the fix.
+
+The subtyping walk in OCaml (`subtype_rec`'s `Tpoly` arm,
+compiler/ml/ctype.ml:4066-4071) reaches the pairs of a record field only
+when the two field types meet as types: two different record types meet in
+the `Tconstr` arm, which records `(t1, t2)` (ctype.ml:3966-4027), so the
+field types are related by `unify` at enforcement, whose `Tpoly` arm
+(`enter_poly`, 2330-2336) and package arm (2416-2424) are the ones above.
+
+#### Fixed
+
+- `ac8408ccc`: OCaml keeps the pairs in one global (ctype.ml:1683);
+  `enter_poly` (1656-1679) saves it at entry and restores it at exit. The
+  inclusion check of two packages (`!package_subtype`, typemod.ml:1224-1236,
+  from `unify_package`, ctype.ml:2172-2180, the package arms of `unify`
+  2418, `moregen` 2967, `eqtype` 3250, and from the subtyping trial,
+  4091-4092) runs `Ctype.moregeneral` for a value and `Ctype.equal` for a
+  type or an extension constructor (includecore.ml:47, 571-584, 726), which
+  set it to `[]` (ctype.ml:3089, 3358), and the trial unifies each completed
+  pair with the public `unify` (2769-2773), which does the same. A trace of
+  both compilers at the pair `('a, 'a)` after the package showed the list
+  empty in OCaml and two entries in Rust (`univars_unify`,
+  `compiler-rust/src/types/ctype.rs`, before the fix): the Rust walks hold
+  their pairs in their own state (`UnifyState`, the subtyping accumulator,
+  the `moregen` and `eqtype` runs) and the relations of the inclusion check
+  start from their own. Now each of those states keeps a floor in its list
+  (`forget_univar_pairs`, ctype.rs:1225); `package_subtype`
+  (typemod.rs:8656) also says whether its check compared a value, type or
+  extension constructor (a count `includemod` raises where OCaml calls those
+  relations, includemod.rs:2656, 3358, 4978); `unify_package`
+  (ctype.rs:8355) passes it on and the package arms raise the floor
+  (ctype.rs:9541, 11005, 12220); `subtype_package` (ctype.rs:6790) raises
+  it after a trial that unified a pair or compared an item, after the
+  accepted constraints were recorded with the pairs before the trial
+  (ctype.ml:4083) and before the constraint of a failed trial (4100). A
+  polymorphic body restores at its exit the floor it saw at entry
+  (`unify_enter_poly`, `UnivarPairs::leave`, the `Tpoly` arm of
+  `subtype_rec`), and its escape test reads only the pairs above the floor
+  (ctype.ml:1664-1668). The invariant-argument children of `subtype_rec`
+  hand their floor back, as they share OCaml's global. Fixtures: the
+  super_errors `package_univar_pairs_*`, the super_errors_multi
+  `package_univar_pairs_value` and `package_univar_pairs_record_field`, and
+  `tests/tests/src/package_univar_pairs_{accepted,shapes,interface}`.
+- `ba06b60a0`: the manifests of two type declarations are compared by
+  `includemod`'s own walk (`type_exprs_equal_for_inclusion_inner`), where
+  OCaml calls `Ctype.equal` (includecore.ml:154-157); the walk matched
+  universal variables by name whatever its package arm had done (a trace
+  showed the package arm, then the universal variables, of the manifest
+  walk). The walk now keeps a flag beside its pairs (`ManifestWalk`,
+  includemod.rs:4423) that the package arm sets when the inclusion check
+  compared an item (4659) and each polymorphic body restores at its exit.
+  Fixtures: the super_errors_multi `package_univar_pairs_manifest` and
+  `package_univar_pairs_manifest_inner_body`.
+
+Every row of OCaml's assignments of the global, and how it is reached from
+inside a body `enter_poly` has open:
+
+| ctype.ml | what it does | inside an open body? | Rust |
+|---|---|---|---|
+| 1672 | `enter_poly` puts the body's pairs in front | entry of every body | `push_univar_scope`, saving the floor |
+| 1675, 1678 | `enter_poly` restores the saved list | exit of every body | truncate and restore the floor |
+| 2737 | `unify_gadt` empties it | NO: called by typecore for pattern equations; no ctype walk calls it, through a hook or otherwise | each call has its own state |
+| 2770 | public `unify` empties it | YES: the subtyping trial of two packages (4091); NO through `unify'`/`unify_var` (2748-2766): its two calls reach the `unify` of 2727, which only snapshots; NO through typemod.ml:1806, which is `type_package`, not reachable from `package_subtype`; includecore, includemod, `Matching_polyfill.variant_is_subtype` and `Typeopt` call no `unify` | floor raised by `subtype_package`: programs 1, 2, 5, the constraint over the universal variable |
+| 3089 | outer `moregen` empties it | YES: `!package_subtype` -> `Includemod.modtypes` -> `Includecore.value_descriptions` (includecore.ml:47) | count in `value_descriptions`: programs 1-3, 10-11, the value through an interface |
+| 3358 | outer `eqtype_list` empties it | YES: `!package_subtype` -> `Includecore.type_declarations` (includecore.ml:571-584, and `type_manifest` 92-157) or `extension_constructors` (726) | count in `includecore_type_declarations` and `extension_constructors`: programs 4, 5; the manifest walk: the manifest programs |
+| 4214 | outer `subtype` empties it | NO: called by typecore for a coercion and its hint, never while a ctype walk is open | each call has its own accumulator |
+
+#### Open
+
+- Pattern-mode unification goes on after a package inclusion check that
+  failed (it reifies the constrained types, ctype.ml:2420-2424), so there the
+  emptying of a failed check is read later; the Rust compiler raises the
+  floor whenever the check compared an item, included or not, as OCaml
+  does, but no program reaching two packages of different module types in a
+  pattern's polymorphic type was found, so this is not shown by a program.
+
 ## Fourth round: modules, aliases and usage marks
 
 ### Scope, commands and calibration

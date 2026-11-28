@@ -1,0 +1,11 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/package_univar_pairs_unify_records_no_coercion_hint.res[0m:[2m11:24[0m
+
+   9 [2m│[0m type r1 = {f: 'a. (module(S), 'a)}
+  10 [2m│[0m type r2 = {f: 'a. (module(T), 'a)}
+  [1;31m11[0m [2m│[0m let g = (o: r1): r2 => [1;31mo[0m
+  12 [2m│[0m 
+
+  This has type: [1;31mr1[0m
+  But it's expected to have type: [1;33mr2[0m
