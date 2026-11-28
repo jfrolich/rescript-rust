@@ -60,7 +60,7 @@ try {
 
 - Throws a SyntaxError (JsExn.t) if the string isn't valid JSON.
 */
-@val
+@val @pure
 external parseOrThrow: (string, ~reviver: (string, t) => t=?) => t = "JSON.parse"
 
 /** 
@@ -108,7 +108,7 @@ JSON.stringify(json, ~replacer)
 // {"foo":"BAR","hello":"WORLD","someNumber":42}
 ```
 */
-@val
+@val @pure
 external stringify: (t, ~replacer: replacer=?, ~space: int=?) => string = "JSON.stringify"
 
 /** 
@@ -174,7 +174,7 @@ switch BigInt.fromInt(0)->JSON.stringifyAny {
 - Throws a TypeError if the value contains circular references.
 - Throws a TypeError if the value contains `BigInt`s.
 */
-@val
+@val @pure
 external stringifyAny: ('a, ~replacer: replacer=?, ~space: int=?) => option<string> =
   "JSON.stringify"
 
@@ -187,6 +187,7 @@ module Encode: {
   JSON.Encode.bool(true)
   ```
   */
+  @pure
   external bool: bool => t = "%identity"
 
   /**
@@ -197,6 +198,7 @@ module Encode: {
   JSON.Encode.null
   ```
   */
+  @pure
   external null: t = "#null"
 
   /**
@@ -207,6 +209,7 @@ module Encode: {
   JSON.Encode.string("hello world")
   ```
   */
+  @pure
   external string: string => t = "%identity"
 
   /**
@@ -217,6 +220,7 @@ module Encode: {
   JSON.Encode.int(42)
   ```
   */
+  @pure
   external int: int => t = "%identity"
 
   /**
@@ -227,6 +231,7 @@ module Encode: {
   JSON.Encode.float(42.0)
   ```
   */
+  @pure
   external float: float => t = "%identity"
 
   /**
@@ -242,6 +247,7 @@ module Encode: {
   JSON.Encode.object(dict)
   ```
   */
+  @pure
   external object: dict<t> => t = "%identity"
 
   /**
@@ -254,31 +260,37 @@ module Encode: {
   JSON.Encode.array(array)
   ```
   */
+  @pure
   external array: array<t> => t = "%identity"
 
   /**
   Returns an array of strings as a JSON object.
   */
+  @pure
   external stringArray: array<string> => t = "%identity"
 
   /**
   Returns an array of floats as a JSON object.
   */
+  @pure
   external floatArray: array<float> => t = "%identity"
 
   /**
   Returns an array of integers as a JSON object.
   */
+  @pure
   external intArray: array<int> => t = "%identity"
 
   /**
   Returns an array of booleans as a JSON object.
   */
+  @pure
   external boolArray: array<bool> => t = "%identity"
 
   /**
   Returns an array of objects as a JSON object.
   */
+  @pure
   external objectArray: array<dict<t>> => t = "%identity"
 }
 
@@ -295,6 +307,7 @@ module Decode: {
   // None
   ```
   */
+  @pure
   let bool: t => option<bool>
 
   /**
@@ -309,6 +322,7 @@ module Decode: {
   // None
   ```
   */
+  @pure
   let null: t => option<Stdlib_Null.t<'a>>
 
   /**
@@ -323,6 +337,7 @@ module Decode: {
   // None
   ```
   */
+  @pure
   let string: t => option<string>
 
   /**
@@ -337,6 +352,7 @@ module Decode: {
   // None
   ```
   */
+  @pure
   let float: t => option<float>
 
   /**
@@ -351,6 +367,7 @@ module Decode: {
   // None
   ```
   */
+  @pure
   let object: t => option<dict<t>>
 
   /**
@@ -365,6 +382,7 @@ module Decode: {
   // None
   ```
   */
+  @pure
   let array: t => option<array<t>>
 }
 
@@ -374,4 +392,5 @@ module Decode: {
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: t => unit = "%ignore"

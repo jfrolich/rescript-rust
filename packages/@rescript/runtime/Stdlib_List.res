@@ -46,7 +46,9 @@
 type t<'a> = list<'a>
 
 module A = {
-  @new external makeUninitializedUnsafe: int => array<'a> = "Array"
+  @pure @new external makeUninitializedUnsafe: int => array<'a> = "Array"
+
+  @pure
   external min: ('a, 'a) => 'a = "%bs_min"
 
   let reduceReverseU = (a, x, f) => {
@@ -67,6 +69,7 @@ module A = {
   }
 }
 
+@pure
 external mutableCell: ('a, list<'a>) => list<'a> = "#makemutablelist"
 
 /*
@@ -76,7 +79,7 @@ external mutableCell: ('a, list<'a>) => list<'a> = "#makemutablelist"
    dont inline a binding to mutable cell, it is mutable
 */
 /* INVARIANT: relies on Literals.tl (internal representation) */
-@set external unsafeMutateTail: (list<'a>, list<'a>) => unit = "tl"
+@pure @set external unsafeMutateTail: (list<'a>, list<'a>) => unit = "tl"
 
 /*
    - the cell is not empty
@@ -418,6 +421,7 @@ let rec lengthAux = (x, acc) =>
 let length = xs => lengthAux(xs, 0)
 let size = length
 
+@mutates
 let rec fillAux = (arr, i, x) =>
   switch x {
   | list{} => ()
@@ -748,4 +752,5 @@ let zip = (l1, l2) =>
     cell
   }
 
+@pure
 external ignore: list<'a> => unit = "%ignore"

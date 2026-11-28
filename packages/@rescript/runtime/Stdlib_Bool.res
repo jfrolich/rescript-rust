@@ -22,8 +22,11 @@ let fromStringOrThrow = param =>
   | _ => throw(Invalid_argument(`Bool.fromStringOrThrow: value is neither "true" nor "false"`))
   }
 
+@pure
 external compare: (bool, bool) => Stdlib_Ordering.t = "%compare"
 
+@pure
 external equal: (bool, bool) => bool = "%equal"
 
+@pure
 external ignore: bool => unit = "%ignore"

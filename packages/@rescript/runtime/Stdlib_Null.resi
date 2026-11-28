@@ -21,6 +21,7 @@ let nullValue = Null.make("Hello")
 let asNullable = nullValue->Null.asNullable // Nullable.t<string>
 ```
 */
+@pure
 external asNullable: t<'a> => Stdlib_Nullable.t<'a> = "%identity"
 
 /**
@@ -33,6 +34,7 @@ See [`null`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/O
 Console.log(null) // Logs `null` to the console.
 ```
 */
+@pure
 external null: t<'a> = "#null"
 
 /**
@@ -45,6 +47,7 @@ let myStr = "Hello"
 let asNullValue = myStr->Null.make // The compiler now thinks this can be `string` or `null`.
 ```
 */
+@pure
 external make: 'a => t<'a> = "%identity"
 
 /**
@@ -62,6 +65,7 @@ Null.equal(a, c, Int.equal) == false
 Null.equal(Null.null, Null.null, Int.equal) == true
 ```
  */
+@pure
 let equal: (t<'a>, t<'b>, ('a, 'b) => bool) => bool
 
 /**
@@ -84,6 +88,7 @@ Null.compare(Null.null, Null.null, Int.compare) == Stdlib_Ordering.equal
 Null.compare(a, c, Int.compare) == Stdlib_Ordering.less
 ```
 */
+@pure
 let compare: (t<'a>, t<'b>, ('a, 'b) => Stdlib_Ordering.t) => Stdlib_Ordering.t
 
 /**
@@ -100,6 +105,7 @@ switch nullStr->Null.toOption {
 }
 ```
 */
+@pure
 external toOption: t<'a> => option<'a> = "#null_to_opt"
 
 /**
@@ -113,6 +119,7 @@ let asNull = optString->Null.fromOption // Null.t<string>, will compile to 'null
 Console.log(asNull == Null.null) // Logs `true` to the console.
 ```
 */
+@pure
 let fromOption: option<'a> => t<'a>
 
 /**
@@ -131,6 +138,7 @@ Null.make("Jane")->Null.toOption->greet // "Greetings Jane"
 Null.null->Null.toOption->greet // "Greetings Anonymous"
 ```
 */
+@pure
 let getOr: (t<'a>, 'a) => 'a
 
 /**
@@ -154,6 +162,7 @@ switch Null.getOrThrow(%raw("null")) {
 
 - Throws `Invalid_argument` if `value` is `null`
 */
+@pure
 let getOrThrow: t<'a> => 'a
 
 /**
@@ -170,6 +179,7 @@ Null.getUnsafe(Null.null) // Throws an error
 
 - This is an unsafe operation, it assumes `value` is not `null`.
 */
+@pure
 external getUnsafe: t<'a> => 'a = "%identity"
 
 /**
@@ -183,6 +193,7 @@ Null.forEach(Null.make("thing"), x => Console.log(x)) // logs "thing"
 Null.forEach(Null.null, x => Console.log(x)) // logs nothing
 ```
 */
+@pure
 let forEach: (t<'a>, 'a => unit) => unit
 
 /**
@@ -196,6 +207,7 @@ Null.map(Null.make(3), x => x * x) // Null.make(9)
 Null.map(Null.null, x => x * x) // null
 ```
 */
+@pure
 let map: (t<'a>, 'a => 'b) => t<'b>
 
 /**
@@ -212,6 +224,7 @@ let noneValue = Null.null
 noneValue->Null.mapOr(0, x => x + 5) // 0
 ```
 */
+@pure
 let mapOr: (t<'a>, 'b, 'a => 'b) => 'b
 
 /**
@@ -233,6 +246,7 @@ Null.flatMap(Null.make(-4), addIfAboveOne) // null
 Null.flatMap(Null.null, addIfAboveOne) // null
 ```
 */
+@pure
 let flatMap: (t<'a>, 'a => t<'b>) => t<'b>
 
 /**
@@ -241,4 +255,5 @@ let flatMap: (t<'a>, 'a => t<'b>) => t<'b>
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: t<'a> => unit = "%ignore"

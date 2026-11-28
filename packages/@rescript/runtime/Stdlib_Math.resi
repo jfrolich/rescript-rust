@@ -23,7 +23,7 @@ See [`Math.E`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference
   Math.Constants.e
   ```
   */
-  @val
+  @val @pure
   external e: float = "Math.E"
 
   /**
@@ -36,7 +36,7 @@ See [`Math.LN2`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referen
   Math.Constants.ln2
   ```
   */
-  @val
+  @val @pure
   external ln2: float = "Math.LN2"
 
   /**
@@ -49,7 +49,7 @@ See [`Math.LN10`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Refere
   Math.Constants.ln10
   ```
   */
-  @val
+  @val @pure
   external ln10: float = "Math.LN10"
 
   /**
@@ -62,7 +62,7 @@ See [`Math.LOG2E`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Refer
   Math.Constants.log2e
   ```
   */
-  @val
+  @val @pure
   external log2e: float = "Math.LOG2E"
 
   /**
@@ -75,7 +75,7 @@ See [`Math.LOG10E`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Refe
   Math.Constants.log10e
   ```
   */
-  @val
+  @val @pure
   external log10e: float = "Math.LOG10E"
 
   /**
@@ -89,7 +89,7 @@ See [`Math.PI`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referenc
   Math.Constants.pi
   ```
   */
-  @val
+  @val @pure
   external pi: float = "Math.PI"
 
   /**
@@ -102,7 +102,7 @@ See [`Math.SQRT1_2`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Ref
   Math.Constants.sqrt1_2
   ```
   */
-  @val
+  @val @pure
   external sqrt1_2: float = "Math.SQRT1_2"
 
   /**
@@ -115,7 +115,7 @@ See [`Math.abs`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referen
   Math.Constants.sqrt2
   ```
   */
-  @val
+  @val @pure
   external sqrt2: float = "Math.SQRT2"
 }
 
@@ -134,7 +134,7 @@ See [`Math.abs`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referen
   Math.Int.abs(3) == 3
   ```
   */
-  @val
+  @val @pure
   external abs: int => int = "Math.abs"
 
   /**
@@ -151,7 +151,7 @@ See [`Math.clz32`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Refer
   Math.Int.clz32(4) == 29
   ```
   */
-  @val
+  @val @pure
   external clz32: int => int = "Math.clz32"
 
   /**
@@ -167,7 +167,7 @@ See [`Math.imul`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Refere
   Math.Int.imul(-5, 12) == -60
   ```
   */
-  @val
+  @val @pure
   external imul: (int, int) => int = "Math.imul"
 
   /**
@@ -181,7 +181,7 @@ See [`Math.min`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referen
   Math.Int.min(-1, -2) == -2
   ```
   */
-  @val
+  @val @pure
   external min: (int, int) => int = "Math.min"
 
   /**
@@ -197,7 +197,7 @@ See [`Math.min`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referen
   Math.Int.minMany([])->Int.toFloat->Float.isFinite == false
   ```
   */
-  @variadic @val
+  @variadic @val @pure
   external minMany: array<int> => int = "Math.min"
 
   /**
@@ -211,7 +211,7 @@ See [`Math.max`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referen
   Math.Int.max(-1, -2) == -1
   ```
   */
-  @val
+  @val @pure
   external max: (int, int) => int = "Math.max"
 
   /**
@@ -227,7 +227,7 @@ See [`Math.max`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referen
   Math.Int.maxMany([])->Int.toFloat->Float.isFinite == false
   ```
   */
-  @variadic @val
+  @variadic @val @pure
   external maxMany: array<int> => int = "Math.max"
 
   /**
@@ -241,7 +241,7 @@ See [`Math.pow`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referen
   Math.Int.pow(3, ~exp=4) == 81
   ```
   */
-  @val
+  @val @pure
   external pow: (int, ~exp: int) => int = "Math.pow"
 
   /**
@@ -257,7 +257,7 @@ See [`Math.sign`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Refere
   Math.Int.sign(0) == 0
   ```
   */
-  @val
+  @val @pure
   external sign: int => int = "Math.sign"
 
   /**
@@ -273,6 +273,7 @@ on MDN.
   Math.Int.floor(-3.1) == -4
   ```
   */
+  @pure
   let floor: float => int
 
   /**
@@ -288,6 +289,7 @@ on MDN.
   Math.Int.ceil(-3.1) == -3
   ```
   */
+  @pure
   let ceil: float => int
 
   /**
@@ -317,7 +319,7 @@ Math.abs(-2.0) == 2.0
 Math.abs(3.0) == 3.0
 ```
   */
-@val
+@val @pure
 external abs: float => float = "Math.abs"
 
 /**
@@ -332,7 +334,7 @@ Math.acos(-1.0) == 3.141592653589793
 Math.acos(-3.0)->Float.isNaN == true
 ```
 */
-@val
+@val @pure
 external acos: float => float = "Math.acos"
 
 /**
@@ -347,7 +349,7 @@ Math.acosh(1.0) == 0.0
 Math.acosh(0.5)->Float.isNaN == true
 ```
 */
-@val
+@val @pure
 external acosh: float => float = "Math.acosh"
 
 /**
@@ -362,7 +364,7 @@ Math.asin(-1.0) == -1.5707963267948966
 Math.asin(-2.0)->Float.isNaN == true
 ```
 */
-@val
+@val @pure
 external asin: float => float = "Math.asin"
 
 /**
@@ -376,7 +378,7 @@ Math.asinh(-1.0) == -0.881373587019543
 Math.asinh(-0.0) == -0.0
 ```
 */
-@val
+@val @pure
 external asinh: float => float = "Math.asinh"
 
 /**
@@ -391,7 +393,7 @@ Math.atan(0.0) == 0.0
 Math.atan(1.0) == 0.7853981633974483
 ```
 */
-@val
+@val @pure
 external atan: float => float = "Math.atan"
 
 /**
@@ -410,7 +412,7 @@ Math.atanh(0.0) == 0.0
 Math.atanh(0.5) == 0.5493061443340548
 ```
 */
-@val
+@val @pure
 external atanh: float => float = "Math.atanh"
 
 /**
@@ -427,7 +429,7 @@ Math.atan2(~x=90.0, ~y=15.0) == 0.16514867741462683
 Math.atan2(~x=15.0, ~y=90.0) == 1.4056476493802699
 ```
 */
-@val
+@val @pure
 external atan2: (~y: float, ~x: float) => float = "Math.atan2"
 
 /**
@@ -442,7 +444,7 @@ Math.cbrt(-0.0) == -0.0
 Math.cbrt(0.0) == 0.0
 ```
 */
-@val
+@val @pure
 external cbrt: float => float = "Math.cbrt"
 
 /**
@@ -460,7 +462,7 @@ Math.ceil(-3.1) == -3.0
 Math.ceil(2_150_000_000.3) == 2_150_000_001.0
 ```
 */
-@val
+@val @pure
 external ceil: float => float = "Math.ceil"
 
 /**
@@ -475,7 +477,7 @@ Math.cos(0.0) == 1.0
 Math.cos(1.0) == 0.5403023058681398
 ```
 */
-@val
+@val @pure
 external cos: float => float = "Math.cos"
 
 /**
@@ -491,7 +493,7 @@ Math.cosh(-0.0) == 1.0
 Math.cosh(0.0) == 1.0
 ```
 */
-@val
+@val @pure
 external cosh: float => float = "Math.cosh"
 
 /**
@@ -506,7 +508,7 @@ Math.exp(-1.0) == 0.36787944117144233
 Math.exp(0.0) == 1.0
 ```
 */
-@val
+@val @pure
 external exp: float => float = "Math.exp"
 
 /**
@@ -521,7 +523,7 @@ Math.expm1(-1.0) == -0.6321205588285577
 Math.expm1(-0.0) == -0.0
 ```
 */
-@val
+@val @pure
 external expm1: float => float = "Math.expm1"
 
 /**
@@ -537,7 +539,7 @@ Math.floor(-45.05) == -46.0
 Math.floor(-0.0) == -0.0
 ```
 */
-@val
+@val @pure
 external floor: float => float = "Math.floor"
 
 /**
@@ -551,7 +553,7 @@ Math.fround(5.5) == 5.5
 Math.fround(5.05) == 5.050000190734863
 ```
 */
-@val
+@val @pure
 external fround: float => float = "Math.fround"
 
 /**
@@ -566,7 +568,7 @@ Math.hypot(3.0, 4.0) == 5.0
 Math.hypot(3.0, 5.0) == 5.8309518948453
 ```
 */
-@val
+@val @pure
 external hypot: (float, float) => float = "Math.hypot"
 
 /**
@@ -582,7 +584,7 @@ Math.hypotMany([3.0, 4.0, 5.0]) == 7.0710678118654755
 Math.hypotMany([]) == 0.0
 ```
 */
-@variadic @val
+@variadic @val @pure
 external hypotMany: array<float> => float = "Math.hypot"
 
 /**
@@ -600,7 +602,7 @@ Math.log(0.0)->Float.isFinite == false
 Math.log(1.0) == 0.0
 ```
 */
-@val
+@val @pure
 external log: float => float = "Math.log"
 
 /**
@@ -616,7 +618,7 @@ Math.log1p(-1.0)->Float.isFinite == false
 Math.log1p(-0.0) == -0.0
 ```
 */
-@val
+@val @pure
 external log1p: float => float = "Math.log1p"
 
 /**
@@ -633,7 +635,7 @@ Math.log10(0.0)->Float.isFinite == false
 Math.log10(1.0) == 0.0
 ```
 */
-@val
+@val @pure
 external log10: float => float = "Math.log10"
 
 /**
@@ -650,7 +652,7 @@ Math.log2(0.0)->Float.isFinite == false
 Math.log2(1.0) == 0.0
 ```
 */
-@val
+@val @pure
 external log2: float => float = "Math.log2"
 
 /**
@@ -664,7 +666,7 @@ Math.min(1.0, 2.0) == 1.0
 Math.min(-1.0, -2.0) == -2.0
 ```
 */
-@val
+@val @pure
 external min: (float, float) => float = "Math.min"
 
 /**
@@ -680,7 +682,7 @@ Math.minMany([-1.0, -2.0]) == -2.0
 Math.minMany([])->Float.isFinite == false
 ```
 */
-@variadic @val
+@variadic @val @pure
 external minMany: array<float> => float = "Math.min"
 
 /**
@@ -694,7 +696,7 @@ Math.max(1.0, 2.0) == 2.0
 Math.max(-1.0, -2.0) == -1.0
 ```
 */
-@val
+@val @pure
 external max: (float, float) => float = "Math.max"
 
 /**
@@ -710,7 +712,7 @@ Math.maxMany([-1.0, -2.0]) == -1.0
 Math.maxMany([])->Float.isFinite == false
 ```
 */
-@variadic @val
+@variadic @val @pure
 external maxMany: array<float> => float = "Math.max"
 
 /**
@@ -724,7 +726,7 @@ Math.pow(2.0, ~exp=4.0) == 16.0
 Math.pow(3.0, ~exp=4.0) == 81.0
 ```
 */
-@val
+@val @pure
 external pow: (float, ~exp: float) => float = "Math.pow"
 
 /**
@@ -756,7 +758,7 @@ Math.round(0.0) == 0.0
 Math.round(-0.0) == -0.0
 ```
 */
-@val
+@val @pure
 external round: float => float = "Math.round"
 
 /**
@@ -772,7 +774,7 @@ Math.sign(-3.0) == -1.0
 Math.sign(0.0) == 0.0
 ```
 */
-@val
+@val @pure
 external sign: float => float = "Math.sign"
 
 /**
@@ -787,7 +789,7 @@ Math.sin(0.0) == 0.0
 Math.sin(1.0) == 0.8414709848078965
 ```
 */
-@val
+@val @pure
 external sin: float => float = "Math.sin"
 
 /**
@@ -803,7 +805,7 @@ Math.sinh(0.0) == 0.0
 Math.sinh(1.0) == 1.1752011936438014
 ```
 */
-@val
+@val @pure
 external sinh: float => float = "Math.sinh"
 
 /**
@@ -820,7 +822,7 @@ Math.sqrt(1.0) == 1.0
 Math.sqrt(9.0) == 3.0
 ```
 */
-@val
+@val @pure
 external sqrt: float => float = "Math.sqrt"
 
 /**
@@ -836,7 +838,7 @@ Math.tan(0.0) == 0.0
 Math.tan(1.0) == 1.5574077246549023
 ```
 */
-@val
+@val @pure
 external tan: float => float = "Math.tan"
 
 /**
@@ -852,7 +854,7 @@ Math.tanh(0.0) == 0.0
 Math.tanh(1.0) == 0.7615941559557649
 ```
 */
-@val
+@val @pure
 external tanh: float => float = "Math.tanh"
 
 /**
@@ -868,5 +870,5 @@ Math.trunc(13.37) == 13.0
 Math.trunc(42.84) == 42.0
 ```
 */
-@val
+@val @pure
 external trunc: float => float = "Math.trunc"

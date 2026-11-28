@@ -5087,6 +5087,11 @@ fn format_type_warnings(
 /// The source text an in-process compile reports diagnostics against. Like
 /// OCaml's code frames (location.ml), it is read back from the source file.
 fn read_in_process_source(filename: &str) -> String {
+    // A page has no file system: its files are in `wasm_vfs`.
+    #[cfg(target_arch = "wasm32")]
+    if let Some(content) = crate::wasm_vfs::read_file(filename) {
+        return content;
+    }
     std::fs::read(filename)
         .map(crate::source_text::latin1_bytes_to_string)
         .unwrap_or_default()
@@ -6737,6 +6742,14 @@ fn compile_source_to_js_with_options_inner(
             current_unit_name.as_deref(),
         )?;
     }
+    verify_typed_structure(
+        &tctx,
+        type_ctx,
+        parser.arena(),
+        &typed_structure,
+        &|| source,
+        filename,
+    )?;
 
     // OCaml compiler/ml/typemod.ml:1755-1758 reads the compiled interface
     // through Env.read_signature; persistent Env errors raised there abort
@@ -10125,6 +10138,50 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     finish_preprocessed_structure_in_process_from_js_boundary(pre_js, options, js_registry)
 }
 
+/// Run the checks of `crate::verify` on a type checked implementation and
+/// report what they find.
+/// Cost: O(1) for a unit that has no verify attribute and whose signatures
+/// required no effect of a value.
+fn verify_typed_structure<'s>(
+    tctx: &TypeCheckContext<'_>,
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    typed_structure: &crate::types::typedtree::Structure,
+    source: &dyn Fn() -> &'s str,
+    filename: &str,
+) -> Result<()> {
+    use crate::verify::purity;
+    if !arena.has_verify_annotations() && !type_ctx.has_effect_obligations() {
+        return Ok(());
+    }
+    let obligations = type_ctx.take_effect_obligations();
+    let diagnostics = purity::check(
+        type_ctx,
+        &tctx.typed,
+        arena,
+        typed_structure,
+        &|_| false,
+        &obligations,
+    );
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    if !arena.stores_locations() {
+        return Err(LocationRetry::Diagnostic.into());
+    }
+    let source = source();
+    let mut output = String::new();
+    for diagnostic in &diagnostics {
+        output.push_str(&format_compiler_error_report_from_location(
+            source,
+            filename,
+            &diagnostic.loc,
+            &diagnostic.message,
+        ));
+    }
+    Err(UserDiagnostic::new(output, 2).into())
+}
+
 /// A fresh type context with the stamp counter where OCaml's starts.
 /// Cost: one context allocation/setup per unit attempt.
 fn fresh_type_context() -> TypeContext {
@@ -10405,6 +10462,12 @@ fn type_structure_two_modes<S, T, R>(
         crate::perf_counters::record_check_attempt();
         let type_ctx = fresh_type_context();
         type_ctx.set_location_namespace(&options.location_identity(filename));
+        // The unit's syntax takes the first scope of every attempt. Its arena
+        // keeps the scope it was given, and each attempt's context counts
+        // scopes from the start again: a later attempt must not give that
+        // scope to an arena it parses, such as a module checked from source.
+        let unit_scope = type_ctx.fresh_location_scope();
+        syntax.arena.declaration_location_scope(|| unit_scope);
         type_ctx.defer_attempt_counters();
         // The environment setup and type checking of this attempt, binding
         // `$tctx` and `$typed`. A macro rather than a closure, so that a build
@@ -10914,6 +10977,20 @@ fn compile_until_js(
                 return Err(prefix_diagnostic(&warnings, error));
             }
         }
+    }
+    if let Err(error) = verify_typed_structure(
+        &tctx,
+        type_ctx,
+        arena,
+        &typed_structure,
+        &source,
+        filename,
+    ) {
+        if error.is::<LocationRetry>() {
+            return Err(error);
+        }
+        let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
+        return Err(prefix_diagnostic(&warnings, error));
     }
     // typemod.ml:1769-1776 forces the delayed usage checks before Lambda
     // translation, as the file compile does.
