@@ -4974,7 +4974,7 @@ impl TypeContext {
         if !arena.stores_locations() {
             return self.intern_loc(loc);
         }
-        let scope = arena.declaration_location_scope(|| self.fresh_location_scope());
+        let scope = arena.declaration_location_scope(self.decl_loc_owner, || self.fresh_location_scope());
         let source = arena.get_location(index);
         let identity = super::decl_loc::LocationIdentity {
             scope,

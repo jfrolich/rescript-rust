@@ -496,9 +496,12 @@ pub struct ParseArena {
     /// but allocate no position or location records. Full locations are populated
     /// only by a fresh diagnostic compilation.
     store_locations: bool,
-    /// Assigned once by the first consuming context. The numeric scope
-    /// survives arena moves and needs no address-based registration.
-    declaration_location_scope: std::sync::OnceLock<u64>,
+    /// The scope of this syntax's declaration locations, with the table owner
+    /// of the context that assigned it. The numeric scope survives arena moves
+    /// and needs no address-based registration. A later context (an explaining
+    /// rerun of the same syntax) assigns its own: its scope counter starts
+    /// again, so the earlier number may name one of its other allocations.
+    declaration_location_scope: std::sync::Mutex<Option<(u32, u64)>>,
     next_location_identity: std::sync::atomic::AtomicU32,
     /// Location-free builds: `next_location_identity` when parsing (including
     /// the frontend) finished. Up to here each identity is the index the same
@@ -1063,7 +1066,7 @@ impl Default for ParseArena {
 
         Self {
             store_locations: true,
-            declaration_location_scope: std::sync::OnceLock::new(),
+            declaration_location_scope: std::sync::Mutex::new(None),
             next_location_identity: std::sync::atomic::AtomicU32::new(2),
             parse_location_slots: None,
             reimported_location_identities: std::sync::Mutex::new(Vec::new()),
@@ -1455,8 +1458,21 @@ impl ParseArena {
         self.last_position_file_name = Some(file_name);
     }
 
-    pub(crate) fn declaration_location_scope(&self, allocate: impl FnOnce() -> u64) -> u64 {
-        *self.declaration_location_scope.get_or_init(allocate)
+    /// The declaration location scope of this syntax in the context whose
+    /// table owner is `owner`, assigned by `allocate` on that context's first use.
+    pub(crate) fn declaration_location_scope(&self, owner: u32, allocate: impl FnOnce() -> u64) -> u64 {
+        let mut assigned = self
+            .declaration_location_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match *assigned {
+            Some((assigner, scope)) if assigner == owner => scope,
+            _ => {
+                let scope = allocate();
+                *assigned = Some((owner, scope));
+                scope
+            }
+        }
     }
 
     /// Push a position into the arena and return its index.
