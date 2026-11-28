@@ -2594,6 +2594,13 @@ mod tests {
         (u, statements)
     }
 
+    /// What the replay read to find the function literals of its
+    /// statements: its steps less the statements, the rows and the
+    /// reservations.
+    fn found(replayed: Replayed) -> usize {
+        replayed.steps() - replayed.statements - replayed.scopes - replayed.reserved
+    }
+
     #[test]
     fn the_replay_is_linear_in_statements_and_rows() {
         let run = |count: usize| {
@@ -2602,15 +2609,21 @@ mod tests {
             assert_eq!(name(&names, VarId(2)), Some("v$1"));
             replayed
         };
-        let (small, large) = (run(5_000), run(10_000));
+        let (small, large) = (run(1_000), run(10_000));
         // Per function: its declaration and the two statements of its body;
-        // one row; the free variable and the binder reserved; one ancestor
-        // (the declaration the literal is the value of).
-        assert_eq!(large.statements - small.statements, 3 * 5_000);
-        assert_eq!(large.scopes - small.scopes, 5_000);
-        assert_eq!(large.reserved - small.reserved, 2 * 5_000);
-        assert_eq!((small.ancestors, large.ancestors), (5_000, 10_000));
-        assert_eq!(large.steps() - small.steps(), 7 * 5_000);
+        // one row; the free variable and the binder reserved.
+        assert_eq!(large.statements - small.statements, 3 * 9_000);
+        assert_eq!(large.scopes - small.scopes, 9_000);
+        assert_eq!(large.reserved - small.reserved, 2 * 9_000);
+        // Finding a literal that is the value of its declaration costs the
+        // same for each, and at most two reads.
+        assert_eq!(found(large), 10 * found(small));
+        assert!(found(large) <= 2 * 10_000, "{}", found(large));
+        // The steps at 10,000 are ten times those at 1,000 less nine times
+        // the constant (the first declaration).
+        let constant = small.steps() - (large.steps() - small.steps()) / 9;
+        assert_eq!(constant, 1);
+        assert_eq!(large.steps(), 10 * small.steps() - 9 * constant);
     }
 
     #[test]
@@ -2631,10 +2644,12 @@ mod tests {
     }
 
     #[test]
-    fn ten_thousand_literals_on_one_spine_read_each_ancestor_at_most_twice() {
+    fn ten_thousand_literals_on_one_spine_are_found_in_at_most_three_reads_a_node() {
         // `[f1, [f2, [f3, ...]]]` in one statement: literal `k` is `k`
-        // arrays below its statement. Each array is read once on the way up
-        // and at most once more by the literal that stops at it.
+        // arrays below its statement. The spine has two nodes a literal
+        // (the literal and its array); finding the literals reads each at
+        // most three times (on trunk an array once on the way up and at
+        // most once more by the literal that stops at it).
         let run = |count: usize| {
             let mut u = Unit::new();
             let mut literals = Vec::new();
@@ -2652,10 +2667,12 @@ mod tests {
             let statement = u.effect(spine);
             u.names(&[statement], &[]).1
         };
-        let (small, large) = (run(5_000), run(10_000));
-        assert!(large.ancestors <= 3 * 10_000, "{}", large.ancestors);
-        assert!(large.ancestors <= 2 * small.ancestors + 8, "{} -> {}", small.ancestors, large.ancestors);
-        // Nothing is named for the first time by a reservation.
-        assert_eq!(large.ambiguous_orders, 0);
+        let (small, large) = (run(1_000), run(10_000));
+        assert!(found(large) >= 10_000, "{}", found(large));
+        assert!(found(large) <= 3 * 2 * 10_000, "{}", found(large));
+        assert!(found(large) <= 10 * found(small) + 8, "{} -> {}", found(small), found(large));
+        // The rest of the replay: the statement and each body's `return`,
+        // one row a literal, nothing reserved.
+        assert_eq!((large.statements, large.scopes, large.reserved), (10_001, 10_000, 0));
     }
 }

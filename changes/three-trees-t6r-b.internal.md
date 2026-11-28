@@ -1,0 +1,1 @@
+- Backend lowering: the tests of the naming replay and of the external-shadow decision assert what stays true when both are converted, and the decision is tested through the lowering.
