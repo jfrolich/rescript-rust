@@ -217,3 +217,188 @@ fn a_release_and_a_leaf_leave_the_operand_stack_alone() {
     assert_eq!([r.id(a, Rows::of(&first)), r.id(a, Rows::of(&second))], ids);
     assert_eq!(r.operands.len(), 0);
 }
+
+/// An imported module of the unit.
+fn module(a: &mut Bir) -> crate::bir::ImportId {
+    a.pools.j_modules.push(crate::js_ir::ModuleId {
+        id: crate::ident::Ident::new("M", 0, crate::ident::IdentFlags::NONE),
+        kind: crate::js_ir::Kind::Ml,
+        dynamic_import: false,
+    });
+    crate::bir::ImportId(a.pools.j_modules.len() as u32 - 1)
+}
+
+/// What `Js::references` finds below `e`, sorted, and the nodes it read.
+fn found(r: &mut Rows, a: &mut Bir, e: &E) -> (Vec<String>, u32) {
+    let mut found = Vec::new();
+    let before = r.steps();
+    let read = r.references(a, e, |_, _, reference| found.push(format!("{reference:?}")));
+    assert_eq!(r.steps(), before, "a reader counts no step");
+    assert!(r.work.is_empty());
+    found.sort();
+    (found, read)
+}
+
+#[test]
+fn the_references_below_an_expression_are_found_and_a_function_is_not_entered() {
+    use crate::bir::lower::js::Found;
+    use crate::bir::lower::js_stmt::JsStmt;
+    let mut u = unit();
+    let mut r = Rows::default();
+    let a = &mut u.b;
+    let m = module(a);
+    // `f(x, M.name, function () { return x }, [f])`.
+    let callee = r.var(a, u.f);
+    let callee_id = r.id(a, Rows::of(&callee));
+    let mark = r.mark();
+    let x = r.var(a, u.x);
+    let x_id = r.id(a, Rows::of(&x));
+    r.push(x);
+    let member = r.qualified(a, m, Some(u.name));
+    let member_id = r.id(a, Rows::of(&member));
+    r.push(member);
+    let inner = r.var(a, u.x);
+    let returned = r.return_(a, inner);
+    let body = r.list(a, 1, std::iter::once(returned));
+    let header = a.function_header(Default::default(), Default::default(), LamLoc::NONE);
+    let function = r.function(a, header, body);
+    r.push(function);
+    let inner_mark = r.mark();
+    let element = r.var(a, u.f);
+    let element_id = r.id(a, Rows::of(&element));
+    r.push(element);
+    let array = r.array(a, inner_mark, 0);
+    r.push(array);
+    let info = a.js_info(JsPayload::Call(Default::default()));
+    let call = r.call(a, callee, mark, info);
+    let mut expected = [
+        Found::Var { var: u.f, id: callee_id },
+        Found::Var { var: u.x, id: x_id },
+        Found::Module { module: m, id: member_id },
+        Found::Function(header),
+        Found::Var { var: u.f, id: element_id },
+    ]
+    .map(|reference| format!("{reference:?}"));
+    expected.sort();
+    // The call, its callee, three operands that are leaves or a literal,
+    // the array and its element: the body of the function is not read.
+    assert_eq!(found(&mut r, a, &call), (expected.to_vec(), 7));
+    // The expression is the caller's still.
+    assert_eq!(r.arity(a, Rows::of(&call)), 5);
+    done(call);
+}
+
+/// The walk of `references` runs above what `Rows::work` holds, as the walk of
+/// a returned value does (THREE_TREES 11.4, "T6r: the naming replay behind
+/// the interface", decision 5).
+#[test]
+fn the_walk_of_references_leaves_what_the_work_stack_held() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let a = &mut u.b;
+    // `[f, x]`.
+    let mark = r.mark();
+    let first = r.var(a, u.f);
+    r.push(first);
+    let second = r.var(a, u.x);
+    r.push(second);
+    let array = r.array(a, mark, 0);
+    r.work.push(NodeId(7));
+    let mut references = 0;
+    let read = r.references(a, &array, |_, _, _| references += 1);
+    assert_eq!((references, read), (2, 3));
+    assert_eq!(r.work, [NodeId(7)]);
+    done(array);
+}
+
+#[test]
+fn the_references_of_an_expression_cost_one_read_a_node_at_any_depth_and_width() {
+    assert_eq!(std::mem::size_of::<crate::bir::lower::js::Found>(), 12);
+    assert_eq!(std::mem::size_of::<crate::bir::lower::js::JsxHead>(), 1);
+    let mut reads = Vec::new();
+    for size in [1_000u32, 10_000] {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let a = &mut u.b;
+        // `size` deep: `x, (x, (x, ...))`; `size` wide: `[x, x, ...]`.
+        let build = |r: &mut Rows, a: &mut Bir| {
+            let mut deep = r.var(a, u.x);
+            for _ in 0..size {
+                let first = r.var(a, u.x);
+                deep = r.seq(a, first, deep);
+            }
+            let mark = r.mark();
+            for _ in 0..size {
+                let value = r.var(a, u.x);
+                r.push(value);
+            }
+            let wide = r.array(a, mark, 0);
+            r.seq(a, deep, wide)
+        };
+        let value = build(&mut r, a);
+        let mut references = 0;
+        let read = r.references(a, &value, |_, _, _| references += 1);
+        assert_eq!(references, 2 * size + 1);
+        // The sequences, their operands, the array and its elements.
+        assert_eq!(read, 3 * size + 3);
+        reads.push(read);
+        let again = build(&mut r, a);
+        let allocations = allocation_counter::measure(|| {
+            r.references(a, &again, |_, _, _| {});
+        });
+        assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        done(value);
+        done(again);
+    }
+    assert_eq!(reads[1] - 3, 10 * (reads[0] - 3));
+}
+
+#[test]
+fn the_callee_and_the_tag_of_a_jsx_element_are_told_by_their_ids() {
+    use crate::bir::lower::js::JsxHead;
+    let mut u = unit();
+    let mut r = Rows::default();
+    let a = &mut u.b;
+    let info = a.js_info(JsPayload::Jsx(JsxHeader {
+        spread: false,
+        props: PropertySpan { start: 0, len: 0 },
+        children: 1,
+        key: false,
+        multi: false,
+        fragment: false,
+    }));
+    let mark = r.mark();
+    // The tag is a member of `x`: the climb from the reference ends at the
+    // member, which is the operand.
+    let base = r.var(a, u.x);
+    let base_id = r.id(a, Rows::of(&base));
+    let tag = r.dot(a, base, u.name, FieldPos::NONE, false);
+    let tag_id = r.id(a, Rows::of(&tag));
+    r.push(tag);
+    let child = r.var(a, u.x);
+    let child_id = r.id(a, Rows::of(&child));
+    r.push(child);
+    let callee = r.var(a, u.f);
+    let callee_id = r.id(a, Rows::of(&callee));
+    // Nothing holds the callee yet.
+    assert_eq!(r.jsx_head(a, callee_id), None);
+    let before = r.steps();
+    let element = r.jsx_element(a, callee, mark, info, true);
+    let counted = r.steps();
+    assert_eq!(r.jsx_head(a, callee_id), Some((JsxHead::Callee, info)));
+    assert_eq!(r.jsx_head(a, tag_id), Some((JsxHead::Tag, info)));
+    assert_eq!(r.jsx_head(a, child_id), None, "an operand after the tag");
+    assert_eq!(r.jsx_head(a, base_id), None, "below the tag: the owner is the member");
+    assert_eq!(r.jsx_head(a, r.id(a, Rows::of(&element))), None);
+    assert_eq!(r.steps(), counted, "a reader counts no step");
+    assert!(counted > before);
+    // The callee of a call is no JSX operand.
+    let callee = r.var(a, u.f);
+    let callee_id = r.id(a, Rows::of(&callee));
+    let info = a.js_info(JsPayload::Call(Default::default()));
+    let mark = r.mark();
+    let call = r.call(a, callee, mark, info);
+    assert_eq!(r.jsx_head(a, callee_id), None);
+    done(element);
+    done(call);
+}

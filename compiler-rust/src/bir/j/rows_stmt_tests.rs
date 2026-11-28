@@ -447,3 +447,127 @@ fn the_variable_a_declaration_aliases_is_read_through_its_id() {
         assert_eq!(r.alias_at(&u.b, r.stmt_id(&u.b, other)), None);
     }
 }
+
+/// `return value` as the one statement of a list in flight, `value` a row
+/// built on the arena.
+fn returning(r: &mut Rows, u: &mut Unit, value: NodeId) -> crate::bir::ListId {
+    let statement = r.return_(&mut u.b, Rows::from_node(value));
+    r.list(&mut u.b, 1, std::iter::once(statement))
+}
+
+/// A call of `callee` without an argument, as a row.
+fn call_of(u: &mut Unit, callee: VarId) -> NodeId {
+    let info = u.b.js_info(JsPayload::Call(Default::default()));
+    let callee = u.b.new_node(View::Var { var: callee }, 0);
+    u.b.new_node(View::JCall { callee, args: &[], info }, 0)
+}
+
+/// The calls `JsStmt::return_calls` gives for `value`, and the nodes it
+/// read.
+fn calls(r: &mut Rows, u: &mut Unit, value: NodeId, last: bool) -> (Vec<(VarId, u32)>, u32) {
+    let list = returning(r, u, value);
+    let mut found = Vec::new();
+    let before = r.steps();
+    let read = r.return_calls(&mut u.b, list, 0, last, |_, var, call| found.push((var, call)));
+    assert_eq!(r.steps(), before, "a reader counts no step");
+    assert!(r.work.is_empty());
+    (found, read)
+}
+
+#[test]
+fn the_calls_a_return_ends_in_are_read_through_conditionals_and_sequences() {
+    let mut u = unit();
+    let (f, x) = (u.f, u.x);
+    let mut r = Rows::default();
+    // `return f()`: a site only when the `return` ends its list.
+    let call = call_of(&mut u, f);
+    assert_eq!(calls(&mut r, &mut u, call, true), (vec![(u.f, call.0)], 1));
+    let call = call_of(&mut u, f);
+    assert_eq!(calls(&mut r, &mut u, call, false), (vec![], 1));
+    // `return (x, f())`: the last operand, as its sequence.
+    let (first, second) = (u.b.new_node(View::Var { var: u.x }, 0), call_of(&mut u, f));
+    let value = u.b.new_node(View::JSeq { first, second }, 0);
+    assert_eq!(calls(&mut r, &mut u, value, true), (vec![(u.f, second.0)], 2));
+    let (first, second) = (u.b.new_node(View::Var { var: u.x }, 0), call_of(&mut u, f));
+    let value = u.b.new_node(View::JSeq { first, second }, 0);
+    assert_eq!(calls(&mut r, &mut u, value, false), (vec![], 2));
+    // `return x ? f() : (x, x())`: both branches whatever `last` is, the
+    // then-branch first; the test is not read.
+    for last in [true, false] {
+        let condition = call_of(&mut u, x);
+        let then_ = call_of(&mut u, f);
+        let (first, second) = (call_of(&mut u, f), call_of(&mut u, x));
+        let else_ = u.b.new_node(View::JSeq { first, second }, 0);
+        let value = u.b.new_node(View::JCond { condition, then_, else_ }, 0);
+        assert_eq!(calls(&mut r, &mut u, value, last), (vec![(u.f, then_.0), (u.x, second.0)], 4));
+    }
+    // A call of something that is no variable, and a value that is no
+    // call, give nothing.
+    let callee = call_of(&mut u, f);
+    let info = u.b.js_info(JsPayload::Call(Default::default()));
+    let value = u.b.new_node(View::JCall { callee, args: &[], info }, 0);
+    assert_eq!(calls(&mut r, &mut u, value, true), (vec![], 1));
+    let value = u.b.new_node(View::Var { var: u.x }, 0);
+    assert_eq!(calls(&mut r, &mut u, value, true), (vec![], 1));
+}
+
+/// `x ? (x ? ... f() ... : x()) : x()`, the conditionals nested `depth`
+/// deep in their then-branches.
+fn nested_conditionals(u: &mut Unit, depth: u32) -> NodeId {
+    let (f, x) = (u.f, u.x);
+    let mut value = call_of(u, f);
+    for _ in 0..depth {
+        let condition = u.b.new_node(View::Var { var: u.x }, 0);
+        let else_ = call_of(u, x);
+        value = u.b.new_node(View::JCond { condition, then_: value, else_ }, 0);
+    }
+    value
+}
+
+#[test]
+fn the_calls_of_a_return_cost_two_reads_a_conditional_at_any_depth() {
+    let mut reads = Vec::new();
+    for depth in [1_000, 10_000] {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let value = nested_conditionals(&mut u, depth);
+        let (found, read) = calls(&mut r, &mut u, value, false);
+        // Each conditional and its else-branch, and the innermost call.
+        assert_eq!(read, 2 * depth + 1);
+        assert_eq!(found.len() as u32, depth + 1);
+        assert_eq!(found[0].0, u.f, "the innermost then-branch is read first");
+        reads.push(read);
+        // A second walk of a value as deep allocates nothing.
+        let again = nested_conditionals(&mut u, depth);
+        let list = returning(&mut r, &mut u, again);
+        let allocations = allocation_counter::measure(|| {
+            r.return_calls(&mut u.b, list, 0, false, |_, _, _| {});
+        });
+        assert_eq!(allocations.count_total, 0, "{allocations:?}");
+    }
+    assert_eq!(reads[1] - 1, 10 * (reads[0] - 1));
+}
+
+#[test]
+fn the_walk_of_a_return_leaves_what_the_work_stack_held() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let value = nested_conditionals(&mut u, 3);
+    let list = returning(&mut r, &mut u, value);
+    r.work.push(NodeId(7));
+    let mut found = 0;
+    r.return_calls(&mut u.b, list, 0, true, |_, _, _| found += 1);
+    assert_eq!(found, 4);
+    assert_eq!(r.work, [NodeId(7)]);
+}
+
+#[test]
+#[should_panic(expected = "not a return statement")]
+fn the_calls_of_a_statement_that_is_no_return_are_not_read() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let x = r.var(&mut u.b, u.x);
+    let statement = r.exp(&mut u.b, x);
+    let list = r.list(&mut u.b, 1, std::iter::once(statement));
+    r.return_calls(&mut u.b, list, 0, true, |_, _, _| {});
+}

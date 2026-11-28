@@ -52,6 +52,8 @@
 //! | `refill` | `plain::node` of the view of `e`'s operation (`JOptional`, `JArray`, `JBlockLit`, `JObject`, `JDot`) over the operands since the mark with `e`'s `aux`, information, property and position; `plain::copy_cold` from `e`; `Bir::release` of `e` |
 //! | `copy_cold` | `plain::copy_cold`, then the character of `from` (`Node::js_char`) set on `to` when `from` has one |
 //! | `copy_members` | the `JDot`s from `r` down pushed on `Rows::work`, then `copy_leaf` and `copy_cold` of the first node that is not one, then for each read from the innermost out `dot` with its `property`, `position` and `aux != 0`, and `copy_cold`; `made` after each node; one step per node made |
+//! | `jsx_head` | the owner (`Bir::parents`) is a `JJsx` whose `values[0]` (the callee) or `values[1]` (the tag) is the node: which, and the `info` of the element |
+//! | `references` | a walk of the subtree of `e` on `Rows::work`, above what the stack holds: a `Var`, a `JQualified` and a `JFun` are given to `visit` and not entered, any other node has its children pushed; returns the nodes popped |
 //! | `jsx_element` | `callee` pushed and rotated to the mark (`slice::rotate_right(1)` of the operands since it), then `plain::node` with the operands since the mark as the list and the children bit as `aux`: one step and one per operand, the callee one of them |
 //!
 //! Steps (`Js::steps`): one for every function that builds a node or takes
@@ -65,7 +67,7 @@
 //! `push`, `pop`, `reserve`, and the four functions of cold data and
 //! `assume_strict` count nothing.
 use crate::bir::j::{facts, norm, plain};
-use crate::bir::lower::js::{Js, Mark, Pools};
+use crate::bir::lower::js::{Found, Js, JsxHead, Mark, Pools};
 use crate::bir::{
     Cold, ConstId, Constant, FuncId, ImportId, JsId, JsPayload, NodeFlags, NodeId, Op, StrId,
     VarId, View,
@@ -96,9 +98,10 @@ pub struct Rows {
     /// is cleared after each copy and exists so that a copy with labels
     /// allocates nothing in a warm unit.
     labels: Vec<(u32, u32)>,
-    /// The statements and expressions `effect_free` and `substitute` have
-    /// still to read, and the member reads `copy_members` has still to
-    /// copy. A work stack of those walks, empty between calls and kept so
+    /// The statements and expressions `effect_free`, `substitute`,
+    /// `references` and `return_calls` have still to read, and the member
+    /// reads `copy_members` has still to copy. A work stack of those
+    /// walks, empty between calls and kept so
     /// that a walk allocates only when a tree is wider or deeper than any
     /// before it in the unit.
     pub(super) work: Vec<NodeId>,
@@ -343,6 +346,18 @@ impl Js for Rows {
             }
             View::JTagged { tag, .. } => tag.0 == id,
             _ => false,
+        }
+    }
+
+    #[inline]
+    fn jsx_head(&self, a: &Pools, id: u32) -> Option<(JsxHead, JsId)> {
+        let View::JJsx { values, info } = a.view(a.parents[id as usize]?) else { return None };
+        if values[0].0 == id {
+            Some((JsxHead::Callee, info))
+        } else if values[1].0 == id {
+            Some((JsxHead::Tag, info))
+        } else {
+            None
         }
     }
 
@@ -688,6 +703,26 @@ impl Js for Rows {
         }
         self.work = spine;
         copy
+    }
+    fn references(&mut self, a: &mut Pools, e: &E, mut visit: impl FnMut(&Self, &mut Pools, Found)) -> u32 {
+        // The stack may hold the pending nodes of a walk that is under
+        // way (`JsStmt::substitute`): the reads go above them.
+        let mut work = std::mem::take(&mut self.work);
+        let base = work.len();
+        let mut read = 0;
+        work.push(e.0);
+        while work.len() > base {
+            let node = work.pop().expect("a pending node");
+            read += 1;
+            match a.view(node) {
+                View::Var { var } => visit(self, a, Found::Var { var, id: node.0 }),
+                View::JQualified { module, .. } => visit(self, a, Found::Module { module, id: node.0 }),
+                View::JFun { header, .. } => visit(self, a, Found::Function(header)),
+                view => view.children_into(&mut work),
+            }
+        }
+        self.work = work;
+        read
     }
     fn release(&mut self, a: &mut Pools, e: E) {
         self.steps += u64::from(a.release(e.0));

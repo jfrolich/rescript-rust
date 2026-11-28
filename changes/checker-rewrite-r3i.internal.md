@@ -1,0 +1,1 @@
+- Checker rewrite R3i: `moregeneral`, `equal` and `matches` in the new type checker kernel, one loop over the frames of unification, with `rigidify` and the renaming of `equal` as a dense table.

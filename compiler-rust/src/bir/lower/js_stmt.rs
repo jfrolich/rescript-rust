@@ -362,6 +362,38 @@ pub trait JsStmt: Js {
     /// reference, O(log of their number). Counts no step. (Decision 7:
     /// `export.rs::alias_of`, a variable no row declares.)
     fn alias_at(&self, a: &Pools, id: u32) -> Option<VarId>;
+    /// The calls a `return` ends in when the flatten pass has split its
+    /// value (THREE_TREES 11.4, "T4c design" (a)): of the value of the
+    /// `Return` that is statement `index` of the list in flight `list`,
+    /// both branches of a conditional, the last operand of a sequence, and
+    /// a call whose callee is a reference to a variable. `visit` is given
+    /// the pools, the variable called and the id of the call (a key), once
+    /// per such call, a then-branch before its else-branch. `last` says
+    /// that the `return` is the last statement of its list: a call that is
+    /// the whole value, or the end of a sequence that is, is given only
+    /// then; below a conditional every such call is given (the flatten
+    /// pass gives each branch a list of its own). The statement stays in
+    /// the list. Returns the number of nodes read.
+    ///
+    /// One read per conditional and sequence between the value and its
+    /// calls and one per node they end in: a test, the head of a sequence
+    /// and the arguments of a call are not read. Counts no step (a reader;
+    /// the caller counts the number returned). The walk is the
+    /// implementation's, over its own work stack (a reference cannot be
+    /// kept across calls of `visit`): no recursion on the depth of the
+    /// value, and nothing allocated once the stack has held a value whose
+    /// conditionals nest as deep. Panics when `index` is not below
+    /// [`JsStmt::len`] and on a statement that is not a `Return`.
+    /// (THREE_TREES 11.4, "T6r: the naming replay behind the interface",
+    /// decision 5: `close::decide`, the return arm.)
+    fn return_calls(
+        &mut self,
+        a: &mut Pools,
+        list: Self::L,
+        index: u32,
+        last: bool,
+        visit: impl FnMut(&mut Pools, VarId, u32),
+    ) -> u32;
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code
     /// that can be observed. An expression statement and a `return` are
     /// free when their value is strictly pure (E:15); a block, an `if`, a

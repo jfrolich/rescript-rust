@@ -60,6 +60,7 @@
 //! | `take_block_stmt` | T6x-e | that entry, `Bir::detach`ed: the parent link is cleared and the entry stays in the list, so the indexes after it stay; one step |
 //! | `substitute` | T6x-e | a walk of the statement's subtree on `Rows::work`: a `Var` of exactly `var` is `Bir::replace`d by what `make` gives and not entered, any other node has its children pushed; it stops at `uses` replacements; one step per node popped |
 //! | `alias_at` | T6x-e | the `var` of the `Var` that is the `value` of the `SDecl` `id`; `None` otherwise |
+//! | `return_calls` | T6r | `return_calls_of` of the `value` of the `SReturn` that is entry `index` of the pool list, on `Rows::work`: a `JCond` pushes its else-branch and its then-branch, a `JSeq` is followed to its `second`, a `JCall` of a `Var` that is a site is given to `visit` with its row id |
 //! | `effect_free` | T6q | the read `export.rs::has_toplevel_effect` made of a statement that is not a declaration row: a work stack (`Rows::work`) of the node's children for a compound statement, the `STRICT` flag of the value of `SExp` and `SReturn` and of every expression below a compound statement, `false` at `SThrow`, `SDebugger`, a jump, `SDecl`, `SRest`, `SForOf`, `SForAwaitOf`; one step per node read |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
@@ -380,6 +381,17 @@ impl JsStmt for Rows {
             _ => None,
         }
     }
+    fn return_calls(
+        &mut self,
+        a: &mut Pools,
+        list: ListId,
+        index: u32,
+        last: bool,
+        visit: impl FnMut(&mut Pools, VarId, u32),
+    ) -> u32 {
+        let View::SReturn { value } = a.view(a.lists.get(list)[index as usize]) else { panic!("not a return statement") };
+        return_calls_of(a, &mut self.work, value, last, visit)
+    }
     fn effect_free(&mut self, a: &Pools, s: &S) -> bool {
         let mut work = std::mem::take(&mut self.work);
         debug_assert!(work.is_empty());
@@ -513,6 +525,51 @@ impl<R: Runs<Rows>> norm::IfLists for RunLists<'_, R> {
     #[inline]
     fn take(&mut self, b: &mut Pools, run: R::Run) -> ListId {
         self.runs.take(self.rows, b, run)
+    }
+}
+
+/// [`JsStmt::return_calls`] of the returned value `value`, a row, over the
+/// work stack `work`, above what it holds: the body of the function on
+/// rows, apart so that `norm::simplify_if_head`, which builds a `return`
+/// that passes no close of a list, runs the same walk until the flip
+/// deletes it. A sequence at the top is followed to its last operand in a
+/// loop and keeps `last`; from the first conditional on every pending node
+/// is a branch, so the stack holds rows alone. Returns the nodes read. One
+/// read per conditional, per sequence and per node they end in; nothing is
+/// allocated once the stack has the depth of the nested conditionals.
+pub(crate) fn return_calls_of(
+    a: &mut Pools,
+    work: &mut Vec<NodeId>,
+    value: NodeId,
+    last: bool,
+    mut visit: impl FnMut(&mut Pools, VarId, u32),
+) -> u32 {
+    let base = work.len();
+    let mut read = 0;
+    let (mut node, mut site) = (value, last);
+    loop {
+        read += 1;
+        match a.view(node) {
+            View::JCond { then_, else_, .. } => {
+                work.push(else_);
+                work.push(then_);
+            }
+            View::JSeq { second, .. } => {
+                node = second;
+                continue;
+            }
+            View::JCall { callee, .. } if site => {
+                if let View::Var { var } = a.view(callee) {
+                    visit(a, var, node.0);
+                }
+            }
+            _ => {}
+        }
+        if work.len() == base {
+            return read;
+        }
+        node = work.pop().expect("a pending branch");
+        site = true;
     }
 }
 
