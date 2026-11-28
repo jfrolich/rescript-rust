@@ -6229,7 +6229,7 @@ the probe's commits, re-cut.
 | T6r-c | The replay's interface on both sides: `below`, `literal_body`, `set_literal_body`, `bodies`, `body`, `set_body`, `binder`, `status`, `range_of` (`rest_fields` is not added: decision 12); on the builder `HAS_GLOBAL` inherited as `HAS_FUN` is, a function literal whose body is a list by header, and the flags of a substitution | `js_stmt.rs`, `js.rs`, `rows_stmt.rs`, `rows.rs`, `emit/builder.rs`, `emit/row.rs`, their tests | nothing (no caller yet) | 830 added and 43 removed, tests apart (built) | none | **On trunk** (pull request 408, design turn 11): 592, 102, 71 |
 | T6r-d1 | The replay names no field of a rest declaration; the parameters of eta-reduced functions counted from the rows | `names.rs` | `Replay::eta_parameter`, the rest arm of `Replay::statement` and its test | 29 added, 59 removed (built once, design turn 11) | one test deleted | 592, 102, 71; allocation counts unmoved |
 | T6r-d2 | The replay walks lists: `Frame` holds a list, a compound statement is held while its lists are walked (`take_at`, `body`, `set_body`, `list`), the root is the block `finish` holds (decision 8); a literal's body by header (decision 2); the literals of a statement still found by the prelude's marks, keyed by `stmt_id` | `names.rs`, `mod.rs` (`finish`, `replay_names`, the type of `State::names`), `unit.rs` (four numbers) | the node-reading `Replay::child`; `names.rs` reads no `View` outside the prelude | 318 added, 225 removed (built once, design turn 11) | the four allocation counts (87, 105, 87, 157); `row_sizes` (`Replayed` 48 to 56) | moves equal statements on both corpora; `bir.view(` is in no built line of `names.rs` |
-| T6r-e | The literals through `below`; the prelude goes | `names.rs` | `Replay::prelude`, `Scratch::{marks, next}`, `Replayed::{ancestors, ambiguous_orders}`, `is_statement`, the five `ambiguous_orders` assertions | about 350 | the two step tests of decision 11 read `descended` | `rg -n 'ambiguous_orders\|fn prelude' src` is empty; the coordinator measures check mode here |
+| T6r-e | The literals through `below`; the prelude goes | `names.rs` | `Replay::prelude`, `Scratch::{marks, next}`, `Replayed::{ancestors, ambiguous_orders}`, `is_statement`, the seven `ambiguous_orders` assertions (six in `names.rs`, one in `oracle_tests.rs`) | about 350 | the two step tests of decision 11 read `descended` | `rg -n 'ambiguous_orders\|fn prelude' src` is empty; the coordinator measures check mode here |
 | T6r-f | The external-shadow decision in the walk (decision 10): counts on entry and exit, `below` with `HAS_GLOBAL` when `Globals::active`, `element_bindings` where a list is entered | `globals.rs`, `names.rs`, `mod.rs` (`finish`) | `globals::{shadowed, binding_scope, bindings, rows}`, `Globals::{marks, epoch}`, the binding half of `Link` and `Row::binding`, the recursion of `deep_constant` | about 450 (the probe's step 5) | `ten_thousand_block_declarations_cost_one_step_per_element` (through the lowering) | the end state of the row: `rg -n 'View::J\|Op::J\|View::S[A-Z]\|Op::S[A-Z]\|parents\[' src/bir/lower` matches only in test modules; `globals_qualified` equal before and after on every unit |
 
 The list of deletions of the row in "T6: the cut of the interface,
@@ -6378,7 +6378,13 @@ whether the reference prints as `globalThis.name` and the
 implementation marks it: rows with `Bir::qualify_global`, the builder
 with `var::QUALIFIED` in the reference's row (the print form is the
 seal's). The finds come in operand order on both sides (rows push the
-children last first; the builder turns each run of operands around).
+children last first; the builder turns each run of operands around),
+with two forms in which the two sides do not find the same things
+(seen in the review of this turn; item 2 of "Corrections after the
+review of the eleventh turn"): the target of an assignment that is an
+identifier, which rows read and the builder does not, and `x === null
+|| x === undefined` on one variable, which is two references on rows
+and one on the builder.
 The number of nodes read is returned and the caller counts it, as
 `references` and `return_calls` do.
 
@@ -6564,8 +6570,10 @@ Three things the build showed that decision 11 did not have:
   variable**: the dead-code marking turns `let location = ext()` into
   `ext()` because it counts no use in the loop's head. Both backends
   print it (the test's first form failed on it), so it is not a
-  difference between them; whether the OCaml compiler prints the same
-  was not checked. It is outside T6: reported, not fixed.
+  difference between them. The OCaml compiler prints the declaration
+  (checked in the review of this turn with a source program; see
+  "State of what is owed", its last item). It is outside T6: reported,
+  not fixed here.
 - A test of "no shadowing binding" that asserts linearity alone fails
   on no break of trunk (the walk of references is linear either way).
   It got a bound, at most two steps a statement, and fails when the
@@ -6661,7 +6669,8 @@ What the build settled:
   **not built in this turn**, so it has no prompt. Its interface is on
   trunk (`below`, with `HAS_FUN` on both sides). What it must still
   show: the closing order of several literals in one statement against
-  the descent's order (the five `ambiguous_orders` assertions), and
+  the descent's order (the seven `ambiguous_orders` assertions: six in
+  `names.rs`, one in `oracle_tests.rs`), and
   whether a count moves in a unit whose work stack was never used
   before the replay.
 - T6r-f, the external-shadow decision in the walk. `State:` not built;
@@ -6694,7 +6703,86 @@ What the build settled:
   2, 6 (decision 10).
 - A range loop whose first value is held and whose body does not read
   the variable prints no declaration of it, on both backends ("T6r-b
-  as built"). `State:` found in this turn, outside T6, not fixed.
+  as built"). `State:` a fault of the compiler in use, confirmed in
+  the review of this turn: for `for _i in ext() to (try ext() catch {
+  | _ => 0 }) { eff() }` the OCaml compiler prints `let _i = ext();`
+  before the loop and the Rust compiler prints `ext();`, so the loop
+  reads and writes a variable nothing declares. Fixed in a pull request
+  of its own, in the backend in use and in the lowering together; the
+  test of T6r-b reads the variable in the body and does not print the
+  faulty form.
+
+**Corrections after the review of the eleventh turn.**
+
+1. *Made in the reviewer's commit.* The number of `ambiguous_orders`
+   assertions T6r-e deletes (seven after T6r-b: six in `names.rs`, one
+   in `oracle_tests.rs`; three places said five); the sentence of
+   decision 14 on the order of the finds; the two sentences on the
+   range loop, which the OCaml compiler was not asked about.
+2. *Owed before `below` gets a caller for `HAS_GLOBAL` (T6r-f), built
+   code of T6r-c.* The two sides do not find the same things in two
+   forms. (a) An assignment whose target is an identifier: rows read
+   the `Var` child of the assignment; the builder turns the reference
+   into an assignment target (`Builder::bin`, the arm `BinOp::Eq`) and
+   `operands_into` pushes nothing for it, so a target with
+   `HAS_GLOBAL` raises the flag on every node above it and is never
+   found. Either the descent visits the target by its row, or both
+   sides assert where the assignment is made that its target is no
+   global, with the reason. (b) `x === null || x === undefined` on one
+   variable is two references on rows and one node on the builder: two
+   finds and two marks against one. State which count the replay's
+   steps take, and test both forms on both sides alike.
+   `inherited_by_every_constructor` does not put its operand in the
+   nullish form of `bin`, in the target of an assignment to an
+   identifier, in a `while_` without a label, or in a `call` with a
+   unit argument; `Builder::substitute`'s flags are tested at one depth.
+3. *Owed before T6r-f, the builder.* A node of a printed form without
+   a row reads row 0, which has no flag, and the descent stops there.
+   Today only leaves are without a row. A constructor that wraps a
+   flagged operand in a node without a row would hide it silently: a
+   debug assertion where such a node is made, or a row for it.
+4. *Owed to T4d (step B, the record rest), decision 12.* "No
+   constructor of the interface makes a rest declaration" holds until
+   the lowering applies the record-rest step itself. That step makes
+   the pattern with the variables of the removed fields; the slice
+   that builds it adds the constructor and the read of the fields to
+   the interface, on both sides, and gives the replay back the rule
+   T6r-d1 deletes with its test (the fields are named before the
+   variable, `walk::rest_declaration`).
+5. *Owed to T6v, the builder.* A second `take_body` of the same list
+   gives an empty list without a word, and `set_body` of a list that
+   was never taken passes its assertion when that list is empty: a
+   marker for a list that is out, as `List::TAKEN` is for a literal's
+   body. A released function literal keeps its slot of
+   `Builder::literals` and its body in the pool until the unit ends:
+   state it or release it. With the three found in the turn (the copy
+   of a literal, a substitution that enters one, a labelled `while` in
+   `S::value`).
+6. *Owed, document.* The trait's doc comment of `below` lists the
+   expressions of a statement without the variable of a range loop
+   over a variable declared before it, which rows read
+   (`SForRangeExisting`); the cost check
+   (`scripts/check_lowering_cost_docs.py`) reads `bir/lower` only, so
+   the stated costs of the bodies under `bir/j` and `emit` are checked
+   by review and by their step tests alone.
+7. *Owed, T6r-d2.* The reservation of the list pool decision 9
+   designed needs a function of the interface and is not built: the
+   allocation counts become 87, 105, 87, 157 in T6r-d2, each rise once
+   a unit (`staged`, `held`, the list pool of the switches unit). The
+   turn that designs T6r-e adds the reservation or says why the three
+   stay.
+8. *T6r-d1.* The new count of `unnamed_references` equals the old one
+   only if every parameter of an eta-reduced function is reached
+   through exactly one closed row; a parameter reached twice would
+   make the count wrap. Nothing but the zero of CI's `Backend bridge
+   coverage` on the slice's own pull request shows it; that pull
+   request is not merged without it.
+9. *The corpus of the check-mode run.* The turn's sandbox built 795
+   units of `tests/tests`; CI builds 799 on this head. The slices are
+   judged by CI's run.
+10. *Not rerun in the review.* The tests on a host; the three
+    throw-away builds (applied with `patch` in order on the head, all
+    clean, not built); check mode.
 
 ### 11.5 Worker prompt for T4b
 
@@ -12216,7 +12304,8 @@ see (`--lib bir::lower`, `--lib bir::j`, `--lib emit::builder`):
    nodes a literal), `found(large) <= 10 * found(small) + 8`, and
    `(large.statements, large.scopes, large.reserved) == (10_001,
    10_000, 0)`. Its assertion on `ambiguous_orders` goes (T6r-e deletes
-   the count; five others still assert it until then).
+   the count; six others in `names.rs` and one in `oracle_tests.rs`
+   still assert it until then).
 
    `a_warm_replay_of_a_unit_with_functions_allocates_nothing` is not
    touched.
