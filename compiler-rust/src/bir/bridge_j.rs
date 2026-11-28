@@ -540,6 +540,9 @@ impl Importer {
                         key: key.is_some(),
                         multi,
                         fragment,
+                        has_children: children.is_some(),
+                        // Read by the naming log of the lowering only.
+                        tag_named: false,
                     };
                     let info = self.b.js_info(JsPayload::Jsx(h));
                     View::JJsx { values: c, info }

@@ -320,10 +320,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 });
         }
         // The scrutinee was built before the function's scope opened and
-        // moves into it (G10). `names::adopt` takes the row, read by its id
-        // until T6r.
-        let site = NodeId(self.js.id(&self.arena, B::of(&arg)));
-        super::names::adopt(&mut self.arena, &self.idents, site);
+        // moves into it (G10).
+        super::names::adopt(&mut self.js, &mut self.arena, &arg);
         let header = self.arena.switch_record(crate::bir::SwitchRecord {
             constants: keys.len,
             keys,
@@ -341,8 +339,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Default::default(),
             crate::lambda::LamLoc::NONE,
         );
+        let eta = super::names::eta_shape(&self.js, &self.arena, header, body);
         let callee = self.js.function(&mut self.arena, header, body);
-        super::names::close(&mut self.arena, &self.idents, header);
+        super::names::close(&self.js, &mut self.arena, &self.idents, header, eta);
         self.call_values(callee, std::iter::empty(), Default::default())
     }
 

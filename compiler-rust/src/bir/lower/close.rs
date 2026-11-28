@@ -7,7 +7,7 @@
 use super::js::{Js, Pools};
 use super::js_stmt::JsStmt;
 use super::scope::{Decision, VarFacts};
-use crate::bir::{FuncHeader, NodeId};
+use crate::bir::FuncHeader;
 use crate::emit::row::{Kind, flag};
 use crate::js_ir::op::UsedStats;
 use crate::lambda::lam_compat::LetKind;
@@ -18,8 +18,8 @@ use crate::lambda::lam_compat::LetKind;
 /// the run were recorded when those were copied.
 ///
 /// Cost: one step per statement of `list` and one per operand of a returned
-/// conditional or sequence on the path to a site (`scope::return_sites`); no statement
-/// body is read, and nothing is allocated once the spine and the decision
+/// conditional or sequence on the path to a site (`JsStmt::return_calls`); no statement
+/// body is read, and nothing is allocated once the implementation's work stack and the decision
 /// rows have their capacity. A statement is read where it is
 /// (`JsStmt::with_stmt_at`, O(1)): the list is not turned into rows and no
 /// statement leaves it. The test at 10,000 declarations asserts 3
@@ -38,18 +38,14 @@ use crate::lambda::lam_compat::LetKind;
 /// acceptable while nothing is rewritten: a decision is a pure function of
 /// the counts and costs the step the copy already takes. A splice needs a
 /// close that happens once (THREE_TREES 11.4, "T4c design").
-pub(super) fn decide<B: JsStmt>(js: &B, bir: &mut Pools, list: B::L) {
+pub(super) fn decide<B: JsStmt>(js: &mut B, bir: &mut Pools, list: B::L) {
     let count = js.len(bir, list);
     let mut steps = 0;
     for at in (0..count).rev() {
         steps += 1;
         match js.kind_at(bir, list, at) {
             Kind::Return => {
-                // `scope::return_sites` takes a row until T6r: the returned
-                // value is named by its id.
-                let value = js.with_stmt_at(bir, list, at, |statement| js.value_of(bir, statement).map(|value| js.id(bir, value)));
-                let value = NodeId(value.expect("a return has a value"));
-                super::scope::return_sites(bir, value, at + 1 == count)
+                steps += js.return_calls(bir, list, at, at + 1 == count, super::scope::tail_call) as usize
             }
             Kind::Declare => {
                 let decision = js.with_stmt_at(bir, list, at, |statement| {
@@ -123,15 +119,15 @@ mod tests {
         b.begin_bulk();
         b.js_scope = Some(Scope::new(0));
         let list = run(&mut b, 10_000);
-        let rows = Rows::default();
-        // Warm: the spine has its capacity, the rows have room.
-        decide(&rows, &mut b, list);
+        let mut rows = Rows::default();
+        // Warm: the work stack has its capacity, the rows have room.
+        decide(&mut rows, &mut b, list);
         let scope = b.js_scope.as_mut().unwrap();
         assert_eq!(scope.decisions.len(), 10_000);
         // 10,001 statements; the returned conditional and its two branches.
         assert_eq!(scope.close_steps, 10_001 + 3);
         scope.decisions.reserve(10_000);
-        let allocations = allocation_counter::measure(|| decide(&rows, &mut b, list));
+        let allocations = allocation_counter::measure(|| decide(&mut rows, &mut b, list));
         assert_eq!(allocations.count_total, 0, "{allocations:?}");
         assert_eq!(b.js_scope.as_ref().unwrap().decisions.len(), 20_000);
     }

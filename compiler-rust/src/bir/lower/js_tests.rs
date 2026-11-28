@@ -1133,6 +1133,7 @@ fn a_jsx_element_without_the_operands_of_its_header_is_refused() {
         key: false,
         multi: false,
         fragment: false,
+        ..Default::default()
     }));
     // The callee and the tag, and no value for the two properties.
     let callee = r.var(&mut u.b, u.f);

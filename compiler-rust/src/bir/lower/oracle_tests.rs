@@ -1483,7 +1483,7 @@ fn a_copied_function_doubles_the_legacy_count_of_the_variables_declared_inside_i
 #[test]
 fn ten_thousand_return_sites_are_read_in_two_steps_each() {
     // One `return` of 10,000 nested conditionals, each with a call of its own
-    // callee in one branch: `scope::return_sites` takes one step per
+    // callee in one branch: `JsStmt::return_calls` takes one step per
     // conditional and one per call, and records every callee's site.
     use crate::lambda::LamLoc;
     let mut a = LamArena::new();
@@ -2386,6 +2386,74 @@ fn the_naming_log_agrees_on_a_preserved_element_whose_runtime_callee_is_not_prin
             let root = a.let_(LetKind::Strict, f, function, end);
             names_agree_printing(a, root, None, false, jsx_preserve);
         }
+    }
+}
+
+#[test]
+fn the_naming_log_agrees_on_a_preserved_element_whose_tag_is_moved_after_the_element_is_built() {
+    // In a unit that preserves JSX, whether JSX can name the tag of an
+    // element is read where the element is built (THREE_TREES 11.4, T6r
+    // decision 4), and the log must agree with the pass on the element as
+    // it is printed. (1) `let f = label => { let C = Other.make; <C
+    // title={label} /> }`: the tag is an alias of a module member declared
+    // before the element and used once; the lowering keeps it, and the
+    // close of `f` reads the element's form for its runtime callee. (2)
+    // At the top level, `let X = Other.X; ext(<X title="a" />); export X`
+    // with the export of another stamp: the export fold moves the alias
+    // to the export tail and replaces the tag, after the element is built,
+    // by the module member (`move_alias_to_tail`).
+    use crate::lambda::lam_primitive::{DeclKind, ExternalDecl, ExternalModuleName, JsxElement, ModuleBindName, ModuleSource, Primitive as P};
+    use crate::lambda::{FieldDbgInfo, LamLoc, TagInfo};
+    let element = |a: &mut LamArena, tag: Lam, title: Lam| {
+        let runtime = ModuleSource::ModuleNamed(ExternalModuleName { bundle: "react/jsx-runtime".into(), module_bind_name: ModuleBindName::PhintNothing, import_attributes: None });
+        let jsx = JsxElement {
+            jsx_name: "jsx".into(),
+            jsx_ffi: ExternalDecl { kind: DeclKind::DeclVal { name: "jsx".into() }, module_: Some(runtime), scopes: vec![], variadic: false, effective_arity: 2 },
+            jsx_multi: false,
+            jsx_fragment: false,
+            jsx_spread: false,
+            jsx_props: vec![("title".into(), false)],
+            jsx_children: None,
+            jsx_key: false,
+        };
+        a.prim_raw(P::Pjsx(Box::new(jsx)), &[tag, title], LamLoc::NONE)
+    };
+    let member = |a: &mut LamArena, name: &str| {
+        let module = a.global_module(Ident::create_persistent("Other"));
+        a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new(name) }), &[module], LamLoc::NONE)
+    };
+    for exported in [false, true] {
+        let mut a = LamArena::new();
+        let root = if exported {
+            let (local, export) = (Ident::new("X", 10, IdentFlags::NONE), Ident::new("X", 20, IdentFlags::NONE));
+            let tag = a.var(local);
+            let title = a.const_(C::String("a".into()));
+            let built = element(&mut a, tag, title);
+            let ext = js_global(&mut a, "ext");
+            let effect = call(&mut a, ext, &[built]);
+            let read = a.var(local);
+            let block = a.prim_raw(P::Pmakeblock(TagInfo::ModuleExport(vec![export]), crate::lambda::lam_primitive::Mutable::Immutable), &[read], LamLoc::NONE);
+            let tail = a.seq_raw(effect, block);
+            let value = member(&mut a, "X");
+            a.let_(LetKind::Alias, local, value, tail)
+        } else {
+            let (f, label, alias) = (Ident::new("f", 1, IdentFlags::NONE), Ident::new("label", 2, IdentFlags::NONE), Ident::new("C", 3, IdentFlags::NONE));
+            let (tag, title) = (a.var(alias), a.var(label));
+            let built = element(&mut a, tag, title);
+            let value = member(&mut a, "make");
+            let body = a.let_(LetKind::Alias, alias, value, built);
+            let function = a.function_(1, &[label], body, Default::default(), LamLoc::NONE);
+            let end = a.var(f);
+            a.let_(LetKind::Strict, f, function, end)
+        };
+        if exported {
+            let resolver = crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+            let lowered = lower_for_names(&a, root, &resolver, false, true);
+            let program = bridge_j::export_lowered(&lowered.program).expect("lowered program exports").program;
+            let text = crate::js_ir::print_deps_program_with_directives_and_options(&program, None, &[], false, false, false);
+            assert!(text.contains("JsxRuntime.jsx(Other.X,") && text.contains("let X = Other.X;"), "{text}");
+        }
+        names_agree_printing(a, root, None, false, true);
     }
 }
 
