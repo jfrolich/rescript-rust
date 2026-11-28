@@ -64,6 +64,7 @@
 //! | `binder` | T6r | the `var` of `SDecl`, `SRest`, `SForRange`, `SForOf` and `SForAwaitOf`; the `exception` of `STry`; `None` otherwise |
 //! | `status` | T6r | of an `SDecl` or an `SRest`: the bits of `aux` above the two of the `LetKind`, bit 15 apart (an `SRest` keeps it for its descriptor); a panic for any other |
 //! | `range_of` | T6r | of an `SForRange` its `var`, of an `SForRangeExisting` the `var` of its `variable` when that is a `Var`; with `rows::kind_of` of the operation of the part before the body (the bound); `None` for any other statement |
+//! | `bodies` | T6r | 1 for an `SBlock`, an `SWhile` and the four loops; 1 or 2 for an `SIf` (its `else_`); the length of the `parts` of an `STry` and of the `actions` of an `SSwitch`; 0 otherwise |
 //! | `effect_free` | T6q | the read `export.rs::has_toplevel_effect` made of a statement that is not a declaration row: a work stack (`Rows::work`) of the node's children for a compound statement, the `STRICT` flag of the value of `SExp` and `SReturn` and of every expression below a compound statement, `false` at `SThrow`, `SDebugger`, a jump, `SDecl`, `SRest`, `SForOf`, `SForAwaitOf`; one step per node read |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
@@ -427,6 +428,20 @@ impl JsStmt for Rows {
         // The bound is the part before the body, with or without a first
         // value.
         Some((var, kind_of(a.node(parts[parts.len() - 2]).op())))
+    }
+    fn bodies(&self, a: &Pools, s: &S) -> u32 {
+        match a.view(s.0) {
+            View::SBlock { .. }
+            | View::SWhile { .. }
+            | View::SForRange { .. }
+            | View::SForRangeExisting { .. }
+            | View::SForOf { .. }
+            | View::SForAwaitOf { .. } => 1,
+            View::SIf { else_, .. } => 1 + u32::from(else_.is_some()),
+            View::STry { parts, .. } => parts.len() as u32,
+            View::SSwitch { actions, .. } => actions.len() as u32,
+            _ => 0,
+        }
     }
     fn effect_free(&mut self, a: &Pools, s: &S) -> bool {
         let mut work = std::mem::take(&mut self.work);

@@ -1930,4 +1930,38 @@ mod replay {
         assert_eq!(b.range_of(&with_row(&b, Kind::ForOf, 0, 6)), None);
         assert_eq!(b.steps, steps);
     }
+
+    /// The list of `len` statements `v0;`.
+    fn effects<'a>(b: &mut Builder<'a>, len: usize) -> List {
+        let mark = b.stage_mark();
+        for _ in 0..len {
+            let value = b.reference(0, 0);
+            let statement = b.exp(value);
+            b.stage(statement);
+        }
+        b.list(mark)
+    }
+
+    #[test]
+    fn a_statement_says_how_many_lists_it_holds() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let list = effects(&mut b, 3);
+        let block = b.block(list);
+        let (test, then, otherwise) = (b.reference(0, 0), effects(&mut b, 1), effects(&mut b, 0));
+        let conditional = b.if_(test, then, otherwise);
+        let (test, list) = (b.reference(0, 0), effects(&mut b, 2));
+        let looped = b.while_(None, test, list);
+        let (test, list) = (b.reference(0, 0), effects(&mut b, 2));
+        let labelled = b.while_(Some("l"), test, list);
+        let value = b.reference(0, 0);
+        let effect = b.exp(value);
+        let value = b.reference(0, 0);
+        let declaration = b.declare(1, 0, Some(value));
+        let stop = b.break_(None);
+        let steps = b.steps;
+        let counts = [&block, &conditional, &looped, &labelled, &effect, &declaration, &stop].map(|s| b.bodies(s));
+        assert_eq!(counts, [1, 2, 1, 1, 0, 0, 0]);
+        assert_eq!(b.steps, steps, "a reader counts no step");
+    }
 }

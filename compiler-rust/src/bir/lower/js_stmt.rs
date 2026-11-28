@@ -429,6 +429,18 @@ pub trait JsStmt: Js {
     /// behind the interface", decision 7: `names.rs`, `Replay::finish`,
     /// the cached bound of a range loop.)
     fn range_of(&self, a: &Pools, s: &Self::S) -> Option<(Option<VarId>, Kind)>;
+    /// The number of statement lists the statement holds, in print order:
+    /// one for a `Block` (its statements), a `While` and each loop (the
+    /// body); one or two for an `If` (the then-list, and the else-list
+    /// when it has one); two or three for a `Try` (the body, the handler
+    /// when it has one, the finaliser when it has one); one per action for
+    /// a `Switch`, the default last. Zero for every other statement. They
+    /// are the indexes [`JsStmt::body`] and [`JsStmt::set_body`] take.
+    /// O(1): one read of the statement; counts no step. (THREE_TREES 11.4,
+    /// "T6r: the naming replay behind the interface", decision 7 and the
+    /// cut's row of T6r-c: `names.rs`, `Replay::child`, which reads the
+    /// lists of a statement by their index in the J row today.)
+    fn bodies(&self, a: &Pools, s: &Self::S) -> u32;
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code
     /// that can be observed. An expression statement and a `return` are
     /// free when their value is strictly pure (E:15); a block, an `if`, a

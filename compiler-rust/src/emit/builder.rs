@@ -1605,6 +1605,32 @@ impl<'a> Builder<'a> {
         };
         Some((variable, Kind::ALL[row.aux as usize]))
     }
+
+    /// The number of statement lists the statement holds (the lowering's
+    /// `JsStmt::bodies`): one for a block and a `while`, labelled or not;
+    /// one or two for an `if` (the builder writes both blocks, so two);
+    /// none for a statement without a list. O(1): the node and, for a
+    /// labelled statement, the node below the label; counts no step.
+    /// Panics on a statement no constructor of the builder makes: the
+    /// slice that adds a constructor adds its arm.
+    pub fn bodies(&self, statement: &S<'a>) -> u32 {
+        let mut stmt = &statement.stmt;
+        if let Statement::LabeledStatement(node) = stmt {
+            stmt = &node.body;
+        }
+        match stmt {
+            Statement::BlockStatement(_) | Statement::WhileStatement(_) => 1,
+            Statement::IfStatement(node) => 1 + u32::from(node.alternate.is_some()),
+            Statement::ExpressionStatement(_)
+            | Statement::ReturnStatement(_)
+            | Statement::ThrowStatement(_)
+            | Statement::VariableDeclaration(_)
+            | Statement::BreakStatement(_)
+            | Statement::ContinueStatement(_)
+            | Statement::DebuggerStatement(_) => 0,
+            _ => unreachable!("a statement no constructor of the builder makes"),
+        }
+    }
 }
 
 #[cfg(test)]

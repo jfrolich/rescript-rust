@@ -747,4 +747,94 @@ mod replay {
         let statement = r.exp(&mut u.b, x);
         assert_eq!(r.range_of(&u.b, &statement), None);
     }
+
+    /// `switch (x) { ...actions }` of `actions` actions, each the block of
+    /// one `x;`.
+    pub(super) fn switch(r: &mut Rows, u: &mut Unit, actions: u32) -> S {
+        let mut blocks = Vec::new();
+        for _ in 0..actions {
+            let list = body(r, u);
+            blocks.push(r.block_of(&mut u.b, list));
+        }
+        let list = r.list(&mut u.b, actions, blocks.into_iter());
+        let header = u.b.switch_record(crate::bir::SwitchRecord {
+            constants: 0,
+            keys: crate::bir::KeySpan { start: 0, len: 0 },
+            clauses: crate::bir::ClauseSpan { start: 0, len: 0 },
+            has_default: false,
+            consts_full: false,
+            blocks_full: false,
+            dispatch: crate::lambda::SwitchDispatch::Direct,
+        });
+        let scrutinee = r.var(&mut u.b, u.x);
+        r.switch(&mut u.b, scrutinee, list, header, false)
+    }
+
+    /// `try { x; } catch (var) { x; } finally { x; }`, with the parts
+    /// asked for.
+    pub(super) fn tried(r: &mut Rows, u: &mut Unit, handler: bool, finaliser: bool) -> S {
+        let list = body(r, u);
+        let handler = handler.then(|| (fresh(u), body(r, u)));
+        let finaliser = finaliser.then(|| body(r, u));
+        r.try_(&mut u.b, list, handler, finaliser)
+    }
+
+    #[test]
+    fn a_statement_says_how_many_lists_it_holds() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let mut counts = Vec::new();
+        let mut count = |r: &Rows, u: &Unit, s: &S| {
+            let steps = r.steps();
+            counts.push(r.bodies(&u.b, s));
+            assert_eq!(r.steps(), steps, "a reader counts no step");
+        };
+        // A block, explicit or not, of any width.
+        let list = body(&mut r, &mut u);
+        let plain = r.block_of(&mut u.b, list);
+        count(&r, &u, &plain);
+        let list = r.list(&mut u.b, 0, std::iter::empty());
+        let explicit = r.explicit_block(&mut u.b, list);
+        count(&r, &u, &explicit);
+        // An `if`: both lists as the interface builds it, one without an
+        // else-block (the rules make that one).
+        let (test, yes, no) = (r.var(&mut u.b, u.x), body(&mut r, &mut u), body(&mut r, &mut u));
+        let both = r.if_plain(&mut u.b, test, yes, no);
+        count(&r, &u, &both);
+        let list = body(&mut r, &mut u);
+        let then_ = Rows::stmt_node(r.block_of(&mut u.b, list));
+        let condition = u.b.new_node(View::Var { var: u.x }, 0);
+        let guard = Rows::stmt_from_node(u.b.new_node(View::SIf { condition, then_, else_: None }, 0));
+        count(&r, &u, &guard);
+        // The loops.
+        let (condition, list) = (r.var(&mut u.b, u.x), body(&mut r, &mut u));
+        let looped = r.while_(&mut u.b, condition, list, None);
+        count(&r, &u, &looped);
+        for init in [true, false] {
+            let (var, end) = (fresh(&mut u), r.var(&mut u.b, u.x));
+            let looped = range(&mut r, &mut u, var, init, end);
+            count(&r, &u, &looped);
+        }
+        let (var, iterable, list) = (fresh(&mut u), r.var(&mut u.b, u.x), body(&mut r, &mut u));
+        let looped = r.for_of(&mut u.b, var, iterable, list, None, true);
+        count(&r, &u, &looped);
+        // A `try`: the body, and the handler and the finaliser it has.
+        for (handler, finaliser) in [(true, false), (false, true), (true, true)] {
+            let statement = tried(&mut r, &mut u, handler, finaliser);
+            count(&r, &u, &statement);
+        }
+        // A `switch`: one list an action.
+        for actions in [0, 1, 5] {
+            let statement = switch(&mut r, &mut u, actions);
+            count(&r, &u, &statement);
+        }
+        // A statement without a list.
+        let x = r.var(&mut u.b, u.x);
+        let effect = r.exp(&mut u.b, x);
+        count(&r, &u, &effect);
+        let x = r.var(&mut u.b, u.x);
+        let returned = r.return_(&mut u.b, x);
+        count(&r, &u, &returned);
+        assert_eq!(counts, [1, 1, 2, 1, 1, 1, 1, 1, 2, 2, 3, 0, 1, 5, 0, 0]);
+    }
 }
