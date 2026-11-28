@@ -1,0 +1,1 @@
+- Checker rewrite: the printed signature of the new checker's segment reads the class of an `@instanceOf` type through its `@module` and `@scope`, as the type printer does, so the both-checkers build agrees on such types again.
