@@ -2653,6 +2653,7 @@ fn value_descriptions(
     // where `Ctype.moregeneral` compares the two value types directly. Forcing
     // manifest aliases up front changes Env.normalize_path side effects and
     // shifts subsequent Ident stamps.
+    type_ctx.note_inclusion_item();
     let moregeneral =
         same_value || ctype::moregeneral(type_ctx, env, true, impl_desc.val_type, expected_ty);
     let mut expected_desc = sig_desc.clone();
@@ -3354,6 +3355,7 @@ pub(crate) fn includecore_type_declarations(
     if !private_flags(impl_decl, sig_decl) {
         return Ok(vec![TypeMismatch::Privacy]);
     }
+    type_ctx.note_inclusion_item();
 
     let param_map = build_type_param_map(type_ctx, &impl_decl.type_params, &sig_decl.type_params);
     match (impl_decl.type_manifest, sig_decl.type_manifest) {
@@ -4627,6 +4629,9 @@ fn type_exprs_equal_for_inclusion_inner(
                     }
                 },
             )
+            // This walk pairs universal variables by name and keeps no
+            // pairs to forget.
+            .0
             .is_some_and(|result| result.is_ok())
         }
         (TypeDesc::Tvariant(impl_row), TypeDesc::Tvariant(sig_row)) => {
@@ -4945,6 +4950,7 @@ fn extension_constructors(
     sig_ext: &ExtensionConstructor,
     subst: &InclusionSubst,
 ) -> IncludeModResult<()> {
+    type_ctx.note_inclusion_item();
     // includecore.ml:461-466: `Env.mark_extension_used usage env ext1
     // (Ident.name id)`.
     if !env.is_implicit_coercion() {
