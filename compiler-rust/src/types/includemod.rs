@@ -4051,7 +4051,7 @@ fn type_expr_lists_equal_for_inclusion(
     if impl_types.len() != sig_types.len() {
         return false;
     }
-    let mut seen = HashSet::new();
+    let mut seen = ManifestWalk::new();
     impl_types
         .iter()
         .zip(sig_types.iter())
@@ -4419,6 +4419,26 @@ fn build_type_param_map(
         .collect()
 }
 
+/// The state of one manifest comparison.
+struct ManifestWalk {
+    /// The pairs already entered.
+    pairs: HashSet<(TypeExprRef, TypeExprRef)>,
+    /// Whether an inclusion check of two packages compared an item in the
+    /// polymorphic body open here: OCaml's `Ctype.equal` then has no
+    /// universal pairs left, and no universal variable of that body matches
+    /// another (compiler/ml/ctype.ml:1559, 3358).
+    univars_forgotten: bool,
+}
+
+impl ManifestWalk {
+    fn new() -> Self {
+        ManifestWalk {
+            pairs: HashSet::new(),
+            univars_forgotten: false,
+        }
+    }
+}
+
 fn type_exprs_equal_for_inclusion(
     type_ctx: &TypeContext,
     env: Option<&Env>,
@@ -4426,7 +4446,7 @@ fn type_exprs_equal_for_inclusion(
     impl_ty: TypeExprRef,
     sig_ty: TypeExprRef,
 ) -> bool {
-    let mut seen = HashSet::new();
+    let mut seen = ManifestWalk::new();
     type_exprs_equal_for_inclusion_inner(type_ctx, env, param_map, impl_ty, sig_ty, &mut seen)
 }
 
@@ -4436,12 +4456,12 @@ fn type_exprs_equal_for_inclusion_inner(
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_ty: TypeExprRef,
     sig_ty: TypeExprRef,
-    seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    seen: &mut ManifestWalk,
 ) -> bool {
     let impl_ty = type_ctx.repr(impl_ty);
     let sig_ty = type_ctx.repr(sig_ty);
 
-    if !seen.insert((impl_ty, sig_ty)) {
+    if !seen.pairs.insert((impl_ty, sig_ty)) {
         return true;
     }
 
@@ -4502,9 +4522,9 @@ fn type_exprs_equal_for_inclusion_inner(
     }
 
     match (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty)) {
-        (TypeDesc::Tvar(impl_name), TypeDesc::Tvar(sig_name))
-        | (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => {
-            impl_name == sig_name
+        (TypeDesc::Tvar(impl_name), TypeDesc::Tvar(sig_name)) => impl_name == sig_name,
+        (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => {
+            !seen.univars_forgotten && impl_name == sig_name
         }
         (
             TypeDesc::Tarrow {
@@ -4579,9 +4599,16 @@ fn type_exprs_equal_for_inclusion_inner(
                 body: impl_body, ..
             },
             TypeDesc::Tpoly { body: sig_body, .. },
-        ) => type_exprs_equal_for_inclusion_inner(
-            type_ctx, env, param_map, *impl_body, *sig_body, seen,
-        ),
+        ) => {
+            // ctype.ml:1675-1678: the exit of the body puts back what an
+            // inclusion check of two packages in it made the walk forget.
+            let forgotten = seen.univars_forgotten;
+            let equal = type_exprs_equal_for_inclusion_inner(
+                type_ctx, env, param_map, *impl_body, *sig_body, seen,
+            );
+            seen.univars_forgotten = forgotten;
+            equal
+        }
         (
             TypeDesc::Tpackage {
                 path: impl_path,
@@ -4605,7 +4632,7 @@ fn type_exprs_equal_for_inclusion_inner(
                     &empty_env
                 }
             };
-            crate::types::ctype::unify_package(
+            let (result, compared) = crate::types::ctype::unify_package(
                 type_ctx,
                 env_or_empty,
                 (
@@ -4628,11 +4655,9 @@ fn type_exprs_equal_for_inclusion_inner(
                         Err(crate::types::TypeError::Unify(vec![]))
                     }
                 },
-            )
-            // This walk pairs universal variables by name and keeps no
-            // pairs to forget.
-            .0
-            .is_some_and(|result| result.is_ok())
+            );
+            seen.univars_forgotten |= compared;
+            result.is_some_and(|result| result.is_ok())
         }
         (TypeDesc::Tvariant(impl_row), TypeDesc::Tvariant(sig_row)) => {
             // OCaml compiler/ml/includecore.ml:87-151 compares type manifests
@@ -4681,7 +4706,7 @@ fn rows_equal_for_inclusion(
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_row: &RowDesc,
     sig_row: &RowDesc,
-    seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    seen: &mut ManifestWalk,
 ) -> bool {
     let impl_row = crate::types::btype::row_repr(type_ctx, impl_row);
     let sig_row = crate::types::btype::row_repr(type_ctx, sig_row);
@@ -4722,7 +4747,7 @@ fn row_fields_equal_for_inclusion(
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_field: &RowField,
     sig_field: &RowField,
-    seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    seen: &mut ManifestWalk,
 ) -> bool {
     let impl_field = crate::types::btype::row_field_repr(type_ctx, impl_field);
     let sig_field = crate::types::btype::row_field_repr(type_ctx, sig_field);
@@ -4892,11 +4917,11 @@ fn object_fields_equal_for_inclusion(
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_fields: TypeExprRef,
     sig_fields: TypeExprRef,
-    seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    seen: &mut ManifestWalk,
 ) -> bool {
     let (impl_fields_flat, impl_rest) = flatten_object_fields_for_inclusion(type_ctx, impl_fields);
     let (sig_fields_flat, sig_rest) = flatten_object_fields_for_inclusion(type_ctx, sig_fields);
-    let same_row = impl_rest == sig_rest || seen.contains(&(impl_rest, sig_rest));
+    let same_row = impl_rest == sig_rest || seen.pairs.contains(&(impl_rest, sig_rest));
 
     if !same_row {
         if let Some(env) = env {
