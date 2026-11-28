@@ -129,7 +129,6 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(s) for the saved preludes and (only for statement-valued while
     /// conditions) the body's immediate statements; never walks subtrees.
-    /// A range loop adds one write: the use of its variable.
     pub(super) fn finish_loop(&mut self, cx: Cx, frame: Loop) -> Probed<B> {
         let plan = &mut self.loops[frame.0 as usize];
         let start = plan.start;
@@ -184,11 +183,6 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             } else {
                 Some(init)
             };
-            // The loop reads and writes its variable whether its body reads
-            // it or not: one use, as the legacy passes count the loop's
-            // variable (`for_ident`, js_record_iter.ml:171-176). A held start
-            // declares the variable before the loop, and this use keeps it.
-            self.arena.js_scope.as_mut().expect("lowering scope").occurrence(var, true);
             self.push_loop_list(blocks[0].unwrap());
             let range = Range { init, end, direction };
             self.js.for_range(&mut self.arena, var, range, blocks[2].unwrap(), label)
@@ -410,5 +404,23 @@ mod tests {
         let scope = lowered.program.arena.js_scope.as_ref().unwrap();
         let decision = scope.decisions.iter().find(|d| lowered.program.idents[d.var.index()].same(&var)).copied().unwrap();
         assert_eq!((decision.status(), decision.built()), (UsedStats::Used as u32, 1));
+    }
+
+    /// `catch (raise e) with (1) (for i in 0 to n { eff() })`: the body is
+    /// finished, so the lowered handler is released with its loop, and the
+    /// loop's use of `i` with it.
+    #[test]
+    fn a_released_range_loop_releases_its_use() {
+        use crate::lambda::{ApInfo, ApplyStatus};
+        let mut a = LamArena::new();
+        let start = a.const_(Constant::int(0));
+        let end = a.var(Ident::new("n", 2, IdentFlags::NONE));
+        let callee = a.var(Ident::new("eff", 3, IdentFlags::NONE));
+        let body = a.apply_raw(callee, &[], ApInfo { status: ApplyStatus::InferFull, loc: LamLoc::NONE });
+        let handler = a.for_(Ident::new("i", 1, IdentFlags::NONE), start, end, DirectionFlag::Upto, body);
+        let exception = a.var(Ident::new("e", 4, IdentFlags::NONE));
+        let raised = a.prim_raw(Primitive::Praise, &[exception], LamLoc::NONE);
+        let root = a.static_catch(raised, 1, &[], handler);
+        super::super::oracle_tests::compare(a, root);
     }
 }
