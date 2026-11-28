@@ -265,6 +265,20 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// X:1417 translate_scoped_global_value. O(scope segments + spelling bytes).
     fn translate_scoped_global_value(&mut self, cx: Cx, name: &str, scopes: &[String]) -> B::E {
         let head = scopes.first().map_or(name, String::as_str);
+        let value = self.global_value(head);
+        if scopes.is_empty() {
+            value
+        } else {
+            let value = self.apply_scoped_access(cx, value, &scopes[1..]);
+            self.member(value, name)
+        }
+    }
+
+    /// X:1420 `JE.var (Ident.create_persistent head)`: a read of the
+    /// JavaScript global `head`, one variable per name in the unit. One
+    /// interning of `head` (O(head bytes)) and one dense read of the table
+    /// by its text; the first read of a name adds its variable.
+    pub(super) fn global_value(&mut self, head: &str) -> B::E {
         let text = self.arena.intern_text(head);
         if self.external_globals.len() <= text.index() {
             self.external_globals.resize(text.index() + 1, None);
@@ -279,13 +293,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 var
             }
         };
-        let value = self.js.var(&mut self.arena, var);
-        if scopes.is_empty() {
-            value
-        } else {
-            let value = self.apply_scoped_access(cx, value, &scopes[1..]);
-            self.member(value, name)
-        }
+        self.js.var(&mut self.arena, var)
     }
 
     /// X:621 translate_scoped_module_value. O(scope segments + spelling bytes)
