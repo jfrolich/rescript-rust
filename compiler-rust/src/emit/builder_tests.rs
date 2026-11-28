@@ -1832,3 +1832,47 @@ mod walks {
         assert_eq!(reads[1] - 4, 10 * (reads[0] - 4));
     }
 }
+
+/// What the naming replay reads of a statement and takes out of it
+/// (THREE_TREES 11.4, "T6r: the naming replay behind the interface", slice
+/// T6r-c).
+mod replay {
+    use super::*;
+
+    /// A statement with the row `row`: the readers of a statement in hand
+    /// read the row alone, and the builder has no constructor yet for the
+    /// kinds T6d adds.
+    fn with_row<'a>(b: &Builder<'a>, kind: Kind, aux: u8, payload: u32) -> S<'a> {
+        S { stmt: Statement::new_debugger_statement(SPAN, &b.ast), row: Row { flags: 0, kind, aux, payload } }
+    }
+
+    #[test]
+    fn the_binder_of_a_statement_is_the_variable_in_its_row() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // The one binding statement the builder constructs.
+        let one = b.int(1);
+        let declaration = b.declare(4, 0, Some(one));
+        let bare = b.declare(5, 0, None);
+        let steps = b.steps;
+        assert_eq!(b.binder(&declaration), Some(4));
+        assert_eq!(b.binder(&bare), Some(5));
+        // The kinds a constructor of T6d writes: the row as `Kind` says.
+        for kind in [Kind::Rest, Kind::ForRange, Kind::ForOf, Kind::ForAwaitOf] {
+            assert_eq!(b.binder(&with_row(&b, kind, 0, 7)), Some(7), "{kind:?}");
+        }
+        assert_eq!(b.binder(&with_row(&b, Kind::Try, 0, 8)), Some(7));
+        assert_eq!(b.binder(&with_row(&b, Kind::Try, 0, 0)), None);
+        assert_eq!(b.binder(&with_row(&b, Kind::ForRangeExisting, 0, 8)), None);
+        // No other statement binds.
+        let value = b.reference(4, 0);
+        let effect = b.exp(value);
+        let value = b.reference(4, 0);
+        let returned = b.return_(value);
+        let steps_after = b.steps;
+        assert_eq!(b.binder(&effect), None);
+        assert_eq!(b.binder(&returned), None);
+        assert_eq!(b.steps, steps_after);
+        assert!(steps_after > steps);
+    }
+}

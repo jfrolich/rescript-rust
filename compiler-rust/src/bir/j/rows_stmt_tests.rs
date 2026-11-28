@@ -571,3 +571,95 @@ fn the_calls_of_a_statement_that_is_no_return_are_not_read() {
     let list = r.list(&mut u.b, 1, std::iter::once(statement));
     r.return_calls(&mut u.b, list, 0, true, |_, _, _| {});
 }
+
+/// The statements of THREE_TREES 11.4, "T6r: the naming replay behind the
+/// interface", slice T6r-c: what the replay reads of a statement in hand
+/// and takes out of it.
+mod replay {
+    use super::*;
+    use crate::bir::lower::js_stmt::Range;
+
+    /// The list of one `x;`.
+    pub(super) fn body(r: &mut Rows, u: &mut Unit) -> crate::bir::ListId {
+        let x = r.var(&mut u.b, u.x);
+        let statement = r.exp(&mut u.b, x);
+        r.list(&mut u.b, 1, std::iter::once(statement))
+    }
+
+    /// A variable nothing binds yet.
+    pub(super) fn fresh(u: &mut Unit) -> VarId {
+        let order = u.b.vars.len() as u32 + 1;
+        u.b.new_var_id(Name::new("v"), order)
+    }
+
+    /// `for (let var = x; var <= end; ++var) { x; }`, or without the first
+    /// value.
+    pub(super) fn range(r: &mut Rows, u: &mut Unit, var: VarId, init: bool, end: E) -> S {
+        let init = init.then(|| r.var(&mut u.b, u.x));
+        let list = body(r, u);
+        r.for_range(&mut u.b, var, Range { init, end, direction: 0 }, list, None)
+    }
+
+    #[test]
+    fn the_binder_of_a_statement_is_the_variable_it_binds() {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let steps = |r: &Rows| r.steps();
+        // A declaration, with and without a value.
+        let x = r.var(&mut u.b, u.x);
+        let declaration = r.declare(&mut u.b, LetKind::Strict, u.f, Some(x));
+        let var = fresh(&mut u);
+        let bare = r.declare(&mut u.b, LetKind::Variable, var, None);
+        let before = steps(&r);
+        assert_eq!(r.binder(&u.b, &declaration), Some(u.f));
+        assert_eq!(r.binder(&u.b, &bare), Some(var));
+        // A range loop names its variable with and without a first value.
+        for init in [true, false] {
+            let (var, end) = (fresh(&mut u), r.var(&mut u.b, u.x));
+            let looped = range(&mut r, &mut u, var, init, end);
+            assert_eq!(r.binder(&u.b, &looped), Some(var));
+        }
+        // A loop over an iterable, awaited or not.
+        for awaited in [false, true] {
+            let iterable = r.var(&mut u.b, u.x);
+            let (var, list) = (fresh(&mut u), body(&mut r, &mut u));
+            let looped = r.for_of(&mut u.b, var, iterable, list, None, awaited);
+            assert_eq!(r.binder(&u.b, &looped), Some(var));
+        }
+        // A `try`: the exception of its handler, nothing without one.
+        let (tried, handler, finaliser) = (body(&mut r, &mut u), body(&mut r, &mut u), body(&mut r, &mut u));
+        let var = fresh(&mut u);
+        let caught = r.try_(&mut u.b, tried, Some((var, handler)), Some(finaliser));
+        assert_eq!(r.binder(&u.b, &caught), Some(var));
+        let (tried, finaliser) = (body(&mut r, &mut u), body(&mut r, &mut u));
+        let uncaught = r.try_(&mut u.b, tried, None, Some(finaliser));
+        assert_eq!(r.binder(&u.b, &uncaught), None);
+        // The statements only the bridge makes: a rest declaration binds,
+        // a range loop over an existing variable does not.
+        let info = u.b.js_info(JsPayload::Rest(crate::bir::RestSpan { start: 0, len: 0 }));
+        let value = u.b.new_node(View::Var { var: u.x }, 0);
+        let var = fresh(&mut u);
+        let rest = Rows::stmt_from_node(u.b.new_node(View::SRest { var, value, info }, 0));
+        assert_eq!(r.binder(&u.b, &rest), Some(var));
+        let variable = u.b.new_node(View::Var { var: u.f }, 0);
+        let end = u.b.new_node(View::JNull, 0);
+        let list = body(&mut r, &mut u);
+        let block = Rows::stmt_node(r.block_of(&mut u.b, list));
+        let existing =
+            Rows::stmt_from_node(u.b.new_node(View::SForRangeExisting { variable, parts: &[end, block], label: None }, 0));
+        assert_eq!(r.binder(&u.b, &existing), None);
+        // Any other statement binds nothing, and no read counts a step.
+        let before_other = steps(&r);
+        let x = r.var(&mut u.b, u.x);
+        let effect = r.exp(&mut u.b, x);
+        let assigned = {
+            let x = r.var(&mut u.b, u.x);
+            r.assign(&mut u.b, u.f, x)
+        };
+        let after_other = steps(&r);
+        assert_eq!(r.binder(&u.b, &effect), None);
+        assert_eq!(r.binder(&u.b, &assigned), None);
+        assert_eq!(steps(&r), after_other);
+        assert!(before_other > before);
+    }
+}

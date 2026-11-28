@@ -394,6 +394,19 @@ pub trait JsStmt: Js {
         last: bool,
         visit: impl FnMut(&mut Pools, VarId, u32),
     ) -> u32;
+    /// The variable the statement binds: that of a `Declare` or a `Rest`,
+    /// the variable of a range loop (with or without a first value: the
+    /// loop names it) and of a loop over an iterable, the exception of a
+    /// `Try` that has a handler. `None` for every other statement, a range
+    /// loop over an existing variable too (it binds nothing). O(1): on
+    /// rows one read of the row; on an implementation that owns its nodes
+    /// the statement's row of facts (`emit::row::Row::payload`), no node.
+    /// Counts no step. (THREE_TREES 11.4, "T6r: the naming replay behind
+    /// the interface", decision 7: `names.rs`, `Replay::statement`, the
+    /// binder a statement names before its literals and lists, and the
+    /// catch variable `Replay::child` names between the body and the
+    /// handler of a `try`.)
+    fn binder(&self, a: &Pools, s: &Self::S) -> Option<VarId>;
     /// S:1053 `js_statement_no_side_effects`: the statement runs no code
     /// that can be observed. An expression statement and a `return` are
     /// free when their value is strictly pure (E:15); a block, an `if`, a

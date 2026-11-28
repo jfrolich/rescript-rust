@@ -1554,6 +1554,31 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// What the lowering's naming replay reads of a statement and takes out
+/// of it (THREE_TREES 11.4, "T6r: the naming replay behind the
+/// interface", decisions 1, 2, 7 and 12 to 16; slice T6r-c).
+///
+/// The readers of a statement in hand answer from its row alone
+/// ([`S::row`]): a constructor writes the row as [`Kind`] says for its
+/// kind, and the builder has no constructor yet for a loop over a range or
+/// an iterable, a `try`, a `switch` and a rest declaration (T6d adds
+/// them, each with the row these readers read).
+impl<'a> Builder<'a> {
+    /// The variable the statement binds (the lowering's `JsStmt::binder`):
+    /// the payload of a `Declare`, a `Rest`, a `ForRange`, a `ForOf` and a
+    /// `ForAwaitOf`; the exception variable of a `Try` that has a handler
+    /// (its payload less one). `None` for every other statement. O(1): the
+    /// row in the handle, no node; counts no step.
+    pub fn binder(&self, statement: &S<'a>) -> Option<u32> {
+        let row = statement.row;
+        match row.kind {
+            Kind::Declare | Kind::Rest | Kind::ForRange | Kind::ForOf | Kind::ForAwaitOf => Some(row.payload),
+            Kind::Try => row.payload.checked_sub(1),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "builder_tests.rs"]
 mod tests;

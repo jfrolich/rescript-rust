@@ -173,7 +173,8 @@ pub enum Kind {
     /// `aux` is 0 for an integer switch, 1 for a string switch; `payload`
     /// is the `SwitchId`.
     Switch,
-    /// `try`.
+    /// `try`; `payload` is the index of the exception variable plus one,
+    /// 0 without a handler.
     Try,
     /// A declaration by a rest pattern; `payload` is the variable's index.
     Rest,
