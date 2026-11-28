@@ -384,7 +384,7 @@ pub struct Checker {
     /// After a failed [`Checker::subtype`] or
     /// [`Checker::force_subtype`] in `Mode::Explain`: the pairs
     /// `subtype_rec` went through down to the constraint that failed,
-    /// outermost first (`List.rev trace0`, compiler/ml/ctype.ml:4226; the
+    /// outermost first (`List.rev trace0`, compiler/ml/ctype.ml:4228; the
     /// first component of the exception `Subtype`, ctype.ml:96), not
     /// expanded. Cleared at the entry of both. (R3j)
     pub subtype_trace: Vec<[Ty; 2]>,

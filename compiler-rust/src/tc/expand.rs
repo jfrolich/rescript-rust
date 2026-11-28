@@ -342,7 +342,7 @@ impl TypeTable {
     /// `parameter` of the type: `(co, cn)`, whether it may occur
     /// positively and whether it may occur negatively; `None` for a type
     /// whose declaration the table does not have (`Env.find_type`'s
-    /// `Not_found`, compiler/ml/ctype.ml:3701-3702, 3501), which is every
+    /// `Not_found`, compiler/ml/ctype.ml:3703-3704, 3500), which is every
     /// type of another unit until R5a fills its rows. O(1): two bounds
     /// tests and two loads. (R3j)
     #[inline]

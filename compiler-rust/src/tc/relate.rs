@@ -788,9 +788,9 @@ impl Checker {
     ///
     /// NO speculation (OCaml takes none): what the walk writes stays.
     /// It writes expansions with their memos (`expand_abbrev`,
-    /// 3675-3678, 3705), opened rows, compressed paths, the nodes of the
-    /// constraints it builds (3688-3691, 4118-4130, 4152-4169), the
-    /// instance of a polymorphic type (4063) and partner nodes of the
+    /// 3675, 3678, 3706), opened rows, compressed paths, the nodes of the
+    /// constraints it builds (3693-3695, 4119-4131, 4152-4170), the
+    /// instance of a polymorphic type (4065) and partner nodes of the
     /// scopes it enters; it links no variable. The trial of two packages
     /// of different paths is the one place that unifies, under a
     /// speculation of its own that is restored (4089-4098).
@@ -904,12 +904,12 @@ impl Checker {
     /// pushed with `posi` and level 4 and `Checker::enlarge_visit` /
     /// `Checker::enlarge_leave` run until the stack is back to its
     /// length at the entry. `loops` is `[]` at this one entry and
-    /// nothing adds to it (3431-3437), so a variable is itself.
+    /// nothing adds to it (3430-3437), so a variable is itself.
     ///
     /// `visited` is a list of the PATH (`let visited = t :: visited`,
-    /// passed down, gone on return; 3442, 3459, 3479), which an object
+    /// passed down, gone on return; 3441, 3458, 3479), which an object
     /// or a variant cuts (3506-3508, 3543-3544), searched with
-    /// `List.memq` (`memq_warn`, 3410-3414). Here
+    /// `List.memq` (`memq_warn`, 3409-3413). Here
     /// [`Checker::path_entries`] with an [`EnlargePath`]:
     /// `Checker::on_path` is two loads and a compare (8.13, "The
     /// visited list").
@@ -936,23 +936,23 @@ impl Checker {
     /// two relations clash, and has continuations the frames of
     /// unification do not have (CHECKER_REWRITE 8.6, decision 119).
     ///
-    /// - [`SubKind::Pair`]: `Checker::subtype_pair`.
-    /// - [`SubKind::Constrain`]: `Checker::constrain` of the frame's
+    /// - A [`SubKind::Pair`] frame: `Checker::subtype_pair`.
+    /// - A [`SubKind::Constrain`] frame: `Checker::constrain` of the frame's
     ///   two types under its link: a constraint OCaml makes after a walk
-    ///   that is still on the stack (`subtype_fields`, 4121-4130).
-    /// - [`SubKind::Leave`]: the innermost scope of
+    ///   that is still on the stack (`subtype_fields`, 4126-4133).
+    /// - A [`SubKind::Leave`] frame: the innermost scope of
     ///   [`Checker::scopes`] is popped and `out.held` is the frame's
     ///   `left` again (`univar_pairs := old_univars`, ctype.ml:1675).
-    /// - [`SubKind::Invariant`] (an argument that may occur both ways,
+    /// - A [`SubKind::Invariant`] frame (an argument that may occur both ways,
     ///   3687-3691): a [`SubKind::Back`] frame of the same pair with the
     ///   `dirty` of `out`; `out.quiet` one more and `out.dirty` false;
     ///   the pair `left`, `right` under a new link.
-    /// - [`SubKind::Back`]: when `out.dirty` (the first direction made a
+    /// - A [`SubKind::Back`] frame: when `out.dirty` (the first direction made a
     ///   constraint: `subtype_rec ... t1 t2 [] = []` is false and `&&`
     ///   does not run the second), `Checker::subtype_close`; otherwise
     ///   a [`SubKind::Close`] frame of the same pair and the pair
     ///   `right`, `left` under a new link.
-    /// - [`SubKind::Close`]: `Checker::subtype_close`.
+    /// - A [`SubKind::Close`] frame: `Checker::subtype_close`.
     ///
     /// `Err` is the link of two tuples of different lengths; the frames
     /// stay for the caller to cut. One step a frame popped. No
@@ -984,7 +984,7 @@ impl Checker {
     /// `(trace, left, right, !(current_univar_pairs ()), None) :: cstrs`
     /// (compiler/ml/ctype.ml:3655 and every arm that collects): inside a
     /// quiet region (`out.quiet != 0`) only `out.dirty` is set, since
-    /// the list the constraint goes to is dropped (3688-3689: `= []`);
+    /// the list the constraint goes to is dropped (3689-3690: `= []`);
     /// otherwise one [`Constraint`] appended with `link` and `out.held`.
     /// O(1). (R3j)
     #[inline]
@@ -1026,39 +1026,39 @@ impl Checker {
     /// 2. A variable on either side: `Checker::constrain` (3654-3655).
     /// 3. Two arrows of one arity whose labels are the same
     ///    (`Asttypes.same_arg_label`: the two label words are equal;
-    ///    3656-3669): for each parameter in order the pair of the RIGHT
+    ///    3656-3668): for each parameter in order the pair of the RIGHT
     ///    parameter's type and the left one's (`subtype_rec env
     ///    ((a2.typ, a1.typ) :: trace) a2.typ a1.typ`), then the pair of
     ///    the two results; pushed last first.
-    /// 4. Two tuples (3670-3672, `subtype_list` 4103-4107): different
+    /// 4. Two tuples (3669-3671, `subtype_list` 4103-4107): different
     ///    lengths, `Err(link)`; otherwise the pairs of the elements.
     /// 5. Two constructors without arguments of one type: nothing
-    ///    (3673).
+    ///    (3672).
     /// 6. A constructor on the left whose type expands publicly
     ///    (`Checker::expands`: `generic_abbrev`, 1353-1357) and whose
     ///    [`Checker::expand_once`] in [`ExpandMode::Safe`] gives a node
     ///    (`safe_abbrev`, 1240-1247): the pair of that node and `t2`
-    ///    under the SAME link (3674-3675). Then the same on the right
+    ///    under the SAME link (3673-3675). Then the same on the right
     ///    (3676-3678).
-    /// 7. Two constructors of one type (3679-3703):
+    /// 7. Two constructors of one type (3679-3704):
     ///    `Checker::subtype_constr`.
     /// 8. A constructor on the left whose type is a private
     ///    abbreviation (`generic_private_abbrev`, 1359-1369) and whose
     ///    `expand_once` in [`ExpandMode::Opt`] gives a node: the pair of
-    ///    that node and `t2` under the same link (3704-3705).
-    /// 9. R6e's arms go HERE (3706-4023: a private record or variant on
+    ///    that node and `t2` under the same link (3705-3706).
+    /// 9. R6e's arms go HERE (3707-4028: a private record or variant on
     ///    the right, `int` to `float`, a primitive and an unboxed
     ///    variant, two variants, two records): not built; such a pair
     ///    goes on and ends in step 13.
-    /// 10. Two objects (4026-4030): when both field lists end in a
+    /// 10. Two objects (4030-4034): when both field lists end in a
     ///     variable (`Checker::object_row`), `constrain`; otherwise
     ///     `Checker::subtype_fields`.
-    /// 11. Two variants (4031-4034): `Checker::subtype_row`. R6e's two
-    ///     arms of a variant against another type (4035-4060) go after
+    /// 11. Two variants (4035-4038): `Checker::subtype_row`. R6e's two
+    ///     arms of a variant against another type (4039-4062) go after
     ///     it.
-    /// 12. Two polymorphic types (4061-4071): `Checker::subtype_poly`.
-    ///     Two packages (4072-4099): `Checker::subtype_package`.
-    /// 13. Anything else: `constrain` (4100).
+    /// 12. Two polymorphic types (4063-4072): `Checker::subtype_poly`.
+    ///     Two packages (4073-4100): `Checker::subtype_package`.
+    /// 13. Anything else: `constrain` (4101).
     ///
     /// O(1) plus the callee; one hash insertion. (R3j)
     fn subtype_pair(&mut self, out: &mut Coercion, frame: SubFrame) -> Result<(), u32> {
@@ -1081,7 +1081,7 @@ impl Checker {
         todo!("R3j")
     }
 
-    /// `object_row ty` (compiler/ml/ctype.ml:347-352): the
+    /// `object_row ty` (compiler/ml/ctype.ml:346-351): the
     /// representative that ends the field list `fields`, through fields
     /// and objects. O(fields), one step a node; no write but path
     /// compression. (R3j)
@@ -1090,7 +1090,7 @@ impl Checker {
     }
 
     /// Two constructors of one type with arguments
-    /// (compiler/ml/ctype.ml:3679-3703), `d1` and `d2` their
+    /// (compiler/ml/ctype.ml:3679-3704), `d1` and `d2` their
     /// descriptors:
     ///
     /// ```text
@@ -1159,7 +1159,7 @@ impl Checker {
     ///   link; when it is mutable, a [`SubKind::Constrain`] under `link`
     ///   of two new fields at the current level
     ///   ([`Checker::build_field`], which shares the name and the CELL
-    ///   of the field it copies: 4152-4168), the left one over `rest1`
+    ///   of the field it copies: 4152-4170), the left one over `rest1`
     ///   and the right one over a new variable;
     /// - a name only the left has is built on the chain that starts at
     ///   `rest1` (`build_fields`, 325-328, at the level of the
@@ -1189,7 +1189,7 @@ impl Checker {
         todo!("R3j")
     }
 
-    /// Two variants (compiler/ml/ctype.ml:4031-4034 with `subtype_row`,
+    /// Two variants (compiler/ml/ctype.ml:4035-4038 with `subtype_row`,
     /// 4175-4210), `t1` and `t2` the two nodes:
     ///
     /// ```text
@@ -1204,10 +1204,10 @@ impl Checker {
     /// length found, and merged ([`Checker::merge_rows`]). By the two
     /// rests `more1`, `more2`:
     ///
-    /// 1. Two constructors of one type (4179-4180): the pair of the two
+    /// 1. Two constructors of one type (4180-4181): the pair of the two
     ///    rests under a new link, and nothing else.
     /// 2. Each a variable, a constructor or `Tnil`, row 1 closed and
-    ///    with no tag row 2 lacks (4181-4192): each common tag, in the
+    ///    with no tag row 2 lacks (4182-4194): each common tag, in the
     ///    order of the pairs, read now ([`Checker::field_now_at`]): a
     ///    present tag without a type or an `Either` tag with `c`,
     ///    against a present tag without a type: nothing; two present
@@ -1216,13 +1216,13 @@ impl Checker {
     ///    its FIRST type and the type; an absent tag on the left:
     ///    nothing; anything else is `Exit`.
     /// 3. Two universal variables, rows closed alike and neither with a
-    ///    tag the other lacks (4193-4208): the pair of the two rests,
+    ///    tag the other lacks (4195-4209): the pair of the two rests,
     ///    popped first; then each common tag: two present tags without
     ///    a type, two `Either` tags with `c` and no type, two absent
     ///    tags: nothing; two present tags with a type, two `Either`
     ///    tags without `c` and with ONE type each: the pair; anything
     ///    else is `Exit`.
-    /// 4. Anything else: `Exit` (4209).
+    /// 4. Anything else: `Exit` (4210).
     ///
     /// The common tags are classified in one pass before a pair is
     /// walked; the pairs to walk are kept above the merged rows in the
@@ -1242,7 +1242,7 @@ impl Checker {
         todo!("R3j")
     }
 
-    /// Two polymorphic types (compiler/ml/ctype.ml:4061-4071), `d1` and
+    /// Two polymorphic types (compiler/ml/ctype.ml:4063-4072), `d1` and
     /// `d2` their descriptors (slot 0 the body, then the bound
     /// variables):
     ///
@@ -1279,7 +1279,7 @@ impl Checker {
         todo!("R3j")
     }
 
-    /// Two packages (compiler/ml/ctype.ml:4072-4099), `d1` and `d2`
+    /// Two packages (compiler/ml/ctype.ml:4073-4100), `d1` and `d2`
     /// their descriptors:
     ///
     /// ```text
@@ -1354,7 +1354,7 @@ impl Checker {
 
     /// Fill [`Checker::subtype_trace`] with the pairs of the trace that
     /// ends in `link`, outermost first (`List.rev trace0`,
-    /// compiler/ml/ctype.ml:4226): the chain of [`TraceLink`]s is
+    /// compiler/ml/ctype.ml:4228): the chain of [`TraceLink`]s is
     /// followed to its root and the vector reversed. Nothing in
     /// `Mode::Success` (`link` is `NONE`). O(pairs of the trace), one
     /// step each. (R3j)
@@ -1363,7 +1363,7 @@ impl Checker {
         todo!("R3j")
     }
 
-    /// `memq_warn t visited` (compiler/ml/ctype.ml:3410-3414) for the
+    /// `memq_warn t visited` (compiler/ml/ctype.ml:3409-3413) for the
     /// representative `ty`:
     ///
     /// ```text
@@ -1386,7 +1386,7 @@ impl Checker {
     }
 
     /// `let visited = t :: visited` for a node that is not an object or
-    /// a variant (compiler/ml/ctype.ml:3442, 3459, 3479): `path_clock`
+    /// a variant (compiler/ml/ctype.ml:3441, 3458, 3479): `path_clock`
     /// one more, and that number as the entry of `ty`; the table grows
     /// to the graph's length when `ty` is past its end. Returns the
     /// entry `ty` had, which the node's leave frame puts back (an entry
@@ -1398,7 +1398,7 @@ impl Checker {
 
     /// `t :: (if level' < level then [] else filter_visited visited)`
     /// for an object or a variant `ty` (compiler/ml/ctype.ml:3506-3508,
-    /// 3543-3544; `filter_visited`, 3404-3408, drops the entries down to
+    /// 3543-3544; `filter_visited`, 3404-3407, drops the entries down to
     /// the nearest object or variant): `Checker::enter_path`, then
     /// `path.base` is the new entry, so that the nodes entered before
     /// it that are not rows are out of `visited`; with `cut` (`level' <
@@ -1435,7 +1435,7 @@ impl Checker {
     ///
     /// - A variable (3430-3437): itself, `Unchanged` (`loops` is
     ///   empty).
-    /// - An arrow (3438-3455), a tuple (3456-3465): on the path
+    /// - An arrow (3438-3454), a tuple (3455-3464): on the path
     ///   (`Checker::on_path`): itself. Otherwise
     ///   `Checker::enter_path`; an arrow's parameters with `posi`
     ///   turned, then its result.
@@ -1445,7 +1445,7 @@ impl Checker {
     ///   leave frame with `a` 0 and no entry (the node is not added to
     ///   `visited`), and the visit of the expansion at `pred_expand
     ///   level`.
-    /// - Any other constructor (3472-3501): on the path, itself.
+    /// - Any other constructor (3472-3500): on the path, itself.
     ///   Otherwise `enter_path`; with `level == 0`, `path.warn` when the
     ///   type expands publicly to a node that is not `has_constr_row`
     ///   (3482-3485: the expansion is made and memorized). A type
@@ -1454,7 +1454,7 @@ impl Checker {
     ///   by [`super::expand::TypeTable::upper`]: both ways, kept;
     ///   negatively only, a visit with `posi` turned; positively only, a
     ///   visit; neither, a new variable.
-    /// - A variant (3502-3537): on the path, or not static: itself.
+    /// - A variant (3501-3537): on the path, or not static: itself.
     ///   Otherwise `Checker::enter_row` with `pred_enlarge level`, and
     ///   a visit at that level of the type of each present tag that
     ///   has one, in the order of the row.
@@ -1488,7 +1488,7 @@ impl Checker {
     /// - An expanded constructor: the expansion's result when it is
     ///   above `Unchanged`, otherwise the constructor, `Unchanged`
     ///   (3470-3471).
-    /// - A field (3563-3575): with `c > Unchanged` a new field node
+    /// - A field (3560-3574): with `c > Unchanged` a new field node
     ///   with the name, the two results and a NEW cell holding the
     ///   value the field's cell has now (`ref (Mutability_value
     ///   (mutability_repr f.mutability))`: one cell node and one
@@ -1591,7 +1591,7 @@ pub struct Coercion {
     /// Walk state, all three as below between calls. How many quiet
     /// regions are open: an invariant argument's two directions, whose
     /// constraints are counted and dropped (`subtype_rec ... [] = []`,
-    /// ctype.ml:3688-3689), or the tags of a row before its `Exit`.
+    /// ctype.ml:3689-3690), or the tags of a row before its `Exit`.
     pub quiet: u32,
     /// The innermost scope open: an index of `scopes`, or `NONE`.
     pub held: u32,
@@ -1618,7 +1618,7 @@ pub struct TraceLink {
 }
 
 /// One scope of universal variables a constraint was made under: 24
-/// bytes, one a scope `subtype_rec` enters (ctype.ml:4065-4069).
+/// bytes, one a scope `subtype_rec` enters (ctype.ml:4067-4070).
 /// `parent` is the scope around it, an index of [`Coercion::scopes`] or
 /// `NONE`. The partner nodes of `scope` are nodes of the graph, so every
 /// constraint that holds the scope sees the pairings the ones before it

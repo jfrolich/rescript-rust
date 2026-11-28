@@ -8023,7 +8023,7 @@ fn assert_subtype_left(c: &Checker, out: &Coercion) {
 }
 
 /// `subtype` collects and `force_subtype` unifies in the order collected
-/// (compiler/ml/ctype.ml:3654-3669, 4212-4231):
+/// (compiler/ml/ctype.ml:3654-3668, 4212-4231):
 ///
 /// ```text
 ///       | Tvar _, _ | _, Tvar _ ->
@@ -8173,7 +8173,7 @@ fn a_tuple_of_another_length_and_a_forced_clash_are_the_two_errors() {
 }
 
 /// The arguments of two constructors of one type are related by the
-/// declaration's variance (compiler/ml/ctype.ml:3679-3703, quoted at
+/// declaration's variance (compiler/ml/ctype.ml:3679-3704, quoted at
 /// `Checker::subtype_constr`), and the pairs a dropped walk visited stay
 /// in the table (3648-3652: `Type_pairs.add (subtypes ()) (t1, t2) ()`,
 /// which nothing takes back).
@@ -8295,8 +8295,8 @@ fn the_arguments_of_a_constructor_follow_its_variance() {
 
 /// Abbreviations: a public one is expanded on either side, a private
 /// one on the left only, and a pair no arm of R3j takes is a constraint
-/// that unification refuses (compiler/ml/ctype.ml:3673-3678, 3704-3705,
-/// 4100):
+/// that unification refuses (compiler/ml/ctype.ml:3672-3678, 3705-3706,
+/// 4101):
 ///
 /// ```text
 ///       | Tconstr (p1, [], _), Tconstr (p2, [], _) when Path.same p1 p2 -> cstrs
@@ -8330,8 +8330,8 @@ fn the_arguments_of_a_constructor_follow_its_variance() {
 ///   (unification expands the spelling).
 /// - What R6e's arms would take, refused here by a constraint: `int`
 ///   against `string` (two constructors without arguments of two
-///   types: 3721-4023, `int` to `float` among them), and a closed
-///   variant against a constructor (4035-4060).
+///   types: 3707-4028, `int` to `float` among them), and a closed
+///   variant against a constructor (4039-4062).
 ///
 /// Bodies: `subtype_pair` (steps 5, 6, 8, 9, 13), `expands`.
 ///
@@ -8390,7 +8390,7 @@ fn abbreviations_expand_and_what_is_left_out_is_refused() {
     }
 }
 
-/// Two objects (compiler/ml/ctype.ml:4026-4030 and `subtype_fields`,
+/// Two objects (compiler/ml/ctype.ml:4030-4034 and `subtype_fields`,
 /// 4109-4173, quoted at `Checker::subtype_fields`):
 ///
 /// ```text
@@ -8405,7 +8405,7 @@ fn abbreviations_expand_and_what_is_left_out_is_refused() {
 /// - `{a: x, b: int}` against `{a: y}`, both closed: the one constraint
 ///   `(x, y)`, under the two objects, then the two field types
 ///   (`poly(x;)`, `poly(y;)`); the two bodies add no pair (`Tpoly (u1,
-///   []), Tpoly (u2, []) -> subtype_rec env trace u1 u2 cstrs`, 4061:
+///   []), Tpoly (u2, []) -> subtype_rec env trace u1 u2 cstrs`, 4063:
 ///   the SAME trace). No constraint for `b` (`rest2.desc = Tnil`).
 /// - `{a: int}` against `{a: int, b: int}`, both closed: one
 ///   constraint, `Tnil` against a NEW field `b` over a new variable at
@@ -8521,7 +8521,7 @@ fn objects_are_related_field_by_field() {
     }
 }
 
-/// Two variants (compiler/ml/ctype.ml:4031-4034 and `subtype_row`,
+/// Two variants (compiler/ml/ctype.ml:4035-4038 and `subtype_row`,
 /// 4175-4210):
 ///
 /// ```text
@@ -8559,9 +8559,9 @@ fn objects_are_related_field_by_field() {
 ///   constraint; and `(x, y)` stays in the table, so the second
 ///   element of the tuple collects nothing. One constraint in all.
 /// - two rows over one constructor (`[#A | t]` twice, `t` two nodes of
-///   one type without arguments): nothing (4179-4180, then 3673).
+///   one type without arguments): nothing (4180-4181, then 3672).
 /// - two rows over universal variables with the same tags: the
-///   constraint of the two rests first, then the tags' (4193-4208).
+///   constraint of the two rests first, then the tags' (4195-4210).
 ///
 /// Bodies: `subtype_pair` (step 11), `subtype_row` (the four cases,
 /// the quiet region of an `Exit`), `subtype_close` (`left` `NONE`).
@@ -8633,8 +8633,8 @@ fn variants_are_related_tag_by_tag() {
     }
 }
 
-/// Polymorphic types (compiler/ml/ctype.ml:4061-4071, quoted at
-/// `Checker::subtype_poly`) and the scopes a constraint keeps (4226:
+/// Polymorphic types (compiler/ml/ctype.ml:4063-4072, quoted at
+/// `Checker::subtype_poly`) and the scopes a constraint keeps (4224:
 /// `unify_pairs (ref env) t1 t2 pairs`; 2769-2771).
 ///
 /// Witnesses:
@@ -8706,7 +8706,7 @@ fn a_constraint_keeps_the_scopes_it_was_made_under() {
     }
 }
 
-/// Two packages (compiler/ml/ctype.ml:4072-4099, quoted at
+/// Two packages (compiler/ml/ctype.ml:4073-4100, quoted at
 /// `Checker::subtype_package`).
 ///
 /// Witnesses, with names `t` and `u` and the module types 7 and 8:
@@ -8781,16 +8781,16 @@ fn packages_are_completed_and_tried() {
 /// - `int`, a variable, an open object: the node itself, no warning.
 /// - a closed object `{a: int}`: a NEW object over a new field `a`
 ///   whose type is the old one's node (`poly(int;)`, unchanged), whose
-///   cell is a NEW cell with the value of the old one (3563-3570), and
+///   cell is a NEW cell with the value of the old one (3560-3574), and
 ///   whose rest is a new variable (`Tnil` with `posi`, 3576-3579).
-///   With a MUTABLE field the type is kept as it is (3550-3556).
+///   With a MUTABLE field the type is kept as it is (3549-3556).
 /// - `{a: int} => {a: int}`: the parameter is in a negative position:
 ///   `Tnil` there is kept and sets the warning (3580-3582); the result
 ///   is enlarged, so a new arrow over the OLD parameter node.
 /// - a static variant `[#A | #B(int)]` with a name: a new closed
 ///   variant (`row_closed = posi`) over a new variable, `#A` as
 ///   `Reither (true, [], false, ref None)` and `#B` as `Reither
-///   (false, [int], false, ref None)` (3513-3524), unopened, the name
+///   (false, [int], false, ref None)` (3514-3523), unopened, the name
 ///   kept (no type changed). In a negative position (the parameter of
 ///   an arrow) the tags stay present and the row is open
 ///   (`row_closed = posi`). A row that is not static: itself.
@@ -8811,10 +8811,10 @@ fn packages_are_completed_and_tried() {
 ///   (The first skeleton of this test expected two objects; the
 ///   prototype followed the lines and the test was corrected.)
 /// - a tuple that holds itself: the second meeting is `memq_warn`
-///   (3457): itself, with the warning.
+///   (3456): itself, with the warning.
 /// - `T = (O, int)` with `O = {a: T}`, a cycle built by hand: at `O`
 ///   the list is cut to the nearest object (`filter_visited`,
-///   3404-3408, 3543-3544), which drops `T`; so `T` is entered a
+///   3404-3407, 3543-3544), which drops `T`; so `T` is entered a
 ///   second time below `O`, where `O` is found: the result is a new
 ///   tuple over a new object whose field `a` is the old `poly(T;)`. A
 ///   mark that stayed for the walk would stop at the second `T` and
@@ -9013,11 +9013,11 @@ fn the_enlarged_type_of_a_coercion_without_a_source() {
 /// 9. two tuples of different lengths below n tuples, in
 ///    `Mode::Explain`: the loop of `read_subtype_trace` (n pairs).
 /// 10. `force_subtype` of n constraints made under 1 to n nested
-///    scopes of universal variables: `open_scopes` opens ONE scope
-///    between two constraints, where making the stack again from each
-///    constraint's chain is n squared over two. (The walk that collects
-///    them is not counted: `enter_poly` marks every bound variable of
-///    the open scopes at each entry, as OCaml does, ctype.ml:1658-1662.)
+///     scopes of universal variables: `open_scopes` opens ONE scope
+///     between two constraints, where making the stack again from each
+///     constraint's chain is n squared over two. (The walk that collects
+///     them is not counted: `enter_poly` marks every bound variable of
+///     the open scopes at each entry, as OCaml does, ctype.ml:1658-1662.)
 ///
 /// Then sharing: `d(40)` against a copy, `d(k) = (d(k-1), d(k-1))`: 41
 /// pairs with the table (`Type_pairs`, ctype.ml:3648-3652), 2^40
@@ -9166,7 +9166,7 @@ fn subtyping_at_ten_thousand() {
 /// 4. a covariant constructor of n arguments, each a closed object.
 /// 5. n arrows, then a tuple of n closed objects: every object cuts
 ///    the path of n + 1 nodes above it (`filter_visited`,
-///    ctype.ml:3404-3408), which is one store here (`enter_row`) and a
+///    ctype.ml:3404-3407), which is one store here (`enter_row`) and a
 ///    scan of n entries in OCaml; and every object asks `on_path`,
 ///    which is one load here and `List.memq` there.
 ///
