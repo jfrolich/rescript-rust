@@ -1191,15 +1191,23 @@ fn with_local_pident_module_type<R>(
 /// Check if `mty_impl` is a subtype of `mty_sig` (implementation matches signature).
 ///
 /// Returns a coercion that can be applied to convert the implementation
-/// to the signature type.
+/// to the signature type. OCaml prints the check's warnings at `loc` while
+/// it runs, whatever its result (`Location.deprecated` from
+/// builtin_attributes.ml:122-125); they go to the lookup events, which the
+/// typer reports in call order.
 pub fn modtypes(
     type_ctx: &TypeContext,
     env: &Env,
+    loc: crate::parse_arena::LocIdx,
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
 ) -> IncludeModResult<ModuleCoercion> {
     let mut warnings = Vec::new();
-    modtypes_with_warnings(type_ctx, env, mty_impl, mty_sig, &mut warnings)
+    let result = modtypes_with_warnings(type_ctx, env, mty_impl, mty_sig, &mut warnings);
+    for warning in warnings {
+        type_ctx.record_warning(loc, warning);
+    }
+    result
 }
 
 /// OCaml `Includemod.modtypes`: check that `mty_impl` is included in
@@ -5622,6 +5630,7 @@ mod tests {
         let result = modtypes(
             &type_ctx,
             &env,
+            crate::parse_arena::LocIdx::none(),
             &ModuleType::MtySignature(std::sync::Arc::new(sig)),
             &ModuleType::MtyIdent(Path::pident(modtype_id)),
         );
@@ -5649,7 +5658,13 @@ mod tests {
             result: Box::new(result_sig),
         };
 
-        let result = modtypes(&type_ctx, &env, &mty_impl, &mty_sig);
+        let result = modtypes(
+            &type_ctx,
+            &env,
+            crate::parse_arena::LocIdx::none(),
+            &mty_impl,
+            &mty_sig,
+        );
         assert!(result.is_ok());
     }
 

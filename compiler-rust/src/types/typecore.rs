@@ -1858,6 +1858,10 @@ impl<'a> TypeCheckContext<'a> {
                     self.report_module_deprecation(deprecation);
                     continue;
                 }
+                crate::types::context::LookupEvent::Warning(loc, warning) => {
+                    self.report_warning_at(self.warnings.len(), loc, *warning);
+                    continue;
+                }
             };
             let report = self.type_ctx.with_open_slot(event.slot, |state| {
                 let report = if event.shadowed

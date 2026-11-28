@@ -746,6 +746,9 @@ pub(crate) enum LookupEvent {
     OpenSlot(OpenSlotEvent),
     /// `report_deprecated ?loc p deprecated` (env.ml:989-994).
     ModuleDeprecated(ModuleDeprecation),
+    /// A warning a check prints at `loc` while it runs, such as the
+    /// deprecation of an included item (builtin_attributes.ml:122-125).
+    Warning(crate::parse_arena::LocIdx, Box<crate::diagnostics::Warning>),
 }
 
 #[derive(Debug, Clone)]
@@ -3490,6 +3493,18 @@ impl TypeContext {
             !self.in_store_build(),
             "{what} was recorded while building shared store data"
         );
+    }
+
+    /// Record a warning a check prints while it runs.
+    pub(crate) fn record_warning(
+        &self,
+        loc: crate::parse_arena::LocIdx,
+        warning: crate::diagnostics::Warning,
+    ) {
+        self.assert_no_store_build("a warning");
+        self.open_slot_events
+            .borrow_mut()
+            .push(LookupEvent::Warning(loc, Box::new(warning)));
     }
 
     /// Record a `report_deprecated` call of a module lookup.
