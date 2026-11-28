@@ -2076,4 +2076,145 @@ mod replay {
         let other = effects(&mut b, 1);
         b.set_body(&mut block, 0, other);
     }
+
+    /// Operands for [`built_over`]: operand number `at` of a run is the
+    /// special one, every other is a reference to a local variable.
+    struct Operands<'a> {
+        special: fn(&mut Builder<'a>) -> J<'a>,
+        at: u32,
+        next: u32,
+    }
+
+    impl<'a> Operands<'a> {
+        fn next(&mut self, b: &mut Builder<'a>) -> J<'a> {
+            self.next += 1;
+            if self.next - 1 == self.at { (self.special)(b) } else { b.reference(1, 0) }
+        }
+        fn list(&mut self, b: &mut Builder<'a>, len: usize) -> List {
+            let mark = b.stage_mark();
+            for _ in 0..len {
+                let value = self.next(b);
+                let statement = b.exp(value);
+                b.stage(statement);
+            }
+            b.list(mark)
+        }
+    }
+
+    /// One node or statement from every constructor of the builder that
+    /// takes an operand or a list, its operands drawn from `operands`:
+    /// the name of the constructor, the flags of the row it wrote, and
+    /// whether the special operand went into it.
+    fn built_over<'a>(b: &mut Builder<'a>, o: &mut Operands<'a>) -> Vec<(&'static str, u16, bool)> {
+        let mut made = Vec::new();
+        macro_rules! expression {
+            ($name:literal, $build:expr) => {{
+                let from = o.next;
+                let node: J<'a> = $build;
+                assert_eq!(b.row(&node.expr), node.row, "{}: the table row is the handle's", $name);
+                made.push(($name, node.row.flags, (from..o.next).contains(&o.at)));
+            }};
+        }
+        macro_rules! statement {
+            ($name:literal, $build:expr) => {{
+                let from = o.next;
+                let node: S<'a> = $build;
+                assert_eq!(b.statement_row(&node.stmt), node.row, "{}: the table row is the handle's", $name);
+                made.push(($name, node.row.flags, (from..o.next).contains(&o.at)));
+            }};
+        }
+        expression!("not", { let v = o.next(b); b.not(v) });
+        expression!("bnot", { let v = o.next(b); b.bnot(v) });
+        expression!("typeof", { let v = o.next(b); b.typeof_(v) });
+        expression!("is_nullish", { let v = o.next(b); b.is_nullish(v) });
+        expression!("in", { let (l, r) = (o.next(b), o.next(b)); b.in_(l, r) });
+        expression!("str_append", { let (l, r) = (o.next(b), o.next(b)); b.str_append(l, r) });
+        for op in [BinOp::Plus, BinOp::And, BinOp::Or, BinOp::Bor, BinOp::Div, BinOp::EqEqEq] {
+            expression!("bin", { let (l, r) = (o.next(b), o.next(b)); b.bin(op, l, r).unwrap() });
+        }
+        // `0 - x` is written as a negation, and an assignment over a
+        // member as an assignment.
+        expression!("negation", { let (l, r) = (b.int(0), o.next(b)); b.bin(BinOp::Minus, l, r).unwrap() });
+        expression!("assignment", {
+            let (object, r) = (o.next(b), o.next(b));
+            let l = b.dot(object, "f", None, false);
+            b.bin(BinOp::Eq, l, r).unwrap()
+        });
+        expression!("cond", { let (c, x, y) = (o.next(b), o.next(b), o.next(b)); b.cond(c, x, y) });
+        expression!("seq", { let (l, r) = (o.next(b), o.next(b)); b.seq(l, r) });
+        expression!("dot", { let v = o.next(b); b.dot(v, "f", Some(0), false) });
+        expression!("length", { let v = o.next(b); b.length(v) });
+        expression!("index", { let (l, r) = (o.next(b), o.next(b)); b.index(l, r) });
+        expression!("call", {
+            let callee = o.next(b);
+            let mark = b.mark();
+            for _ in 0..2 {
+                let argument = o.next(b);
+                b.push(argument);
+            }
+            b.call(callee, mark, 0, false)
+        });
+        expression!("new", {
+            let callee = o.next(b);
+            let mark = b.mark();
+            let argument = o.next(b);
+            b.push(argument);
+            b.new_(callee, mark)
+        });
+        statement!("exp", { let v = o.next(b); b.exp(v) });
+        statement!("return", { let v = o.next(b); b.return_(v) });
+        statement!("throw", { let v = o.next(b); b.throw(v) });
+        statement!("declare", { let v = o.next(b); b.declare(2, 0, Some(v)) });
+        statement!("if", {
+            let test = o.next(b);
+            let (then, otherwise) = (o.list(b, 2), o.list(b, 1));
+            b.if_(test, then, otherwise)
+        });
+        statement!("block", { let list = o.list(b, 2); b.block(list) });
+        statement!("while", { let test = o.next(b); let list = o.list(b, 2); b.while_(Some("l"), test, list) });
+        made
+    }
+
+    /// Every constructor of the builder gives its row `flag` exactly when
+    /// the operand `special` makes went into it, whichever of its operands
+    /// or of its lists' statements that is. Returns the operands drawn.
+    fn inherited_by_every_constructor(special: for<'a> fn(&mut Builder<'a>) -> J<'a>, flag: u16) -> u32 {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        let mut count = Operands { special, at: u32::MAX, next: 0 };
+        for (name, flags, _) in built_over(&mut b, &mut count) {
+            assert_eq!(flags & flag, 0, "{name}: without the operand");
+        }
+        for at in 0..count.next {
+            let mut operands = Operands { special, at, next: 0 };
+            let made = built_over(&mut b, &mut operands);
+            assert_eq!(made.iter().filter(|(_, _, holds)| *holds).count(), 1);
+            for (name, flags, holds) in made {
+                assert_eq!(flags & flag != 0, holds, "{name}: operand {at}");
+            }
+        }
+        count.next
+    }
+
+    #[test]
+    fn a_reference_to_a_global_marks_every_node_and_statement_built_over_it() {
+        let allocator = Allocator::default();
+        let mut b = Builder::new(&allocator);
+        // Where the flag starts: a reference the caller knows as a global.
+        assert!(b.reference(3, var::GLOBAL).row.has(flag::HAS_GLOBAL));
+        assert!(b.reference(3, var::GLOBAL | var::ASSIGNED).row.has(flag::HAS_GLOBAL));
+        assert!(!b.reference(3, 0).row.has(flag::HAS_GLOBAL));
+        assert!(!b.reference(3, var::ASSIGNED).row.has(flag::HAS_GLOBAL));
+        // A name the unit does not bind has no variable to decide: no flag.
+        assert!(!b.named("window", true).row.has(flag::HAS_GLOBAL));
+        // A copy of a leaf and of a chain of member reads over one.
+        let global = b.reference(3, var::GLOBAL);
+        assert!(b.copy_leaf(&global.expr).row.has(flag::HAS_GLOBAL));
+        let chain = b.dot(global, "a", None, false);
+        let chain = b.dot(chain, "b", Some(1), false);
+        assert!(b.copy_members(&chain.expr, |_| {}).row.has(flag::HAS_GLOBAL));
+        // Every constructor, with the reference as each of its operands.
+        let operands = inherited_by_every_constructor(|b| b.reference(3, var::GLOBAL), flag::HAS_GLOBAL);
+        assert_eq!(operands, 50);
+    }
 }

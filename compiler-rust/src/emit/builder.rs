@@ -38,11 +38,13 @@
 //! | `Call` | exactly one argument, and it; the callee is `Array.isArray`: a `Dot` named `isArray`, without position, not a tag, on a `Named` JavaScript identifier `Array` (B:164) | no | no | no |
 //! | `New` | no | no | no | no |
 //!
-//! `HAS_FUN` and `SEAL` hold for a node, and for a statement, when they hold
-//! for anything it is built from. `SEAL` is set where it starts: by
-//! [`Builder::bin`] for `&&`, `||` and `|` whose right operand is a `Bin` of
-//! the same operator, and by [`Builder::seq`] when an operand is a `Seq`.
-//! A statement's row has no other flag.
+//! `HAS_FUN`, `SEAL` and `HAS_GLOBAL` hold for a node, and for a statement,
+//! when they hold for anything it is built from. `SEAL` is set where it
+//! starts: by [`Builder::bin`] for `&&`, `||` and `|` whose right operand is
+//! a `Bin` of the same operator, and by [`Builder::seq`] when an operand is
+//! a `Seq`. `HAS_GLOBAL` starts at [`Builder::reference`] of a variable the
+//! caller knows as a JavaScript global (`var::GLOBAL`). A statement's row
+//! has no other flag.
 pub(crate) use super::row::{Kind, Row, flag, num, var};
 use super::{Unsupported, literal, walk};
 use crate::js_ir::op::{BinOp, Number};
@@ -72,8 +74,9 @@ const FLOAT_ZERO_TEXT: u32 = 1;
 /// alike (except `Bin`'s `STRICT`).
 const PURITY: u16 = flag::PURE | flag::STRICT;
 
-/// `HAS_FUN` and `SEAL`: what a node holds when an operand holds it.
-const INHERITED: u16 = flag::HAS_FUN | flag::SEAL;
+/// `HAS_FUN`, `SEAL` and `HAS_GLOBAL`: what a node holds when an operand
+/// holds it.
+const INHERITED: u16 = flag::HAS_FUN | flag::SEAL | flag::HAS_GLOBAL;
 
 /// The flags of a node with one operand whose `kept` flags hold when they
 /// hold for the operand. O(1).
@@ -401,7 +404,10 @@ impl<'a> Builder<'a> {
     }
 
     /// A reference to variable `var`, printed through the name table (the
-    /// reference id is the variable's index). `known` is of [`var`]. O(1).
+    /// reference id is the variable's index). `known` is of [`var`]; a
+    /// reference to a JavaScript global (`var::GLOBAL`) has `HAS_GLOBAL`,
+    /// which every node and statement built over it inherits: it is what
+    /// the replay's descent is pruned by ([`Builder::below`]). O(1).
     pub fn reference(&mut self, variable: u32, known: u8) -> J<'a> {
         let expr = Expression::new_identifier_with_reference_id(
             SPAN,
@@ -415,6 +421,8 @@ impl<'a> Builder<'a> {
         }
         if known & var::GLOBAL == 0 {
             flags |= flag::DUPLICABLE;
+        } else {
+            flags |= flag::HAS_GLOBAL;
         }
         self.attach(expr, Row { flags, kind: Kind::Var, aux: known, payload: variable })
     }
@@ -988,7 +996,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The row of a statement of `kind` that holds what has `flags`: their
-    /// `HAS_FUN` and `SEAL`, and no other flag. O(1).
+    /// `HAS_FUN`, `SEAL` and `HAS_GLOBAL`, and no other flag. O(1).
     fn statement(kind: Kind, flags: u16) -> Row {
         Row { flags: flags & INHERITED, kind, aux: 0, payload: 0 }
     }
