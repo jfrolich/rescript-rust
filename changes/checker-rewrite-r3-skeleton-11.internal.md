@@ -1,0 +1,1 @@
+- Checker rewrite R3j: design subtyping (`subtype`, `force_subtype`, `enlarge_type`) as a skeleton with eleven acceptance tests that passed against a prototype, and a build prompt; widen the declaration table to both upper bits of a variance. The harness operations for subtyping and the corrections owed from earlier reviews are not part of it.
