@@ -780,7 +780,7 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
             Some(exports) if !exports.is_empty() => {
                 let coerced = self.coerce_exports(run, exports, out.finished);
                 let list = self.coerced_list(run);
-                self.statements.close(&self.js, &mut self.arena, list);
+                self.statements.close(&mut self.js, &mut self.arena, list);
                 (list, coerced)
             }
             _ => (

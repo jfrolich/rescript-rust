@@ -1,7 +1,8 @@
 //! JavaScript occurrence counts, maintained by the arena's existing mutation
 //! paths, including normalisation, argument sequencing and statement removal.
 //! These are unweighted JS occurrences, not level-L switch-default use weights.
-use crate::bir::{Bir, NodeId, VarId, View};
+use super::js::Pools;
+use crate::bir::{NodeId, VarId};
 
 /// Two counts per variable; indexed by VarId, never by identifier or node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -95,10 +96,12 @@ pub(crate) struct Scope {
     pub(crate) facts: Vec<VarFacts>,
     /// One per declaration of every copied run, last slot first within a run.
     pub(crate) decisions: Vec<Decision>,
-    /// Pending operands of the returned expression `return_sites` reads: the
-    /// node, and whether a call found there is a site.
-    spine: Vec<(NodeId, bool)>,
-    /// Steps of `close::decide` and `return_sites`.
+    /// The work stack of the walk of a returned value that
+    /// `bir::j::norm::simplify_if_head` runs for a `return` it builds on
+    /// rows (`bir::j::rows_stmt::return_calls_of`). Empty between calls;
+    /// deleted with `bir/j/norm.rs` at the flip.
+    pub(crate) spine: Vec<NodeId>,
+    /// Steps of `close::decide` and of the walks of returned values.
     pub(crate) close_steps: usize,
     /// Live `JQualified` references per imported module. Dense by ImportId,
     /// grown where a module is first referenced.
@@ -206,42 +209,12 @@ impl Scope {
     }
 }
 
-/// The sites of `return value`, read through the flatten pass ("T4c design"
-/// (a)): both branches of a conditional, the last operand of a sequence, a
-/// call of a variable. `last` says whether the `return` is the last
-/// statement of its list; below a conditional every call is a site, because
-/// the flatten pass gives each branch a list of its own.
-///
-/// Cost: one step per conditional and sequence between `value` and its
-/// calls, and one per call; a predicate, the head of a sequence and the
-/// arguments of a call are not read. Nothing is allocated once the spine
-/// has its capacity; nothing is done on an arena without counts.
-pub(crate) fn return_sites(bir: &mut Bir, value: NodeId, last: bool) {
-    let Some(scope) = &mut bir.js_scope else { return };
-    let mut spine = std::mem::take(&mut scope.spine);
-    debug_assert!(spine.is_empty());
-    spine.push((value, last));
-    let mut steps = 0;
-    while let Some((node, site)) = spine.pop() {
-        steps += 1;
-        match bir.view(node) {
-            View::JCond { then_, else_, .. } => {
-                spine.push((else_, true));
-                spine.push((then_, true));
-            }
-            View::JSeq { second, .. } => spine.push((second, site)),
-            View::JCall { callee, .. } if site => {
-                if let View::Var { var } = bir.view(callee) {
-                    let scope = bir.js_scope.as_mut().expect("lowering scope");
-                    scope.facts[var.index()].site = node;
-                }
-            }
-            _ => {}
-        }
-    }
-    let scope = bir.js_scope.as_mut().expect("lowering scope");
-    scope.close_steps += steps;
-    scope.spine = spine;
+/// The visitor of `JsStmt::return_calls`: the call with the id `call` is a
+/// tail-call site of `var`. The id is a key: `VarFacts::site` is compared
+/// with `NO_SITE` and read by nothing else. The last call given for a
+/// variable stands. Cost: one write.
+pub(crate) fn tail_call(bir: &mut Pools, var: VarId, call: u32) {
+    bir.js_scope.as_mut().expect("lowering scope").facts[var.index()].site = NodeId(call);
 }
 
 #[cfg(test)]
