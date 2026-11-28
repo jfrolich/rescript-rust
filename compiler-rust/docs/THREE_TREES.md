@@ -3036,7 +3036,7 @@ through a `RESCRIPT_BACKEND=check` build.
 | T6k to T6q | The lowering's files stop naming J opcodes, a group of files a slice; storage is `Bir` rows | T6k first | Check mode as today: `before` and `after`, texts and mappings, on the corpora; `compare_decisions`; the name comparison of T5b; the allocation pins of `bir/lower/unit.rs` |
 | T6r | `names.rs`, `globals.rs` behind the statement interface; the external-shadow decision in the replay's walk | T6k to T6q | The same; `globals_qualified` equal before and after on every corpus unit |
 | T6u | F1 to F8 in the replay's walk (`bir/lower/seal.rs`); the new side stops running `apply_js_flatten_pass` | T6r | `before` is now "legacy after P1 and P2" against the lowering's program; `after` unchanged; `compare_decisions` on the lowering's own program; the tests of "T4c design" (c) and of T4b keep both texts |
-| T4g | Step A with the splice | T6u | `after`: the new side runs P4, P5, P6; `before` moves to "legacy after P1, P2, P3"; `compare_decisions` stays (it compares what the lowering decided with what P3 decides on the legacy side) |
+| T4g | Step A with the splice; with it the external-shadow decision sees the spliced lists, and the two tests of "T6r: the naming replay behind the interface", decision 10, are rewritten against the order 1, 3, 4, 5, 2, 6 | T6u | `after`: the new side runs P4, P5, P6; `before` moves to "legacy after P1, P2, P3"; `compare_decisions` stays (it compares what the lowering decided with what P3 decides on the legacy side) |
 | T4d | Step B | T4g | `after`: the new side runs P5, P6; `before` after P4 |
 | T4e | Steps C and D | T4d | `after`: the new side runs P6; `before` after P5 |
 | T4f | The shake over rows | T4e, T6q | `before` and `after` are the same comparison: both final. The new side runs no legacy pass |
@@ -3448,7 +3448,7 @@ changed lines without tests.
 | T6l to T6q, T6w | The same in their files; a helper of `State` that only wrapped a constructor (`State::pure_expression` when its last caller is converted, by the slice that converts it) |
 | T6x | The three transitional functions and their twins; the `NodeId` in `Out`, `Free` and the stack's slots |
 | T6r-a | `scope::return_sites`, `Log::pending`, the node-taking `names::eta_shape`, `jsx::printed_form` and `jsx::jsx_tag` |
-| T6r-b | The five tests of `globals.rs` that call `decide` alone (replaced by tests through the lowering) |
+| T6r-b | The tests of `globals.rs` that call `decide` alone and that T6r-f moves (replaced by tests through the lowering) |
 | T6r-d | `Replay::child`, the node of `Frame` |
 | T6r-e | `Replay::prelude`, `Scratch::{marks, next}`, `Replayed::{ancestors, ambiguous_orders}`, `names::is_statement` |
 | T6r-f | `globals::{shadowed, binding_scope, bindings, rows}`, `Globals::{marks, epoch}`, the binding chain (`Link` for binders, `Row::binding`), the recursion of `deep_constant` |
@@ -6047,14 +6047,26 @@ JSX can name the tag), both written by `compile_jsx` where the element
 is built, the second by `jsx::jsx_tag` through the interface from the
 tag in hand, in a unit that preserves JSX only (`names::jsx_tag_named`).
 `jsx::printed_form(bir, info, steps)` takes no node (gap 5). A copy of
-an element shares its information, so it has the same form; nothing
-rewrites the tag of a built element. Moving the whole rule to where the
+an element shares its information, so it has the same form. This
+fixes the answer where the element is built, where trunk reads the tag
+at each close: it is the same only if no edit puts another expression
+in the tag's place between the two (`JsStmt::substitute` and
+`alias_at` replace a reference to a moved variable through
+`Bir::replace`, and a tag can be a variable). That is **not shown**:
+check mode is equal on both corpora, and no test has a tag that is a
+moved variable in a unit that preserves JSX. T6r-a writes that test
+through the lowering, before its second commit, and stops if the log
+and the pass differ (its prompt). Moving the whole rule to where the
 element is built (marking the callee's and the tag's sites) was
 rejected: a copy of an element records new sites, which the copy would
 have to mark, in `Bir::copy_subtree` now and in the builder's copy
 later. The tag's chain is now read once an element, not once a site
 that climbs to it: `name_log_steps` of `tests/tests` moves 49,559 to
 49,565 and the step test of the rule from three steps a member to two.
+The rise of 6 on a corpus is not traced to its elements: the likely
+cause is elements whose tag trunk never reads (a fragment, where the
+test stops before the tag; an element none of whose sites is read at a
+close) and that now pay the read once. T6r-a's pull request says which.
 
 **Decision 5: the two walks that read an expression are the
 implementation's** (gaps 1 and 2). A `Js::Ref` borrows the pools and
@@ -6087,7 +6099,7 @@ walk recurses now.
   `copy_members`. `substitute` lends the implementation to `make` with
   its pending nodes on the stack, and `copy_members` already reads
   above them. The two new walks do the same (a base taken on entry; a
-  test leaves a node on the stack and finds it after the walk). Their
+  test of each leaves a node on the stack and finds it after the walk). Their
   visitors are given the pools, and `references` the implementation by
   shared reference: neither can start a walk.
 
@@ -6189,7 +6201,7 @@ at. After pull request 402:
 | `names.rs`, `the_replay_is_linear_in_statements_and_rows` | Rewritten to assert relations: the replay's steps at 10,000 are ten times those at 1,000 less the constant, and no count names `ancestors`. It passes before and after |
 | `names.rs`, `ten_thousand_literals_on_one_spine_read_each_ancestor_at_most_twice` | Rewritten: the bound becomes "at most three reads a node of the spine" on trunk (the prelude reads two) and names the descent, not the ancestors; T6r-e's one descent is inside it |
 | `names.rs`, `a_warm_replay_of_a_unit_with_functions_allocates_nothing` | Kept as it is. The probe's replay allocated once on a second run (rows append each rebuilt list to the pool); with the reservation of decision 9 T6r-d keeps it at 0, and if its build cannot, the design turn that builds T6r-d moves the bound and says why |
-| `globals.rs`, the five tests that call `decide` alone | Replaced by tests through the whole lowering in `oracle_tests.rs` (the form of `shadow_rule`), one a binder kind, among them the two the probe found untested: an explicit block spliced into its list, and a loop over an existing variable. The step tests at 10,000 references and at 10,000 bindings become tests of the lowering's `global_steps` |
+| `globals.rs`, the tests that call `decide` alone (seven on trunk beside `row_sizes`; the probe failed five of them and its report names them, this turn did not rerun it) | Replaced by tests through the whole lowering in `oracle_tests.rs` (the form of `shadow_rule`), one a binder kind, among them the two the probe found untested: an explicit block spliced into its list, and a loop over an existing variable. The step tests at 10,000 references and at 10,000 bindings become tests of the lowering's `global_steps` |
 | The four allocation counts of `unit.rs` | Not pre-moved (a test does not pin a number a later slice changes). T6r-d says by how much each moves and why (decision 9) |
 
 **The interface on trunk after this turn.**
@@ -6213,7 +6225,7 @@ the probe's commits, re-cut.
 | Slice | What | Files | Deletes | Lines | Tests that move | Check |
 | --- | --- | --- | --- | ---: | --- | --- |
 | T6r-a | The return arm through `return_calls`; `adopt` on the handle through `references`; the log's close without a view: `Site::entry`, `unprinted` by key, the printed form from the pools, the eta shape from the body's list | `close.rs`, `scope.rs`, `out.rs`, `mod.rs` (one line), `norm.rs`, `names.rs`, `jsx.rs`, `pools.rs`, `edit.rs`, `bridge_j.rs`, `globals.rs` (one pattern, one note), `call.rs`, `expr.rs`, `ffi_args.rs`, `import.rs`, four test files | `scope::return_sites`, `Log::pending`, the node-taking `eta_shape`, `printed_form` and `jsx_tag` | 296 added, 234 removed (built) | two `size_of` of `Site` (8 to 12); the JSX step test (three steps a member to two, renamed); test helpers of `names.rs` | built once: 591, 80, 46; check mode identical; prompt in 11.9 |
-| T6r-b | The tests of decision 11 | `names.rs` (tests), `globals.rs` (tests), `oracle_tests.rs` | the five decide-only tests of `globals.rs` | about 250, tests only | as decision 11 | every test passes on trunk as it is |
+| T6r-b | The tests of decision 11 | `names.rs` (tests), `globals.rs` (tests), `oracle_tests.rs` | the decide-only tests of `globals.rs` that T6r-f moves | about 250, tests only | as decision 11 | every test passes on trunk as it is |
 | T6r-c | The replay's interface on both sides: `below`, `literal_body`, `set_literal_body`, `bodies`, `body`, `set_body`, `binder`, `rest_fields`, `status`, `range_of`; on the builder `HAS_GLOBAL` inherited as `HAS_FUN` is, and a function literal whose body is a list by header | `js_stmt.rs`, `rows_stmt.rs`, `emit/builder.rs`, their tests | nothing (no caller yet) | about 500 | none | a step test at 10,000 on each side; done by the next design turn in its own pull request |
 | T6r-d | The replay walks lists: `Frame` holds a list, a compound statement is held while its lists are walked (`take_at`, `body`, `set_body`, `list`), the root is the block `finish` holds (decision 8); a literal's body by header (decision 2); the literals of a statement still found by the prelude's marks, keyed by `stmt_id` | `names.rs`, `mod.rs` (`finish`, `replay_names`, `Storage`) | the node-reading `Replay::child`, `Frame::statement`; `names.rs` reads no `View` outside the prelude | about 500 (the probe's step 4 less its literals) | the four allocation counts (decision 9: `held`, the list pool's reservation); `row_sizes` | moves equal statements on both corpora; `rg -n 'bir\.view\(' src/bir/lower/names.rs` outside tests shows the prelude only |
 | T6r-e | The literals through `below`; the prelude goes | `names.rs` | `Replay::prelude`, `Scratch::{marks, next}`, `Replayed::{ancestors, ambiguous_orders}`, `is_statement`, the five `ambiguous_orders` assertions | about 350 | the two step tests of decision 11 read `descended` | `rg -n 'ambiguous_orders\|fn prelude' src` is empty; the coordinator measures check mode here |
@@ -11290,7 +11302,7 @@ line and `rg -n 'fn references|fn jsx_head'
 compiler-rust/src/bir/lower/js.rs` shows two (the tenth design turn,
 pull request 406, is merged); `cargo test --manifest-path
 compiler-rust/Cargo.toml --lib bir::lower` reads 591 passed, `--lib
-bir::j` 80, `--lib emit::builder` 46, none ignored; from compiler-rust,
+bir::j` 81, `--lib emit::builder` 46, none ignored; from compiler-rust,
 `python3 ../scripts/count_lowering_ids.py --self-test` prints `32
 files, 0 transition calls`; `rg -n 'return_sites' compiler-rust/src`
 prints nine lines (three in close.rs, three in scope.rs, two in
@@ -11322,7 +11334,8 @@ oracle_tests.rs. Nothing else. You add no function to a trait and none
 to `Rows` or the builder. Not yours: `names::replay` and everything
 below it in names.rs (`Replay`, `Scratch`, `Storage`, the prelude: they
 keep their views of the arena for T6r-d and T6r-e), `globals::decide`
-and its helpers but for the one pattern, `export.rs` but for the
+and its helpers but for the one pattern and the doc comment of `rows`,
+`export.rs` but for the
 number, js.rs, js_stmt.rs, rows.rs, rows_stmt.rs, src/emit.
 
 What the slice is. On trunk three things of the lowering find a J node
@@ -11348,7 +11361,7 @@ you may copy, and for a body this task does not print, the comment's
 body is the one to write. Where this task gives code, the task is
 right.
 
-Where the common blocks and this task disagree, the task wins. Five
+Where the common blocks and this task disagree, the task wins. Ten
 places are known. (1) The block of T6x-a1 to T6x-a4 says "every
 `size_of` assertion keeps its number": two move here, both of
 `scope::Site`, 8 to 12. (2) That block holds the allocation counts at
@@ -11359,6 +11372,32 @@ tests it edits and the two values that move. (4) `Instruction count`
 is read and reported, not held at +0.02%. (5) The block's check-mode
 figure (`scripts/compare_build_instructions.py`) is not yours to
 produce: CI `Backend bridge coverage` is the gate of check mode.
+Further sentences of the blocks that do not hold here: (6) "a change in
+src/bir/j other than the one T6x-a2 names" counts as failure there:
+norm.rs, rows_tests.rs and js_tests.rs are yours as named above. (7)
+The line of `count_lowering_ids.py | grep '^| total'`: this task gives
+none; paste the self-test's line instead. (8) The wraps the blocks
+prescribe (`B::from_node`, `B::node`, `B::stmt_from_node`,
+`B::stmt_node`, `B::list_from`) are deleted from the traits: wrap
+nothing. (9) The probe the block of T6x-a names (branch
+`bir-lower-js-interface-2`) is not this row's: read neither. (10)
+Phase C counts "a `View::J` left in a converted file" and "a walk over
+an expression" as failures: names.rs is converted only in the
+functions named above (the replay keeps its views), and `eta_shape`,
+`jsx_tag` and `unprinted` read one statement, a member chain and a
+climb through the readers of the interface, which is what the task
+asks.
+
+One test you add, before commit 2, in oracle_tests.rs, through the
+whole lowering in a unit that preserves JSX: an element whose tag is a
+variable that the lowering moves or replaces after the element is built
+(an alias of a module member declared before the element and used once,
+and one the export fold moves), with the naming log compared with the
+pass as the tests around it do. It must pass on trunk. If it fails
+after commit 2, stop and report: decision 4 fixes the tag's answer
+where the element is built, and that test is its proof. With it the
+first filter reads 592 after commit 2; say so in the pull request, and
+say which elements pay the 6 more `name_log_steps` of `tests/tests`.
 
 Commits, in this order, each compiling and passing the three filters,
 clippy and `cargo doc` on its own (the design turn ran each state),
@@ -11425,7 +11464,7 @@ each pushed when made:
    and the call `crate::bir::lower::scope::return_sites(b, n, true);`
    becomes `tail_calls(b, n);`.
 
-   After this commit: the three filters read 591, 80 and 46; the cost
+   After this commit: the three filters read 591, 81 and 46; the cost
    check prints `production functions=578; changed/new=4;
    missing/generic=0; removed=0`.
 
@@ -11549,7 +11588,8 @@ each pushed when made:
    parameters in order and none of them the callee, and whose
    information is an `MlCall` or `BuiltinRuntime` call of full arity.
    The doc comment of `adopt` says "the implementation's work stack"
-   where it says `pending` (the build left that line; write it).
+   where it says `pending`, and loses its sentence on `jsx_tag` reading
+   down the tag's chain (the build left both lines; write them).
 
    The call sites. In call.rs and ffi_args.rs the three
    `NodeId(self.js.id(..))` go: `super::names::adopt(&mut self.js,
@@ -11583,7 +11623,7 @@ each pushed when made:
    of `ten_thousand_return_sites_are_read_in_two_steps_each` names
    `JsStmt::return_calls` (the build left `scope::return_sites` there).
 
-   After this commit: the three filters read 591, 80 and 46; the cost
+   After this commit: the three filters read 592, 81 and 46; the cost
    check prints `production functions=579; changed/new=22;
    missing/generic=0; removed=0`.
 
@@ -11604,21 +11644,24 @@ design turn's build:
   src/bir/lower/jsx.rs`: 5, 5 and 8; on the build 5 (its test), 1 (its
   test) and 1 (`BinOp::NotEqEq`).
 - From compiler-rust, the test module of each file cut off with `sed
-  '/^mod tests\|^#\[cfg(test)\]$/q'`, `rg -c
+  '/^mod tests\|^#\[cfg(test)\]$/q'` (GNU sed; on macOS `sed -E '/^mod
+  tests|^#\[cfg\(test\)\]$/q'`), whole test files (`*_tests.rs`) left out, `rg -c
   'View::J|Op::J|View::S[A-Z]|Op::S[A-Z]|parents\['` over the files of
   src/bir/lower: globals.rs 19, jsx.rs 6, names.rs 55, scope.rs 3; on
   the build globals.rs 19 and names.rs 42 and no other file.
 - `python3 ../scripts/count_lowering_ids.py --self-test`: `32 files, 0
   transition calls` on both.
 
-Counts you must see: the three filters 591, 80, 46 after each commit,
-none ignored (the slice adds no test and removes none); the four
+Counts you must see: the three filters 591, 81, 46 after commit 1 and
+592, 81, 46 after commit 2, none ignored (the slice adds the one test
+named above and removes none); the four
 allocation counts of unit.rs 86, 102, 86, 155; `size_of::<Rows>()`
 416.
 
 Run by the design turn, in a copy that was not pushed, on the head of
 pull request 406 before its document commits: commit 1 alone and then
-both, each with the three filters at 591, 80 and 46, clippy and `cargo
+both, each with the three filters at 591, 80 and 46 (the second is 81
+since: one test was added to trunk after the build), clippy and `cargo
 doc` clean with warnings denied, the cost check at zero and the
 self-test at zero; 296 lines added and 234 removed in 18 files, tests
 included (commit 1: 40 and 57 in five files). A check-mode build
