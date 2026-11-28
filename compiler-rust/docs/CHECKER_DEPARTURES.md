@@ -9768,7 +9768,7 @@ check against its Rust site (`compiler-rust/src/types/includemod.rs`):
 
 Labels and extension constructors are not checked by OCaml (the three calls
 in includecore.ml are the only ones; `extension_constructors`,
-includecore.ml:711-760, has none), and the Rust check has no site for
+includecore.ml:711-746, has none), and the Rust check has no site for
 them. Their rows above print no warning in either
 compiler.
 
