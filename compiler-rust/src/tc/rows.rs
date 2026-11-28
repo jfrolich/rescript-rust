@@ -311,6 +311,19 @@ pub trait PackageDecls {
     /// already tested. `left` and `right` are the two descriptors; the
     /// arguments are their slots.
     fn compatible(&mut self, c: &mut Checker, left: Node, right: Node) -> bool;
+    /// `eq_package_path env p1 p2` (compiler/ml/ctype.ml:2110-2112) for
+    /// two `PackageRow::path` that are not one index: whether the two
+    /// module type paths are one after `normalize_package_path`.
+    /// Subtyping asks it apart from the test below (ctype.ml:4084).
+    /// (R3j)
+    fn same_path(&self, left: u32, right: u32) -> bool;
+    /// `!package_subtype env p1 nl1 tl1 p2 nl2 tl2`
+    /// (compiler/ml/ctype.ml:4089; typemod.ml:1224-1238): whether the
+    /// module type of the left package is included in the right one's,
+    /// in that ONE direction, after the completed lists were unified
+    /// under a speculation the caller restores. `left` and `right` are
+    /// the two descriptors. (R3j)
+    fn subtype(&mut self, c: &mut Checker, left: Node, right: Node) -> bool;
 }
 
 /// One equation of pattern mode in force (`Env.add_local_constraint`,

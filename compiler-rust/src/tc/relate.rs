@@ -20,15 +20,22 @@ use super::rows::{RES_ABSENT, RES_PRESENT, cell_mutable, cell_repr, each_field_t
 use super::segment::{EXTENDED, ExtraDescriptor, RowFieldKind, VariantRow};
 use super::unify::{Checker, Clash, Frame, FrameKind};
 
-/// One delayed constraint of subtyping (`cstrs`,
-/// compiler/ml/ctype.ml:3647): 12 bytes.
+/// One delayed constraint of subtyping (`(trace, t1, t2,
+/// !(current_univar_pairs ()), None) :: cstrs`,
+/// compiler/ml/ctype.ml:3655): 16 bytes. (Changed in the eleventh
+/// skeleton turn from 12 bytes with a trace length: CHECKER_REWRITE 8.6,
+/// decision 120.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct Constraint {
     pub left: Ty,
     pub right: Ty,
-    /// Length of the trace when the constraint was made, `Mode::Explain`.
+    /// The trace of the pair the constraint was made at: an index of
+    /// [`Coercion::links`], or `NONE` in `Mode::Success`.
     pub trace: u32,
+    /// The scopes of universal variables open where it was made: an
+    /// index of [`Coercion::scopes`], or `NONE`.
+    pub scopes: u32,
 }
 
 /// Which relation `Checker::relate_frames` decides for a pair: 2 bytes,
@@ -752,28 +759,985 @@ impl Checker {
         todo!("R3i")
     }
 
-    /// `subtype` (compiler/ml/ctype.ml:4216-4225) without the checks that
-    /// read a declaration's labels or constructors (those belong to R6e,
-    /// see "R3 as designed", decision 6): collect the constraints of
-    /// `left :> right` into `out` (`subtype_rec`, ctype.ml:3647). O(pairs),
-    /// pair set, explicit stack. (R3j)
-    pub fn subtype(&mut self, left: Ty, right: Ty, out: &mut Vec<Constraint>) -> Result<(), Clash> {
+    /// `subtype env ty1 ty2` up to the closure it returns
+    /// (compiler/ml/ctype.ml:4212-4217), without the arms that read a
+    /// declaration's labels or constructors (R6e; CHECKER_REWRITE 8.13,
+    /// the table of arms):
+    ///
+    /// ```text
+    /// let subtype env ty1 ty2 =
+    ///   Type_pairs.clear (subtypes ());
+    ///   current_univar_pairs () := [];
+    ///   (* Build constraint set. *)
+    ///   let cstrs = subtype_rec env [(ty1, ty2)] ty1 ty2 [] in
+    ///   Type_pairs.clear (subtypes ());
+    /// ```
+    ///
+    /// `out` is emptied, then filled with the constraints of `left :>
+    /// right` in the order [`Checker::force_subtype`] unifies them
+    /// (OCaml conses and reverses, 4231). Nothing is unified here.
+    ///
+    /// No scope of universal variables is open at the entry (asserted in
+    /// debug builds: OCaml empties its list, 4214, and the kernel cuts
+    /// `scopes` back to empty at the end). [`Checker::related`] is
+    /// cleared at the entry and at the end, as OCaml clears twice, so
+    /// the table is empty between relations. [`Checker::subtype_trace`]
+    /// is cleared. The root pair goes on [`Checker::subtyping`] with the
+    /// first link of the trace (`[(ty1, ty2)]`) and
+    /// `Checker::subtype_frames` runs.
+    ///
+    /// NO speculation (OCaml takes none): what the walk writes stays.
+    /// It writes expansions with their memos (`expand_abbrev`,
+    /// 3675-3678, 3705), opened rows, compressed paths, the nodes of the
+    /// constraints it builds (3688-3691, 4118-4130, 4152-4169), the
+    /// instance of a polymorphic type (4063) and partner nodes of the
+    /// scopes it enters; it links no variable. The trial of two packages
+    /// of different paths is the one place that unifies, under a
+    /// speculation of its own that is restored (4089-4098).
+    ///
+    /// `Err`: two tuples of different lengths (`subtype_list`,
+    /// 4104: `subtype_error env trace`). The frames, the scopes and
+    /// `out` are cut back to empty; in `Mode::Explain`
+    /// [`Checker::subtype_trace`] holds the pairs down to the two
+    /// tuples and [`Checker::trace`] is empty (`Subtype (expand_trace
+    /// env (List.rev trace), [], None)`, 3614-3615); in `Mode::Success`
+    /// outside a speculation `unexplained_failure` is set.
+    ///
+    /// Cost: O(pairs visited): one step and one hash insertion a pair
+    /// that is not one node, plus the callees; 16 bytes of frame a
+    /// pending pair, 16 a constraint, and in `Mode::Explain` 12 a pair
+    /// pushed. No recursion. (R3j)
+    pub fn subtype(&mut self, left: Ty, right: Ty, out: &mut Coercion) -> Result<(), Clash> {
         todo!("R3j")
     }
 
-    /// Unify the delayed constraints, in order (the closure `subtype`
-    /// returns, compiler/ml/ctype.ml:4221-4225). O(constraints) plus the
-    /// unifications. (R3j)
-    pub fn force_subtype(&mut self, constraints: &[Constraint]) -> Result<(), Clash> {
+    /// The closure `subtype` returns (compiler/ml/ctype.ml:4219-4231):
+    ///
+    /// ```text
+    ///   function
+    ///   | () ->
+    ///     List.iter
+    ///       (function
+    ///         | trace0, t1, t2, pairs, ctx -> (
+    ///           try unify_pairs (ref env) t1 t2 pairs
+    ///           with Unify trace ->
+    ///             raise
+    ///               (Subtype
+    ///                  ( expand_trace env (List.rev trace0),
+    ///                    List.tl (List.tl trace),
+    ///                    ctx ))))
+    ///       (List.rev cstrs)
+    /// ```
+    ///
+    /// Each constraint of `coercion`, in order: when its `scopes` is not
+    /// what the constraint before it had, `Checker::open_scopes` makes
+    /// [`Checker::scopes`] the chain of its [`HeldScope`]s, outermost
+    /// first (`unify_pairs`: `univar_pairs := pairs`,
+    /// ctype.ml:2769-2771); then [`Checker::unify`]. A unification leaves `scopes` as it found it
+    /// on both answers. After the last constraint, and after a clash,
+    /// `scopes` is emptied: OCaml leaves the last constraint's list in
+    /// place, and every later `unify` of the typer starts by emptying it
+    /// (`let unify env ty1 ty2 = unify_pairs (ref env) ty1 ty2 []`,
+    /// 2773).
+    ///
+    /// NO speculation: the links stay, also those of the constraints
+    /// before a clash and of the one that clashed (in `Mode::Explain`
+    /// the top-level unification undoes its path compressions only,
+    /// `Checker::undo_compress`).
+    ///
+    /// A clash ends the call (the constraints after it are not
+    /// unified). In `Mode::Explain` [`Checker::subtype_trace`] holds
+    /// the constraint's pairs outermost first, and [`Checker::trace`]
+    /// the unification's trace without its first pair (`List.tl
+    /// (List.tl trace)`: OCaml's trace has two entries a pair, a type
+    /// and its expansion, and the kernel's one). Neither is expanded:
+    /// the expansion of a trace is the printer's (8.13). In
+    /// `Mode::Success` the unification has set `unexplained_failure`.
+    ///
+    /// No scope is open at the entry (asserted in debug builds). A
+    /// caller that never forces drops `coercion`: nothing of it is held
+    /// by the checker. Cost: O(constraints), one step each, plus the
+    /// unifications; one step a scope closed or opened between two
+    /// constraints, which over a whole coercion is at most twice the
+    /// scopes entered plus the scopes open at the last constraint (the
+    /// constraints are in the order of the walk); on a clash one step a
+    /// pair of the trace. (R3j)
+    pub fn force_subtype(&mut self, coercion: &Coercion) -> Result<(), Clash> {
         todo!("R3j")
     }
 
-    /// `enlarge_type` (compiler/ml/ctype.ml:3593-3613): the supertype a
-    /// coercion without a source annotation goes to, and whether it is the
-    /// type itself (`build_subtype`, ctype.ml:3431). O(nodes), marks. (R3j)
+    /// Make [`Checker::scopes`], which holds the chain of `from` (an
+    /// index of `coercion.scopes` or `NONE`), hold the chain of `to`,
+    /// outermost first, and return `to`. A row's parent has a lower
+    /// index than the row, so the two chains are walked back from their
+    /// ends, the one with the higher index first, until they meet: a
+    /// scope left on the `from` side is popped, one left on the `to`
+    /// side is counted; then the counted scopes are pushed from `to`
+    /// upwards and that tail of `scopes` is reversed. OCaml assigns a
+    /// list (`univar_pairs := pairs`, O(1)); this is O(scopes that
+    /// differ), one step each, no allocation. (R3j)
+    fn open_scopes(&mut self, coercion: &Coercion, from: u32, to: u32) -> u32 {
+        todo!("R3j")
+    }
+
+    /// `enlarge_type env ty` (compiler/ml/ctype.ml:3589-3593):
+    ///
+    /// ```text
+    /// let enlarge_type env ty =
+    ///   warn () := false;
+    ///   (* [level = 4] allows 2 expansions involving objects/variants *)
+    ///   let ty', _ = build_subtype env [] [] true 4 ty in
+    ///   (ty', !(warn ()))
+    /// ```
+    ///
+    /// The supertype a coercion without a source annotation is first
+    /// tried against (typecore.ml:3594-3604; the snapshot and the
+    /// unification are the caller's), and `warn`: whether a double
+    /// coercion might do better, which no caller of this compiler reads
+    /// (`let ty, _b = enlarge_type env ty'`, typecore.ml:3597) and which
+    /// is returned because OCaml returns it.
+    ///
+    /// `build_subtype` (3427-3587) is a recursion that returns a type
+    /// and a `change`; here one loop over [`Checker::enlarging`], a
+    /// frame a node entered ([`EnlargeFrame`]), with the results of the
+    /// nodes left on [`Checker::enlarged`]. The frame of the root is
+    /// pushed with `posi` and level 4 and `Checker::enlarge_visit` /
+    /// `Checker::enlarge_leave` run until the stack is back to its
+    /// length at the entry. `loops` is `[]` at this one entry and
+    /// nothing adds to it (3431-3437), so a variable is itself.
+    ///
+    /// `visited` is a list of the PATH (`let visited = t :: visited`,
+    /// passed down, gone on return; 3442, 3459, 3479), which an object
+    /// or a variant cuts (3506-3508, 3543-3544), searched with
+    /// `List.memq` (`memq_warn`, 3410-3414). Here
+    /// [`Checker::path_entries`] with an [`EnlargePath`]:
+    /// `Checker::on_path` is two loads and a compare (8.13, "The
+    /// visited list").
+    ///
+    /// What it writes: the new nodes, at the current level (`newty`,
+    /// `newvar`, `newconstr`); expansions with their memos
+    /// (`expand_abbrev` under `safe_abbrev`, 3466-3468, 3483); opened
+    /// rows. It links nothing and takes no speculation.
+    ///
+    /// Cost: one step a frame popped, at most three frames a node
+    /// entered and one a child; one node made for a node with a changed
+    /// child, a variant, or a closed end of a field list in a positive
+    /// position; no allocation outside the pools. A unit that never
+    /// calls it pays nothing: `path_entries` is empty until the first
+    /// call, then four bytes a node. (R3j)
     pub fn enlarge_type(&mut self, ty: Ty) -> (Ty, bool) {
         todo!("R3j")
     }
+
+    /// The loop of `subtype_rec` (compiler/ml/ctype.ml:3643-4101): pop
+    /// the frames of [`Checker::subtyping`] above `base` until none is
+    /// left. A loop of its own and not a third `Relation` of
+    /// `relate_frames`: a pair here carries its trace, collects where the
+    /// two relations clash, and has continuations the frames of
+    /// unification do not have (CHECKER_REWRITE 8.6, decision 119).
+    ///
+    /// - [`SubKind::Pair`]: `Checker::subtype_pair`.
+    /// - [`SubKind::Constrain`]: `Checker::constrain` of the frame's
+    ///   two types under its link: a constraint OCaml makes after a walk
+    ///   that is still on the stack (`subtype_fields`, 4121-4130).
+    /// - [`SubKind::Leave`]: the innermost scope of
+    ///   [`Checker::scopes`] is popped and `out.held` is the frame's
+    ///   `left` again (`univar_pairs := old_univars`, ctype.ml:1675).
+    /// - [`SubKind::Invariant`] (an argument that may occur both ways,
+    ///   3687-3691): a [`SubKind::Back`] frame of the same pair with the
+    ///   `dirty` of `out`; `out.quiet` one more and `out.dirty` false;
+    ///   the pair `left`, `right` under a new link.
+    /// - [`SubKind::Back`]: when `out.dirty` (the first direction made a
+    ///   constraint: `subtype_rec ... t1 t2 [] = []` is false and `&&`
+    ///   does not run the second), `Checker::subtype_close`; otherwise
+    ///   a [`SubKind::Close`] frame of the same pair and the pair
+    ///   `right`, `left` under a new link.
+    /// - [`SubKind::Close`]: `Checker::subtype_close`.
+    ///
+    /// `Err` is the link of two tuples of different lengths; the frames
+    /// stay for the caller to cut. One step a frame popped. No
+    /// recursion: a type 10,000 deep costs 16 bytes of frame a level.
+    /// (R3j)
+    fn subtype_frames(&mut self, out: &mut Coercion, base: usize) -> Result<(), u32> {
+        todo!("R3j")
+    }
+
+    /// A new entry of the trace: `(left, right) :: trace` for the trace
+    /// that ends in `parent` (`NONE`: the empty trace). In
+    /// `Mode::Explain` one [`TraceLink`] appended to `out.links`, whose
+    /// index is returned; in `Mode::Success` nothing, and `NONE`. Made
+    /// inside a quiet region too: `subtype_error` reports the trace of a
+    /// pair of tuples met there. O(1). (R3j)
+    #[inline]
+    fn subtype_link(&mut self, out: &mut Coercion, parent: u32, left: Ty, right: Ty) -> u32 {
+        todo!("R3j")
+    }
+
+    /// `subtype_rec env ((left, right) :: trace) left right cstrs` as a
+    /// pending call: one [`SubKind::Pair`] frame under a new link whose
+    /// parent is `parent`. O(1). (R3j)
+    #[inline]
+    fn push_subtype(&mut self, out: &mut Coercion, parent: u32, left: Ty, right: Ty) {
+        todo!("R3j")
+    }
+
+    /// `(trace, left, right, !(current_univar_pairs ()), None) :: cstrs`
+    /// (compiler/ml/ctype.ml:3655 and every arm that collects): inside a
+    /// quiet region (`out.quiet != 0`) only `out.dirty` is set, since
+    /// the list the constraint goes to is dropped (3688-3689: `= []`);
+    /// otherwise one [`Constraint`] appended with `link` and `out.held`.
+    /// O(1). (R3j)
+    #[inline]
+    fn constrain(&mut self, out: &mut Coercion, link: u32, left: Ty, right: Ty) {
+        todo!("R3j")
+    }
+
+    /// The end of a quiet region: `out.quiet` one less, `out.dirty` what
+    /// the frame kept. For an invariant argument (the frame's `left` is
+    /// not `NONE`) of which a direction made a constraint
+    /// (compiler/ml/ctype.ml:3692-3698):
+    ///
+    /// ```text
+    ///                     ( trace,
+    ///                       newty2 t1.level (Ttuple [t1]),
+    ///                       newty2 t2.level (Ttuple [t2]),
+    ///                       !(current_univar_pairs ()),
+    ///                       None )
+    ///                     :: cstrs
+    /// ```
+    ///
+    /// `Checker::constrain` under the frame's link (the constructor
+    /// pair's) of two new tuples of one element, each at the level its
+    /// element's node has, read without `repr` as OCaml reads it. The
+    /// tuples are not made inside an enclosing quiet region. For the
+    /// region of a row that ended in `Exit` (`left` is `NONE`) nothing
+    /// more: the frame below is the row's [`SubKind::Constrain`]. O(1);
+    /// two nodes and two list slots. (R3j)
+    fn subtype_close(&mut self, out: &mut Coercion, frame: SubFrame) {
+        todo!("R3j")
+    }
+
+    /// One pair of `subtype_rec` (compiler/ml/ctype.ml:3643-4101), in
+    /// OCaml's order of arms; `link` is the frame's (`trace`).
+    ///
+    /// 1. The two representatives; one node: nothing (3644-3646). The
+    ///    ordered pair in [`Checker::related`]: nothing; otherwise
+    ///    added (3648-3652).
+    /// 2. A variable on either side: `Checker::constrain` (3654-3655).
+    /// 3. Two arrows of one arity whose labels are the same
+    ///    (`Asttypes.same_arg_label`: the two label words are equal;
+    ///    3656-3669): for each parameter in order the pair of the RIGHT
+    ///    parameter's type and the left one's (`subtype_rec env
+    ///    ((a2.typ, a1.typ) :: trace) a2.typ a1.typ`), then the pair of
+    ///    the two results; pushed last first.
+    /// 4. Two tuples (3670-3672, `subtype_list` 4103-4107): different
+    ///    lengths, `Err(link)`; otherwise the pairs of the elements.
+    /// 5. Two constructors without arguments of one type: nothing
+    ///    (3673).
+    /// 6. A constructor on the left whose type expands publicly
+    ///    (`Checker::expands`: `generic_abbrev`, 1353-1357) and whose
+    ///    [`Checker::expand_once`] in [`ExpandMode::Safe`] gives a node
+    ///    (`safe_abbrev`, 1240-1247): the pair of that node and `t2`
+    ///    under the SAME link (3674-3675). Then the same on the right
+    ///    (3676-3678).
+    /// 7. Two constructors of one type (3679-3703):
+    ///    `Checker::subtype_constr`.
+    /// 8. A constructor on the left whose type is a private
+    ///    abbreviation (`generic_private_abbrev`, 1359-1369) and whose
+    ///    `expand_once` in [`ExpandMode::Opt`] gives a node: the pair of
+    ///    that node and `t2` under the same link (3704-3705).
+    /// 9. R6e's arms go HERE (3706-4023: a private record or variant on
+    ///    the right, `int` to `float`, a primitive and an unboxed
+    ///    variant, two variants, two records): not built; such a pair
+    ///    goes on and ends in step 13.
+    /// 10. Two objects (4026-4030): when both field lists end in a
+    ///     variable (`Checker::object_row`), `constrain`; otherwise
+    ///     `Checker::subtype_fields`.
+    /// 11. Two variants (4031-4034): `Checker::subtype_row`. R6e's two
+    ///     arms of a variant against another type (4035-4060) go after
+    ///     it.
+    /// 12. Two polymorphic types (4061-4071): `Checker::subtype_poly`.
+    ///     Two packages (4072-4099): `Checker::subtype_package`.
+    /// 13. Anything else: `constrain` (4100).
+    ///
+    /// O(1) plus the callee; one hash insertion. (R3j)
+    fn subtype_pair(&mut self, out: &mut Coercion, frame: SubFrame) -> Result<(), u32> {
+        todo!("R3j")
+    }
+
+    /// `generic_abbrev env p` with `flag` [`super::expand::ABBREV`]
+    /// (compiler/ml/ctype.ml:1353-1357) and `generic_private_abbrev env
+    /// p` with [`super::expand::PRIVATE`] (1359-1369) for type index
+    /// `type_index`: whether the row has the flag, or is another
+    /// spelling ([`super::expand::ALIAS`]) of a type that has it
+    /// (`Env.find_type_expansion` and `Env.find_type` find the
+    /// declaration through a module alias); the chain of spellings is
+    /// followed. The test `(repr body).level = generic_level` holds for
+    /// every manifest the table has: a manifest is a template, and the
+    /// destination of an equation is a generic copy (8.13). O(spellings
+    /// on the way), one row load each. (R3j)
+    #[inline]
+    fn expands(&self, type_index: u32, flag: u8) -> bool {
+        todo!("R3j")
+    }
+
+    /// `object_row ty` (compiler/ml/ctype.ml:347-352): the
+    /// representative that ends the field list `fields`, through fields
+    /// and objects. O(fields), one step a node; no write but path
+    /// compression. (R3j)
+    fn object_row(&mut self, fields: Ty) -> Ty {
+        todo!("R3j")
+    }
+
+    /// Two constructors of one type with arguments
+    /// (compiler/ml/ctype.ml:3679-3703), `d1` and `d2` their
+    /// descriptors:
+    ///
+    /// ```text
+    ///           List.fold_left2
+    ///             (fun cstrs v (t1, t2) ->
+    ///               let co, cn = Variance.get_upper v in
+    ///               if co then
+    ///                 if cn then
+    ///                   (* Invariant type argument: check both ways *)
+    ///                   if
+    ///                     subtype_rec env ((t1, t2) :: trace) t1 t2 [] = []
+    ///                     && subtype_rec env ((t2, t1) :: trace) t2 t1 [] = []
+    ///                   then cstrs
+    ///                   else (...) :: cstrs
+    ///                 else subtype_rec env ((t1, t2) :: trace) t1 t2 cstrs
+    ///               else if cn then subtype_rec env ((t2, t1) :: trace) t2 t1 cstrs
+    ///               else cstrs)
+    ///             cstrs decl.type_variance (List.combine tl1 tl2)
+    ///         with Not_found ->
+    ///           (trace, t1, t2, !(current_univar_pairs ()), None) :: cstrs)
+    /// ```
+    ///
+    /// A type whose declaration the table does not have
+    /// ([`super::expand::TypeTable::upper`] is `None`): `constrain` of
+    /// the two nodes. Otherwise one frame an argument, pushed last
+    /// argument first: both ways, [`SubKind::Invariant`] of the two
+    /// arguments under `link`; positively only, the pair; negatively
+    /// only, the pair swapped; neither, nothing. O(arguments), one step
+    /// each. (R3j)
+    fn subtype_constr(&mut self, out: &mut Coercion, [t1, t2]: [Ty; 2], d1: Node, d2: Node, link: u32) {
+        todo!("R3j")
+    }
+
+    /// `subtype_fields env trace ty1 ty2 cstrs`
+    /// (compiler/ml/ctype.ml:4109-4173) for two field lists, `link` the
+    /// trace of the two objects:
+    ///
+    /// ```text
+    ///   let fields1, rest1 = flatten_fields ty1 in
+    ///   let fields2, rest2 = flatten_fields ty2 in
+    ///   let pairs, miss1, miss2 = associate_fields fields1 fields2 in
+    ///   let cstrs =
+    ///     if rest2.desc = Tnil then cstrs
+    ///     else if miss1 = [] then
+    ///       subtype_rec env ((rest1, rest2) :: trace) rest1 rest2 cstrs
+    ///     else
+    ///       ( trace, build_fields (repr ty1).level miss1 rest1, rest2, ... ) :: cstrs
+    ///   in
+    ///   let cstrs =
+    ///     if miss2 = [] then cstrs
+    ///     else
+    ///       ( trace, rest1, build_fields (repr ty2).level miss2 (newvar ()), ... ) :: cstrs
+    ///   in
+    ///   List.fold_left (fun cstrs (f1, f2) -> ...) cstrs pairs
+    /// ```
+    ///
+    /// Both lists are flattened into `Extras::fields` (taken and put
+    /// back, cut to the length found) and merged from the last names to
+    /// the first (`associate_fields`, 330-342; two indices may spell one
+    /// name: differing indices compare their texts once, decision 32).
+    /// In that one pass:
+    /// - a common name pushes its frame, so that the common names are
+    ///   popped in name order: when the RIGHT field is immutable
+    ///   (`mutability_repr f2.f_mut`; [`cell_repr`], [`cell_mutable`] of
+    ///   `Checker::cell_of`), the pair of the two types under a new
+    ///   link; when it is mutable, a [`SubKind::Constrain`] under `link`
+    ///   of two new fields at the current level
+    ///   ([`Checker::build_field`], which shares the name and the CELL
+    ///   of the field it copies: 4152-4168), the left one over `rest1`
+    ///   and the right one over a new variable;
+    /// - a name only the left has is built on the chain that starts at
+    ///   `rest1` (`build_fields`, 325-328, at the level of the
+    ///   representative of `ty1`), unless `rest2` is `Tnil`;
+    /// - a name only the right has is built on a chain that starts at a
+    ///   new variable, at the level of the representative of `ty2`.
+    ///
+    /// Then, above the common names and so popped before them: a
+    /// `Constrain` of `rest1` and the right chain when the right has a
+    /// name the left lacks; and above it, unless `rest2` is `Tnil`, the
+    /// pair of the two rests under a new link when the left has no name
+    /// the right lacks, else a `Constrain` of the left chain and
+    /// `rest2`. Inside a quiet region no node is built and the two
+    /// `Constrain` frames carry `NONE`.
+    ///
+    /// Cost: the two flattenings (their sort included) and one step a
+    /// merge step; 16 bytes of frame a common name; one node a field
+    /// built. (R3j)
+    fn subtype_fields(&mut self, out: &mut Coercion, ty1: Ty, ty2: Ty, link: u32) {
+        todo!("R3j")
+    }
+
+    /// A new variable at the current level, without a name (`newvar
+    /// ()`). O(1); one node. (R3j)
+    #[inline]
+    fn fresh_var(&mut self) -> Ty {
+        todo!("R3j")
+    }
+
+    /// Two variants (compiler/ml/ctype.ml:4031-4034 with `subtype_row`,
+    /// 4175-4210), `t1` and `t2` the two nodes:
+    ///
+    /// ```text
+    ///       | Tvariant row1, Tvariant row2 -> (
+    ///         try subtype_row env trace row1 row2 cstrs
+    ///         with Exit ->
+    ///           (trace, t1, t2, !(current_univar_pairs ()), None) :: cstrs)
+    /// ```
+    ///
+    /// Both nodes are opened and flattened ([`Checker::open_row`],
+    /// [`Checker::flatten_row`]) into `Extras::row_scratch` above the
+    /// length found, and merged ([`Checker::merge_rows`]). By the two
+    /// rests `more1`, `more2`:
+    ///
+    /// 1. Two constructors of one type (4179-4180): the pair of the two
+    ///    rests under a new link, and nothing else.
+    /// 2. Each a variable, a constructor or `Tnil`, row 1 closed and
+    ///    with no tag row 2 lacks (4181-4192): each common tag, in the
+    ///    order of the pairs, read now ([`Checker::field_now_at`]): a
+    ///    present tag without a type or an `Either` tag with `c`,
+    ///    against a present tag without a type: nothing; two present
+    ///    tags with a type: the pair of the types; `Either` without `c`
+    ///    and with a type against a present tag with a type: the pair of
+    ///    its FIRST type and the type; an absent tag on the left:
+    ///    nothing; anything else is `Exit`.
+    /// 3. Two universal variables, rows closed alike and neither with a
+    ///    tag the other lacks (4193-4208): the pair of the two rests,
+    ///    popped first; then each common tag: two present tags without
+    ///    a type, two `Either` tags with `c` and no type, two absent
+    ///    tags: nothing; two present tags with a type, two `Either`
+    ///    tags without `c` and with ONE type each: the pair; anything
+    ///    else is `Exit`.
+    /// 4. Anything else: `Exit` (4209).
+    ///
+    /// The common tags are classified in one pass before a pair is
+    /// walked; the pairs to walk are kept above the merged rows in the
+    /// scratch and pushed last first. `Exit` with no pair before it:
+    /// `constrain` of the two nodes. `Exit` at a later tag: OCaml has
+    /// walked the pairs before it and drops what they collected (the
+    /// handler has the list of before), while the pairs they visited
+    /// stay in the table. So: a `Constrain` frame of the two nodes; above
+    /// it a [`SubKind::Close`] frame with `left` `NONE` and the `dirty`
+    /// of `out`; `out.quiet` one more and `out.dirty` false; then the
+    /// pairs before the `Exit` (CHECKER_REWRITE 8.6, decision 122). The
+    /// scratch is cut back to the length found.
+    ///
+    /// Cost: the two flattenings and the merge, one step a common tag
+    /// classified, 16 bytes of frame a pair. (R3j)
+    fn subtype_row(&mut self, out: &mut Coercion, [t1, t2]: [Ty; 2], link: u32) {
+        todo!("R3j")
+    }
+
+    /// Two polymorphic types (compiler/ml/ctype.ml:4061-4071), `d1` and
+    /// `d2` their descriptors (slot 0 the body, then the bound
+    /// variables):
+    ///
+    /// ```text
+    ///       | Tpoly (u1, []), Tpoly (u2, []) -> subtype_rec env trace u1 u2 cstrs
+    ///       | Tpoly (u1, tl1), Tpoly (u2, []) ->
+    ///         let _, u1' = instance_poly ~fixed:false tl1 u1 in
+    ///         subtype_rec env trace u1' u2 cstrs
+    ///       | Tpoly (u1, tl1), Tpoly (u2, tl2) -> (
+    ///         try
+    ///           enter_poly env (current_univar_pairs ()) u1 tl1 u2 tl2 (fun t1 t2 ->
+    ///               subtype_rec env trace t1 t2 cstrs)
+    ///         with Unify _ ->
+    ///           (trace, t1, t2, !(current_univar_pairs ()), None) :: cstrs)
+    /// ```
+    ///
+    /// Neither binds: the pair of the bodies under the SAME link. Only
+    /// the left binds: [`Checker::instance_poly`] of `t1` (not fixed, no
+    /// names; its variables go to `Extras::fields`' sibling scratch
+    /// [`Checker::rigid_vars`], taken and put back empty) and the pair
+    /// of the instance and the right body. Otherwise
+    /// [`Checker::enter_poly`]: a clash is `constrain` of the two
+    /// nodes; on success the two frames it pushed on
+    /// [`Checker::frames`] are taken off again, the scope it pushed is
+    /// appended to `out.scopes` as a [`HeldScope`] whose parent is
+    /// `out.held`, a [`SubKind::Leave`] frame keeps the old `out.held`
+    /// in its `left`, `out.held` is the new row, and the pair of the
+    /// bodies goes above the `Leave` frame under the same link. So a
+    /// constraint made below it records the scopes that are open where
+    /// it is made, and [`Checker::force_subtype`] opens them again
+    /// (CHECKER_REWRITE 8.6, decision 120). O(1) plus the callee; 24
+    /// bytes a scope entered. (R3j)
+    fn subtype_poly(&mut self, out: &mut Coercion, [t1, t2]: [Ty; 2], d1: Node, d2: Node, link: u32) {
+        todo!("R3j")
+    }
+
+    /// Two packages (compiler/ml/ctype.ml:4072-4099), `d1` and `d2`
+    /// their descriptors:
+    ///
+    /// ```text
+    ///         try
+    ///           let ntl1 = complete_type_list env nl2 t1.level (Mty_ident p1) nl1 tl1
+    ///           and ntl2 =
+    ///             complete_type_list env nl1 t2.level (Mty_ident p2) nl2 tl2
+    ///               ~allow_absent:true
+    ///           in
+    ///           let cstrs' =
+    ///             List.map
+    ///               (fun (n2, t2) ->
+    ///                 (trace, List.assoc n2 ntl1, t2, !(current_univar_pairs ()), None))
+    ///               ntl2
+    ///           in
+    ///           if eq_package_path env p1 p2 then cstrs' @ cstrs
+    ///           else
+    ///             (* need to check module subtyping *)
+    ///             let snap = Btype.snapshot () in
+    ///             try
+    ///               List.iter (fun (_, t1, t2, _, _) -> unify env t1 t2) cstrs';
+    ///               if !package_subtype env p1 nl1 tl1 p2 nl2 tl2 then (
+    ///                 Btype.backtrack snap;
+    ///                 cstrs' @ cstrs)
+    ///               else raise (Unify [])
+    ///             with Unify _ ->
+    ///               Btype.backtrack snap;
+    ///               raise Not_found
+    ///         with Not_found ->
+    ///           (trace, t1, t2, !(current_univar_pairs ()), None) :: cstrs)
+    /// ```
+    ///
+    /// No supplier ([`Checker::packages`] is `None`): `constrain` of
+    /// the two nodes, which unification then refuses. Otherwise one
+    /// merge of the two name lists
+    /// ([`super::rows::PackageDecls::compare`]), one
+    /// [`SubKind::Constrain`] frame a name of `ntl2`, in name order, so
+    /// that they are popped, and so forced, last name first (`cstrs' @
+    /// cstrs`, reversed with the rest at 4231):
+    /// - a name both list: the two arguments;
+    /// - a name only the RIGHT lists: the left module type's answer at
+    ///   the left node's level
+    ///   ([`super::rows::PackageDecls::complete`]) and the right
+    ///   argument; an answer that is no type ends the arm;
+    /// - a name only the LEFT lists (`~allow_absent:true`): the left
+    ///   argument and the right module type's answer at the right
+    ///   node's level; [`super::rows::Completion::Abstract`] and
+    ///   [`super::rows::Completion::Missing`] skip the name,
+    ///   [`super::rows::Completion::Other`] ends the arm.
+    ///
+    /// Then, unless the two paths are one index or
+    /// [`super::rows::PackageDecls::same_path`]: one speculation, each
+    /// pair of the frames unified in name order,
+    /// [`super::rows::PackageDecls::subtype`], and
+    /// [`Checker::restore`] on either answer. The arm that ends (also on
+    /// a clash of the trial or a `false`) takes its frames off and
+    /// `constrain`s the two nodes. The supplier is taken out of
+    /// `Checker::packages` for the calls and put back. The trial runs
+    /// under the scopes the walk has open; OCaml's `unify` there is the
+    /// typer's, which empties the list of scopes (2773), so that inside
+    /// a polymorphic type the constraints made after a trial record no
+    /// scope: not followed (CHECKER_REWRITE 8.6, decision 123).
+    ///
+    /// Cost: O(names of both), one step a merge step, 16 bytes of frame
+    /// a name, plus the supplier; for two paths the unifications and
+    /// the restore. Cold. (R3j)
+    #[cold]
+    #[inline(never)]
+    fn subtype_package(&mut self, out: &mut Coercion, [t1, t2]: [Ty; 2], d1: Node, d2: Node, link: u32) {
+        todo!("R3j")
+    }
+
+    /// Fill [`Checker::subtype_trace`] with the pairs of the trace that
+    /// ends in `link`, outermost first (`List.rev trace0`,
+    /// compiler/ml/ctype.ml:4226): the chain of [`TraceLink`]s is
+    /// followed to its root and the vector reversed. Nothing in
+    /// `Mode::Success` (`link` is `NONE`). O(pairs of the trace), one
+    /// step each. (R3j)
+    #[cold]
+    fn read_subtype_trace(&mut self, coercion: &Coercion, link: u32) {
+        todo!("R3j")
+    }
+
+    /// `memq_warn t visited` (compiler/ml/ctype.ml:3410-3414) for the
+    /// representative `ty`:
+    ///
+    /// ```text
+    /// let memq_warn t visited =
+    ///   if List.memq t visited then (
+    ///     warn () := true;
+    ///     true)
+    ///   else false
+    /// ```
+    ///
+    /// The entry of `ty` in [`Checker::path_entries`] (0 past its end):
+    /// an object or a variant (`row`) is in `visited` when its entry is
+    /// at or above `path.floor`, any other node when it is above
+    /// `path.base` (CHECKER_REWRITE 8.13, "The visited list"). Sets
+    /// `path.warn` when it answers true. O(1): one bounds test, one
+    /// load, one compare; OCaml scans the list. (R3j)
+    #[inline]
+    fn on_path(&self, path: &mut EnlargePath, ty: Ty, row: bool) -> bool {
+        todo!("R3j")
+    }
+
+    /// `let visited = t :: visited` for a node that is not an object or
+    /// a variant (compiler/ml/ctype.ml:3442, 3459, 3479): `path_clock`
+    /// one more, and that number as the entry of `ty`; the table grows
+    /// to the graph's length when `ty` is past its end. Returns the
+    /// entry `ty` had, which the node's leave frame puts back (an entry
+    /// an enclosing cut has hidden is in `visited` again when the walk
+    /// is back above the cut). O(1) amortized. (R3j)
+    fn enter_path(&mut self, ty: Ty) -> u32 {
+        todo!("R3j")
+    }
+
+    /// `t :: (if level' < level then [] else filter_visited visited)`
+    /// for an object or a variant `ty` (compiler/ml/ctype.ml:3506-3508,
+    /// 3543-3544; `filter_visited`, 3404-3408, drops the entries down to
+    /// the nearest object or variant): `Checker::enter_path`, then
+    /// `path.base` is the new entry, so that the nodes entered before
+    /// it that are not rows are out of `visited`; with `cut` (`level' <
+    /// level`) a frame `ENLARGE_FLOOR` that keeps `path.floor` is
+    /// pushed and `path.floor` is the new entry too, so that the rows
+    /// entered before it are out as well. Returns the entry `ty` had and
+    /// the `path.base` there was, for the leave frame, which the caller
+    /// pushes ABOVE the floor frame. O(1). (R3j)
+    fn enter_row(&mut self, path: &mut EnlargePath, ty: Ty, cut: bool) -> (u32, u32) {
+        todo!("R3j")
+    }
+
+    /// `has_constr_row' env t` after the expansion
+    /// (compiler/ml/ctype.ml:3425; btype.ml:212: `(not (is_Tconstr t))
+    /// && is_Tconstr (row_of_type t)`) for the representative
+    /// `expansion`: whether it is an object whose field list ends in a
+    /// constructor (`Checker::object_row`) or a variant whose row
+    /// ([`Checker::flatten_row`] of the opened node, the scratch cut
+    /// back) ends in one. O(fields) for an object or a variant, O(1)
+    /// otherwise. (R3j)
+    fn has_constr_row(&mut self, expansion: Ty) -> bool {
+        todo!("R3j")
+    }
+
+    /// One node of `build_subtype env visited loops posi level t`
+    /// (compiler/ml/ctype.ml:3427-3587) on the way down; `frame.state`
+    /// holds `posi` and `level`. Either the node's result is pushed on
+    /// [`Checker::enlarged`] at once, or a leave frame (`ENLARGE_LEAVE`,
+    /// with `a` the entry the node had and `b` the `path.base` there
+    /// was) and above it one frame a child, so that the children are
+    /// popped in OCaml's order and leave one result each: a visit, or
+    /// `ENLARGE_KEEP` for a child returned as it is, or
+    /// `ENLARGE_FRESH` for a new variable with `Changed`.
+    ///
+    /// - A variable (3430-3437): itself, `Unchanged` (`loops` is
+    ///   empty).
+    /// - An arrow (3438-3455), a tuple (3456-3465): on the path
+    ///   (`Checker::on_path`): itself. Otherwise
+    ///   `Checker::enter_path`; an arrow's parameters with `posi`
+    ///   turned, then its result.
+    /// - A constructor whose type expands publicly, with `level > 0`,
+    ///   whose [`Checker::expand_once`] in [`ExpandMode::Safe`] gives a
+    ///   node that is not `Checker::has_constr_row` (3465-3471): a
+    ///   leave frame with `a` 0 and no entry (the node is not added to
+    ///   `visited`), and the visit of the expansion at `pred_expand
+    ///   level`.
+    /// - Any other constructor (3472-3501): on the path, itself.
+    ///   Otherwise `enter_path`; with `level == 0`, `path.warn` when the
+    ///   type expands publicly to a node that is not `has_constr_row`
+    ///   (3482-3485: the expansion is made and memorized). A type
+    ///   whose declaration the table does not have, or without
+    ///   arguments: itself, the entry put back. Otherwise per argument
+    ///   by [`super::expand::TypeTable::upper`]: both ways, kept;
+    ///   negatively only, a visit with `posi` turned; positively only, a
+    ///   visit; neither, a new variable.
+    /// - A variant (3502-3537): on the path, or not static: itself.
+    ///   Otherwise `Checker::enter_row` with `pred_enlarge level`, and
+    ///   a visit at that level of the type of each present tag that
+    ///   has one, in the order of the row.
+    /// - An object (3538-3547): on the path, or its field list ends in
+    ///   a variable, a universal variable or a constructor: itself.
+    ///   Otherwise `enter_row` and the visit of the field list.
+    /// - A field (3548-3575): its type kept when its cell is mutable,
+    ///   visited otherwise; then the rest. No entry.
+    /// - `Tnil` (3576-3582): with `posi` a new variable, `Changed`;
+    ///   otherwise itself and `path.warn`.
+    /// - A polymorphic type (3584-3586): the visit of the body.
+    /// - A universal variable, a package (3587): itself.
+    ///
+    /// O(children) frames; one step a field of a variant read. (R3j)
+    fn enlarge_visit(&mut self, frame: EnlargeFrame, path: &mut EnlargePath) {
+        todo!("R3j")
+    }
+
+    /// One node of `build_subtype` on the way up: the results of its
+    /// children are the last entries of [`Checker::enlarged`], in the
+    /// order they were visited; they are replaced by the node's own.
+    /// `c` is the greatest `change` of the children (`collect`,
+    /// ctype.ml:3402).
+    ///
+    /// - An arrow, a tuple, a constructor with arguments, an object, a
+    ///   polymorphic type: with `c > Unchanged` a new node of the same
+    ///   kind at the current level over the children's results (an
+    ///   arrow keeps each parameter's label and location; a constructor
+    ///   gets an empty memo slot, `newconstr`; a polymorphic type its
+    ///   bound variables), with `c`; otherwise the node, `Unchanged`.
+    /// - An expanded constructor: the expansion's result when it is
+    ///   above `Unchanged`, otherwise the constructor, `Unchanged`
+    ///   (3470-3471).
+    /// - A field (3563-3575): with `c > Unchanged` a new field node
+    ///   with the name, the two results and a NEW cell holding the
+    ///   value the field's cell has now (`ref (Mutability_value
+    ///   (mutability_repr f.mutability))`: one cell node and one
+    ///   descriptor row).
+    /// - A variant: `Checker::enlarge_variant`, always `Changed`.
+    ///
+    /// Then the node's entry in [`Checker::path_entries`] is what the
+    /// frame's `a` holds and `path.base` its `b` (an expanded
+    /// constructor, a field and a polymorphic type made no entry and
+    /// write the base they found). O(children); one node. (R3j)
+    fn enlarge_leave(&mut self, frame: EnlargeFrame, path: &mut EnlargePath) {
+        todo!("R3j")
+    }
+
+    /// The public expansion of constructor node `ty` when
+    /// `build_subtype` may go through it (`safe_abbrev env t && not
+    /// (has_constr_row' env t)`, compiler/ml/ctype.ml:3466-3468,
+    /// 3483-3484): [`Checker::expand_once`] in [`ExpandMode::Safe`]; the
+    /// representative of what it gives unless that is
+    /// `Checker::has_constr_row`; otherwise `NONE`. The cost of the
+    /// expansion (a memo hit the second time). (R3j)
+    fn enlarge_expansion(&mut self, ty: Ty) -> Ty {
+        todo!("R3j")
+    }
+
+    /// The leave of a static variant (compiler/ml/ctype.ml:3510-3537);
+    /// `frame.state` holds `posi` and the `level` the node was entered
+    /// with:
+    ///
+    /// ```text
+    ///       let fields = filter_row_fields false row.row_fields in
+    ///       let fields =
+    ///         List.map
+    ///           (fun ((l, f) as orig) ->
+    ///             match row_field_repr f with
+    ///             | Rpresent None ->
+    ///               if posi then ((l, Reither (true, [], false, ref None)), Unchanged)
+    ///               else (orig, Unchanged)
+    ///             | Rpresent (Some t) ->
+    ///               let t', c = build_subtype env visited loops posi level' t in
+    ///               let f =
+    ///                 if posi && level > 0 then Reither (false, [t'], false, ref None)
+    ///                 else Rpresent (Some t')
+    ///               in
+    ///               ((l, f), c)
+    ///             | _ -> assert false)
+    ///           fields
+    ///       in
+    ///       let c = collect fields in
+    ///       let row =
+    ///         {
+    ///           row_fields = List.map fst fields;
+    ///           row_more = newvar ();
+    ///           row_closed = posi;
+    ///           row_fixed = false;
+    ///           row_name = (if c > Unchanged then None else row.row_name);
+    ///         }
+    ///       in
+    ///       (newty (Tvariant row), Changed)
+    /// ```
+    ///
+    /// The row is flattened again; the results of its typed tags are
+    /// the last entries of [`Checker::enlarged`], in the order of the
+    /// row. One new UNOPENED variant node at the current level (each of
+    /// its `Either` fields stands for a reference of its own, `ref
+    /// None`; "The reference of a variant field", rows.rs): one
+    /// `RowFieldRow` a tag that is not absent, the slots of the typed
+    /// tags' results in order, a new variable as `more`, and the
+    /// arguments of the row's name when the name is kept (those of the
+    /// LAST node of the chain). Its result is always `Changed`. Cost:
+    /// the flattening and two steps a tag; one node, one variable, one
+    /// descriptor row, one `VariantRow`. (R3j)
+    fn enlarge_variant(&mut self, frame: EnlargeFrame) {
+        todo!("R3j")
+    }
+}
+
+/// The end of a row in `Checker::subtype_row`, beside the tags `VAR`
+/// and `CONSTR`: `Tnil`, a universal variable, anything else.
+const NIL_END: u32 = 16;
+const UNIVAR_END: u32 = 17;
+const OTHER_END: u32 = 18;
+
+/// What one [`Checker::subtype`] collects and [`Checker::force_subtype`]
+/// unifies (the closure of compiler/ml/ctype.ml:4219-4231 as data). The
+/// caller owns it and may use it again: `subtype` empties it first. A
+/// caller that never forces drops it or passes it again; the checker
+/// holds nothing of it. (R3j; CHECKER_REWRITE 8.13)
+pub struct Coercion {
+    /// The constraints in the order they are unified (`List.rev cstrs`).
+    pub constraints: Vec<Constraint>,
+    /// The traces of the pairs walked, `Mode::Explain` only: OCaml's
+    /// `trace` is a list whose tail every deeper pair shares; here the
+    /// tail is the `parent` of a row.
+    pub links: Vec<TraceLink>,
+    /// The scopes of universal variables entered, each with the one
+    /// around it (`!(current_univar_pairs ())` as a constraint keeps
+    /// it).
+    pub scopes: Vec<HeldScope>,
+    /// Walk state, all three as below between calls. How many quiet
+    /// regions are open: an invariant argument's two directions, whose
+    /// constraints are counted and dropped (`subtype_rec ... [] = []`,
+    /// ctype.ml:3688-3689), or the tags of a row before its `Exit`.
+    pub quiet: u32,
+    /// The innermost scope open: an index of `scopes`, or `NONE`.
+    pub held: u32,
+    /// Whether the innermost quiet region has made a constraint.
+    pub dirty: bool,
+}
+
+impl Default for Coercion {
+    /// O(1): nothing collected; allocates nothing.
+    fn default() -> Self {
+        Coercion { constraints: Vec::new(), links: Vec::new(), scopes: Vec::new(), quiet: 0, held: NONE, dirty: false }
+    }
+}
+
+/// One pair of a trace of `subtype_rec` (`(t1, t2) :: trace`): 12 bytes,
+/// one a pair pushed in `Mode::Explain`. `parent` is the rest of the
+/// trace, an index of [`Coercion::links`] or `NONE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct TraceLink {
+    pub left: Ty,
+    pub right: Ty,
+    pub parent: u32,
+}
+
+/// One scope of universal variables a constraint was made under: 24
+/// bytes, one a scope `subtype_rec` enters (ctype.ml:4065-4069).
+/// `parent` is the scope around it, an index of [`Coercion::scopes`] or
+/// `NONE`. The partner nodes of `scope` are nodes of the graph, so every
+/// constraint that holds the scope sees the pairings the ones before it
+/// made, as OCaml's constraints share the `ref`s of one list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct HeldScope {
+    pub scope: super::rows::PolyScope,
+    pub parent: u32,
+}
+
+/// What a [`SubFrame`] asks for when it is popped
+/// (`Checker::subtype_frames`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SubKind {
+    /// `subtype_rec env trace left right cstrs`; `link` is `trace`.
+    Pair,
+    /// `(trace, left, right, ...) :: cstrs`, put off until the frames
+    /// above it are popped.
+    Constrain,
+    /// Leave the innermost scope of universal variables; `left` is the
+    /// `Coercion::held` to put back.
+    Leave,
+    /// An invariant argument, before its first direction.
+    Invariant,
+    /// An invariant argument, after its first direction.
+    Back,
+    /// The end of a quiet region; `dirty` is the `Coercion::dirty` to
+    /// put back. `left` is `NONE` for the region of a row.
+    Close,
+}
+
+/// One entry of [`Checker::subtyping`]: 16 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct SubFrame {
+    pub left: Ty,
+    pub right: Ty,
+    /// The trace: an index of [`Coercion::links`], or `NONE`.
+    pub link: u32,
+    pub kind: SubKind,
+    pub dirty: bool,
+}
+
+/// `change` of `build_subtype` (compiler/ml/ctype.ml:3398), ordered as
+/// OCaml orders it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Change {
+    Unchanged,
+    Equiv,
+    Changed,
+}
+
+/// The result of one node of `build_subtype`: 8 bytes, on
+/// [`Checker::enlarged`] until the node above it is left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct Enlarged {
+    pub ty: Ty,
+    pub change: Change,
+}
+
+/// One entry of [`Checker::enlarging`]: 16 bytes. `state` is one of the
+/// five kinds below in its low three bits, [`ENLARGE_POSI`], the level
+/// (the expansion budget, 0 to 4) from bit [`ENLARGE_LEVEL`], and for a
+/// leave frame [`ENLARGE_EXPANDED`] and [`ENLARGE_ENTERED`]. For a
+/// leave frame `a` is the entry the node had in
+/// [`Checker::path_entries`] and `b` the `EnlargePath::base` to put
+/// back; for a floor frame `a` is the `EnlargePath::floor` to put back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct EnlargeFrame {
+    pub ty: Ty,
+    pub a: u32,
+    pub b: u32,
+    pub state: u32,
+}
+
+/// `build_subtype env visited loops posi level ty`, pending.
+pub const ENLARGE_VISIT: u32 = 0;
+/// The children of `ty` are done.
+pub const ENLARGE_LEAVE: u32 = 1;
+/// Put `EnlargePath::floor` back.
+pub const ENLARGE_FLOOR: u32 = 2;
+/// The result is `ty` itself, `Unchanged`.
+pub const ENLARGE_KEEP: u32 = 3;
+/// The result is a new variable, `Changed` (ctype.ml:3494).
+pub const ENLARGE_FRESH: u32 = 4;
+/// The three bits of the kind.
+pub const ENLARGE_KIND: u32 = 7;
+/// `posi`.
+pub const ENLARGE_POSI: u32 = 8;
+/// The shift of the level.
+pub const ENLARGE_LEVEL: u32 = 4;
+/// A leave frame of a constructor that was expanded (ctype.ml:3470-3471).
+pub const ENLARGE_EXPANDED: u32 = 1 << 7;
+/// A leave frame of a node that made an entry on the path.
+pub const ENLARGE_ENTERED: u32 = 1 << 8;
+
+/// O(1): the `state` of a frame of kind `kind` with `posi` and `level`.
+#[inline]
+pub fn enlarge_state(kind: u32, posi: bool, level: u32) -> u32 {
+    kind | if posi { ENLARGE_POSI } else { 0 } | level << ENLARGE_LEVEL
+}
+
+/// `visited` and `warn` of one `build_subtype` walk
+/// (compiler/ml/ctype.ml:3427, 3394), held by `Checker::enlarge_type`:
+/// 12 bytes. A node that is not an object or a variant is in `visited`
+/// when its entry is above `base`; an object or a variant when its
+/// entry is at or above `floor` (CHECKER_REWRITE 8.13, "The visited
+/// list").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct EnlargePath {
+    pub base: u32,
+    pub floor: u32,
+    pub warn: bool,
 }
 
 #[cfg(test)]
@@ -782,7 +1746,16 @@ mod tests {
 
     #[test]
     fn sizes() {
-        assert_eq!(std::mem::size_of::<Constraint>(), 12);
+        // R3j: 8.13.
+        assert_eq!(std::mem::size_of::<Constraint>(), 16);
+        assert_eq!(std::mem::size_of::<TraceLink>(), 12);
+        assert_eq!(std::mem::size_of::<HeldScope>(), 24);
+        assert_eq!(std::mem::size_of::<SubKind>(), 1);
+        assert_eq!(std::mem::size_of::<SubFrame>(), 16);
+        assert_eq!(std::mem::size_of::<Change>(), 4);
+        assert_eq!(std::mem::size_of::<Enlarged>(), 8);
+        assert_eq!(std::mem::size_of::<EnlargeFrame>(), 16);
+        assert_eq!(std::mem::size_of::<EnlargePath>(), 12);
         assert_eq!(std::mem::size_of::<Relation>(), 2);
         assert_eq!(std::mem::size_of::<Renamed>(), 12);
     }

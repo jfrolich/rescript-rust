@@ -377,6 +377,31 @@ pub struct Checker {
     /// Scratch of `matches`: the variables `rigidify` collected
     /// (`vars`, ctype.ml:3150-3154). Empty between calls. (R3i)
     pub rigid_vars: Vec<Ty>,
+    /// The explicit stack of `subtype_rec` (compiler/ml/ctype.ml:
+    /// 3643-4101): not `frames`, whose kinds are unification's. Empty
+    /// between calls of [`Checker::subtype`]. (R3j; CHECKER_REWRITE 8.13)
+    pub subtyping: Vec<super::relate::SubFrame>,
+    /// After a failed [`Checker::subtype`] or
+    /// [`Checker::force_subtype`] in `Mode::Explain`: the pairs
+    /// `subtype_rec` went through down to the constraint that failed,
+    /// outermost first (`List.rev trace0`, compiler/ml/ctype.ml:4226; the
+    /// first component of the exception `Subtype`, ctype.ml:96), not
+    /// expanded. Cleared at the entry of both. (R3j)
+    pub subtype_trace: Vec<[Ty; 2]>,
+    /// The explicit stack of `build_subtype` (compiler/ml/ctype.ml:
+    /// 3427-3587) and the results of the nodes it has left, innermost
+    /// last. Empty between calls of [`Checker::enlarge_type`]. (R3j)
+    pub enlarging: Vec<super::relate::EnlargeFrame>,
+    pub enlarged: Vec<super::relate::Enlarged>,
+    /// `visited` of `build_subtype` (ctype.ml:3427) as a dense table:
+    /// per node the number of its entry on the path, a value of
+    /// `path_clock`, or 0. Not `marks`: the walk holds its entries
+    /// across an expansion, and an expansion of a type with a
+    /// constrained parameter unifies and takes generations of `marks`.
+    /// Empty until a unit calls [`Checker::enlarge_type`]; then it grows
+    /// to the graph's length: four bytes a node. (R3j)
+    pub path_entries: Vec<u32>,
+    pub path_clock: u32,
 }
 
 /// `Frame::extra` of the frame [`Checker::occur_pattern`] pushes for a
@@ -423,6 +448,12 @@ impl Checker {
             renamed: Vec::new(),
             renaming_trail: 0,
             rigid_vars: Vec::new(),
+            subtyping: Vec::new(),
+            subtype_trace: Vec::new(),
+            enlarging: Vec::new(),
+            enlarged: Vec::new(),
+            path_entries: Vec::new(),
+            path_clock: 0,
         }
     }
 
