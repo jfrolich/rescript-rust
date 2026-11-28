@@ -14,6 +14,6 @@ createRoot(window.document.getElementById("root")).render(
       </>
     }
     lede="A program states what must hold, in ReScript, next to the code, and the tools check it. No proof language, no solver, no new kind of type."
-    about={about}
+    about={{ ...about, current: "overview" }}
   />,
 );

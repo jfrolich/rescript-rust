@@ -14,6 +14,6 @@ createRoot(window.document.getElementById("root")).render(
       </>
     }
     lede="A reducer is a state machine, and its bugs are in the orders of actions nobody tried. Mark the machine and what must be true of it with @spec, and rescript verify goes through every state it can get into, then prints the shortest run that breaks a property. Every example on this page is live: the machines are explored in your browser."
-    about={{ ...about, pullRequest: 255, jump: { href: "#reference", text: "The rules →" } }}
+    about={{ ...about, current: "spec", pullRequest: 255, jump: { href: "#reference", text: "The rules →" } }}
   />,
 );
