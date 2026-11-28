@@ -3430,7 +3430,7 @@ changed lines without tests.
 | T6x | `out.rs`, `mod.rs`, `unit.rs`; the plan structs of the converted files | `Out<B>`, `Probed<B>`, `Free<B>`, `StatementStack<B>`; the `NodeId` and `ListId` fields of the plans (`loops::Plan`, `try_::Plan` and their like); `State::{leaf, seq, effect, complete_unit, complete, finish}`; deletes `from_node`, `node`, `at` and their statement twins from both traits and every call | T6m to T6q, T6w | - | 600 | no |
 | T6r-a | `close.rs`, `scope.rs`, `names.rs` (the log), `jsx.rs`, and the call sites ("T6r: the naming replay behind the interface", the cut) | The return arm of `close::decide`, `names::{close, adopt, eta_shape}`, `Log::{close, read_sites, unprinted, adopt}`, `scope::Site`, `jsx::{printed_form, jsx_tag}` | T6x, the tenth design turn | phases A, B | 530 (built) | no |
 | T6r-b | tests of `names.rs`, `globals.rs`, `oracle_tests.rs` | The tests T6r-d to T6r-f move, rewritten first | T6r-a | phases A, B | 250 | no |
-| T6r-c | `js_stmt.rs`, `rows_stmt.rs`, `emit/builder.rs` | `JsStmt::{below, literal_body, set_literal_body, bodies, body, set_body, binder, rest_fields, status, range_of}` on rows and on the builder (a design turn's pull request) | T6r-a | phases A, B | 500 | no |
+| T6r-c | `js_stmt.rs`, `rows_stmt.rs`, `emit/builder.rs`, `emit/row.rs` | `JsStmt::{below, literal_body, set_literal_body, bodies, body, set_body, binder, status, range_of}` on rows and on the builder (design turn 11, pull request 408) | T6r-a | phases A, B | 873 (built) | no |
 | T6r-d | `names.rs`, `mod.rs` | The replay walks lists; the root is the block `finish` holds | T6r-b, T6r-c | phases A, B | 500 | no |
 | T6r-e | `names.rs` | The literals through `below`; the prelude deleted | T6r-d | phases A, B | 350 | no |
 | T6r-f | `globals.rs`, `names.rs`, `mod.rs` | The external-shadow decision in the replay's walk | T6r-e | phases A, B | 450 | no |
@@ -6224,9 +6224,9 @@ the probe's commits, re-cut.
 
 | Slice | What | Files | Deletes | Lines | Tests that move | Check |
 | --- | --- | --- | --- | ---: | --- | --- |
-| T6r-a | The return arm through `return_calls`; `adopt` on the handle through `references`; the log's close without a view: `Site::entry`, `unprinted` by key, the printed form from the pools, the eta shape from the body's list | `close.rs`, `scope.rs`, `out.rs`, `mod.rs` (one line), `norm.rs`, `names.rs`, `jsx.rs`, `pools.rs`, `edit.rs`, `bridge_j.rs`, `globals.rs` (one pattern, one note), `call.rs`, `expr.rs`, `ffi_args.rs`, `import.rs`, four test files | `scope::return_sites`, `Log::pending`, the node-taking `eta_shape`, `printed_form` and `jsx_tag` | 296 added, 234 removed (built) | two `size_of` of `Site` (8 to 12); the JSX step test (three steps a member to two, renamed); test helpers of `names.rs` | built once: 591, 80, 46; check mode identical; prompt in 11.9 |
+| T6r-a | The return arm through `return_calls`; `adopt` on the handle through `references`; the log's close without a view: `Site::entry`, `unprinted` by key, the printed form from the pools, the eta shape from the body's list | `close.rs`, `scope.rs`, `out.rs`, `mod.rs` (one line), `norm.rs`, `names.rs`, `jsx.rs`, `pools.rs`, `edit.rs`, `bridge_j.rs`, `globals.rs` (one pattern, one note), `call.rs`, `expr.rs`, `ffi_args.rs`, `import.rs`, four test files | `scope::return_sites`, `Log::pending`, the node-taking `eta_shape`, `printed_form` and `jsx_tag` | 296 added, 234 removed (built) | two `size_of` of `Site` (8 to 12); the JSX step test (three steps a member to two, renamed); test helpers of `names.rs` | **On trunk** (pull request 407): 592, 81, 46; check mode identical |
 | T6r-b | The tests of decision 11 | `names.rs` (tests), `globals.rs` (tests), `oracle_tests.rs` | the decide-only tests of `globals.rs` that T6r-f moves | about 250, tests only | as decision 11 | every test passes on trunk as it is |
-| T6r-c | The replay's interface on both sides: `below`, `literal_body`, `set_literal_body`, `bodies`, `body`, `set_body`, `binder`, `rest_fields`, `status`, `range_of`; on the builder `HAS_GLOBAL` inherited as `HAS_FUN` is, and a function literal whose body is a list by header | `js_stmt.rs`, `rows_stmt.rs`, `emit/builder.rs`, their tests | nothing (no caller yet) | about 500 | none | a step test at 10,000 on each side; done by the next design turn in its own pull request |
+| T6r-c | The replay's interface on both sides: `below`, `literal_body`, `set_literal_body`, `bodies`, `body`, `set_body`, `binder`, `status`, `range_of` (`rest_fields` is not added: decision 12); on the builder `HAS_GLOBAL` inherited as `HAS_FUN` is, a function literal whose body is a list by header, and the flags of a substitution | `js_stmt.rs`, `js.rs`, `rows_stmt.rs`, `rows.rs`, `emit/builder.rs`, `emit/row.rs`, their tests | nothing (no caller yet) | 830 added and 43 removed, tests apart (built) | none | **On trunk** (pull request 408, design turn 11): 592, 102, 71 |
 | T6r-d | The replay walks lists: `Frame` holds a list, a compound statement is held while its lists are walked (`take_at`, `body`, `set_body`, `list`), the root is the block `finish` holds (decision 8); a literal's body by header (decision 2); the literals of a statement still found by the prelude's marks, keyed by `stmt_id` | `names.rs`, `mod.rs` (`finish`, `replay_names`, `Storage`) | the node-reading `Replay::child`, `Frame::statement`; `names.rs` reads no `View` outside the prelude | about 500 (the probe's step 4 less its literals) | the four allocation counts (decision 9: `held`, the list pool's reservation); `row_sizes` | moves equal statements on both corpora; `rg -n 'bir\.view\(' src/bir/lower/names.rs` outside tests shows the prelude only |
 | T6r-e | The literals through `below`; the prelude goes | `names.rs` | `Replay::prelude`, `Scratch::{marks, next}`, `Replayed::{ancestors, ambiguous_orders}`, `is_statement`, the five `ambiguous_orders` assertions | about 350 | the two step tests of decision 11 read `descended` | `rg -n 'ambiguous_orders\|fn prelude' src` is empty; the coordinator measures check mode here |
 | T6r-f | The external-shadow decision in the walk (decision 10): counts on entry and exit, `below` with `HAS_GLOBAL` when `Globals::active`, `element_bindings` where a list is entered | `globals.rs`, `names.rs`, `mod.rs` (`finish`) | `globals::{shadowed, binding_scope, bindings, rows}`, `Globals::{marks, epoch}`, the binding half of `Link` and `Row::binding`, the recursion of `deep_constant` | about 450 (the probe's step 5) | `ten_thousand_block_declarations_cost_one_step_per_element` (through the lowering) | the end state of the row: `rg -n 'View::J\|Op::J\|View::S[A-Z]\|Op::S[A-Z]\|parents\[' src/bir/lower` matches only in test modules; `globals_qualified` equal before and after on every unit |
@@ -6287,6 +6287,251 @@ list (the builder's owed items) moves to T6v.
   measured together about +0.10% of the check-mode build of a
   3,735-module application (the coordinator, on a Mac) against +0.3%
   for T6k to T6x; about +0.1% is left for the whole of T6r.
+
+**Design turn 11: slice T6r-c on trunk.** The second turn of the row.
+It checked its "before" first: on trunk at ab5e5a5898 `--lib
+bir::lower` 592 passed, `--lib bir::j` 81, `--lib emit::builder` 46,
+none ignored; `python3 ../scripts/count_lowering_ids.py --self-test`
+printed "count_lowering_ids self-test ok: 32 files, 0 transition
+calls"; the end-state search of the row printed 19 for `globals.rs` and
+42 for `names.rs`, and beside them the three whole test files that have
+no `mod tests` line to cut at (`js_stmt_tests.rs` 35, `js_tests.rs` 47,
+`oracle_tests.rs` 1).
+
+*T6r-a as built* (pull request 407, on trunk at ab5e5a5898): 592, 81,
+46; the allocation counts 86, 102, 86, 155; the test of decision 4 is
+`the_naming_log_agrees_on_a_preserved_element_whose_tag_is_moved_after_the_element_is_built`.
+What its review says the test shows: the one replacement of a built tag
+(the export fold, in `complete_unit`) happens, and the log and the pass
+still agree. What it does not show, and cannot: a `tag_named` that
+differs between the build of the element and a later read, because
+`printed_form` has one caller, `Log::unprinted`, which runs at a close
+and in `adopt`, both while a function scope is open, and the fold runs
+after every function is closed; no reader comes after the fold on
+either side. The 49,559 to 49,565 steps of the naming log on one corpus
+stay untraced (the explanation is reasoned, not measured).
+
+*T6r-c as built* (this turn's pull request, 408): nine functions of
+`JsStmt` with a body on rows and on the builder and a test on each
+side, in ten commits, and no caller in the lowering. `--lib bir::lower`
+592 (no test added: the functions have no caller there), `--lib bir::j`
+102 (21 added), `--lib emit::builder` 71 (25 added); the allocation
+counts and `size_of::<Rows>()` (416) unchanged; clippy and rustdoc
+clean with warnings denied; the cost-note check prints
+`missing/generic=0`; the self-test prints 0. Changed lines, tests
+apart (`git diff --numstat` against trunk): `rows_stmt.rs` 209 added,
+`js_stmt.rs` 169, `emit/builder.rs` 423 added and 26 removed, `row.rs`
+18 and 6, `js.rs` 7 and 4, `rows.rs` 4 and 3; tests 755 and 851 lines.
+The cut's estimate was about 500: the builder's function literal, its
+flags and the path of `substitute` are the difference.
+
+**Decision 12: `rest_fields` is not added.** The cut listed ten
+functions; nine are on trunk. No constructor of `Js` or `JsStmt` makes
+a `Rest` statement: `rg -n 'SRest\s*\{' src` finds the bridge
+(`bridge_j.rs:585`), `edit.rs` and tests, and under `bir/lower` and
+`bir/j` readers only; the lowering compiles a record rest as the
+expression `Js::record_rest` under a `Declare` (`record.rs:177`), and
+writes `binding: None` for every field of its descriptor
+(`record.rs:182`). So `Replay::statement`'s arm that names the fields
+of an `SRest` serves rows a test builds by hand
+(`the_replay_names_the_fields_of_a_rest_declaration_before_its_variable`)
+and nothing the lowering lowers. T6r-d deletes that arm with its test
+(a `Rest` in hand is named as a declaration, by `binder` and `status`,
+which answer for it). The same search for `SForRangeExisting` finds the
+bridge and tests only: the lowering writes a loop whose variable is
+declared before it as `for_range` without a first value
+(`loops.rs`, `finish_loop`), an `SForRange` of two parts. `range_of` keeps the
+second kind all the same, because rows can hold one and its body is
+three lines; `binder` gives `None` for it.
+
+**Decision 13: on the builder the readers of a statement in hand read
+its row, and four rows say more.** `binder`, `status`, `range_of` and
+`bodies` take a statement the caller holds, and the builder's handle
+carries the row (`S::row`): the first three read nothing else, no node.
+For that `emit/row.rs` now says: a `Try`'s payload is its exception
+variable plus one (0 without a handler); the `aux` of a `Declare` and
+of a `Rest` is the `LetKind` in two bits and the `UsedStats` above
+them, as on rows (`Builder::declare` is given that byte); a
+`ForRange`'s `aux` is the number of the kind of its bound; a
+`ForRangeExisting`'s payload is its variable plus one (0 when its
+target is no reference) and its `aux` as a `ForRange`'s. The builder
+has a constructor for the declaration only: the loops, the `try`, the
+`switch` and the rest declaration are T6d's, and each writes the row
+these readers read. So the builder's tests of `binder` and `range_of`
+build those rows by hand: they show what the reader reads, not that a
+constructor writes it. `bodies`, `take_body` and `set_body` are tested
+on the three compound statements the builder constructs (a block, an
+`if`, a `while`, labelled or not) and panic on a statement no
+constructor makes, as `substitute` does.
+
+**Decision 14: the visitor of `below` is given nothing, and the mark
+of a shadowed global is the implementation's.** `JsStmt::below(a, &mut
+S, want, visit: impl FnMut(Below) -> bool) -> u32`, `Below` being
+`Function(FuncId)` or `Global(VarId)`, 8 bytes. The visitor holds
+neither the implementation nor the pools (the descent holds both), so
+it can call no function of the interface: it can start no walk and
+replace no node, by its type. What the replay needs in the visit it
+has in hand: `Scratch::literals` for a header (decision 2), the tables
+of `Globals` for a global (T6r-f). For a global the visitor returns
+whether the reference prints as `globalThis.name` and the
+implementation marks it: rows with `Bir::qualify_global`, the builder
+with `var::QUALIFIED` in the reference's row (the print form is the
+seal's). The finds come in operand order on both sides (rows push the
+children last first; the builder turns each run of operands around).
+The number of nodes read is returned and the caller counts it, as
+`references` and `return_calls` do.
+
+- *What a global reference is.* On rows a `Var` whose variable has
+  `VarFlags::JS_GLOBAL` now; on the builder a `Var` row built with
+  `var::GLOBAL`, which `Js::var` of the builder's trait implementation
+  (T6v) takes from the same flag where the reference is built. The
+  flag is set where the variable is made (four sites: `external.rs:290`,
+  `import.rs:57`, `jsx.rs:143`, `untagged.rs:1132`), before any
+  reference to it, so the two agree. `globals::decide` asks another question of the same
+  variables: `is_js_global` of the identifier (`is_js()`, or global
+  with stamp 0). That every variable it answers yes for has the flag
+  is **not shown**: T6r-f's build puts a debug assertion in `decide`
+  before it converts, runs check mode over both corpora, and stops if
+  it fires.
+- *The pruning, counted.* `Builder::below` reads nothing of a statement
+  whose row has none of the flags wanted (the row is in the handle),
+  and below one that has, the row of each operand of each node with a
+  flag wanted. Of 1,000 and of 10,000 statements `v1(v1, v1 + x, v1);`
+  of which one in fifty has a function literal for `x` and one in fifty
+  a global, it reads seven rows of each of those and none of the
+  others: 140 and 1,400 for one flag, 280 and 2,800 for both
+  (`the_descent_reads_only_the_statements_that_hold_what_is_wanted`).
+  With both prunings taken out of the body the test read 7,000 where
+  140 is expected and failed (seen once, then restored). On rows the
+  same descent reads every expression node of every statement, three a
+  statement here: 3,000 and 30,000
+  (`the_descent_reads_every_statement_of_a_list_on_rows`), which is the
+  cost decision 1 accepts until the flip.
+- *`rows_stmt::is_statement`* is the twin of `names::is_statement`
+  until T6r-e deletes the latter with the prelude.
+
+**Decision 15: a list of a compound statement on the builder costs one
+move a statement each way, and the pool keeps what was taken.**
+`JsStmt::body` and `set_body` are O(1) and one step each on rows (the
+pool list of the block; the block written again over the list put
+back, with its flags and its `aux`; a debug build checks that the
+statements put back are the block's own, which makes "the list the
+caller took" an assertion and not prose). The builder keeps a compound
+statement as a node (T6b), so `Builder::take_body` moves the
+statements out of the node's vector into the pool of lists in flight,
+each with its row from the table, and `set_body` moves them back into
+the same vector, which kept its capacity (nothing is allocated in the
+arena): one step and one move a statement in each direction, 2 + 2n
+steps a list (`a_list_taken_and_put_back_costs_two_steps_a_statement_at_any_width`).
+The pool is cleared a unit and not before, so a replay that takes
+every list once leaves each statement in it three times (as built, as
+taken, as listed again) unless T6v changes the form: either a compound
+statement keeps its lists as lists until the seal, as a function
+literal does, or the pool reuses the slots of a list that was put
+back. That is T6v's decision, with the application's measurement; this
+turn states the cost and tests it. `bodies` of a `switch` is the
+number of its actions and `body` takes the list of one, so an action
+has to be a block: `JsStmt::switch` says so and a debug build of rows
+asserts it; every test of the lowering passes with the assertion (592).
+
+**Decision 16: the builder's function literal.** `Builder::function(header,
+body)` writes an arrow function node without parameters and with an
+empty body, a `Fun` row with the header as payload, `PURE`, `STRICT`,
+`DELAY_SAFE` (as `bir/j/facts.rs` gives a `JFun`) and `HAS_FUN`, and
+keeps the body as the list in flight it was given as in
+`Builder::literals`, a vector dense by header (8 bytes a header;
+`List::NONE` for no literal, `List::TAKEN` while the body is out).
+`literal_body` and `set_literal_body` are one indexed read and one
+store, one step each; at 1,000 and at 10,000 statements two steps, no
+statement moved, nothing allocated on either side. The literal's row
+has none of its body's flags, because the body is not below the node:
+who walks it takes it by header and reads the rows of its statements.
+Two things follow and are owed to T6v with the builder's trait
+implementation: `Builder::substitute` cannot enter a literal as rows
+do (the body is in the pool, which the walk cannot hold beside the
+builder it lends to `make`), so it panics at one instead of passing it
+(`a_substitution_does_not_pass_a_function_literal_silently`); and a
+copy of a literal (`copy_stmt`, `copy_fresh`) needs a header of its
+own and a copy of the list.
+
+**Decision 17: `Builder::substitute` writes the inherited flags of
+what it puts in.** The export fold replaces a reference to a moved
+variable after the statement was built, and what replaces it can be a
+reference to a global (`Replacement::Var`, `export.rs:1158`). The
+builder left the rows above a replaced reference alone, which was
+right while no flag a node inherits could come in; with `HAS_GLOBAL`
+the replay's descent, which runs after the fold, would have skipped
+the statement. The walk now keeps the path from the statement to the
+node in hand (`Builder::path`, one id a level, and `Builder::depths`
+beside its work stack, both kept) and a replacement whose row has
+`HAS_FUN`, `SEAL` or `HAS_GLOBAL` writes them into every row above it
+and into the handle's: one store a level, nothing for a replacement
+without such a flag
+(`a_global_substituted_into_a_statement_is_found_by_the_descent`).
+Rows have no such flag and need nothing.
+
+**Decision 18: the visitor of `Js::references` holds the pools by
+shared reference.** The review of the tenth turn found the rule "the
+visitor replaces no node" in prose only: the visitor held `&mut Pools`.
+The one caller, `Log::adopt`, reads them (`Log::unprinted`) and fills
+a log it took out of the pools before the call. The function and its
+visitor now take `&Pools`: a visitor cannot replace or release a node,
+and it could already not reach the work stack (taken out of the
+implementation for the walk) or start a walk (it holds `&Self`).
+`names.rs` compiles unchanged.
+
+**The interface on trunk after turn 11.** Each function has a test on
+each side; a step test at 1,000 and 10,000 where it has a loop, as a
+relation, with zero allocations on a second run where it walks.
+
+| Function | Rows | The builder | The site that will call it, and the probe's line |
+| --- | --- | --- | --- |
+| `below(a, &mut S, want, visit) -> u32` | one read per expression node of the statement outside literals, whatever `want` is, on `Rows::work` above what it holds; no allocation once the stack has the width and depth | nothing for a statement without a flag wanted; else the row of each operand of each node with one; kept storage (`recycle`) | T6r-e `Replay::statement`, the literals (probe 3b315e402, `names.rs`, `js.functions(bir, &mut statement, ..)`); T6r-f the same call with `HAS_GLOBAL` (probe 9bbf7177d, `js.globals(..)`) |
+| `literal_body(a, header) -> L` | O(1), one step: `func_owners[header]`, its block's pool list | O(1), one step: `literals[header]` | T6r-d `Replay::literal` (the probe read the list the visitor of `functions` was lent) |
+| `set_literal_body(a, header, L)` | O(1), one step: the block written again; a debug build reads each statement's owner | O(1), one step | T6r-d `Replay::statements`, a literal's frame done (the probe's second descent in `Replay::advance`, gap 7) |
+| `bodies(a, &S) -> u32` | O(1), one read of the row | O(1), the node (and the one below a label) | T6r-d `Replay::statement` (probe: the same) |
+| `body(a, &mut S, index) -> L` | O(1), one step | one step, and one step and one move a statement | T6r-d `Replay::advance`, and `Replay::statements` for the root (decision 8) |
+| `set_body(a, &mut S, index, L)` | O(1), one step; a debug build reads each statement's owner | one step, and one step and one move a statement; no arena allocation | T6r-d `Replay::give` and `Replay::statements` |
+| `binder(a, &S) -> Option<VarId>` | O(1), one read of the row | O(1), the row in the handle | T6r-d `Replay::statement`, `Replay::literal`, and the catch variable in `Replay::advance` |
+| `status(a, &S) -> u8` | O(1), the bits of `aux` above the kind | O(1), the same bits of the row | T6r-d `Replay::declaration` (probe gap 8) |
+| `range_of(a, &S) -> Option<(Option<VarId>, Kind)>` | O(1), the row and the operation of its bound | O(1), the row | T6r-d `Replay::finish` (probe gap 9) |
+| `rest_fields` | not added (decision 12) | | |
+
+Tests on rows (`rows_stmt_tests.rs`, module `replay`, 21): `binder` 1,
+`status` 2, `range_of` 1, `bodies` 1, `body` and `set_body` 6 (among
+them the step test and the two refusals), `literal_body` and
+`set_literal_body` 4, `below` 6. On the builder (`builder_tests.rs`,
+module `replay`, 25): `binder` 1, `status` 2, `range_of` 1, `bodies`
+1, `take_body` and `set_body` 4, `HAS_GLOBAL` 1, the literal 9 (among
+them `Reference::Function` reached and `HAS_FUN` inherited by every
+constructor, 50 operand positions each), `below` 5, `substitute` 1.
+
+**Shared scratch.** Who else can hold each structure live across a
+call of a function of this turn.
+
+| Function | Structure | Who else is on it, and why it is safe |
+| --- | --- | --- |
+| `Rows::below` | `Rows::work`, taken out for the walk and read above the length it had | `substitute` lends the implementation to `make` with its pending nodes on the stack: a `below` from there reads above them (`the_descent_leaves_what_the_work_stack_held`). `references` holds the stack as a local and gives its visitor `&Self`: `below` needs `&mut`. `return_calls` gives its visitor the pools alone; `effect_free` and `copy_members` call nothing back that holds the implementation. The visitor of `below` holds nothing |
+| `Rows::references` | the same | as before; its visitor now holds `&Self` and `&Pools` (decision 18): no walk, no replacement |
+| `Rows::body`, `set_body`, `literal_body`, `set_literal_body`, `bodies`, `binder`, `status`, `range_of` | none | they read and write one row and one pool list |
+| `Builder::below` | `Builder::spare` (`recycle`) | `references` gives its visitor `&Self` and `return_calls` two numbers: neither can call `below`. Its own visitor holds nothing. Were a walk started inside another, the inner would find `spare` empty and allocate, and the outer's write-back would drop the inner's storage: lost capacity, no wrong read |
+| `Builder::take_body`, `set_body` | `Builder::pool` | every list in flight is a run of it by index: an append moves no run. `set_body` empties the slots of the list it is given and no other |
+| `Builder::function`, `literal_body`, `set_literal_body` | `Builder::literals` | one slot a header; nothing else reads it |
+| `Builder::substitute` | `Builder::path`, `Builder::depths`, taken out for the walk | `make` holds the builder: a `substitute` from there finds both empty, allocates its own, and the outer write-back drops them (lost capacity). `copy_members` inside `make` is on `Builder::members` above its own base, as before |
+
+**Changes of this turn to what trunk had**, each with its reason:
+`Js::references` takes the pools by shared reference (decision 18);
+`JsStmt::switch` says an action is a block and `Rows::switch`
+debug-asserts it (decision 15); `emit/row.rs` says more for `Declare`,
+`Rest`, `Try`, `ForRange`, `ForRangeExisting` and `Var`, and has
+`var::QUALIFIED` (decisions 13 and 14); `Builder::reference` sets
+`HAS_GLOBAL`, `INHERITED` holds it (decision 1's builder half);
+`Builder::substitute` keeps a path and panics at a function literal
+(decisions 16 and 17); `Builder::operands_into` has an arm for a
+function literal (no operand). No test that existed on trunk changes,
+no pinned number moves, and no attribute is added to code the default
+build links (`#[inline]` on four bodies of `Rows`: `binder`, `status`,
+`body`, `literal_body`, which check mode alone runs).
 
 ### 11.5 Worker prompt for T4b
 
