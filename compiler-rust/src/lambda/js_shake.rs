@@ -968,6 +968,12 @@ fn collect_statement_idents(a: &JsArena, stmt: Stmt, stats: &mut JsIdentStats) {
                 collect_expression_idents(a, init, stats);
             }
             collect_expression_idents(a, info.end, stats);
+            // The loop uses its variable: a held first value declares it
+            // before the loop, and that declaration is live while the loop
+            // is (`for_ident` is `ident`, js_record_iter.ml:171-176, which
+            // `free_variables` adds to the used identifiers:
+            // js_analyzer.ml:59-61).
+            stats.add_used_ident(&a.ident(info.ident));
             stats
                 .used_idents
                 .extend(free_variables_of_block_with_defined(
@@ -1091,5 +1097,41 @@ fn js_statement_no_side_effects(a: &JsArena, stmt: Stmt) -> bool {
                 && info.catch.is_none_or(|(_, block)| list(block))
                 && info.finally.is_none_or(list)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_range_loop_keeps_its_held_pure_variable() {
+        // `free_variables` adds the loop's `for_ident` to the used
+        // identifiers (js_analyzer.ml:59-61), so the declaration is live.
+        let mut program = held_range_loop(|j| {
+            let cell = E::var(Ident::new("cell", 4, crate::ident::IdentFlags::NONE), j);
+            E::static_index(cell, "contents", None, j)
+        });
+        shake_program(&mut program);
+        assert_eq!(program.block.len(), 2);
+        assert!(matches!(program.arena.sk(program.block[0]), StmtKind::Variable(_)));
+    }
+
+    /// `let i = <start>; for (; i <= 3; ++i) { <effect> }`: the loop's first
+    /// value held before it, the body not reading `i`.
+    fn held_range_loop(start: impl FnOnce(&mut JsArena) -> Expr) -> Program {
+        use crate::ident::IdentFlags;
+        use crate::js_ir::ForDirection;
+        use crate::js_ir::build::{exp as E, stmt as S};
+        let mut j = JsArena::new();
+        let i = Ident::new("i", 1, IdentFlags::NONE);
+        let start = start(&mut j);
+        let declare = S::define(i, Some(start), LetKind::Variable, &mut j);
+        let end = E::int(3, &mut j);
+        let g = E::var(Ident::new("g", 2, IdentFlags::NONE), &mut j);
+        let call = E::call(g, &[], Default::default(), &mut j);
+        let effect = j.stmt(StmtKind::Exp(call));
+        let range = S::for_range(None, None, end, i, ForDirection::Upto, &[effect], &mut j);
+        Program { arena: j, block: vec![declare, range], exports: vec![], export_set: Default::default(), name_reservations: vec![] }
     }
 }
