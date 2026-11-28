@@ -4078,6 +4078,18 @@ impl PackageDecls for Supplier {
             .push((path(c, left), "compatible", path(c, right)));
         self.compatible
     }
+    fn same_path(&self, left: u32, right: u32) -> bool {
+        self.calls.borrow_mut().push((left, "same_path", right));
+        false
+    }
+    fn subtype(&mut self, c: &mut Checker, left: Node, right: Node) -> bool {
+        let path = |c: &Checker, node: Node| match c.extras.descriptors[node.a as usize] {
+            ExtraDescriptor::Package(row) => c.extras.packages[row as usize].path,
+            _ => panic!("not a package"),
+        };
+        self.calls.borrow_mut().push((path(c, left), "subtype", path(c, right)));
+        self.compatible
+    }
 }
 
 /// `Tpackage (path, names, arguments)` at `level`: the names are the
@@ -7948,4 +7960,1678 @@ fn the_copy_of_the_subject_shares_the_references_of_its_rows() {
     let (e1, e2) = (end(&mut c, pattern), end(&mut c, subject));
     assert_ne!(e2, Ty(NONE), "the subject's row was opened to share its reference");
     assert_eq!(e1, e2);
+}
+
+// ---------------------------------------------------------------------------
+// R3j: subtyping (CHECKER_REWRITE.md, section 8.13).
+// ---------------------------------------------------------------------------
+
+use super::relate::{Change, Coercion, Constraint, Enlarged};
+
+/// A new abstract type whose declaration the table has, with one byte of
+/// `Variance.get_upper` a parameter (`expand::MAY_POS`, `MAY_NEG`).
+fn declared(c: &mut Checker, upper: &[u8]) -> u32 {
+    let index = c.types.rows.len() as u32;
+    c.types.rows.push(TypeInfo { manifest: NONE, scope: 0, newtype: NONE, arity: upper.len() as u16, flags: 0, reserved: 0 });
+    c.types.variances.resize(index as usize, NONE);
+    c.types.variances.push(c.types.occurs.len() as u32);
+    c.types.occurs.extend_from_slice(upper);
+    index
+}
+
+/// A new type `type name<params> = body`, public or private.
+fn abbreviated(c: &mut Checker, params: &[Ty], body: Ty, private: bool) -> u32 {
+    let index = declared(c, &vec![3; params.len()]);
+    abbreviation(c, index, params, body);
+    if private {
+        c.types.rows[index as usize].flags = super::expand::PRIVATE;
+    }
+    index
+}
+
+/// The constraints as pairs of representatives.
+fn pairs(c: &mut Checker, out: &Coercion) -> Vec<[Ty; 2]> {
+    out.constraints.iter().map(|k| [c.g.repr(k.left), c.g.repr(k.right)]).collect()
+}
+
+/// The trace of constraint `at`, outermost first.
+fn trace_of(out: &Coercion, at: usize) -> Vec<[Ty; 2]> {
+    let mut trace = Vec::new();
+    let mut link = out.constraints[at].trace;
+    while link != NONE {
+        let row = out.links[link as usize];
+        trace.push([row.left, row.right]);
+        link = row.parent;
+    }
+    trace.reverse();
+    trace
+}
+
+/// What every call of `subtype` and `force_subtype` leaves.
+fn assert_subtype_left(c: &Checker, out: &Coercion) {
+    assert!(c.subtyping.is_empty() && c.frames.is_empty() && c.saved.is_empty() && c.scopes.is_empty());
+    assert!(c.subtyped.keys.is_empty(), "the table of pairs is cleared twice (ctype.ml:4213, 4217)");
+    assert_eq!(c.scope_floor, 0, "the floor of the scopes is what the entry found");
+    assert_eq!((out.quiet, out.held, out.dirty), (0, NONE, false));
+    assert!(c.extras.fields.is_empty() && c.extras.row_scratch.is_empty());
+}
+
+/// `subtype` collects and `force_subtype` unifies in the order collected
+/// (compiler/ml/ctype.ml:3654-3668, 4212-4231):
+///
+/// ```text
+///       | Tvar _, _ | _, Tvar _ ->
+///         (trace, t1, t2, !(current_univar_pairs ()), None) :: cstrs
+///       | Tarrow (params1, ret1), Tarrow (params2, ret2) when ... ->
+///         let cstrs =
+///           List.fold_left2
+///             (fun cstrs (a1 : Types.arg) (a2 : Types.arg) ->
+///               subtype_rec env ((a2.typ, a1.typ) :: trace) a2.typ a1.typ cstrs)
+///             cstrs params1 params2
+///         in
+///         subtype_rec env ((ret1, ret2) :: trace) ret1 ret2 cstrs
+/// ```
+///
+/// Witness: `(a1, b1) => r1` against `(a2, b2) => r2`, six variables.
+/// The constraints are `(a2, a1)`, `(b2, b1)`, `(r1, r2)`: the
+/// parameters swapped, in order, then the results. Nothing is linked by
+/// `subtype`. In `Mode::Explain` the trace of the second is the two
+/// arrows, then `(b2, b1)`; in `Mode::Success` no link is kept. Forcing
+/// links `a2` to `a1`, `b2` to `b1` and `r1` to `r2` (`unify env t1
+/// t2` in the direction of the constraint). A coercion of a variable
+/// against `int` is one constraint whose trace is the root pair.
+///
+/// Bodies: `subtype`, `subtype_frames`, `subtype_pair` (steps 1 to 3),
+/// `subtype_link`, `push_subtype`, `constrain`, `force_subtype`.
+///
+/// Reaches: R3j.
+#[test]
+#[ignore = "R3j build"]
+fn a_coercion_collects_its_constraints_and_forcing_unifies_them_in_order() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let [a1, b1, r1, a2, b2, r2] = [(); 6].map(|()| var(&mut c));
+        let left = arrow(&mut c, &[a1, b1], r1);
+        let right = arrow(&mut c, &[a2, b2], r2);
+        let before = nodes_now(&c);
+        let mut out = Coercion::default();
+        c.subtype(left, right, &mut out).unwrap();
+        assert_eq!(nodes_now(&c), before, "subtype links nothing");
+        assert_subtype_left(&c, &out);
+        assert_eq!(pairs(&mut c, &out), [[a2, a1], [b2, b1], [r1, r2]]);
+        if mode == Mode::Explain {
+            assert_eq!(trace_of(&out, 1), [[left, right], [b2, b1]]);
+            assert_eq!(trace_of(&out, 2), [[left, right], [r1, r2]]);
+        } else {
+            assert!(out.links.is_empty());
+            assert!(out.constraints.iter().all(|k| k.trace == NONE && k.scopes == NONE));
+        }
+        c.force_subtype(&out).unwrap();
+        assert_subtype_left(&c, &out);
+        assert_eq!((c.g.repr(a2), c.g.repr(b2), c.g.repr(r1)), (a1, b1, r2));
+        // A variable against a constructor.
+        let (x, int) = (var(&mut c), constr(&mut c, INT, &[]));
+        c.subtype(x, int, &mut out).unwrap();
+        assert_eq!(pairs(&mut c, &out), [[x, int]]);
+        if mode == Mode::Explain {
+            assert_eq!(trace_of(&out, 0), [[x, int]]);
+        }
+        // A caller that never forces: nothing is held, and the next call
+        // empties the collection.
+        c.subtype(int, int, &mut out).unwrap();
+        assert!(out.constraints.is_empty());
+        assert_eq!(c.g.repr(x), x);
+    }
+}
+
+/// Two tuples of different lengths are the one error `subtype` itself
+/// reports, and a clash of a forced constraint is the other
+/// (compiler/ml/ctype.ml:3614-3615, 4103-4107, 4222-4230):
+///
+/// ```text
+/// let subtype_error env trace =
+///   raise (Subtype (expand_trace env (List.rev trace), [], None))
+/// and subtype_list env trace tl1 tl2 cstrs =
+///   if List.length tl1 <> List.length tl2 then subtype_error env trace;
+///   List.fold_left2
+///     (fun cstrs t1 t2 -> subtype_rec env ((t1, t2) :: trace) t1 t2 cstrs)
+///     cstrs tl1 tl2
+/// ...
+///           try unify_pairs (ref env) t1 t2 pairs
+///           with Unify trace ->
+///             raise
+///               (Subtype
+///                  ( expand_trace env (List.rev trace0),
+///                    List.tl (List.tl trace),
+///                    ctx ))))
+/// ```
+///
+/// Witnesses:
+/// - `x => (int, int)` against `y => (int, int, int)`: `Err`; in
+///   `Mode::Explain` `subtype_trace` is the two arrows, then the two
+///   tuples, and `trace` is empty; in `Mode::Success`
+///   `unexplained_failure` is set. The collection is empty: the
+///   constraint `(y, x)` made before the error is not kept (no closure
+///   is returned).
+/// - `(x, (int, string))` against `(y, (z, w))` with `z` linked to
+///   `string` before the forcing: the constraints are `(x, y)`, `(int,
+///   z)`, `(string, w)`; forcing links `x` to `y` and then clashes at
+///   the second: `subtype_trace` is the two outer tuples, the two inner
+///   ones, `(int, z)`; `trace` is empty (the unification's one pair is
+///   dropped: `List.tl (List.tl trace)`); `x` STAYS linked (no
+///   snapshot) and `w` is not linked (the third is not unified).
+///
+/// Bodies: `subtype` (the error path), `subtype_pair` (step 4),
+/// `read_subtype_trace`, `force_subtype` (the clash).
+///
+/// Reaches: R3j.
+#[test]
+#[ignore = "R3j build"]
+fn a_tuple_of_another_length_and_a_forced_clash_are_the_two_errors() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let (x, y) = (var(&mut c), var(&mut c));
+        let ints = [(); 5].map(|()| constr(&mut c, INT, &[]));
+        let (short, long) = (tuple(&mut c, &ints[..2]), tuple(&mut c, &ints[2..]));
+        let (left, right) = (arrow(&mut c, &[x], short), arrow(&mut c, &[y], long));
+        let mut out = Coercion::default();
+        assert!(c.subtype(left, right, &mut out).is_err());
+        assert_subtype_left(&c, &out);
+        assert!(out.constraints.is_empty());
+        if mode == Mode::Explain {
+            assert_eq!(c.subtype_trace, [[left, right], [short, long]]);
+            assert!(c.trace.is_empty() && !c.unexplained_failure);
+        } else {
+            assert!(c.subtype_trace.is_empty() && c.unexplained_failure);
+        }
+
+        let mut c = checker(mode);
+        let [x, y, z, w] = [(); 4].map(|()| var(&mut c));
+        let (int, string) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]));
+        let (inner1, inner2) = (tuple(&mut c, &[int, string]), tuple(&mut c, &[z, w]));
+        let (left, right) = (tuple(&mut c, &[x, inner1]), tuple(&mut c, &[y, inner2]));
+        c.subtype(left, right, &mut out).unwrap();
+        assert_eq!(pairs(&mut c, &out), [[x, y], [int, z], [string, w]]);
+        let other = constr(&mut c, STRING, &[]);
+        c.unify(z, other).unwrap();
+        assert!(c.force_subtype(&out).is_err());
+        assert_subtype_left(&c, &out);
+        assert_eq!((c.g.repr(x), c.g.repr(w)), (y, w));
+        if mode == Mode::Explain {
+            assert_eq!(c.subtype_trace, [[left, right], [inner1, inner2], [int, z]]);
+            assert!(c.trace.is_empty(), "{:?}", c.trace);
+        } else {
+            assert!(c.unexplained_failure);
+        }
+    }
+}
+
+/// The arguments of two constructors of one type are related by the
+/// declaration's variance (compiler/ml/ctype.ml:3679-3704, quoted at
+/// `Checker::subtype_constr`), and the pairs a dropped walk visited stay
+/// in the table (3648-3652: `Type_pairs.add (subtypes ()) (t1, t2) ()`,
+/// which nothing takes back).
+///
+/// Witnesses, with `co<+'a>`, `contra<-'a>`, `inv<'a>`, `unused<'a>`
+/// and `box<'a>`, a type whose declaration the table does not have:
+/// - `co<x>` against `co<y>`: the constraint `(x, y)` under the trace
+///   of the two constructors, then `(x, y)`.
+/// - `contra<x>` against `contra<y>`: `(y, x)`.
+/// - `unused<x>` against `unused<y>`: nothing.
+/// - `box<x>` against `box<y>`: the two constructors themselves
+///   (`with Not_found`).
+/// - `inv<x>` against `inv<y>`: ONE constraint of two new tuples of one
+///   element, `(x)` and `(y)`, under the trace of the two constructors
+///   only; two nodes are made, no more.
+/// - `inv<int>` against `inv<int>` (two nodes of `int`): nothing, both
+///   directions are empty.
+/// - `inv<inv<x>>` against `inv<inv<y>>`: one constraint, of `(inv<x>)`
+///   and `(inv<y>)`: the inner test made a constraint of the outer's
+///   dropped list, and no node of its own (two nodes are made).
+/// - `(inv<p>, p)` against `(inv<q>, q)` with `p = (x, int)` and `q =
+///   (y, int)`: only the constraint of `(p)` and `(q)`: the first
+///   direction of the test visited `(p, q)`, so the second element is
+///   found in the table and nothing is collected for it.
+/// - `(p, inv<p>)` against `(q, inv<q>)`: `(x, y)`, then the constraint
+///   of `(p)` and `(q)`: the first direction finds `(p, q)` in the
+///   table and is empty, the second walks `(q, p)` and is not.
+///
+/// Bodies: `subtype_constr`, `subtype_frames` (`Invariant`, `Back`,
+/// `Close`), `subtype_close`, `constrain` (quiet).
+///
+/// Reaches: R3j.
+#[test]
+#[ignore = "R3j build"]
+fn the_arguments_of_a_constructor_follow_its_variance() {
+    use super::expand::{MAY_NEG, MAY_POS};
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let co = declared(&mut c, &[MAY_POS]);
+        let contra = declared(&mut c, &[MAY_NEG]);
+        let inv = declared(&mut c, &[MAY_POS | MAY_NEG]);
+        let unused = declared(&mut c, &[0]);
+        let mut out = Coercion::default();
+        let run = |c: &mut Checker, out: &mut Coercion, ty: u32| {
+            let (x, y) = (var(c), var(c));
+            let (left, right) = (constr(c, ty, &[x]), constr(c, ty, &[y]));
+            c.subtype(left, right, out).unwrap();
+            assert_subtype_left(c, out);
+            (x, y, left, right)
+        };
+        let (x, y, left, right) = run(&mut c, &mut out, co);
+        assert_eq!(pairs(&mut c, &out), [[x, y]]);
+        if mode == Mode::Explain {
+            assert_eq!(trace_of(&out, 0), [[left, right], [x, y]]);
+        }
+        let (x, y, ..) = run(&mut c, &mut out, contra);
+        assert_eq!(pairs(&mut c, &out), [[y, x]]);
+        run(&mut c, &mut out, unused);
+        assert!(out.constraints.is_empty());
+        let (_, _, left, right) = run(&mut c, &mut out, BOX);
+        assert_eq!(pairs(&mut c, &out), [[left, right]]);
+
+        let nodes = c.g.nodes.len();
+        let (x, y, left, right) = run(&mut c, &mut out, inv);
+        assert_eq!(c.g.nodes.len(), nodes + 6, "two variables, two constructors, two tuples");
+        let [[l, r]] = pairs(&mut c, &out)[..] else { panic!("{:?}", out.constraints) };
+        for (tuple, element) in [(l, x), (r, y)] {
+            let node = c.g.nodes[tuple.0 as usize];
+            assert_eq!((node.tag(), node.arity(), node.level), (TUPLE, 1, 2));
+            assert_eq!(c.g.lists[node.b as usize], element);
+        }
+        if mode == Mode::Explain {
+            assert_eq!(trace_of(&out, 0), [[left, right]]);
+        }
+        c.force_subtype(&out).unwrap();
+        assert_eq!(c.g.repr(x), y);
+
+        let (i1, i2) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
+        let (left, right) = (constr(&mut c, inv, &[i1]), constr(&mut c, inv, &[i2]));
+        c.subtype(left, right, &mut out).unwrap();
+        assert!(out.constraints.is_empty());
+
+        let (x, y) = (var(&mut c), var(&mut c));
+        let (ix, iy) = (constr(&mut c, inv, &[x]), constr(&mut c, inv, &[y]));
+        let (left, right) = (constr(&mut c, inv, &[ix]), constr(&mut c, inv, &[iy]));
+        let nodes = c.g.nodes.len();
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        assert_eq!(c.g.nodes.len(), nodes + 2);
+        let [[l, r]] = pairs(&mut c, &out)[..] else { panic!("{:?}", out.constraints) };
+        assert_eq!((c.g.lists[c.g.nodes[l.0 as usize].b as usize], c.g.lists[c.g.nodes[r.0 as usize].b as usize]), (ix, iy));
+
+        for swapped in [false, true] {
+            let (x, y) = (var(&mut c), var(&mut c));
+            let (i1, i2) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
+            let (p, q) = (tuple(&mut c, &[x, i1]), tuple(&mut c, &[y, i2]));
+            let (ip, iq) = (constr(&mut c, inv, &[p]), constr(&mut c, inv, &[q]));
+            let (left, right) = if swapped {
+                (tuple(&mut c, &[p, ip]), tuple(&mut c, &[q, iq]))
+            } else {
+                (tuple(&mut c, &[ip, p]), tuple(&mut c, &[iq, q]))
+            };
+            c.subtype(left, right, &mut out).unwrap();
+            assert_subtype_left(&c, &out);
+            let found = pairs(&mut c, &out);
+            let boxed = found.last().unwrap();
+            assert_eq!(
+                (c.g.lists[c.g.nodes[boxed[0].0 as usize].b as usize], c.g.lists[c.g.nodes[boxed[1].0 as usize].b as usize]),
+                (p, q)
+            );
+            if swapped {
+                assert_eq!(found[..found.len() - 1], [[x, y]]);
+            } else {
+                assert_eq!(found.len(), 1, "{found:?}");
+            }
+        }
+    }
+}
+
+/// Abbreviations: a public one is expanded on either side, a private
+/// one on the left only, and a pair no arm of R3j takes is a constraint
+/// that unification refuses (compiler/ml/ctype.ml:3672-3678, 3705-3706,
+/// 4101):
+///
+/// ```text
+///       | Tconstr (p1, [], _), Tconstr (p2, [], _) when Path.same p1 p2 -> cstrs
+///       | Tconstr (p1, _tl1, _abbrev1), _
+///         when generic_abbrev env p1 && safe_abbrev env t1 ->
+///         subtype_rec env trace (expand_abbrev env t1) t2 cstrs
+///       | _, Tconstr (p2, _tl2, _abbrev2)
+///         when generic_abbrev env p2 && safe_abbrev env t2 ->
+///         subtype_rec env trace t1 (expand_abbrev env t2) cstrs
+/// ...
+///       | Tconstr (p1, _, _), _ when generic_private_abbrev env p1 ->
+///         subtype_rec env trace (expand_abbrev_opt env t1) t2 cstrs
+/// ...
+///       | _, _ -> (trace, t1, t2, !(current_univar_pairs ()), None) :: cstrs)
+/// ```
+///
+/// Witnesses:
+/// - `myint` against `int`, and `int` against `myint`: no constraint;
+///   the expansion is memorized (the node of `myint` expands to the
+///   same node afterwards).
+/// - `pa<x>` against `(y, int)` (`type pa<'x> = ('x, int)`): the
+///   constraint `(x', y)` with `x'` the node `x` is in the expansion,
+///   under the trace of the root pair then `(x', y)`: an expansion adds
+///   no pair to the trace.
+/// - `priv` (`type priv = private int`) against `int`: no constraint.
+///   `int` against `priv`: the constraint `(int, priv)`, which forcing
+///   refuses: a private abbreviation is not expanded on the right, nor
+///   by unification.
+/// - `N.t` against `M.t` (`module N = M`, another spelling of an
+///   abstract type): the constraint of the two, which forcing accepts
+///   (unification expands the spelling).
+/// - What R6e's arms would take, refused here by a constraint: `int`
+///   against `string` (two constructors without arguments of two
+///   types: 3707-4028, `int` to `float` among them), and a closed
+///   variant against a constructor (4039-4062).
+///
+/// Bodies: `subtype_pair` (steps 5, 6, 8, 9, 13), `expands`.
+///
+/// Reaches: R3f, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn abbreviations_expand_and_what_is_left_out_is_refused() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let mut out = Coercion::default();
+        let (myint, int) = (constr(&mut c, MYINT, &[]), constr(&mut c, INT, &[]));
+        for (left, right) in [(myint, int), (int, myint)] {
+            c.subtype(left, right, &mut out).unwrap();
+            assert!(out.constraints.is_empty());
+            assert_subtype_left(&c, &out);
+        }
+        let memorized = c.expand_once(myint, ExpandMode::Safe).unwrap();
+        assert_eq!(c.expand_once(myint, ExpandMode::Safe).unwrap(), memorized);
+
+        let (x, y) = (var(&mut c), var(&mut c));
+        let i = constr(&mut c, INT, &[]);
+        let (left, right) = (constr(&mut c, PA, &[x]), tuple(&mut c, &[y, i]));
+        c.subtype(left, right, &mut out).unwrap();
+        assert_eq!(pairs(&mut c, &out), [[x, y]]);
+        if mode == Mode::Explain {
+            assert_eq!(trace_of(&out, 0).len(), 2);
+            assert_eq!(trace_of(&out, 0)[0], [left, right]);
+        }
+
+        let body = constr_at(&mut c, GENERIC, INT, &[]);
+        let private = abbreviated(&mut c, &[], body, true);
+        let (p, int) = (constr(&mut c, private, &[]), constr(&mut c, INT, &[]));
+        c.subtype(p, int, &mut out).unwrap();
+        assert!(out.constraints.is_empty());
+        c.subtype(int, p, &mut out).unwrap();
+        assert_eq!(pairs(&mut c, &out), [[int, p]]);
+        assert!(c.force_subtype(&out).is_err());
+        assert_subtype_left(&c, &out);
+
+        let (nt, t) = (constr(&mut c, NT, &[]), constr(&mut c, T, &[]));
+        c.subtype(nt, t, &mut out).unwrap();
+        assert_eq!(pairs(&mut c, &out), [[nt, t]]);
+        c.force_subtype(&out).unwrap();
+
+        let (int, string) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]));
+        c.subtype(int, string, &mut out).unwrap();
+        assert_eq!(pairs(&mut c, &out), [[int, string]]);
+        assert!(c.force_subtype(&out).is_err());
+        let nil = nil_at(&mut c, 2);
+        let row = variant_at(&mut c, 2, &[("A", Tag::Present(None))], nil, true, NONE);
+        let r = constr(&mut c, R, &[]);
+        c.subtype(row, r, &mut out).unwrap();
+        assert_eq!(pairs(&mut c, &out), [[row, r]]);
+        assert!(c.force_subtype(&out).is_err());
+        assert_subtype_left(&c, &out);
+    }
+}
+
+/// Two objects (compiler/ml/ctype.ml:4030-4034 and `subtype_fields`,
+/// 4109-4173, quoted at `Checker::subtype_fields`):
+///
+/// ```text
+///       | Tobject f1, Tobject f2
+///         when is_Tvar (object_row f1) && is_Tvar (object_row f2) ->
+///         (* Same row variable implies same object. *)
+///         (trace, t1, t2, !(current_univar_pairs ()), None) :: cstrs
+///       | Tobject f1, Tobject f2 -> subtype_fields env trace f1 f2 cstrs
+/// ```
+///
+/// Witnesses (a closed object ends in `Tnil`):
+/// - `{a: x, b: int}` against `{a: y}`, both closed: the one constraint
+///   `(x, y)`, under the two objects, then the two field types
+///   (`poly(x;)`, `poly(y;)`); the two bodies add no pair (`Tpoly (u1,
+///   []), Tpoly (u2, []) -> subtype_rec env trace u1 u2 cstrs`, 4063:
+///   the SAME trace). No constraint for `b` (`rest2.desc = Tnil`).
+/// - `{a: int}` against `{a: int, b: int}`, both closed: one
+///   constraint, `Tnil` against a NEW field `b` over a new variable at
+///   the level of the right field list; forcing clashes.
+/// - `{a: int, b: int}` closed against `{a: int, ..r}`: one constraint,
+///   a new field `b` over `Tnil` at the level of the left list, sharing
+///   the cell of the left `b`, against `r`; forcing links `r`.
+/// - `{.. a: x}` against `{.. a: y}`, both ending in a variable: the
+///   two objects themselves.
+/// - a mutable target field, `{a: x}` against `{mutable a: y}`: one
+///   constraint of two new fields at the current level, the left one
+///   with the cell of the left `a` over the left rest (`Tnil`), the
+///   right one with the cell of the right `a` over a new variable; `x`
+///   and `y` are their types.
+/// - inside a quiet region (an invariant argument) no field is built:
+///   `inv<{a: int}>` against `inv<{a: int, b: int}>` makes two nodes,
+///   the two tuples.
+///
+/// Bodies: `subtype_pair` (step 10), `object_row`, `subtype_fields`
+/// (every branch), `fresh_var`.
+///
+/// Reaches: R3e, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn objects_are_related_field_by_field() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let mut out = Coercion::default();
+        let field_of = |c: &Checker, field: Ty| {
+            let node = c.g.nodes[field.0 as usize];
+            let ExtraDescriptor::Field { mutability, .. } = c.extras.descriptors[node.a as usize] else {
+                panic!("not a field: {node:?}");
+            };
+            (node.a, mutability, node.level, c.g.lists[node.b as usize], c.g.lists[node.b as usize + 1])
+        };
+        let (x, y) = (var(&mut c), var(&mut c));
+        let int = constr(&mut c, INT, &[]);
+        let (nil1, nil2) = (nil_at(&mut c, 2), nil_at(&mut c, 2));
+        let (left, lf) = obj(&mut c, &[("a", false, x), ("b", false, int)], nil1);
+        let (right, rf) = obj(&mut c, &[("a", false, y)], nil2);
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        assert_eq!(pairs(&mut c, &out), [[x, y]]);
+        if mode == Mode::Explain {
+            let types = [field_of(&c, lf[0]).3, field_of(&c, rf[0]).3];
+            assert_eq!(trace_of(&out, 0), [[left, right], types]);
+        }
+
+        c.g.begin_def();
+        let (nil1, nil2) = (nil_at(&mut c, 2), nil_at(&mut c, 2));
+        let (i1, i2, i3) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
+        let (small, _) = obj(&mut c, &[("a", false, i1)], nil1);
+        let (large, large_fields) = obj(&mut c, &[("a", false, i2), ("b", false, i3)], nil2);
+        let b_of_large = field_of(&c, large_fields[1]);
+        c.subtype(small, large, &mut out).unwrap();
+        let [[l, r]] = pairs(&mut c, &out)[..] else { panic!("{:?}", out.constraints) };
+        let built = field_of(&c, r);
+        assert_eq!(l, nil1);
+        assert_eq!((built.0, built.1, built.3), (b_of_large.0, b_of_large.1, b_of_large.3));
+        assert_eq!(built.2, c.g.nodes[large_fields[0].0 as usize].level, "at the level of the right list");
+        let end = c.g.nodes[built.4.0 as usize];
+        assert_eq!((end.tag(), end.level), (VAR, 3), "a new variable at the current level");
+        assert!(c.force_subtype(&out).is_err());
+        if mode == Mode::Explain {
+            assert_eq!(c.subtype_trace, [[small, large]]);
+        }
+
+        let r = var(&mut c);
+        let i4 = constr(&mut c, INT, &[]);
+        let (open, _) = obj(&mut c, &[("a", false, i4)], r);
+        c.subtype(large, open, &mut out).unwrap();
+        let [[l, rest]] = pairs(&mut c, &out)[..] else { panic!("{:?}", out.constraints) };
+        let built = field_of(&c, l);
+        assert_eq!((rest, built.0, built.4), (r, b_of_large.0, nil2));
+        c.force_subtype(&out).unwrap();
+        assert_eq!(c.g.repr(r), l);
+        c.g.end_def();
+
+        let (x, y, r1, r2) = (var(&mut c), var(&mut c), var(&mut c), var(&mut c));
+        let (left, _) = obj(&mut c, &[("a", false, x)], r1);
+        let (right, _) = obj(&mut c, &[("a", false, y)], r2);
+        c.subtype(left, right, &mut out).unwrap();
+        assert_eq!(pairs(&mut c, &out), [[left, right]]);
+
+        c.g.begin_def();
+        let (x, y) = (var_at(&mut c, 2), var_at(&mut c, 2));
+        let (nil1, nil2) = (nil_at(&mut c, 2), nil_at(&mut c, 2));
+        let (left, lf) = obj(&mut c, &[("a", false, x)], nil1);
+        let (right, rf) = obj(&mut c, &[("a", true, y)], nil2);
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        let [[source, target]] = pairs(&mut c, &out)[..] else { panic!("{:?}", out.constraints) };
+        let (source, target) = (field_of(&c, source), field_of(&c, target));
+        let (f1, f2) = (field_of(&c, lf[0]), field_of(&c, rf[0]));
+        assert_eq!((source.0, source.1, source.2, source.3, source.4), (f1.0, f1.1, 3, f1.3, nil1));
+        assert_eq!((target.0, target.1, target.2, target.3), (f2.0, f2.1, 3, f2.3));
+        assert_eq!(c.g.nodes[target.4.0 as usize].tag(), VAR);
+        if mode == Mode::Explain {
+            assert_eq!(trace_of(&out, 0), [[left, right]]);
+        }
+        c.g.end_def();
+
+        let inv = declared(&mut c, &[3]);
+        let (nil1, nil2) = (nil_at(&mut c, 2), nil_at(&mut c, 2));
+        let (i1, i2, i3) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
+        let (small, _) = obj(&mut c, &[("a", false, i1)], nil1);
+        let (large, _) = obj(&mut c, &[("a", false, i2), ("b", false, i3)], nil2);
+        let (left, right) = (constr(&mut c, inv, &[small]), constr(&mut c, inv, &[large]));
+        let nodes = c.g.nodes.len();
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        assert_eq!((out.constraints.len(), c.g.nodes.len()), (1, nodes + 2));
+    }
+}
+
+/// Two variants (compiler/ml/ctype.ml:4035-4038 and `subtype_row`,
+/// 4175-4210):
+///
+/// ```text
+///   | (Tvar _ | Tconstr _ | Tnil), (Tvar _ | Tconstr _ | Tnil)
+///     when row1.row_closed && r1 = [] ->
+///     List.fold_left
+///       (fun cstrs (_, f1, f2) ->
+///         match (row_field_repr f1, row_field_repr f2) with
+///         | (Rpresent None | Reither (true, _, _, _)), Rpresent None -> cstrs
+///         | Rpresent (Some t1), Rpresent (Some t2) ->
+///           subtype_rec env ((t1, t2) :: trace) t1 t2 cstrs
+///         | Reither (false, t1 :: _, _, _), Rpresent (Some t2) ->
+///           subtype_rec env ((t1, t2) :: trace) t1 t2 cstrs
+///         | Rabsent, _ -> cstrs
+///         | _ -> raise Exit)
+///       cstrs pairs
+/// ...
+///   | _ -> raise Exit
+/// ```
+///
+/// Witnesses (rows closed and over `Tnil` unless said):
+/// - `[#A | #B(x)]` against `[#A | #B(y) | #C]`: the constraint `(x,
+///   y)` under the two rows, then `(x, y)`.
+/// - `[#A | #C]` against `[#A]`: row 1 has a tag row 2 lacks: `Exit`,
+///   the constraint of the two rows.
+/// - an OPEN row 1 `[> #A]` against `[#A]`: `Exit`.
+/// - `[< #B(x) & ...]` (`Reither (false, [x], _, _)`) against
+///   `[#B(y)]`: `(x, y)`.
+/// - `Exit` after a pair was walked: `([#A | #B(x)], x)` against
+///   `([#A(int) | #B(y)], y)`. The pairs of a row are met last tag
+///   first (`merge_row_fields` conses, ctype.ml:374), so `#B` is walked
+///   and collects `(x, y)`, then `#A` (`Rpresent None` against
+///   `Rpresent (Some _)`) is `Exit`: the handler has the list of
+///   BEFORE the row, so `(x, y)` is dropped and the two rows are the
+///   constraint; and `(x, y)` stays in the table, so the second
+///   element of the tuple collects nothing. One constraint in all.
+/// - two rows over one constructor (`[#A | t]` twice, `t` two nodes of
+///   one type without arguments): nothing (4180-4181, then 3672).
+/// - two rows over universal variables with the same tags: the
+///   constraint of the two rests first, then the tags' (4195-4210).
+///
+/// Bodies: `subtype_pair` (step 11), `subtype_row` (the four cases,
+/// the quiet region of an `Exit`), `subtype_close` (`left` `NONE`).
+///
+/// Reaches: R3f, R3g, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn variants_are_related_tag_by_tag() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let mut out = Coercion::default();
+        let closed = |c: &mut Checker, tags: &[(&str, Tag)]| {
+            let nil = nil_at(c, 2);
+            variant_at(c, 2, tags, nil, true, NONE)
+        };
+        let (x, y) = (var(&mut c), var(&mut c));
+        let left = closed(&mut c, &[("A", Tag::Present(None)), ("B", Tag::Present(Some(x)))]);
+        let right = closed(&mut c, &[("A", Tag::Present(None)), ("B", Tag::Present(Some(y))), ("C", Tag::Present(None))]);
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        assert_eq!(pairs(&mut c, &out), [[x, y]]);
+        if mode == Mode::Explain {
+            assert_eq!(trace_of(&out, 0), [[left, right], [x, y]]);
+        }
+
+        let left = closed(&mut c, &[("A", Tag::Present(None)), ("C", Tag::Present(None))]);
+        let right = closed(&mut c, &[("A", Tag::Present(None))]);
+        c.subtype(left, right, &mut out).unwrap();
+        assert_eq!(pairs(&mut c, &out), [[left, right]]);
+        assert!(c.force_subtype(&out).is_err());
+
+        let more = var(&mut c);
+        let left = variant_at(&mut c, 2, &[("A", Tag::Present(None))], more, false, NONE);
+        c.subtype(left, right, &mut out).unwrap();
+        assert_eq!(pairs(&mut c, &out), [[left, right]]);
+
+        let (x, y) = (var(&mut c), var(&mut c));
+        let left = closed(&mut c, &[("B", Tag::Either(false, Some(x), false))]);
+        let right = closed(&mut c, &[("B", Tag::Present(Some(y)))]);
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        assert_eq!(pairs(&mut c, &out), [[x, y]]);
+
+        let (x, y) = (var(&mut c), var(&mut c));
+        let int = constr(&mut c, INT, &[]);
+        let row1 = closed(&mut c, &[("A", Tag::Present(None)), ("B", Tag::Present(Some(x)))]);
+        let row2 = closed(&mut c, &[("A", Tag::Present(Some(int))), ("B", Tag::Present(Some(y)))]);
+        let (left, right) = (tuple(&mut c, &[row1, x]), tuple(&mut c, &[row2, y]));
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        assert_eq!(pairs(&mut c, &out), [[row1, row2]]);
+        if mode == Mode::Explain {
+            assert_eq!(trace_of(&out, 0), [[left, right], [row1, row2]]);
+        }
+
+        let (t1, t2) = (constr(&mut c, T, &[]), constr(&mut c, T, &[]));
+        let left = variant_at(&mut c, 2, &[("A", Tag::Present(None))], t1, true, NONE);
+        let right = variant_at(&mut c, 2, &[("A", Tag::Present(None))], t2, true, NONE);
+        c.subtype(left, right, &mut out).unwrap();
+        assert!(out.constraints.is_empty());
+
+        let (u1, u2) = (univar_at(&mut c, 2), univar_at(&mut c, 2));
+        let (x, y) = (var(&mut c), var(&mut c));
+        let left = variant_at(&mut c, 2, &[("A", Tag::Present(Some(x)))], u1, true, NONE);
+        let right = variant_at(&mut c, 2, &[("A", Tag::Present(Some(y)))], u2, true, NONE);
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        assert_eq!(pairs(&mut c, &out), [[u1, u2], [x, y]]);
+    }
+}
+
+/// Polymorphic types (compiler/ml/ctype.ml:4063-4072, quoted at
+/// `Checker::subtype_poly`) and the scopes a constraint keeps (4224:
+/// `unify_pairs (ref env) t1 t2 pairs`; 2769-2771).
+///
+/// Witnesses:
+/// - `poly((u, x); u)` against `poly((v, y); v)`: the scope is entered
+///   and left; the constraints are `(u, v)` and `(x, y)`, both holding
+///   scope 0 of the collection, whose partner nodes are new nodes;
+///   `Checker::scopes` is empty after `subtype`. Forcing pairs `u`
+///   with `v` (the unification links them) and leaves `scopes` empty.
+///   The same two universal variables forced WITHOUT their scope clash
+///   (`unify_univar`, 1559).
+/// - `poly(poly((u, w); w); u)` against the same shape: the inner
+///   constraints hold scope 1 whose parent is 0; forcing opens both.
+/// - `poly((u, int); u)` against `poly((x, int);)` (only the left
+///   binds): `instance_poly`: the constraint of a NEW variable and `x`,
+///   holding no scope.
+///
+/// Bodies: `subtype_pair` (step 12), `subtype_poly` (the three
+/// arms), `subtype_frames` (`Leave`), `force_subtype` with
+/// `open_scopes`.
+///
+/// Reaches: R3g, R3q, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn a_constraint_keeps_the_scopes_it_was_made_under() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let mut out = Coercion::default();
+        let (u, v, x, y) = (univar_at(&mut c, 2), univar_at(&mut c, 2), var(&mut c), var(&mut c));
+        let (b1, b2) = (tuple(&mut c, &[u, x]), tuple(&mut c, &[v, y]));
+        let (left, right) = (poly_of(&mut c, 2, b1, &[u]), poly_of(&mut c, 2, b2, &[v]));
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        assert_eq!(pairs(&mut c, &out), [[u, v], [x, y]]);
+        assert_eq!(out.scopes.len(), 1);
+        assert!(out.constraints.iter().all(|k| k.scopes == 0) && out.scopes[0].parent == NONE);
+        if mode == Mode::Explain {
+            assert_eq!(trace_of(&out, 0), [[left, right], [u, v]]);
+        }
+        // Without its scope the first constraint clashes; nothing was
+        // linked by the attempt.
+        let bare = Coercion { constraints: vec![Constraint { scopes: NONE, trace: NONE, ..out.constraints[0] }], ..Coercion::default() };
+        assert!(c.force_subtype(&bare).is_err());
+        c.unexplained_failure = false;
+        c.force_subtype(&out).unwrap();
+        assert_subtype_left(&c, &out);
+        assert_eq!((c.g.repr(u), c.g.repr(x)), (v, y));
+
+        let [u, v, w1, w2] = [(); 4].map(|()| univar_at(&mut c, 2));
+        let (t1, t2) = (tuple(&mut c, &[u, w1]), tuple(&mut c, &[v, w2]));
+        let (i1, i2) = (poly_of(&mut c, 2, t1, &[w1]), poly_of(&mut c, 2, t2, &[w2]));
+        let (left, right) = (poly_of(&mut c, 2, i1, &[u]), poly_of(&mut c, 2, i2, &[v]));
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        assert_eq!(pairs(&mut c, &out), [[u, v], [w1, w2]]);
+        assert_eq!((out.scopes.len(), out.scopes[1].parent, out.constraints[0].scopes, out.constraints[1].scopes), (2, 0, 1, 1));
+        c.force_subtype(&out).unwrap();
+        assert_subtype_left(&c, &out);
+
+        let (u, x) = (univar_at(&mut c, 2), var(&mut c));
+        let (i1, i2) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
+        let (b1, b2) = (tuple(&mut c, &[u, i1]), tuple(&mut c, &[x, i2]));
+        let (left, right) = (poly_of(&mut c, 2, b1, &[u]), poly_of(&mut c, 2, b2, &[]));
+        let nodes = c.g.nodes.len() as u32;
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        let [[fresh, target]] = pairs(&mut c, &out)[..] else { panic!("{:?}", out.constraints) };
+        assert!(fresh.0 >= nodes && c.g.nodes[fresh.0 as usize].tag() == VAR && target == x);
+        assert_eq!(out.constraints[0].scopes, NONE);
+    }
+}
+
+/// Two packages (compiler/ml/ctype.ml:4073-4100, quoted at
+/// `Checker::subtype_package`).
+///
+/// Witnesses, with names `t` and `u` and the module types 7 and 8:
+/// - no supplier: the constraint of the two packages, which forcing
+///   refuses (unification has no supplier either).
+/// - one module type, `{t = x, u = a}` against `{t = y, u = b}`: the
+///   constraints `(a, b)` then `(x, y)`: LAST name first (`cstrs' @
+///   cstrs`, reversed at 4231). No trial, the declarations are not
+///   asked.
+/// - `{t = x, u = a}` of 7 against `{t = y}` of 8, where 8 answers
+///   `Abstract` for `u`: the name is skipped (`~allow_absent:true`);
+///   the paths differ and are not one after normalization, so the
+///   trial runs: `x` and `y` are unified under a speculation and
+///   `subtype` is asked; with `true` the one constraint `(x, y)` is
+///   kept and `x` is NOT linked afterwards; with `false` the
+///   constraint is the two packages.
+/// - `{t = x}` of 7 against `{t = y, u = b}` of 8, where 7 answers
+///   `Missing` for `u`: the arm ends (`Not_found` without
+///   `allow_absent`): the constraint is the two packages.
+///
+/// Bodies: `subtype_pair` (step 12), `subtype_package` (every branch).
+///
+/// Reaches: R3p, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn packages_are_completed_and_tried() {
+    let mut c = checker(Mode::Success);
+    let mut out = Coercion::default();
+    let (x, y) = (var(&mut c), var(&mut c));
+    let (left, right) = (package_at(&mut c, 2, 7, 0, &[x]), package_at(&mut c, 2, 7, 1, &[y]));
+    c.subtype(left, right, &mut out).unwrap();
+    assert_eq!(pairs(&mut c, &out), [[left, right]]);
+    assert!(c.force_subtype(&out).is_err());
+
+    let names = ["t", "u", "t", "u"];
+    let (mut c, calls) = with_supplier(Mode::Success, &names, &[], false);
+    let [x, y, a, b] = [(); 4].map(|()| var(&mut c));
+    let (left, right) = (package_at(&mut c, 2, 7, 0, &[x, a]), package_at(&mut c, 2, 7, 2, &[y, b]));
+    c.subtype(left, right, &mut out).unwrap();
+    assert_subtype_left(&c, &out);
+    assert_eq!(pairs(&mut c, &out), [[a, b], [x, y]]);
+    assert!(calls.borrow().is_empty() && c.packages.is_some());
+
+    for accepted in [true, false] {
+        let names = ["t", "u", "t"];
+        let (mut c, calls) = with_supplier(Mode::Success, &names, &[(8, "u", Answer::Abstract)], accepted);
+        let [x, y, a] = [(); 3].map(|()| var(&mut c));
+        let (left, right) = (package_at(&mut c, 2, 7, 0, &[x, a]), package_at(&mut c, 2, 8, 2, &[y]));
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        assert_eq!(*calls.borrow(), [(8, "u", 2), (7, "same_path", 8), (7, "subtype", 8)]);
+        assert_eq!((c.g.repr(x), c.g.repr(y)), (x, y), "the trial is restored");
+        assert_eq!(pairs(&mut c, &out), if accepted { [[x, y]] } else { [[left, right]] });
+        assert!(!c.unexplained_failure);
+    }
+
+    let names = ["t", "t", "u"];
+    let (mut c, calls) = with_supplier(Mode::Success, &names, &[], true);
+    let [x, y, b] = [(); 3].map(|()| var(&mut c));
+    let (left, right) = (package_at(&mut c, 2, 7, 0, &[x]), package_at(&mut c, 2, 8, 1, &[y, b]));
+    c.subtype(left, right, &mut out).unwrap();
+    assert_subtype_left(&c, &out);
+    assert_eq!(*calls.borrow(), [(7, "u", 2)]);
+    assert_eq!(pairs(&mut c, &out), [[left, right]]);
+}
+
+/// `enlarge_type` (compiler/ml/ctype.ml:3589-3593 over `build_subtype`,
+/// 3427-3587, quoted arm by arm at `Checker::enlarge_visit`,
+/// `Checker::enlarge_leave` and `Checker::enlarge_variant`).
+///
+/// Witnesses, at level 2, all with `posi` at the root:
+/// - `int`, a variable, an open object: the node itself, no warning.
+/// - a closed object `{a: int}`: a NEW object over a new field `a`
+///   whose type is the old one's node (`poly(int;)`, unchanged), whose
+///   cell is a NEW cell with the value of the old one (3560-3574), and
+///   whose rest is a new variable (`Tnil` with `posi`, 3576-3579).
+///   With a MUTABLE field the type is kept as it is (3549-3556).
+/// - `{a: int} => {a: int}`: the parameter is in a negative position:
+///   `Tnil` there is kept and sets the warning (3580-3582); the result
+///   is enlarged, so a new arrow over the OLD parameter node.
+/// - a static variant `[#A | #B(int)]` with a name: a new closed
+///   variant (`row_closed = posi`) over a new variable, `#A` as
+///   `Reither (true, [], false, ref None)` and `#B` as `Reither
+///   (false, [int], false, ref None)` (3514-3523), unopened, the name
+///   kept (no type changed). In a negative position (the parameter of
+///   an arrow) the tags stay present and the row is open
+///   (`row_closed = posi`). A row that is not static: itself.
+/// - `co<{a: int}>`: a new constructor over the enlarged object;
+///   `contra<{a: int}>`: itself, with the warning; `inv<{a: int}>`:
+///   itself; `unused<{a: int}>`: a new constructor over a new variable
+///   (3486-3495).
+/// - `a = {x: b}`, `b = {y: c}`, `c = {z: int}`, three public
+///   abbreviations: level 4 expands `a` (3), its object cuts (2), `b`
+///   expands (1), its object cuts (0), and `c` is not expanded and sets
+///   the warning (3482-3485): two new objects, the inner one's `y` the
+///   node of `c` itself.
+/// - `t = {next: t}`: the copy of `t` in the expansion is a link to
+///   the node that was expanded (`Some ty when repr ty != t -> Tlink
+///   ty`, ctype.ml:782, the memo of constructors without arguments), so
+///   `next` expands to the object the walk is in, which is `memq_warn`:
+///   ONE new object whose `next` is the old node, with the warning.
+///   (The first skeleton of this test expected two objects; the
+///   prototype followed the lines and the test was corrected.)
+/// - a tuple that holds itself: the second meeting is `memq_warn`
+///   (3456): itself, with the warning.
+/// - `T = (O, int)` with `O = {a: T}`, a cycle built by hand: at `O`
+///   the list is cut to the nearest object (`filter_visited`,
+///   3404-3407, 3543-3544), which drops `T`; so `T` is entered a
+///   second time below `O`, where `O` is found: the result is a new
+///   tuple over a new object whose field `a` is the old `poly(T;)`. A
+///   mark that stayed for the walk would stop at the second `T` and
+///   make a different type.
+///
+/// Bodies: `enlarge_type`, `enlarge_visit` (every arm but packages),
+/// `enlarge_leave`, `enlarge_variant`, `enlarge_expansion`,
+/// `has_constr_row`, `on_path`, `enter_path`, `enter_row`.
+///
+/// Reaches: R3e, R3f, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn the_enlarged_type_of_a_coercion_without_a_source() {
+    use super::expand::{MAY_NEG, MAY_POS};
+    let mut c = checker(Mode::Success);
+    let closed_obj = |c: &mut Checker, mutable: bool| {
+        let (int, nil) = (constr(c, INT, &[]), nil_at(c, 2));
+        obj(c, &[("a", mutable, int)], nil)
+    };
+    let slot = |c: &Checker, ty: Ty, at: u32| c.g.lists[(c.g.nodes[ty.0 as usize].b + at) as usize];
+    let after = |c: &Checker| c.enlarging.is_empty() && c.enlarged.is_empty() && c.extras.row_scratch.is_empty();
+
+    let (int, x, r) = (constr(&mut c, INT, &[]), var(&mut c), var(&mut c));
+    let (open, _) = obj(&mut c, &[("a", false, int)], r);
+    for ty in [int, x, open] {
+        assert_eq!(c.enlarge_type(ty), (ty, false));
+    }
+    assert!(after(&c));
+
+    for mutable in [false, true] {
+        let (object, fields) = closed_obj(&mut c, mutable);
+        let nodes = c.g.nodes.len() as u32;
+        let (enlarged, warn) = c.enlarge_type(object);
+        assert!(!warn && enlarged.0 >= nodes && after(&c));
+        let field = slot(&c, enlarged, 0);
+        let (old, new) = (c.g.nodes[fields[0].0 as usize], c.g.nodes[field.0 as usize]);
+        assert_eq!(slot(&c, field, 0), slot(&c, fields[0], 0), "the type is the old node");
+        assert_ne!(new.a, old.a, "a descriptor of its own");
+        let (ExtraDescriptor::Field { name: n1, mutability: m1 }, ExtraDescriptor::Field { name: n2, mutability: m2 }) =
+            (c.extras.descriptors[old.a as usize], c.extras.descriptors[new.a as usize])
+        else {
+            panic!("not fields");
+        };
+        assert!(n1 == n2 && m1 != m2 && cell_mutable(&c.g, Ty(m2)) == mutable);
+        let rest = c.g.nodes[slot(&c, field, 1).0 as usize];
+        assert_eq!((rest.tag(), rest.level, new.level), (VAR, 2, 2));
+    }
+
+    let ((p, _), (q, _)) = (closed_obj(&mut c, false), closed_obj(&mut c, false));
+    let function = arrow(&mut c, &[p], q);
+    let (enlarged, warn) = c.enlarge_type(function);
+    let node = c.g.nodes[enlarged.0 as usize];
+    assert!(warn && enlarged != function && node.tag() == ARROW);
+    assert_eq!(c.g.params[node.b as usize].ty, p);
+    assert_ne!(Ty(node.a), q);
+
+    let (int, nil) = (constr(&mut c, INT, &[]), nil_at(&mut c, 2));
+    let tags = [("A", Tag::Present(None)), ("B", Tag::Present(Some(int)))];
+    let row = variant_at(&mut c, 2, &tags, nil, true, R);
+    let (enlarged, warn) = c.enlarge_type(row);
+    assert!(!warn && after(&c));
+    assert_eq!(shape(&mut c, enlarged), "[closed A?c0 B?1 | ' as 8]");
+    assert_eq!(read_row(&mut c, enlarged).0[1].1.first, int);
+    assert_eq!(c.g.nodes[enlarged.0 as usize].arity(), 2, "unopened: the type and the row variable");
+    let unit = constr(&mut c, UNIT, &[]);
+    let function = arrow(&mut c, &[row], unit);
+    let (enlarged, _) = c.enlarge_type(function);
+    let parameter = c.g.params[c.g.nodes[enlarged.0 as usize].b as usize].ty;
+    assert_eq!(shape(&mut c, parameter), "[A B() | ' as 8]");
+    let more = var(&mut c);
+    let open_row = variant_at(&mut c, 2, &[("A", Tag::Present(None))], more, false, NONE);
+    assert_eq!(c.enlarge_type(open_row), (open_row, false));
+
+    let co = declared(&mut c, &[MAY_POS]);
+    let contra = declared(&mut c, &[MAY_NEG]);
+    let inv = declared(&mut c, &[MAY_POS | MAY_NEG]);
+    let unused = declared(&mut c, &[0]);
+    for (ty, changed, warned) in [(co, true, false), (contra, false, true), (inv, false, false), (unused, true, false)] {
+        let (object, _) = closed_obj(&mut c, false);
+        let applied = constr(&mut c, ty, &[object]);
+        let (enlarged, warn) = c.enlarge_type(applied);
+        assert_eq!((enlarged != applied, warn), (changed, warned), "type {ty}");
+        if changed {
+            let node = c.g.nodes[enlarged.0 as usize];
+            assert_eq!((node.tag(), node.a, node.arity(), slot(&c, enlarged, 0)), (CONSTR, ty, 1, Ty(NONE)));
+            let argument = c.g.nodes[slot(&c, enlarged, 1).0 as usize];
+            assert_eq!(argument.tag() == VAR, ty == unused);
+        }
+    }
+    assert!(after(&c));
+
+    // `type a = {x: b}`, `type b = {y: c}`, `type c = {z: int}`.
+    let record = |c: &mut Checker, label: &str, ty: u32| {
+        let index = declared(c, &[]);
+        let (inner, nil) = (constr_at(c, GENERIC, ty, &[]), nil_at(c, GENERIC));
+        let typ = poly_at(c, GENERIC, inner);
+        let cell = cell(c, false);
+        let name = name(c, label);
+        let field = extended_at(c, GENERIC, ExtraDescriptor::Field { name, mutability: cell.0 }, &[typ, nil]);
+        let body = extended_at(c, GENERIC, ExtraDescriptor::Object, &[field]);
+        abbreviation(c, index, &[], body);
+        index
+    };
+    let follow = |c: &Checker, mut ty: Ty| {
+        while c.g.nodes[ty.0 as usize].tag() == LINK {
+            ty = Ty(c.g.nodes[ty.0 as usize].a);
+        }
+        ty
+    };
+    // The type of the one field of object `ty` (through its `poly`),
+    // and what the field list ends in.
+    let object_of = |c: &Checker, ty: Ty| {
+        let node = c.g.nodes[follow(c, ty).0 as usize];
+        assert_eq!(c.extras.descriptors[node.a as usize], ExtraDescriptor::Object, "{node:?}");
+        let field = follow(c, c.g.lists[node.b as usize]);
+        (follow(c, slot(c, follow(c, slot(c, field, 0)), 0)), follow(c, slot(c, field, 1)))
+    };
+    let third = record(&mut c, "z", INT);
+    let second = record(&mut c, "y", third);
+    let first = record(&mut c, "x", second);
+    let root = constr(&mut c, first, &[]);
+    let (enlarged, warn) = c.enlarge_type(root);
+    assert!(warn && after(&c));
+    let (next1, rest1) = object_of(&c, enlarged);
+    let (next2, rest2) = object_of(&c, next1);
+    let last = c.g.nodes[next2.0 as usize];
+    assert_eq!((last.tag(), last.a), (CONSTR, third), "the third abbreviation is not expanded");
+    assert!(c.g.nodes[rest1.0 as usize].tag() == VAR && c.g.nodes[rest2.0 as usize].tag() == VAR);
+
+    // `type rec t = {next: t}`.
+    let t = declared(&mut c, &[]);
+    c.types.rows[t as usize].arity = 0;
+    let (inner, nil) = (constr_at(&mut c, GENERIC, t, &[]), nil_at(&mut c, GENERIC));
+    let typ = poly_at(&mut c, GENERIC, inner);
+    let cell = cell(&mut c, false);
+    let name = name(&mut c, "next");
+    let field = extended_at(&mut c, GENERIC, ExtraDescriptor::Field { name, mutability: cell.0 }, &[typ, nil]);
+    let body = extended_at(&mut c, GENERIC, ExtraDescriptor::Object, &[field]);
+    abbreviation(&mut c, t, &[], body);
+    let root = constr(&mut c, t, &[]);
+    let (enlarged, warn) = c.enlarge_type(root);
+    assert!(warn && after(&c));
+    let (next, rest) = object_of(&c, enlarged);
+    assert_eq!(next, root, "the copy of `t` in the expansion is the expanded node");
+    assert_eq!(c.g.nodes[rest.0 as usize].tag(), VAR);
+    let expansion = c.expand_once(root, ExpandMode::Safe).unwrap();
+    assert_ne!(follow(&c, enlarged), follow(&c, expansion));
+    assert_eq!(object_of(&c, expansion).0, root);
+
+    // A tuple that holds itself.
+    let int = constr(&mut c, INT, &[]);
+    let knot = tuple(&mut c, &[int, int]);
+    let b = c.g.nodes[knot.0 as usize].b;
+    c.g.lists[b as usize] = knot;
+    assert_eq!(c.enlarge_type(knot), (knot, true));
+
+    // `T = (O, int)`, `O = {a: T}`.
+    let (int, nil) = (constr(&mut c, INT, &[]), nil_at(&mut c, 2));
+    let t_node = tuple(&mut c, &[int, int]);
+    let (o_node, fields) = obj(&mut c, &[("a", false, t_node)], nil);
+    let b = c.g.nodes[t_node.0 as usize].b;
+    c.g.lists[b as usize] = o_node;
+    let (enlarged, warn) = c.enlarge_type(t_node);
+    assert!(warn && enlarged != t_node && after(&c));
+    let new_object = slot(&c, enlarged, 0);
+    assert_ne!(new_object, o_node);
+    let new_field = slot(&c, new_object, 0);
+    assert_eq!(slot(&c, new_field, 0), slot(&c, fields[0], 0), "the field's type is the old node: `T` was entered again");
+    assert_eq!(c.g.nodes[slot(&c, new_field, 1).0 as usize].tag(), VAR);
+    let _ = (Change::Unchanged, Enlarged { ty: int, change: Change::Equiv });
+}
+
+/// The step relations of `subtype` and `force_subtype`, each between n
+/// = 1,000 and n = 10,000 (a linear walk reads at most eleven times the
+/// steps; the two shapes that sort names at most fourteen times), and a
+/// shared type that only the table of pairs keeps linear. Each loop of
+/// the slice's bodies with the shape that runs it n times:
+///
+/// 0. `subtype` of two tuples of n variables: the loop of
+///    `subtype_frames` and of `subtype_pair`'s tuple arm; n
+///    constraints.
+/// 1. `force_subtype` of those n constraints: its loop.
+/// 2. `subtype` of two chains n deep (`chain`): no machine stack.
+/// 3. two arrows of n parameters: the two loops of the arrow arm.
+/// 4. two constructors of a covariant type with n parameters: the loop
+///    of `subtype_constr`.
+/// 5. an invariant parameter nested n deep (`inv<inv<...x>>`): the
+///    `Invariant`, `Back` and `Close` frames, n quiet regions open at
+///    once, one constraint.
+/// 6. two closed objects of n fields in opposite orders, the types
+///    variables: the merge of `subtype_fields`; n constraints.
+/// 7. a closed object of no field against one of n: the chain of n
+///    built fields (`build_fields`).
+/// 8. two closed rows of n typed tags: the classification of
+///    `subtype_row` and its n pairs.
+/// 9. two tuples of different lengths below n tuples, in
+///    `Mode::Explain`: the loop of `read_subtype_trace` (n pairs).
+/// 10. `force_subtype` of n constraints made under 1 to n nested
+///     scopes of universal variables: `open_scopes` opens ONE scope
+///     between two constraints, where making the stack again from each
+///     constraint's chain is n squared over two. (The walk that collects
+///     them is not counted: `enter_poly` marks every bound variable of
+///     the open scopes at each entry, as OCaml does, ctype.ml:1658-1662.)
+///
+/// Then sharing: `d(40)` against a copy, `d(k) = (d(k-1), d(k-1))`: 41
+/// pairs with the table (`Type_pairs`, ctype.ml:3648-3652), 2^40
+/// without: at most 500 steps.
+///
+/// Loops no shape runs wide: the names of two packages
+/// (`subtype_package`), the spellings of `expands`, the nodes of
+/// `object_row` beyond the fields shape 6 walks.
+///
+/// Reaches: R3e, R3f, R3g, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn subtyping_at_ten_thousand() {
+    use super::expand::{MAY_NEG, MAY_POS};
+    let labels = |prefix: &str, n: u32| -> Vec<String> { (0..n).map(|at| format!("{prefix}{at:05}")).collect() };
+    let run = |n: u32| -> [u64; 11] {
+        let mut c = checker(Mode::Success);
+        let mut out = Coercion::default();
+        let wide = |c: &mut Checker| {
+            let vars: Vec<Ty> = (0..n).map(|_| var(c)).collect();
+            tuple(c, &vars)
+        };
+        let (l, r) = (wide(&mut c), wide(&mut c));
+        let collected = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        assert_eq!(out.constraints.len(), n as usize);
+        let forced = steps::scope(|| c.force_subtype(&out).unwrap());
+        let (l, r) = (chain(&mut c, n), chain(&mut c, n));
+        let deep = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        let function = |c: &mut Checker| {
+            let params: Vec<Ty> = (0..n).map(|_| var(c)).collect();
+            let result = var(c);
+            arrow(c, &params, result)
+        };
+        let (l, r) = (function(&mut c), function(&mut c));
+        let arrows = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        assert_eq!(out.constraints.len(), n as usize + 1);
+        let co = declared(&mut c, &vec![MAY_POS; n as usize]);
+        let applied = |c: &mut Checker| {
+            let arguments: Vec<Ty> = (0..n).map(|_| var(c)).collect();
+            constr(c, co, &arguments)
+        };
+        let (l, r) = (applied(&mut c), applied(&mut c));
+        let arguments = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        assert_eq!(out.constraints.len(), n as usize);
+        let inv = declared(&mut c, &[MAY_POS | MAY_NEG]);
+        let nested = |c: &mut Checker| {
+            let mut ty = var(c);
+            for _ in 0..n {
+                ty = constr(c, inv, &[ty]);
+            }
+            ty
+        };
+        let (l, r) = (nested(&mut c), nested(&mut c));
+        let invariant = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        assert_eq!(out.constraints.len(), 1);
+
+        let names = labels("f", n);
+        let object = |c: &mut Checker, reversed: bool| {
+            let mut fields: Vec<(&str, bool, Ty)> = names.iter().map(|label| (label.as_str(), false, var(c))).collect();
+            if reversed {
+                fields.reverse();
+            }
+            let nil = nil_at(c, 2);
+            obj(c, &fields, nil).0
+        };
+        let (l, r) = (object(&mut c, true), object(&mut c, false));
+        let fields = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        assert_eq!(out.constraints.len(), n as usize);
+        let nil = nil_at(&mut c, 2);
+        let (empty, _) = obj(&mut c, &[], nil);
+        let nodes = c.g.nodes.len();
+        let built = steps::scope(|| c.subtype(empty, r, &mut out).unwrap());
+        assert_eq!((out.constraints.len(), c.g.nodes.len()), (1, nodes + n as usize + 1));
+
+        let tags = labels("T", n);
+        let row = |c: &mut Checker, reversed: bool| {
+            let mut list: Vec<(&str, Tag)> = tags.iter().map(|label| (label.as_str(), Tag::Present(Some(var(c))))).collect();
+            if reversed {
+                list.reverse();
+            }
+            let nil = nil_at(c, 2);
+            variant_at(c, 2, &list, nil, true, NONE)
+        };
+        let (l, r) = (row(&mut c, true), row(&mut c, false));
+        let rows = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+        assert_eq!(out.constraints.len(), n as usize);
+
+        let mut e = checker(Mode::Explain);
+        let ints = [(); 5].map(|()| constr(&mut e, INT, &[]));
+        let (mut l, mut r) = (tuple(&mut e, &ints[..2]), tuple(&mut e, &ints[2..]));
+        for _ in 0..n {
+            (l, r) = (tuple(&mut e, &[l]), tuple(&mut e, &[r]));
+        }
+        let trace = steps::scope(|| assert!(e.subtype(l, r, &mut out).is_err()));
+        assert_eq!(e.subtype_trace.len(), n as usize + 1);
+
+        let mut c = checker(Mode::Success);
+        let scoped = |c: &mut Checker| {
+            let mut ty = constr(c, INT, &[]);
+            for _ in 0..n {
+                let u = univar_at(c, 2);
+                let body = tuple(c, &[u, ty]);
+                ty = poly_of(c, 2, body, &[u]);
+            }
+            ty
+        };
+        let (l, r) = (scoped(&mut c), scoped(&mut c));
+        c.subtype(l, r, &mut out).unwrap();
+        assert_eq!((out.constraints.len(), out.scopes.len()), (n as usize, n as usize));
+        let scopes = steps::scope(|| c.force_subtype(&out).unwrap());
+        [collected, forced, deep, arrows, arguments, invariant, fields, built, rows, trace, scopes]
+    };
+    let (small, large) = (run(1_000), run(10_000));
+    for (at, (s, l)) in small.iter().zip(large).enumerate() {
+        let factor = if at == 6 || at == 8 { 14 } else { 11 };
+        assert!(l <= s * factor, "shape {at}: {s} steps at 1,000, {l} at 10,000");
+        assert!(*s >= 1_000, "shape {at} is vacuous: {s}");
+    }
+    let mut c = checker(Mode::Success);
+    let shared = |c: &mut Checker| {
+        let mut ty = constr(c, INT, &[]);
+        for _ in 0..40 {
+            ty = tuple(c, &[ty, ty]);
+        }
+        ty
+    };
+    let (l, r) = (shared(&mut c), shared(&mut c));
+    let mut out = Coercion::default();
+    let count = steps::scope(|| c.subtype(l, r, &mut out).unwrap());
+    assert!(count <= 500 && out.constraints.is_empty(), "{count}");
+    let _ = MAY_NEG;
+}
+
+/// The step relations of `enlarge_type`, each between n = 1,000 and n =
+/// 10,000 (at most eleven times the steps; fourteen where a row is
+/// flattened). Each loop of its bodies with the shape that runs it n
+/// times:
+///
+/// 0. a tuple of n closed objects: the loop of `enlarge_type`, the
+///    children of the tuple arm and the results of `enlarge_leave`.
+/// 1. a closed object under n arrows (each the result of the one
+///    above): no machine stack; n nodes rebuilt on the way up.
+/// 2. a closed object of n fields: a frame a field, n new fields.
+/// 3. a static row of n typed tags: the three loops of
+///    `enlarge_visit`'s variant arm and of `enlarge_variant`.
+/// 4. a covariant constructor of n arguments, each a closed object.
+/// 5. n arrows, then a tuple of n closed objects: every object cuts
+///    the path of n + 1 nodes above it (`filter_visited`,
+///    ctype.ml:3404-3407), which is one store here (`enter_row`) and a
+///    scan of n entries in OCaml; and every object asks `on_path`,
+///    which is one load here and `List.memq` there.
+///
+/// Reaches: R3e, R3f, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn enlarging_at_ten_thousand() {
+    use super::expand::MAY_POS;
+    let labels = |prefix: &str, n: u32| -> Vec<String> { (0..n).map(|at| format!("{prefix}{at:05}")).collect() };
+    let small_object = |c: &mut Checker| {
+        let (int, nil) = (constr(c, INT, &[]), nil_at(c, 2));
+        obj(c, &[("a", false, int)], nil).0
+    };
+    let run = |n: u32| -> [u64; 6] {
+        let mut c = checker(Mode::Success);
+        let objects: Vec<Ty> = (0..n).map(|_| small_object(&mut c)).collect();
+        let wide_tuple = tuple(&mut c, &objects);
+        let wide = steps::scope(|| assert_ne!(c.enlarge_type(wide_tuple).0, wide_tuple));
+        let unit = constr(&mut c, UNIT, &[]);
+        let mut function = small_object(&mut c);
+        for _ in 0..n {
+            function = arrow(&mut c, &[unit], function);
+        }
+        let nodes = c.g.nodes.len();
+        let deep = steps::scope(|| assert_ne!(c.enlarge_type(function).0, function));
+        assert!(c.g.nodes.len() >= nodes + n as usize);
+        let names = labels("f", n);
+        let int = constr(&mut c, INT, &[]);
+        let list: Vec<(&str, bool, Ty)> = names.iter().map(|label| (label.as_str(), false, int)).collect();
+        let nil = nil_at(&mut c, 2);
+        let (object, _) = obj(&mut c, &list, nil);
+        let fields = steps::scope(|| assert_ne!(c.enlarge_type(object).0, object));
+        let tags = labels("T", n);
+        let list: Vec<(&str, Tag)> = tags.iter().map(|label| (label.as_str(), Tag::Present(Some(int)))).collect();
+        let nil = nil_at(&mut c, 2);
+        let row = variant_at(&mut c, 2, &list, nil, true, NONE);
+        let rows = steps::scope(|| assert_ne!(c.enlarge_type(row).0, row));
+        let co = declared(&mut c, &vec![MAY_POS; n as usize]);
+        let objects: Vec<Ty> = (0..n).map(|_| small_object(&mut c)).collect();
+        let applied = constr(&mut c, co, &objects);
+        let arguments = steps::scope(|| assert_ne!(c.enlarge_type(applied).0, applied));
+        let objects: Vec<Ty> = (0..n).map(|_| small_object(&mut c)).collect();
+        let mut below = tuple(&mut c, &objects);
+        for _ in 0..n {
+            below = arrow(&mut c, &[unit], below);
+        }
+        let path = steps::scope(|| assert_ne!(c.enlarge_type(below).0, below));
+        assert!(c.enlarging.is_empty() && c.enlarged.is_empty());
+        [wide, deep, fields, rows, arguments, path]
+    };
+    let (small, large) = (run(1_000), run(10_000));
+    for (at, (s, l)) in small.iter().zip(large).enumerate() {
+        let factor = if at == 3 { 14 } else { 11 };
+        assert!(l <= s * factor, "shape {at}: {s} steps at 1,000, {l} at 10,000");
+        assert!(*s >= 1_000, "shape {at} is vacuous: {s}");
+    }
+}
+
+/// What the inclusion check of a [`Relating`] supplier does with the
+/// checker it is handed. OCaml's `!package_subtype` is
+/// `Includemod.modtypes`, which compares the items of two signatures
+/// with `Ctype.moregeneral` (a value, includecore.ml:47) and
+/// `Ctype.equal` (a type declaration, includecore.ml:92-157): the real
+/// supplier calls the kernel's own relations on this `Checker`.
+#[derive(Clone, Copy)]
+enum Runs {
+    /// No relation: two signatures without items.
+    Nothing,
+    /// The first statement of the outer `moregen` and of `eqtype_list`
+    /// (compiler/ml/ctype.ml:3089, 3358) and nothing else:
+    /// `Checker::empty_scopes`. A stand-in that runs before R3i is
+    /// built.
+    Empties,
+    /// What a relation does to `Checker::related`, and nothing else:
+    /// the table cleared and the pair entered. A stand-in that runs
+    /// before R3i is built.
+    Table(Ty, Ty),
+    /// `Checker::equal` of two empty lists.
+    Equal,
+    /// `Checker::equal`, without renaming, of the two types.
+    EqualPair(Ty, Ty),
+    /// `Checker::equal` WITH renaming of the two (different) variables,
+    /// as `Includecore` compares the parameters of two declarations
+    /// (includecore.ml:92-157).
+    EqualRenaming(Ty, Ty),
+}
+
+/// A supplier whose two module types (7 and 8) are different paths and
+/// always compatible, after running [`Runs`]. A name is its position:
+/// two arguments at the same position have the same name. No module
+/// type has an answer for a name it does not list.
+struct Relating {
+    runs: Runs,
+}
+
+impl Relating {
+    fn run(&self, c: &mut Checker) -> bool {
+        match self.runs {
+            Runs::Nothing => {}
+            Runs::Empties => c.empty_scopes(),
+            Runs::Table(left, right) => {
+                c.related.keys.clear();
+                c.related.keys.insert(super::unify::PairSet::key(left, right));
+            }
+            Runs::Equal => assert!(c.equal(false, &[], &[])),
+            Runs::EqualPair(left, right) => assert!(!c.equal(false, &[left], &[right])),
+            Runs::EqualRenaming(left, right) => assert!(c.equal(true, &[left], &[right])),
+        }
+        true
+    }
+}
+
+impl PackageDecls for Relating {
+    fn compare(&self, left: u32, right: u32) -> std::cmp::Ordering {
+        left.cmp(&right)
+    }
+    fn complete(&mut self, _: &mut Checker, _: u32, _: u32, _: u32) -> Completion {
+        Completion::Missing
+    }
+    fn compatible(&mut self, c: &mut Checker, _: Node, _: Node) -> bool {
+        self.run(c)
+    }
+    fn same_path(&self, _: u32, _: u32) -> bool {
+        false
+    }
+    fn subtype(&mut self, c: &mut Checker, _: Node, _: Node) -> bool {
+        self.run(c)
+    }
+}
+
+/// A checker at level 2 whose declarations are a [`Relating`].
+fn relating(mode: Mode, runs: Runs) -> Checker {
+    let mut c = checker(mode);
+    c.packages = Some(Box::new(Relating { runs }));
+    c
+}
+
+/// `'a. (first, second)` twice, over two new universal variables `u`
+/// and `v`: element `package` is a package without arguments (or, with
+/// `int`, with one argument `int` under the name 0) of the module type 7
+/// on the left and 8 on the right; the other element is the variable.
+/// Returns the two types and `[u, v]`.
+fn package_and_univar(c: &mut Checker, package: usize, int: bool) -> ([Ty; 2], [Ty; 2]) {
+    let vars = [univar_at(c, 2), univar_at(c, 2)];
+    let types = [0, 1].map(|side| {
+        let arguments = if int { vec![constr(c, INT, &[])] } else { Vec::new() };
+        let module = package_at(c, 2, 7 + side as u32, 0, &arguments);
+        let mut elements = [vars[side]; 2];
+        elements[package] = module;
+        let body = tuple(c, &elements);
+        poly_of(c, 2, body, &[vars[side]])
+    });
+    (types, vars)
+}
+
+/// The scopes of universal variables are emptied by an entry that runs
+/// INSIDE a polymorphic body, and come back when that body is left
+/// (CHECKER_REWRITE 8.6, decision 127; 8.13, "The scopes after an
+/// inclusion check"). OCaml: `univar_pairs` is one global;
+/// `enter_poly` puts `old_univars` back at its own exit only
+/// (compiler/ml/ctype.ml:1675, 1678); the outer `moregen` (3089) and
+/// `eqtype_list` (3358), which `unify_package` reaches through
+/// `!package_subtype` (2172-2180), start with `current_univar_pairs ()
+/// := []`. So the next pair of universal variables of the same body has
+/// no entry in `unify_univar` (`[] -> raise (Unify [])`, 1559).
+///
+/// Witnesses, each the shape of a source program of 8.13 that OCaml
+/// refuses or accepts, with a supplier whose inclusion check does what
+/// the entry of a relation does to the scopes ([`Runs::Empties`]; the
+/// tests with the relation itself are
+/// `an_inclusion_check_that_runs_a_relation_empties_the_scopes` and
+/// `a_coercion_whose_inclusion_check_runs_a_relation`):
+/// - UPkgFirst, `'a. (module(S), 'a)` against `'a. (module(T), 'a)`:
+///   REFUSED. The package pair is unified first, the check empties the
+///   scopes, the pair of the two variables clashes.
+/// - UVarFirst, `'a. ('a, module(S))`: accepted, the variables are
+///   paired before the check.
+/// - UEmptyFirst, UPkgFirst with a check that runs nothing: accepted.
+/// - `('a. (module(S), 'a), 'b. 'b)`: REFUSED in its first element, and
+///   with that element `'a. ('a, module(S))` accepted: the scope of the
+///   SECOND polymorphic type is read, because the first put the floor
+///   back when it was left.
+///
+/// After each call no scope is open and the floor is 0, on both
+/// answers. Seen to fail with `empty_scopes` storing nothing (the first
+/// and fourth witnesses are accepted), and with `leave_poly` not
+/// putting the floor back (the floor is 1 after the first witness).
+#[test]
+fn emptied_scopes_come_back_when_the_polymorphic_type_is_left() {
+    for mode in [Mode::Success, Mode::Explain] {
+        for (package, runs, accepted) in
+            [(0, Runs::Empties, false), (1, Runs::Empties, true), (0, Runs::Nothing, true)]
+        {
+            let mut c = relating(mode, runs);
+            let ([left, right], [u, v]) = package_and_univar(&mut c, package, false);
+            assert_eq!(c.unify(left, right).is_ok(), accepted, "package at {package}");
+            assert!(c.scopes.is_empty() && c.frames.is_empty());
+            assert_eq!(c.scope_floor, 0);
+            if accepted {
+                assert_eq!(c.g.repr(u), c.g.repr(v));
+            }
+        }
+        for (package, accepted) in [(0, false), (1, true)] {
+            let mut c = relating(mode, Runs::Empties);
+            let ([l1, r1], _) = package_and_univar(&mut c, package, false);
+            let (a, b) = (univar_at(&mut c, 2), univar_at(&mut c, 2));
+            let (l2, r2) = (poly_of(&mut c, 2, a, &[a]), poly_of(&mut c, 2, b, &[b]));
+            let (left, right) = (tuple(&mut c, &[l1, l2]), tuple(&mut c, &[r1, r2]));
+            assert_eq!(c.unify(left, right).is_ok(), accepted, "package at {package}");
+            assert!(c.scopes.is_empty() && c.frames.is_empty());
+            assert_eq!(c.scope_floor, 0);
+        }
+    }
+}
+
+/// A relation that runs while another relation runs has a table of
+/// pairs of its own, and the outer one has its table again afterwards
+/// (`Type_pairs.create` a call, compiler/ml/ctype.ml:3115, 3370;
+/// CHECKER_REWRITE 8.6, decision 128): `Checker::enter_relation` and
+/// `Checker::leave_relation`, which the entries of `moregen` and
+/// `equal` call. The first relation shelves nothing; one entered inside
+/// it finds an empty table; the outer table comes back with its pair,
+/// and the inner table is kept for the next nested relation (no
+/// allocation a relation). Seen to fail with `enter_relation` shelving
+/// nothing (the inner relation finds the outer pair).
+#[test]
+fn a_relation_inside_a_relation_has_a_table_of_its_own() {
+    let mut c = checker(Mode::Success);
+    let key = super::unify::PairSet::key;
+    let [x, y, z] = [(); 3].map(|()| var(&mut c));
+    for _ in 0..2 {
+        c.enter_relation();
+        assert!(c.related_shelf.is_empty(), "the first relation moves no table");
+        c.related.keys.clear();
+        c.related.keys.insert(key(x, y));
+        c.enter_relation();
+        assert!(c.related.keys.is_empty());
+        c.related.keys.insert(key(y, z));
+        c.enter_relation();
+        assert!(c.related.keys.is_empty());
+        c.leave_relation();
+        assert!(c.related.keys.contains(&key(y, z)) && c.related.keys.len() == 1);
+        c.leave_relation();
+        assert!(c.related.keys.contains(&key(x, y)) && c.related.keys.len() == 1);
+        c.leave_relation();
+        assert_eq!((c.relating, c.related_shelf.len(), c.related_spare.len()), (0, 0, 2));
+    }
+}
+
+/// The package arm of `subtype_rec` inside a polymorphic type
+/// (compiler/ml/ctype.ml:4073-4100 under 4063-4072; CHECKER_REWRITE
+/// 8.6, decision 127): the trial empties the scopes. `cstrs'` is built
+/// BEFORE the trial and holds the list as it was (4083); the `unify` of
+/// the trial is the typer's (`unify_pairs (ref env) ty1 ty2 []`,
+/// 2769-2773); every constraint made afterwards, until `enter_poly`
+/// puts `old_univars` back (1675), holds `[]`, and a pair of universal
+/// variables among them clashes when it is forced (1559).
+///
+/// Witnesses, each the shape of a coercion of 8.13, the supplier's
+/// check running nothing unless said:
+/// - PkgFirst, `'a. (module(S with type t = int), 'a)` against the same
+///   with `T`: REFUSED when forced. The constraints: `(int, int)` under
+///   the scope, then `(u, v)` under NO scope.
+/// - VarFirst, `'a. ('a, module(S with type t = int))`: accepted;
+///   both constraints are under the scope.
+/// - EmptyFirst, `'a. (module(S), 'a)` with no item: accepted; no pair
+///   is unified in the trial and the check runs no relation.
+/// - PkgNoCstr, the same when the check empties the scopes
+///   ([`Runs::Empties`], what the entry of a relation does): REFUSED.
+/// - `'a. ('b. (module(S with type t = int), 'b), 'a)`: `(int, int)`
+///   under the inner scope, `(b1, b2)` under none, `(a1, a2)` under the
+///   OUTER scope: the `Leave` frame of the inner type put the floor and
+///   the chain back.
+///
+/// Seen to fail against the prototype with `empty_scopes` left out of
+/// the trial (PkgFirst is accepted), with `out.held` not set to `NONE`
+/// after it (the same), and with the frames of the trial constrained
+/// after `out.held` is cut (the first constraint of PkgFirst is under no
+/// scope).
+///
+/// Reaches: R3g, R3q, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn a_trial_of_two_packages_empties_the_scopes_of_the_body_it_is_in() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut out = Coercion::default();
+        for (package, int, runs, scopes, accepted) in [
+            (0, true, Runs::Nothing, vec![0, NONE], false),
+            (1, true, Runs::Nothing, vec![0, 0], true),
+            (0, false, Runs::Nothing, vec![0], true),
+            (0, false, Runs::Empties, vec![NONE], false),
+        ] {
+            let mut c = relating(mode, runs);
+            let ([left, right], [u, v]) = package_and_univar(&mut c, package, int);
+            c.subtype(left, right, &mut out).unwrap();
+            assert_subtype_left(&c, &out);
+            let held: Vec<u32> = out.constraints.iter().map(|k| k.scopes).collect();
+            assert_eq!(held, scopes, "package at {package}, int {int}");
+            let last = pairs(&mut c, &out)[if package == 0 { out.constraints.len() - 1 } else { 0 }];
+            assert_eq!(last, [u, v]);
+            assert_eq!(c.force_subtype(&out).is_ok(), accepted, "package at {package}, int {int}");
+            assert_subtype_left(&c, &out);
+            if !accepted && mode == Mode::Explain {
+                assert_eq!(c.subtype_trace.last(), Some(&[u, v]));
+            }
+        }
+
+        let mut c = relating(mode, Runs::Nothing);
+        let ([l1, r1], [b1, b2]) = package_and_univar(&mut c, 0, true);
+        let (a1, a2) = (univar_at(&mut c, 2), univar_at(&mut c, 2));
+        let (t1, t2) = (tuple(&mut c, &[l1, a1]), tuple(&mut c, &[r1, a2]));
+        let (left, right) = (poly_of(&mut c, 2, t1, &[a1]), poly_of(&mut c, 2, t2, &[a2]));
+        c.subtype(left, right, &mut out).unwrap();
+        assert_subtype_left(&c, &out);
+        let held: Vec<u32> = out.constraints.iter().map(|k| k.scopes).collect();
+        assert_eq!(held, [1, NONE, 0]);
+        assert_eq!(pairs(&mut c, &out)[1..], [[b1, b2], [a1, a2]]);
+        assert!(c.force_subtype(&out).is_err());
+        assert_subtype_left(&c, &out);
+    }
+}
+
+/// The table of pairs of `subtype_rec` is its own (`subtypes ()`,
+/// compiler/ml/ctype.ml:3611-3612, one global cleared at 4213 and 4217),
+/// and a relation the inclusion check of two packages runs inside the
+/// walk has another (`Type_pairs.create`, 3115, 3370): CHECKER_REWRITE
+/// 8.6, decision 128.
+///
+/// Witness: `(module(S), x)` against `(module(T), y)` with a check
+/// that does to `Checker::related` what a relation on `(x, y)` does
+/// ([`Runs::Table`]): the walk meets `(x, y)` AFTER the check and its
+/// constraint is collected. Seen to fail against the prototype with
+/// `subtype_pair` reading `Checker::related` (no constraint: the
+/// coercion would be accepted without `x` and `y` being unified).
+///
+/// Reaches: R3g, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn the_pairs_of_a_coercion_are_not_those_of_a_relation_run_inside_it() {
+    let mut c = checker(Mode::Success);
+    let (x, y) = (var(&mut c), var(&mut c));
+    c.packages = Some(Box::new(Relating { runs: Runs::Table(x, y) }));
+    let (p1, p2) = (package_at(&mut c, 2, 7, 0, &[]), package_at(&mut c, 2, 8, 0, &[]));
+    let (left, right) = (tuple(&mut c, &[p1, x]), tuple(&mut c, &[p2, y]));
+    let mut out = Coercion::default();
+    c.subtype(left, right, &mut out).unwrap();
+    assert_subtype_left(&c, &out);
+    assert_eq!(pairs(&mut c, &out), [[x, y]]);
+}
+
+/// The same structures with a supplier that calls the kernel's own
+/// relation on the checker it is handed, as the real one will
+/// ([`Runs::Equal`], [`Runs::EqualPair`], [`Runs::EqualRenaming`]):
+/// the entries of `moregen` and `equal` call `Checker::empty_scopes`
+/// (compiler/ml/ctype.ml:3089, 3358) and `Checker::enter_relation`
+/// (CHECKER_REWRITE 8.6, decisions 127 and 128).
+///
+/// - Unification (programs UPkgFirst, UVarFirst, UEmptyFirst of 8.13):
+///   `'a. (module(S), 'a)` is REFUSED when the check runs `equal`,
+///   `'a. ('a, module(S))` accepted, and the first accepted when the
+///   check runs nothing.
+/// - A relation inside a relation, the table: `equal` of `(module(S),
+///   x)` and `(module(T), y)` where the check runs `equal` on `(x,
+///   y)`: the outer `equal` answers `false` (with one shared table the
+///   inner pair is found and `x` against `y` is skipped).
+/// - A relation inside a relation, the renaming (`subst` is a list a
+///   call, ctype.ml:3370): `equal` with renaming of `(a, module(S), a)`
+///   and `(b, module(T), c)`, where the check runs `equal` with
+///   renaming on two other variables, answers `false`: `a` is renamed
+///   to `b` before the check and is still renamed to `b` after it.
+///   And `(a, module(S), a)` against `(b, module(T), b)` answers
+///   `true`, also when the check renames `a` itself to another
+///   variable (the inner row of `a` is not the outer one's).
+///
+/// - `'a. ('b. ('b, module(S)), 'a)` against the same with `T`, by
+///   `equal` and by unification: accepted; the exit of the inner type
+///   puts the scopes back for the pair of `'a`.
+///
+/// Seen to fail with `equal` not emptying the scopes (the first witness
+/// is accepted), with `enter_relation` shelving nothing (the table
+/// witness answers `true`), with the table shelved and the renaming
+/// not, and with `unshelve_related` not writing the outer renaming
+/// again (the renaming witness: `a` against `b` a second time is
+/// refused), and with `relate_frames` cutting the scopes without
+/// putting the floor back (the nested witness is refused by `equal`),
+/// and with `relate_run` not calling `leave_scopes` on a failure (the
+/// floor is 1 after a refused `equal`).
+#[test]
+fn an_inclusion_check_that_runs_a_relation_empties_the_scopes() {
+    for (package, runs, accepted) in [(0, Runs::Equal, false), (1, Runs::Equal, true), (0, Runs::Nothing, true)] {
+        let mut c = relating(Mode::Success, runs);
+        let ([left, right], _) = package_and_univar(&mut c, package, false);
+        assert_eq!(c.unify(left, right).is_ok(), accepted, "package at {package}");
+        assert!(c.scopes.is_empty() && c.frames.is_empty() && c.scope_floor == 0 && c.relating == 0);
+    }
+
+    let mut c = checker(Mode::Success);
+    let (x, y) = (var(&mut c), var(&mut c));
+    c.packages = Some(Box::new(Relating { runs: Runs::EqualPair(x, y) }));
+    let (p1, p2) = (package_at(&mut c, 2, 7, 0, &[]), package_at(&mut c, 2, 8, 0, &[]));
+    let (left, right) = (tuple(&mut c, &[p1, x]), tuple(&mut c, &[p2, y]));
+    assert!(!c.equal(false, &[left], &[right]));
+    assert!(c.related_shelf.is_empty() && c.relating == 0);
+
+    // A relation that fails inside a polymorphic type after the check
+    // emptied the scopes leaves the floor where its entry put it.
+    let mut c = relating(Mode::Success, Runs::Equal);
+    let ([left, right], _) = package_and_univar(&mut c, 0, false);
+    assert!(!c.equal(false, &[left], &[right]));
+    assert!(c.scopes.is_empty() && c.scope_floor == 0 && c.frames.is_empty());
+
+    // `'a. ('b. ('b, module(S)), 'a)`: the check empties the scopes
+    // inside the inner type, whose exit puts them back for `'a`.
+    for (relation, unified) in [(true, false), (false, true)] {
+        let mut c = relating(Mode::Success, Runs::Equal);
+        let ([l1, r1], _) = package_and_univar(&mut c, 1, false);
+        let (a1, a2) = (univar_at(&mut c, 2), univar_at(&mut c, 2));
+        let (t1, t2) = (tuple(&mut c, &[l1, a1]), tuple(&mut c, &[r1, a2]));
+        let (left, right) = (poly_of(&mut c, 2, t1, &[a1]), poly_of(&mut c, 2, t2, &[a2]));
+        assert!(!relation || c.equal(false, &[left], &[right]));
+        assert!(!unified || c.unify(left, right).is_ok());
+        assert!(c.scopes.is_empty() && c.scope_floor == 0);
+    }
+
+    for inner_renames_a in [false, true] {
+        let mut c = checker(Mode::Success);
+        let [a, b, d, p, q] = [(); 5].map(|()| var(&mut c));
+        let runs = if inner_renames_a { Runs::EqualRenaming(a, q) } else { Runs::EqualRenaming(p, q) };
+        c.packages = Some(Box::new(Relating { runs }));
+        let (p1, p2) = (package_at(&mut c, 2, 7, 0, &[]), package_at(&mut c, 2, 8, 0, &[]));
+        let left = tuple(&mut c, &[a, p1, a]);
+        let (same, other) = (tuple(&mut c, &[b, p2, b]), tuple(&mut c, &[b, p2, d]));
+        assert!(c.equal(true, &[left], &[same]), "the inner relation renames a: {inner_renames_a}");
+        assert!(!c.equal(true, &[left], &[other]), "the inner relation renames a: {inner_renames_a}");
+        assert!(c.related_shelf.is_empty() && c.relating == 0);
+    }
+}
+
+/// The package arm of `subtype_rec` with a supplier that calls the
+/// kernel's own relation (compiler/ml/ctype.ml:4089-4098; CHECKER_REWRITE
+/// 8.6, decisions 127 and 128).
+///
+/// - PkgNoCstr of 8.13, `'a. (module(S), 'a)` with no completed pair:
+///   the check runs `equal`, whose entry empties the scopes; the
+///   constraint `(u, v)` is under no scope and forcing REFUSES.
+/// - The table of subtyping: the check runs `equal` on `(x, y)`, which
+///   enters the pair in ITS table and answers `false`; the walk's
+///   constraint `(x, y)` is still collected.
+///
+/// Passed against the prototype; seen to fail there with `equal` not
+/// emptying the scopes (the constraint is under scope 0) and with
+/// `subtype_pair` reading `Checker::related` (no constraint).
+///
+/// Reaches: R3g, R3j.
+#[test]
+#[ignore = "R3j build"]
+fn a_coercion_whose_inclusion_check_runs_a_relation() {
+    let mut out = Coercion::default();
+    let mut c = relating(Mode::Success, Runs::Equal);
+    let ([left, right], [u, v]) = package_and_univar(&mut c, 0, false);
+    c.subtype(left, right, &mut out).unwrap();
+    assert_subtype_left(&c, &out);
+    assert_eq!((pairs(&mut c, &out), out.constraints[0].scopes), (vec![[u, v]], NONE));
+    assert!(c.force_subtype(&out).is_err());
+
+    let mut c = checker(Mode::Success);
+    let (x, y) = (var(&mut c), var(&mut c));
+    c.packages = Some(Box::new(Relating { runs: Runs::EqualPair(x, y) }));
+    let (p1, p2) = (package_at(&mut c, 2, 7, 0, &[]), package_at(&mut c, 2, 8, 0, &[]));
+    let (left, right) = (tuple(&mut c, &[p1, x]), tuple(&mut c, &[p2, y]));
+    c.subtype(left, right, &mut out).unwrap();
+    assert_subtype_left(&c, &out);
+    assert_eq!(pairs(&mut c, &out), [[x, y]]);
 }
